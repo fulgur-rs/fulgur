@@ -188,6 +188,7 @@ impl Pageable for BlockPageable {
 
         // Split based on children's y positions
         let mut split_index = self.children.len();
+        let mut overflow_child_index: Option<usize> = None;
 
         for (i, pc) in self.children.iter().enumerate() {
             if pc.child.pagination().break_before == BreakBefore::Page && i > 0 && pc.y > 0.0 {
@@ -196,7 +197,12 @@ impl Pageable for BlockPageable {
             }
 
             if pc.y + pc.child.height() > avail_height {
-                split_index = i.max(1); // At least keep first child
+                if i == 0 && self.children.len() == 1 {
+                    // Only child overflows — try to split it recursively
+                    overflow_child_index = Some(i);
+                } else {
+                    split_index = i.max(1);
+                }
                 break;
             }
 
@@ -204,6 +210,23 @@ impl Pageable for BlockPageable {
                 split_index = i + 1;
                 break;
             }
+        }
+
+        // Handle the case where a single child overflows: split it recursively
+        if let Some(idx) = overflow_child_index {
+            let pc = &self.children[idx];
+            let child_avail = avail_height - pc.y;
+            if child_avail > 0.0 {
+                if let Some((first_part, second_part)) = pc.child.split(0.0, child_avail) {
+                    let first = vec![PositionedChild { child: first_part, x: pc.x, y: pc.y }];
+                    let second = vec![PositionedChild { child: second_part, x: pc.x, y: 0.0 }];
+                    return Some((
+                        Box::new(BlockPageable::with_positioned_children(first).with_pagination(self.pagination).with_style(self.style.clone())),
+                        Box::new(BlockPageable::with_positioned_children(second).with_pagination(self.pagination).with_style(self.style.clone())),
+                    ));
+                }
+            }
+            return None;
         }
 
         if split_index == 0 || split_index >= self.children.len() {
