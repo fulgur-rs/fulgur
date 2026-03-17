@@ -62,14 +62,7 @@ impl Pageable for ImagePageable {
         None
     }
 
-    fn draw(
-        &self,
-        canvas: &mut Canvas<'_, '_>,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) {
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         let data: krilla::Data = Arc::clone(&self.image_data).into();
         let image_result = match self.format {
             ImageFormat::Png => krilla::image::Image::from_png(data, true),

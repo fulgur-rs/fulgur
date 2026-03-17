@@ -4,10 +4,7 @@ use crate::pageable::{Canvas, Pageable};
 use crate::paginate::paginate;
 
 /// Render a Pageable tree to PDF bytes.
-pub fn render_to_pdf(
-    root: Box<dyn Pageable>,
-    config: &Config,
-) -> Result<Vec<u8>> {
+pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>> {
     let content_width = config.content_width();
     let content_height = config.content_height();
 
@@ -31,7 +28,9 @@ pub fn render_to_pdf(
         let mut surface = page.surface();
 
         // Pass margin offsets as x/y origin to draw
-        let mut canvas = Canvas { surface: &mut surface };
+        let mut canvas = Canvas {
+            surface: &mut surface,
+        };
         page_content.draw(
             &mut canvas,
             config.margin.left,
@@ -53,6 +52,8 @@ pub fn render_to_pdf(
 
     document.set_metadata(metadata);
 
-    let pdf_bytes = document.finish().map_err(|e| Error::PdfGeneration(format!("{e:?}")))?;
+    let pdf_bytes = document
+        .finish()
+        .map_err(|e| Error::PdfGeneration(format!("{e:?}")))?;
     Ok(pdf_bytes)
 }

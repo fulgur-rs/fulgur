@@ -65,18 +65,26 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Render { input, stdin, output, size, landscape, title, fonts, css_files } => {
+        Commands::Render {
+            input,
+            stdin,
+            output,
+            size,
+            landscape,
+            title,
+            fonts,
+            css_files,
+        } => {
             let html = if stdin {
                 let mut buf = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
                     .expect("Failed to read stdin");
                 buf
             } else if let Some(input) = input {
-                std::fs::read_to_string(&input)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Error reading {}: {e}", input.display());
-                        std::process::exit(1);
-                    })
+                std::fs::read_to_string(&input).unwrap_or_else(|e| {
+                    eprintln!("Error reading {}: {e}", input.display());
+                    std::process::exit(1);
+                })
             } else {
                 eprintln!("Error: provide an input HTML file or use --stdin");
                 std::process::exit(1);

@@ -41,7 +41,11 @@ impl AssetBundle {
         self.images.insert(name.into(), Arc::new(data));
     }
 
-    pub fn add_image_file(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<()> {
+    pub fn add_image_file(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
         let data = std::fs::read(path)?;
         self.images.insert(name.into(), Arc::new(data));
         Ok(())

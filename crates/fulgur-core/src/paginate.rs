@@ -42,10 +42,7 @@ mod tests {
 
     #[test]
     fn test_paginate_single_page() {
-        let block = BlockPageable::new(vec![
-            make_spacer(100.0),
-            make_spacer(100.0),
-        ]);
+        let block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
         let pages = paginate(Box::new(block), 200.0, 300.0);
         assert_eq!(pages.len(), 1);
     }

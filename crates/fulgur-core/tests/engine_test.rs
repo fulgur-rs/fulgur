@@ -1,4 +1,4 @@
-use fulgur_core::config::{PageSize, Margin};
+use fulgur_core::config::{Margin, PageSize};
 use fulgur_core::engine::Engine;
 use fulgur_core::pageable::{BlockPageable, Pageable, SpacerPageable};
 

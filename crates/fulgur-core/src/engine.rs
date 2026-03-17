@@ -54,7 +54,9 @@ impl Engine {
             html.to_string()
         };
 
-        let fonts = self.assets.as_ref()
+        let fonts = self
+            .assets
+            .as_ref()
             .map(|a| a.fonts.as_slice())
             .unwrap_or(&[]);
         let doc = crate::blitz_adapter::parse_and_layout(
@@ -68,11 +70,7 @@ impl Engine {
     }
 
     /// Render HTML string to a PDF file.
-    pub fn render_html_to_file(
-        &self,
-        html: &str,
-        path: impl AsRef<Path>,
-    ) -> Result<()> {
+    pub fn render_html_to_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
         let pdf = self.render_html(html)?;
         std::fs::write(path, pdf)?;
         Ok(())

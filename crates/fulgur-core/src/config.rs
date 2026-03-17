@@ -6,9 +6,18 @@ pub struct PageSize {
 }
 
 impl PageSize {
-    pub const A4: Self = Self { width: 595.28, height: 841.89 };
-    pub const LETTER: Self = Self { width: 612.0, height: 792.0 };
-    pub const A3: Self = Self { width: 841.89, height: 1190.55 };
+    pub const A4: Self = Self {
+        width: 595.28,
+        height: 841.89,
+    };
+    pub const LETTER: Self = Self {
+        width: 612.0,
+        height: 792.0,
+    };
+    pub const A3: Self = Self {
+        width: 841.89,
+        height: 1190.55,
+    };
 
     pub fn custom(width_mm: f32, height_mm: f32) -> Self {
         Self {
@@ -36,11 +45,21 @@ pub struct Margin {
 
 impl Margin {
     pub fn uniform(pt: f32) -> Self {
-        Self { top: pt, right: pt, bottom: pt, left: pt }
+        Self {
+            top: pt,
+            right: pt,
+            bottom: pt,
+            left: pt,
+        }
     }
 
     pub fn symmetric(vertical: f32, horizontal: f32) -> Self {
-        Self { top: vertical, right: horizontal, bottom: vertical, left: horizontal }
+        Self {
+            top: vertical,
+            right: horizontal,
+            bottom: vertical,
+            left: horizontal,
+        }
     }
 
     pub fn uniform_mm(mm: f32) -> Self {
@@ -89,13 +108,21 @@ impl Config {
 
     /// Content area width (page width minus left and right margins)
     pub fn content_width(&self) -> f32 {
-        let ps = if self.landscape { self.page_size.landscape() } else { self.page_size };
+        let ps = if self.landscape {
+            self.page_size.landscape()
+        } else {
+            self.page_size
+        };
         ps.width - self.margin.left - self.margin.right
     }
 
     /// Content area height (page height minus top and bottom margins)
     pub fn content_height(&self) -> f32 {
-        let ps = if self.landscape { self.page_size.landscape() } else { self.page_size };
+        let ps = if self.landscape {
+            self.page_size.landscape()
+        } else {
+            self.page_size
+        };
         ps.height - self.margin.top - self.margin.bottom
     }
 }

@@ -1,4 +1,4 @@
-use fulgur_core::config::{Config, PageSize, Margin};
+use fulgur_core::config::{Config, Margin, PageSize};
 use fulgur_core::pageable::{BlockPageable, Pageable, SpacerPageable};
 use fulgur_core::render::render_to_pdf;
 

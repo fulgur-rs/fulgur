@@ -27,7 +27,9 @@ fn suppress_stdout<F: FnOnce() -> T, T>(f: F) -> T {
         let saved_fd = devnull.as_ref().map(|_| {
             // dup(1) to save original stdout
             let saved = unsafe { libc::dup(1) };
-            if saved < 0 { return -1; }
+            if saved < 0 {
+                return -1;
+            }
             // dup2(devnull_fd, 1) to redirect stdout
             if let Some(ref dn) = devnull {
                 unsafe { libc::dup2(dn.as_raw_fd(), 1) };

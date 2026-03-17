@@ -18,7 +18,9 @@ pub fn dom_to_pageable(doc: &HtmlDocument) -> Box<dyn Pageable> {
 }
 
 fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) {
-    let Some(node) = doc.get_node(node_id) else { return };
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
     let layout = node.final_layout;
     let indent = "  ".repeat(depth);
     let tag = match &node.data {
@@ -27,9 +29,15 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
         NodeData::Comment => "#comment".to_string(),
         _ => "#other".to_string(),
     };
-    eprintln!("{indent}{tag} id={} pos=({},{}) size={}x{} inline_root={}",
-        node_id, layout.location.x, layout.location.y,
-        layout.size.width, layout.size.height, node.flags.is_inline_root());
+    eprintln!(
+        "{indent}{tag} id={} pos=({},{}) size={}x{} inline_root={}",
+        node_id,
+        layout.location.x,
+        layout.location.y,
+        layout.size.width,
+        layout.size.height,
+        node.flags.is_inline_root()
+    );
     for &child_id in &node.children {
         debug_print_tree(doc, child_id, depth + 1);
     }
@@ -50,8 +58,13 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
                 || style.border_widths.iter().any(|&w| w > 0.0)
                 || style.padding.iter().any(|&p| p > 0.0);
             if has_style {
-                let child = PositionedChild { child: Box::new(paragraph), x: 0.0, y: 0.0 };
-                let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+                let child = PositionedChild {
+                    child: Box::new(paragraph),
+                    x: 0.0,
+                    y: 0.0,
+                };
+                let mut block =
+                    BlockPageable::with_positioned_children(vec![child]).with_style(style);
                 block.wrap(width, height);
                 return Box::new(block);
             }
@@ -85,7 +98,9 @@ fn collect_positioned_children(
 ) -> Vec<PositionedChild> {
     let mut result = Vec::new();
     for &child_id in child_ids {
-        let Some(child_node) = doc.get_node(child_id) else { continue };
+        let Some(child_node) = doc.get_node(child_id) else {
+            continue;
+        };
 
         if matches!(&child_node.data, NodeData::Comment) {
             continue;
@@ -97,14 +112,16 @@ fn collect_positioned_children(
         let child_layout = child_node.final_layout;
 
         // Zero-size leaf nodes (whitespace text, etc.) — skip
-        if child_layout.size.height == 0.0 && child_layout.size.width == 0.0
+        if child_layout.size.height == 0.0
+            && child_layout.size.width == 0.0
             && child_node.children.is_empty()
         {
             continue;
         }
 
         // Zero-size container (thead, tbody, tr, etc.) — flatten children into parent
-        if child_layout.size.height == 0.0 && child_layout.size.width == 0.0
+        if child_layout.size.height == 0.0
+            && child_layout.size.width == 0.0
             && !child_node.children.is_empty()
         {
             let nested = collect_positioned_children(doc, &child_node.children);
@@ -243,7 +260,10 @@ fn extract_block_style(node: &Node) -> BlockStyle {
 fn is_non_visual_element(node: &Node) -> bool {
     if let Some(elem) = node.element_data() {
         let tag = elem.name.local.as_ref();
-        matches!(tag, "head" | "script" | "style" | "link" | "meta" | "title" | "noscript")
+        matches!(
+            tag,
+            "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
+        )
     } else {
         false
     }

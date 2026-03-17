@@ -108,14 +108,7 @@ impl Pageable for ParagraphPageable {
         Some((Box::new(first), Box::new(second)))
     }
 
-    fn draw(
-        &self,
-        canvas: &mut Canvas<'_, '_>,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) {
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         let mut current_y = y;
 
         for line in &self.lines {
@@ -150,12 +143,8 @@ impl Pageable for ParagraphPageable {
 
                 // Set text color
                 let fill = krilla::paint::Fill {
-                    paint: krilla::color::rgb::Color::new(
-                        run.color[0],
-                        run.color[1],
-                        run.color[2],
-                    )
-                    .into(),
+                    paint: krilla::color::rgb::Color::new(run.color[0], run.color[1], run.color[2])
+                        .into(),
                     opacity: krilla::num::NormalizedF32::new(run.color[3] as f32 / 255.0)
                         .unwrap_or(krilla::num::NormalizedF32::ONE),
                     rule: Default::default(),
