@@ -672,6 +672,7 @@ dependencies = [
  "blitz-html",
  "blitz-traits",
  "krilla",
+ "libc",
  "parley",
  "thiserror",
 ]

@@ -169,7 +169,7 @@ impl Pageable for BlockPageable {
         size
     }
 
-    fn split(&self, avail_width: Pt, avail_height: Pt)
+    fn split(&self, _avail_width: Pt, avail_height: Pt)
         -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)>
     {
         if self.pagination.break_inside == BreakInside::Avoid {

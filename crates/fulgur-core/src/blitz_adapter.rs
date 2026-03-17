@@ -7,6 +7,52 @@ use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
 use std::sync::Arc;
 
+/// Suppress stdout during a closure. Blitz's HTML parser unconditionally prints
+/// `println!("ERROR: {error}")` for non-fatal parse errors (e.g., "Unexpected token").
+/// These are html5ever's error-recovery messages and do not indicate real failures.
+fn suppress_stdout<F: FnOnce() -> T, T>(f: F) -> T {
+    use std::io::Write;
+
+    // Flush any pending stdout first
+    let _ = std::io::stdout().flush();
+
+    // On Unix, redirect fd 1 to /dev/null temporarily
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let devnull = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .ok();
+        let saved_fd = devnull.as_ref().map(|_| {
+            // dup(1) to save original stdout
+            let saved = unsafe { libc::dup(1) };
+            if saved < 0 { return -1; }
+            // dup2(devnull_fd, 1) to redirect stdout
+            if let Some(ref dn) = devnull {
+                unsafe { libc::dup2(dn.as_raw_fd(), 1) };
+            }
+            saved
+        });
+
+        let result = f();
+
+        // Restore original stdout
+        if let Some(Some(saved)) = saved_fd.map(|fd| if fd >= 0 { Some(fd) } else { None }) {
+            let _ = std::io::stdout().flush();
+            unsafe { libc::dup2(saved, 1) };
+            unsafe { libc::close(saved) };
+        }
+
+        result
+    }
+
+    #[cfg(not(unix))]
+    {
+        f()
+    }
+}
+
 /// Parse HTML and return a fully resolved document (styles + layout computed).
 ///
 /// We pass the content width as the viewport width so Taffy wraps text
@@ -44,7 +90,8 @@ pub fn parse_and_layout(
         ..DocumentConfig::default()
     };
 
-    let mut doc = HtmlDocument::from_html(html, config);
+    // Suppress Blitz's noisy "ERROR: Unexpected token" println output
+    let mut doc = suppress_stdout(|| HtmlDocument::from_html(html, config));
 
     // Resolve styles (Stylo) and layout (Taffy)
     doc.resolve(0.0);
