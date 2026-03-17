@@ -54,10 +54,14 @@ impl Engine {
             html.to_string()
         };
 
+        let fonts = self.assets.as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
         let doc = crate::blitz_adapter::parse_and_layout(
             &final_html,
             self.config.content_width(),
             self.config.content_height(),
+            fonts,
         );
         let root = crate::convert::dom_to_pageable(&doc);
         self.render_pageable(root)

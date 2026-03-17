@@ -4,6 +4,8 @@
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
+use parley::FontContext;
+use std::sync::Arc;
 
 /// Parse HTML and return a fully resolved document (styles + layout computed).
 ///
@@ -15,6 +17,7 @@ pub fn parse_and_layout(
     html: &str,
     viewport_width: f32,
     _viewport_height: f32,
+    font_data: &[Arc<Vec<u8>>],
 ) -> HtmlDocument {
     let viewport = Viewport::new(
         viewport_width as u32,
@@ -23,8 +26,21 @@ pub fn parse_and_layout(
         ColorScheme::Light,
     );
 
+    // Build FontContext with bundled fonts
+    let font_ctx = if font_data.is_empty() {
+        None
+    } else {
+        let mut ctx = FontContext::new();
+        for data in font_data {
+            let blob: parley::fontique::Blob<u8> = (**data).clone().into();
+            ctx.collection.register_fonts(blob, None);
+        }
+        Some(ctx)
+    };
+
     let config = DocumentConfig {
         viewport: Some(viewport),
+        font_ctx,
         ..DocumentConfig::default()
     };
 
