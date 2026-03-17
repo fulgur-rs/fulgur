@@ -44,6 +44,17 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
     // Check if this is an inline root (contains text layout)
     if node.flags.is_inline_root() {
         if let Some(paragraph) = extract_paragraph(doc, node) {
+            // Wrap in a BlockPageable to apply background/border/padding styles
+            let style = extract_block_style(node);
+            let has_style = style.background_color.is_some()
+                || style.border_widths.iter().any(|&w| w > 0.0)
+                || style.padding.iter().any(|&p| p > 0.0);
+            if has_style {
+                let child = PositionedChild { child: Box::new(paragraph), x: 0.0, y: 0.0 };
+                let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+                block.wrap(width, height);
+                return Box::new(block);
+            }
             return Box::new(paragraph);
         }
     }
