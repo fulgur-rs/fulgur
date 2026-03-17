@@ -81,6 +81,7 @@ fn extract_paragraph(doc: &blitz_dom::BaseDocument, node: &Node) -> Option<Parag
                 let color = get_text_color(doc, brush.id);
 
                 // Extract positioned glyphs
+                let text_len = text.len();
                 let mut glyphs = Vec::new();
                 for g in glyph_run.positioned_glyphs() {
                     glyphs.push(ShapedGlyph {
@@ -88,7 +89,7 @@ fn extract_paragraph(doc: &blitz_dom::BaseDocument, node: &Node) -> Option<Parag
                         x_advance: g.advance / font_size,
                         x_offset: g.x / font_size,
                         y_offset: g.y / font_size,
-                        text_range: 0..1, // Simplified range
+                        text_range: 0..text_len,
                     });
                 }
 
