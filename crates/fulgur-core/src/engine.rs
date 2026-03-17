@@ -25,6 +25,28 @@ impl Engine {
         render_to_pdf(root, &self.config)
     }
 
+    /// Render HTML string to PDF bytes.
+    pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
+        let doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            self.config.content_width(),
+            self.config.content_height(),
+        );
+        let root = crate::convert::dom_to_pageable(&doc);
+        self.render_pageable(root)
+    }
+
+    /// Render HTML string to a PDF file.
+    pub fn render_html_to_file(
+        &self,
+        html: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let pdf = self.render_html(html)?;
+        std::fs::write(path, pdf)?;
+        Ok(())
+    }
+
     /// Render a Pageable tree to a PDF file.
     pub fn render_pageable_to_file(
         &self,

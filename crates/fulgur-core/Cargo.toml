@@ -5,4 +5,7 @@ edition = "2024"
 
 [dependencies]
 krilla = "0.6.0"
+blitz-html = "0.2"
+blitz-dom = "0.2"
+blitz-traits = "0.2"
 thiserror = "2"

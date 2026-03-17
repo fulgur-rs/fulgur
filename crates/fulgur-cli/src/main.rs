@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use fulgur_core::config::{Margin, PageSize};
 use fulgur_core::engine::Engine;
-use fulgur_core::pageable::{Pageable, SpacerPageable};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -13,8 +12,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Render HTML to PDF (currently: test mode with placeholder content)
+    /// Render HTML to PDF
     Render {
+        /// Input HTML file (omit for --stdin)
+        #[arg()]
+        input: Option<PathBuf>,
+
+        /// Read HTML from stdin
+        #[arg(long)]
+        stdin: bool,
+
         /// Output PDF file path
         #[arg(short, long)]
         output: PathBuf,
@@ -49,7 +56,23 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Render { output, size, landscape, title } => {
+        Commands::Render { input, stdin, output, size, landscape, title } => {
+            let html = if stdin {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                    .expect("Failed to read stdin");
+                buf
+            } else if let Some(input) = input {
+                std::fs::read_to_string(&input)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error reading {}: {e}", input.display());
+                        std::process::exit(1);
+                    })
+            } else {
+                eprintln!("Error: provide an input HTML file or use --stdin");
+                std::process::exit(1);
+            };
+
             let mut builder = Engine::builder()
                 .page_size(parse_page_size(&size))
                 .margin(Margin::uniform_mm(20.0))
@@ -61,12 +84,7 @@ fn main() {
 
             let engine = builder.build();
 
-            // For now, render a placeholder PDF (no HTML parsing yet)
-            let mut spacer = SpacerPageable::new(100.0);
-            spacer.wrap(100.0, 1000.0);
-            let root = fulgur_core::pageable::BlockPageable::new(vec![Box::new(spacer)]);
-
-            match engine.render_pageable_to_file(Box::new(root), &output) {
+            match engine.render_html_to_file(&html, &output) {
                 Ok(()) => println!("PDF written to {}", output.display()),
                 Err(e) => eprintln!("Error: {e}"),
             }
