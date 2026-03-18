@@ -268,6 +268,89 @@ fn is_non_visual_element(node: &Node) -> bool {
     }
 }
 
+/// Extract shaped lines from a list marker's Parley layout.
+fn extract_marker_lines(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+) -> (Vec<ShapedLine>, f32) {
+    let elem_data = match node.element_data() {
+        Some(d) => d,
+        None => return (Vec::new(), 0.0),
+    };
+    let list_item_data = match &elem_data.list_item_data {
+        Some(d) => d,
+        None => return (Vec::new(), 0.0),
+    };
+    let parley_layout = match &list_item_data.position {
+        blitz_dom::node::ListItemLayoutPosition::Outside(layout) => layout,
+        blitz_dom::node::ListItemLayoutPosition::Inside => return (Vec::new(), 0.0),
+    };
+
+    let marker_text = match &list_item_data.marker {
+        blitz_dom::node::Marker::Char(c) => {
+            let mut buf = [0u8; 4];
+            c.encode_utf8(&mut buf).to_string()
+        }
+        blitz_dom::node::Marker::String(s) => s.clone(),
+    };
+
+    let mut shaped_lines = Vec::new();
+    let mut max_width: f32 = 0.0;
+
+    for line in parley_layout.lines() {
+        let metrics = line.metrics();
+        let mut glyph_runs = Vec::new();
+        let mut line_width: f32 = 0.0;
+
+        for item in line.items() {
+            if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                let run = glyph_run.run();
+                let font_data = run.font();
+                let font_bytes: Vec<u8> = font_data.data.data().to_vec();
+                let font_index = font_data.index;
+                let font_size = run.font_size();
+
+                let brush = &glyph_run.style().brush;
+                let color = get_text_color(doc, brush.id);
+
+                let text_len = marker_text.len();
+                let mut glyphs = Vec::new();
+                for g in glyph_run.glyphs() {
+                    line_width += g.advance;
+                    glyphs.push(ShapedGlyph {
+                        id: g.id,
+                        x_advance: g.advance / font_size,
+                        x_offset: g.x / font_size,
+                        y_offset: g.y / font_size,
+                        text_range: 0..text_len,
+                    });
+                }
+
+                if !glyphs.is_empty() {
+                    glyph_runs.push(ShapedGlyphRun {
+                        font_data: Arc::new(font_bytes),
+                        font_index,
+                        font_size,
+                        color,
+                        glyphs,
+                        text: marker_text.clone(),
+                        x_offset: glyph_run.offset(),
+                    });
+                }
+            }
+        }
+
+        max_width = max_width.max(line_width);
+        shaped_lines.push(ShapedLine {
+            height: metrics.line_height,
+            baseline: metrics.baseline,
+            glyph_runs,
+        });
+    }
+
+    (shaped_lines, max_width)
+}
+
 /// Get text color from a DOM node's computed styles.
 fn get_text_color(doc: &blitz_dom::BaseDocument, node_id: usize) -> [u8; 4] {
     if let Some(node) = doc.get_node(node_id)
