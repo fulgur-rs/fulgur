@@ -53,6 +53,65 @@ impl ParagraphPageable {
     }
 }
 
+/// Draw pre-shaped text lines at the given position.
+pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
+    let mut current_y = y;
+
+    for line in lines {
+        let baseline_y = current_y + line.baseline;
+
+        for run in &line.glyph_runs {
+            // Create Krilla font from cached data
+            let data: krilla::Data = Arc::clone(&run.font_data).into();
+            let Some(font) = krilla::text::Font::new(data, run.font_index) else {
+                continue;
+            };
+
+            // Convert shaped glyphs to Krilla glyphs
+            // Values are already normalized (/ font_size) in convert.rs
+            let krilla_glyphs: Vec<krilla::text::KrillaGlyph> = run
+                .glyphs
+                .iter()
+                .map(|g| krilla::text::KrillaGlyph {
+                    glyph_id: krilla::text::GlyphId::new(g.id),
+                    text_range: g.text_range.clone(),
+                    x_advance: g.x_advance,
+                    x_offset: g.x_offset,
+                    y_offset: g.y_offset,
+                    y_advance: 0.0,
+                    location: None,
+                })
+                .collect();
+
+            if krilla_glyphs.is_empty() {
+                continue;
+            }
+
+            // Set text color
+            let fill = krilla::paint::Fill {
+                paint: krilla::color::rgb::Color::new(run.color[0], run.color[1], run.color[2])
+                    .into(),
+                opacity: krilla::num::NormalizedF32::new(run.color[3] as f32 / 255.0)
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                rule: Default::default(),
+            };
+            canvas.surface.set_fill(Some(fill));
+
+            let start = krilla::geom::Point::from_xy(x + run.x_offset, baseline_y);
+            canvas.surface.draw_glyphs(
+                start,
+                &krilla_glyphs,
+                font,
+                &run.text,
+                run.font_size,
+                false,
+            );
+        }
+
+        current_y += line.height;
+    }
+}
+
 impl Pageable for ParagraphPageable {
     fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
         self.cached_height = self.lines.iter().map(|l| l.height).sum();
@@ -109,61 +168,7 @@ impl Pageable for ParagraphPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        let mut current_y = y;
-
-        for line in &self.lines {
-            let baseline_y = current_y + line.baseline;
-
-            for run in &line.glyph_runs {
-                // Create Krilla font from cached data
-                let data: krilla::Data = Arc::clone(&run.font_data).into();
-                let Some(font) = krilla::text::Font::new(data, run.font_index) else {
-                    continue;
-                };
-
-                // Convert shaped glyphs to Krilla glyphs
-                // Values are already normalized (/ font_size) in convert.rs
-                let krilla_glyphs: Vec<krilla::text::KrillaGlyph> = run
-                    .glyphs
-                    .iter()
-                    .map(|g| krilla::text::KrillaGlyph {
-                        glyph_id: krilla::text::GlyphId::new(g.id),
-                        text_range: g.text_range.clone(),
-                        x_advance: g.x_advance,
-                        x_offset: g.x_offset,
-                        y_offset: g.y_offset,
-                        y_advance: 0.0,
-                        location: None,
-                    })
-                    .collect();
-
-                if krilla_glyphs.is_empty() {
-                    continue;
-                }
-
-                // Set text color
-                let fill = krilla::paint::Fill {
-                    paint: krilla::color::rgb::Color::new(run.color[0], run.color[1], run.color[2])
-                        .into(),
-                    opacity: krilla::num::NormalizedF32::new(run.color[3] as f32 / 255.0)
-                        .unwrap_or(krilla::num::NormalizedF32::ONE),
-                    rule: Default::default(),
-                };
-                canvas.surface.set_fill(Some(fill));
-
-                let start = krilla::geom::Point::from_xy(x + run.x_offset, baseline_y);
-                canvas.surface.draw_glyphs(
-                    start,
-                    &krilla_glyphs,
-                    font,
-                    &run.text,
-                    run.font_size,
-                    false,
-                );
-            }
-
-            current_y += line.height;
-        }
+        draw_shaped_lines(canvas, &self.lines, x, y);
     }
 
     fn pagination(&self) -> Pagination {
