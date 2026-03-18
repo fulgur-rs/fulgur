@@ -182,4 +182,8 @@ impl Pageable for ParagraphPageable {
     fn height(&self) -> Pt {
         self.cached_height
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

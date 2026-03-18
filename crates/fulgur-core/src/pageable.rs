@@ -78,6 +78,9 @@ pub trait Pageable: Send + Sync {
 
     /// Measured height from last wrap() call.
     fn height(&self) -> Pt;
+
+    /// Downcast support for tests.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -401,6 +404,10 @@ impl Pageable for BlockPageable {
     fn height(&self) -> Pt {
         self.cached_size.map(|s| s.height).unwrap_or(0.0)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ─── SpacerPageable ──────────────────────────────────────
@@ -443,6 +450,94 @@ impl Pageable for SpacerPageable {
 
     fn height(&self) -> Pt {
         self.height
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── ListItemPageable ───────────────────────────────────
+
+use crate::paragraph::ShapedLine;
+
+/// A list item with an outside-positioned marker.
+#[derive(Clone)]
+pub struct ListItemPageable {
+    /// Shaped lines for the marker text (extracted from Blitz's Parley layout)
+    pub marker_lines: Vec<ShapedLine>,
+    /// Width of the marker (for positioning to the left of body)
+    pub marker_width: Pt,
+    /// The list item's body content
+    pub body: Box<dyn Pageable>,
+    /// Visual style (background, borders, padding)
+    pub style: BlockStyle,
+    /// Taffy-computed width
+    pub width: Pt,
+    /// Cached height from wrap()
+    pub height: Pt,
+}
+
+impl Pageable for ListItemPageable {
+    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
+        let body_size = self.body.wrap(avail_width, avail_height);
+        self.height = body_size.height;
+        Size {
+            width: avail_width,
+            height: self.height,
+        }
+    }
+
+    fn split(
+        &self,
+        avail_width: Pt,
+        avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        let (top_body, bottom_body) = self.body.split(avail_width, avail_height)?;
+        Some((
+            Box::new(ListItemPageable {
+                marker_lines: self.marker_lines.clone(),
+                marker_width: self.marker_width,
+                body: top_body,
+                style: self.style.clone(),
+                width: self.width,
+                height: 0.0,
+            }),
+            Box::new(ListItemPageable {
+                marker_lines: Vec::new(),
+                marker_width: 0.0,
+                body: bottom_body,
+                style: self.style.clone(),
+                width: self.width,
+                height: 0.0,
+            }),
+        ))
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
+        // Draw marker to the left of the body
+        if !self.marker_lines.is_empty() {
+            let marker_x = x - self.marker_width;
+            crate::paragraph::draw_shaped_lines(canvas, &self.marker_lines, marker_x, y);
+        }
+        // Draw body
+        self.body.draw(canvas, x, y, avail_width, avail_height);
+    }
+
+    fn pagination(&self) -> Pagination {
+        self.body.pagination()
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        self.height
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -513,5 +608,48 @@ mod tests {
         block.wrap(200.0, 1000.0);
         // Even if it doesn't fit, split returns None
         assert!(block.split(200.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn test_list_item_delegates_to_body() {
+        let body = make_spacer(100.0);
+        let mut item = ListItemPageable {
+            marker_lines: Vec::new(),
+            marker_width: 20.0,
+            body,
+            style: BlockStyle::default(),
+            width: 200.0,
+            height: 100.0,
+        };
+        let size = item.wrap(200.0, 1000.0);
+        assert!((size.height - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_list_item_split_keeps_marker_on_first_part() {
+        let mut body = BlockPageable::new(vec![
+            make_spacer(100.0),
+            make_spacer(100.0),
+            make_spacer(100.0),
+        ]);
+        body.wrap(200.0, 1000.0);
+        let mut item = ListItemPageable {
+            marker_lines: vec![],
+            marker_width: 20.0,
+            body: Box::new(body),
+            style: BlockStyle::default(),
+            width: 200.0,
+            height: 300.0,
+        };
+        item.wrap(200.0, 1000.0);
+        let result = item.split(200.0, 250.0);
+        assert!(result.is_some());
+        let (first, second) = result.unwrap();
+        // First part keeps marker
+        let first_item = first.as_any().downcast_ref::<ListItemPageable>().unwrap();
+        assert!((first_item.marker_width - 20.0).abs() < 0.01);
+        // Second part has no marker
+        let second_item = second.as_any().downcast_ref::<ListItemPageable>().unwrap();
+        assert!((second_item.marker_width - 0.0).abs() < 0.01);
     }
 }

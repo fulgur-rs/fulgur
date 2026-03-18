@@ -95,4 +95,8 @@ impl Pageable for ImagePageable {
     fn height(&self) -> Pt {
         self.height
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
