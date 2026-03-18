@@ -1,6 +1,8 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
-use crate::pageable::{BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, SpacerPageable};
+use crate::pageable::{
+    BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, SpacerPageable,
+};
 use crate::paragraph::{ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine};
 use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
@@ -69,7 +71,8 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
                     x: 0.0,
                     y: 0.0,
                 };
-                let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+                let mut block =
+                    BlockPageable::with_positioned_children(vec![child]).with_style(style);
                 block.wrap(width, height);
                 Box::new(block)
             } else {
@@ -78,7 +81,8 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
         } else {
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children);
-            let mut block = BlockPageable::with_positioned_children(positioned_children).with_style(style);
+            let mut block =
+                BlockPageable::with_positioned_children(positioned_children).with_style(style);
             block.wrap(width, 10000.0);
             Box::new(block)
         };
@@ -315,10 +319,7 @@ fn is_non_visual_element(node: &Node) -> bool {
 }
 
 /// Extract shaped lines from a list marker's Parley layout.
-fn extract_marker_lines(
-    doc: &blitz_dom::BaseDocument,
-    node: &Node,
-) -> (Vec<ShapedLine>, f32) {
+fn extract_marker_lines(doc: &blitz_dom::BaseDocument, node: &Node) -> (Vec<ShapedLine>, f32) {
     let elem_data = match node.element_data() {
         Some(d) => d,
         None => return (Vec::new(), 0.0),
