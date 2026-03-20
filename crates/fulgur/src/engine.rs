@@ -34,24 +34,30 @@ impl Engine {
 
     /// Render HTML string to PDF bytes.
     /// If an AssetBundle is set, its CSS will be injected as a <style> block.
+    /// When GCPM constructs (margin boxes, running elements) are detected in the CSS,
+    /// a 2-pass rendering pipeline is used: pass 1 paginates body content, pass 2
+    /// renders each page with resolved margin boxes.
     pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
-        let final_html = if let Some(assets) = &self.assets {
-            let combined_css = assets.combined_css();
-            if combined_css.is_empty() {
-                html.to_string()
-            } else {
-                // Inject CSS into the HTML
-                let style_block = format!("<style>{}</style>", combined_css);
-                if let Some(pos) = html.find("</head>") {
-                    format!("{}{}{}", &html[..pos], style_block, &html[pos..])
-                } else if let Some(pos) = html.find("<body") {
-                    format!("{}{}{}", &html[..pos], style_block, &html[pos..])
-                } else {
-                    format!("{}{}", style_block, html)
-                }
-            }
-        } else {
+        let combined_css = self
+            .assets
+            .as_ref()
+            .map(|a| a.combined_css())
+            .unwrap_or_default();
+
+        let gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
+        let css_to_inject = &gcpm.cleaned_css;
+
+        let final_html = if css_to_inject.is_empty() {
             html.to_string()
+        } else {
+            let style_block = format!("<style>{}</style>", css_to_inject);
+            if let Some(pos) = html.find("</head>") {
+                format!("{}{}{}", &html[..pos], style_block, &html[pos..])
+            } else if let Some(pos) = html.find("<body") {
+                format!("{}{}{}", &html[..pos], style_block, &html[pos..])
+            } else {
+                format!("{}{}", style_block, html)
+            }
         };
 
         let fonts = self
@@ -65,9 +71,22 @@ impl Engine {
             self.config.content_height(),
             fonts,
         );
+
+        let gcpm_opt = if gcpm.is_empty() { None } else { Some(&gcpm) };
         let mut running_store = crate::gcpm::running::RunningElementStore::new();
-        let root = crate::convert::dom_to_pageable(&doc, None, &mut running_store);
-        self.render_pageable(root)
+        let root = crate::convert::dom_to_pageable(&doc, gcpm_opt, &mut running_store);
+
+        if gcpm.is_empty() {
+            self.render_pageable(root)
+        } else {
+            crate::render::render_to_pdf_with_gcpm(
+                root,
+                &self.config,
+                &gcpm,
+                &running_store,
+                fonts,
+            )
+        }
     }
 
     /// Render HTML string to a PDF file.
