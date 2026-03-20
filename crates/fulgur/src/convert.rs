@@ -1,5 +1,7 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
+use crate::gcpm::GcpmContext;
+use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::pageable::{
     BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, SpacerPageable,
 };
@@ -10,13 +12,17 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 /// Convert a resolved Blitz document into a Pageable tree.
-pub fn dom_to_pageable(doc: &HtmlDocument) -> Box<dyn Pageable> {
+pub fn dom_to_pageable(
+    doc: &HtmlDocument,
+    gcpm: Option<&GcpmContext>,
+    running_store: &mut RunningElementStore,
+) -> Box<dyn Pageable> {
     let root = doc.root_element();
     // Debug: print layout tree structure
     if std::env::var("FULGUR_DEBUG").is_ok() {
         debug_print_tree(doc.deref(), root.id, 0);
     }
-    convert_node(doc.deref(), root.id)
+    convert_node(doc.deref(), root.id, gcpm, running_store)
 }
 
 fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) {
@@ -45,7 +51,12 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
     }
 }
 
-fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageable> {
+fn convert_node(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    gcpm: Option<&GcpmContext>,
+    running_store: &mut RunningElementStore,
+) -> Box<dyn Pageable> {
     let node = doc.get_node(node_id).unwrap();
     let layout = node.final_layout;
     let height = layout.size.height;
@@ -80,7 +91,8 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
             }
         } else {
             let children: &[usize] = &node.children;
-            let positioned_children = collect_positioned_children(doc, children);
+            let positioned_children =
+                collect_positioned_children(doc, children, gcpm, running_store);
             let mut block =
                 BlockPageable::with_positioned_children(positioned_children).with_style(style);
             block.wrap(width, 10000.0);
@@ -131,7 +143,7 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
     }
 
     // Container node — collect children with Taffy-computed positions
-    let positioned_children = collect_positioned_children(doc, children);
+    let positioned_children = collect_positioned_children(doc, children, gcpm, running_store);
 
     let style = extract_block_style(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children).with_style(style);
@@ -144,6 +156,8 @@ fn convert_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> Box<dyn Pageab
 fn collect_positioned_children(
     doc: &blitz_dom::BaseDocument,
     child_ids: &[usize],
+    gcpm: Option<&GcpmContext>,
+    running_store: &mut RunningElementStore,
 ) -> Vec<PositionedChild> {
     let mut result = Vec::new();
     for &child_id in child_ids {
@@ -156,6 +170,17 @@ fn collect_positioned_children(
         }
         if is_non_visual_element(child_node) {
             continue;
+        }
+
+        // GCPM: skip running elements and store their HTML
+        if let Some(ctx) = gcpm {
+            if is_running_element(child_node, ctx) {
+                let html = serialize_node(doc, child_id);
+                if let Some(name) = get_running_name(child_node, ctx) {
+                    running_store.register(name, html);
+                }
+                continue;
+            }
         }
 
         let child_layout = child_node.final_layout;
@@ -173,12 +198,13 @@ fn collect_positioned_children(
             && child_layout.size.width == 0.0
             && !child_node.children.is_empty()
         {
-            let nested = collect_positioned_children(doc, &child_node.children);
+            let nested =
+                collect_positioned_children(doc, &child_node.children, gcpm, running_store);
             result.extend(nested);
             continue;
         }
 
-        let child_pageable = convert_node(doc, child_id);
+        let child_pageable = convert_node(doc, child_id, gcpm, running_store);
         result.push(PositionedChild {
             child: child_pageable,
             x: child_layout.location.x,
@@ -186,6 +212,46 @@ fn collect_positioned_children(
         });
     }
     result
+}
+
+/// Check if a node is a running element.
+/// Since the CSS preprocessor replaced `position: running(name)` with `display: none`,
+/// we identify running elements by checking if they have a class matching a known running name.
+/// Elements with `display: none` will typically have zero-size layout, but we rely on the
+/// class name match against `running_names` from the GCPM context.
+fn is_running_element(node: &Node, ctx: &GcpmContext) -> bool {
+    if ctx.running_names.is_empty() {
+        return false;
+    }
+    let Some(elem) = node.element_data() else {
+        return false;
+    };
+    has_matching_running_name(elem, ctx)
+}
+
+fn get_class_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
+    elem.attrs()
+        .iter()
+        .find(|a| a.name.local.as_ref() == "class")
+        .map(|a| a.value.as_ref())
+}
+
+fn has_matching_running_name(elem: &blitz_dom::node::ElementData, ctx: &GcpmContext) -> bool {
+    let Some(class_attr) = get_class_attr(elem) else {
+        return false;
+    };
+    class_attr
+        .split_whitespace()
+        .any(|cls| ctx.running_names.contains(cls))
+}
+
+fn get_running_name(node: &Node, ctx: &GcpmContext) -> Option<String> {
+    let elem = node.element_data()?;
+    let class_attr = get_class_attr(elem)?;
+    class_attr
+        .split_whitespace()
+        .find(|cls| ctx.running_names.contains(*cls))
+        .map(|s| s.to_string())
 }
 
 /// Extract a ParagraphPageable from an inline root node.

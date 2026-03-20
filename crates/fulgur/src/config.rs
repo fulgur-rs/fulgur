@@ -82,8 +82,6 @@ pub struct Config {
     pub title: Option<String>,
     pub author: Option<String>,
     pub lang: Option<String>,
-    pub header_html: Option<String>,
-    pub footer_html: Option<String>,
 }
 
 impl Default for Config {
@@ -95,8 +93,6 @@ impl Default for Config {
             title: None,
             author: None,
             lang: None,
-            header_html: None,
-            footer_html: None,
         }
     }
 }
@@ -160,16 +156,6 @@ impl ConfigBuilder {
 
     pub fn lang(mut self, lang: impl Into<String>) -> Self {
         self.config.lang = Some(lang.into());
-        self
-    }
-
-    pub fn header_html(mut self, html: impl Into<String>) -> Self {
-        self.config.header_html = Some(html.into());
-        self
-    }
-
-    pub fn footer_html(mut self, html: impl Into<String>) -> Self {
-        self.config.footer_html = Some(html.into());
         self
     }
 

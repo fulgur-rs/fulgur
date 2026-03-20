@@ -4,6 +4,7 @@ pub mod config;
 pub mod convert;
 pub mod engine;
 pub mod error;
+pub mod gcpm;
 pub mod image;
 pub mod pageable;
 pub mod paginate;
