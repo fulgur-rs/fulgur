@@ -1,15 +1,20 @@
 [package]
 name = "fulgur-cli"
 version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "HTML/CSS to PDF conversion CLI"
-repository = "https://github.com/mitsuru/fulgur"
+readme = "../../README.md"
+keywords = ["pdf", "html", "css", "cli"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "fulgur"
 path = "src/main.rs"
 
 [dependencies]
-fulgur-core = { path = "../fulgur-core" }
+fulgur = { version = "0.1.0", path = "../fulgur" }
 clap = { version = "4", features = ["derive"] }

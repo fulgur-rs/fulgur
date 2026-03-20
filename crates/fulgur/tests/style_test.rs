@@ -1,5 +1,5 @@
-use fulgur_core::config::PageSize;
-use fulgur_core::engine::Engine;
+use fulgur::config::PageSize;
+use fulgur::engine::Engine;
 
 #[test]
 fn test_render_styled_html() {

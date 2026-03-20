@@ -1,5 +1,5 @@
-use fulgur_core::config::{Margin, PageSize};
-use fulgur_core::engine::Engine;
+use fulgur::config::{Margin, PageSize};
+use fulgur::engine::Engine;
 
 #[test]
 fn test_render_simple_html() {
@@ -16,6 +16,6 @@ fn test_render_simple_html() {
 
 #[test]
 fn test_convert_html_convenience() {
-    let pdf = fulgur_core::convert_html("<h1>Test</h1>").unwrap();
+    let pdf = fulgur::convert_html("<h1>Test</h1>").unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }

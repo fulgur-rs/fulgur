@@ -1,6 +1,6 @@
-use fulgur_core::config::{Config, Margin, PageSize};
-use fulgur_core::pageable::{BlockPageable, Pageable, SpacerPageable};
-use fulgur_core::render::render_to_pdf;
+use fulgur::config::{Config, Margin, PageSize};
+use fulgur::pageable::{BlockPageable, Pageable, SpacerPageable};
+use fulgur::render::render_to_pdf;
 
 #[test]
 fn test_render_empty_pdf() {
@@ -28,7 +28,7 @@ fn test_render_multipage_pdf() {
     let content_height = config.content_height();
 
     // Create content taller than one page
-    let mut spacers: Vec<Box<dyn fulgur_core::pageable::Pageable>> = Vec::new();
+    let mut spacers: Vec<Box<dyn fulgur::pageable::Pageable>> = Vec::new();
     let spacer_height = content_height / 3.0;
     for _ in 0..7 {
         let mut s = SpacerPageable::new(spacer_height);

@@ -1,6 +1,6 @@
-use fulgur_core::asset::AssetBundle;
-use fulgur_core::config::PageSize;
-use fulgur_core::engine::Engine;
+use fulgur::asset::AssetBundle;
+use fulgur::config::PageSize;
+use fulgur::engine::Engine;
 
 #[test]
 fn test_bundled_font() {

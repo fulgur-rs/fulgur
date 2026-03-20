@@ -1,6 +1,6 @@
-use fulgur_core::config::{Margin, PageSize};
-use fulgur_core::engine::Engine;
-use fulgur_core::pageable::{BlockPageable, Pageable, SpacerPageable};
+use fulgur::config::{Margin, PageSize};
+use fulgur::engine::Engine;
+use fulgur::pageable::{BlockPageable, Pageable, SpacerPageable};
 
 #[test]
 fn test_engine_render_pageable() {

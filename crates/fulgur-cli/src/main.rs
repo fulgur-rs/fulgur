@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
-use fulgur_core::asset::AssetBundle;
-use fulgur_core::config::{Margin, PageSize};
-use fulgur_core::engine::Engine;
+use fulgur::asset::AssetBundle;
+use fulgur::config::{Margin, PageSize};
+use fulgur::engine::Engine;
 use std::path::PathBuf;
 
 #[derive(Parser)]

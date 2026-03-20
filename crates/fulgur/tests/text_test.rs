@@ -1,5 +1,5 @@
-use fulgur_core::config::{Margin, PageSize};
-use fulgur_core::engine::Engine;
+use fulgur::config::{Margin, PageSize};
+use fulgur::engine::Engine;
 
 #[test]
 fn test_render_html_with_text() {

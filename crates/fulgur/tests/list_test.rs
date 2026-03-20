@@ -1,5 +1,5 @@
-use fulgur_core::config::{Margin, PageSize};
-use fulgur_core::engine::Engine;
+use fulgur::config::{Margin, PageSize};
+use fulgur::engine::Engine;
 
 fn make_engine() -> Engine {
     Engine::builder()

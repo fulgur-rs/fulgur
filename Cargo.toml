@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/fulgur-core", "crates/fulgur-cli"]
+members = ["crates/fulgur", "crates/fulgur-cli"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mitsuru/fulgur"
+homepage = "https://github.com/mitsuru/fulgur"
