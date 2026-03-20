@@ -657,15 +657,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fulgur-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "fulgur-core",
-]
-
-[[package]]
-name = "fulgur-core"
+name = "fulgur"
 version = "0.1.0"
 dependencies = [
  "blitz-dom",
@@ -675,6 +667,14 @@ dependencies = [
  "libc",
  "parley",
  "thiserror",
+]
+
+[[package]]
+name = "fulgur-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "fulgur",
 ]
 
 [[package]]

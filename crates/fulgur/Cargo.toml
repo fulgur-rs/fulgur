@@ -1,0 +1,23 @@
+[package]
+name = "fulgur"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "HTML/CSS to PDF conversion library"
+readme = "../../README.md"
+keywords = ["pdf", "html", "css", "converter"]
+categories = ["text-processing", "command-line-utilities"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dependencies]
+krilla = "0.6.0"
+blitz-html = "0.2"
+blitz-dom = "0.2"
+blitz-traits = "0.2"
+parley = "0.6"
+thiserror = "2"

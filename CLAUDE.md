@@ -15,7 +15,7 @@ cargo build --release
 
 # Test (unit tests are in paginate.rs)
 cargo test --lib
-cargo test -p fulgur-core
+cargo test -p fulgur
 
 # Lint
 cargo clippy
@@ -36,10 +36,10 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 
 ### Workspace Structure
 
-- `crates/fulgur-core/` — Library crate with the conversion engine
+- `crates/fulgur/` — Library crate with the conversion engine
 - `crates/fulgur-cli/` — CLI binary using clap
 
-### Key Modules (fulgur-core)
+### Key Modules (fulgur)
 
 - **engine.rs** — `Engine` builder: configures and executes `render_html()` / `render_pageable()`
 - **blitz_adapter.rs** — Thin adapter isolating Blitz API changes from the rest of the codebase
