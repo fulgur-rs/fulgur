@@ -13,24 +13,59 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut margin_boxes = Vec::new();
     let mut cleaned_css = String::with_capacity(css.len());
 
-    let bytes = css.as_bytes();
-    let len = bytes.len();
+    let len = css.len();
     let mut i = 0;
 
     while i < len {
+        let remaining = &css[i..];
+        let ch = remaining.chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+
+        // Skip CSS comments /* ... */
+        if remaining.starts_with("/*") {
+            if let Some(end) = css[i + 2..].find("*/") {
+                cleaned_css.push_str(&css[i..i + 2 + end + 2]);
+                i += 2 + end + 2;
+            } else {
+                // Unterminated comment — copy the rest
+                cleaned_css.push_str(remaining);
+                break;
+            }
+            continue;
+        }
+
+        // Skip string literals "..." and '...'
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut j = i + 1;
+            while j < len {
+                let c = css[j..].chars().next().unwrap();
+                if c == '\\' {
+                    j += c.len_utf8();
+                    if j < len {
+                        j += css[j..].chars().next().unwrap().len_utf8();
+                    }
+                } else if c == quote {
+                    j += 1;
+                    break;
+                } else {
+                    j += c.len_utf8();
+                }
+            }
+            cleaned_css.push_str(&css[i..j]);
+            i = j;
+            continue;
+        }
+
         // Check for @page rule
-        if bytes[i] == b'@' {
+        if ch == '@' {
             if let Some(rest) = css.get(i + 1..) {
                 if rest.starts_with("page") {
                     let after_page = i + 5; // after "@page"
+                    let after_page_ch = css[after_page..].chars().next();
                     // Make sure it's not @page-something (must be followed by whitespace, {, or :)
                     if after_page >= len
-                        || bytes[after_page] == b' '
-                        || bytes[after_page] == b'\n'
-                        || bytes[after_page] == b'\r'
-                        || bytes[after_page] == b'\t'
-                        || bytes[after_page] == b'{'
-                        || bytes[after_page] == b':'
+                        || matches!(after_page_ch, Some(c) if c.is_ascii_whitespace() || c == '{' || c == ':')
                     {
                         if let Some((consumed, page_sel, boxes)) =
                             parse_page_rule(&css[i..])
@@ -54,7 +89,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         }
 
         // Check for position: running(...)
-        if bytes[i] == b'p' || bytes[i] == b'P' {
+        if ch == 'p' || ch == 'P' {
             if let Some(result) = try_parse_running(&css[i..]) {
                 let (name, replacement, consumed) = result;
                 running_names.insert(name);
@@ -64,8 +99,8 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
             }
         }
 
-        cleaned_css.push(bytes[i] as char);
-        i += 1;
+        cleaned_css.push_str(&css[i..i + ch_len]);
+        i += ch_len;
     }
 
     GcpmContext {
@@ -487,5 +522,21 @@ mod tests {
             mb.content,
             vec![ContentItem::Element("firstHeader".to_string())]
         );
+    }
+
+    #[test]
+    fn test_ignores_gcpm_in_comments() {
+        let css =
+            "/* @page { @top-center { content: element(x); } } */ body { color: red; }";
+        let ctx = parse_gcpm(css);
+        assert!(ctx.margin_boxes.is_empty());
+        assert!(ctx.cleaned_css.contains("body { color: red; }"));
+    }
+
+    #[test]
+    fn test_ignores_gcpm_in_string_literals() {
+        let css = r#"body { content: "position: running(x)"; color: blue; }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.running_names.is_empty());
     }
 }

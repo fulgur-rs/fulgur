@@ -110,6 +110,15 @@ pub fn render_to_pdf_with_gcpm(
 
         // Draw margin boxes first (behind body content)
         for margin_box in &gcpm.margin_boxes {
+            // Filter by page selector
+            if let Some(ref sel) = margin_box.page_selector {
+                match sel.as_str() {
+                    ":first" if page_num != 1 => continue,
+                    ":left" if page_num % 2 != 0 => continue,
+                    ":right" if page_num % 2 == 0 => continue,
+                    _ => {}
+                }
+            }
             let resolved_html = resolve_content_to_html(
                 &margin_box.content,
                 &running_pairs,
