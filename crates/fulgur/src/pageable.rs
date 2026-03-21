@@ -495,8 +495,7 @@ impl Pageable for BlockPageable {
 
             if pc.y + pc.child.height() > avail_height {
                 let child_avail = avail_height - pc.y;
-                if let Some(parts) = child_avail
-                    .is_sign_positive()
+                if let Some(parts) = (child_avail > 0.0)
                     .then(|| pc.child.split(0.0, child_avail))
                     .flatten()
                 {
