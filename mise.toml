@@ -1,2 +1,19 @@
 [tools]
 rust = "latest"
+
+[tasks.update-examples]
+description = "Regenerate all example PDFs"
+run = """
+cargo build --bin fulgur --release 2>&1 | tail -1
+for dir in examples/*/; do
+  html="$dir/index.html"
+  css="$dir/style.css"
+  pdf="$dir/index.pdf"
+  [ -f "$html" ] || continue
+  if [ -f "$css" ]; then
+    target/release/fulgur render "$html" --css "$css" -o "$pdf"
+  else
+    target/release/fulgur render "$html" -o "$pdf"
+  fi
+done
+"""
