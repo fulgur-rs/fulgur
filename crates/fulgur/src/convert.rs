@@ -3,7 +3,7 @@
 use crate::gcpm::GcpmContext;
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::pageable::{
-    BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, SpacerPageable,
+    BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, Size, SpacerPageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -80,14 +80,17 @@ fn convert_node(
                 || style.border_widths.iter().any(|&w| w > 0.0)
                 || style.padding.iter().any(|&p| p > 0.0);
             if has_style {
+                let child_x = style.border_widths[3] + style.padding[3];
+                let child_y = style.border_widths[0] + style.padding[0];
                 let child = PositionedChild {
                     child: Box::new(paragraph),
-                    x: 0.0,
-                    y: 0.0,
+                    x: child_x,
+                    y: child_y,
                 };
                 let mut block =
                     BlockPageable::with_positioned_children(vec![child]).with_style(style);
                 block.wrap(width, height);
+                block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
                 Box::new(paragraph)
@@ -124,13 +127,17 @@ fn convert_node(
             || style.border_widths.iter().any(|&w| w > 0.0)
             || style.padding.iter().any(|&p| p > 0.0);
         if has_style {
+            let child_x = style.border_widths[3] + style.padding[3]; // left border + left padding
+            let child_y = style.border_widths[0] + style.padding[0]; // top border + top padding
             let child = PositionedChild {
                 child: Box::new(paragraph),
-                x: 0.0,
-                y: 0.0,
+                x: child_x,
+                y: child_y,
             };
             let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
             block.wrap(width, height);
+            // Use Taffy's computed height (includes padding + border) instead of children-only height
+            block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
         return Box::new(paragraph);
@@ -139,7 +146,18 @@ fn convert_node(
     let children: &[usize] = &node.children;
 
     if children.is_empty() {
-        // Leaf node — create a spacer with the computed height
+        // Leaf node with style (background/border/radius) — use BlockPageable to draw visuals
+        let style = extract_block_style(node);
+        let has_style = style.background_color.is_some()
+            || style.border_widths.iter().any(|&w| w > 0.0)
+            || style.border_radii.iter().any(|r| r[0] > 0.0 || r[1] > 0.0);
+        if has_style {
+            let mut block = BlockPageable::with_positioned_children(vec![]).with_style(style);
+            block.wrap(width, height);
+            block.layout_size = Some(Size { width, height });
+            return Box::new(block);
+        }
+        // Plain leaf node — create a spacer with the computed height
         let mut spacer = SpacerPageable::new(height);
         spacer.wrap(width, height);
         return Box::new(spacer);
@@ -370,6 +388,41 @@ fn extract_block_style(node: &Node) -> BlockStyle {
             (bc_abs.components.1.clamp(0.0, 1.0) * 255.0) as u8,
             (bc_abs.components.2.clamp(0.0, 1.0) * 255.0) as u8,
             (bc_abs.alpha.clamp(0.0, 1.0) * 255.0) as u8,
+        ];
+
+        // Border radii
+        let width = layout.size.width;
+        let height = layout.size.height;
+        let resolve_radius =
+            |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
+             basis: f32|
+             -> f32 {
+                r.0.resolve(style::values::computed::Length::new(basis))
+                    .px()
+            };
+
+        let tl = styles.clone_border_top_left_radius();
+        let tr = styles.clone_border_top_right_radius();
+        let br = styles.clone_border_bottom_right_radius();
+        let bl = styles.clone_border_bottom_left_radius();
+
+        style.border_radii = [
+            [
+                resolve_radius(&tl.0.width, width),
+                resolve_radius(&tl.0.height, height),
+            ],
+            [
+                resolve_radius(&tr.0.width, width),
+                resolve_radius(&tr.0.height, height),
+            ],
+            [
+                resolve_radius(&br.0.width, width),
+                resolve_radius(&br.0.height, height),
+            ],
+            [
+                resolve_radius(&bl.0.width, width),
+                resolve_radius(&bl.0.height, height),
+            ],
         ];
     }
 

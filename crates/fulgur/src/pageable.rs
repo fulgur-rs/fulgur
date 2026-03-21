@@ -102,6 +102,8 @@ pub struct BlockStyle {
     pub border_widths: [f32; 4],
     /// Padding: top, right, bottom, left
     pub padding: [f32; 4],
+    /// Border radii: [top-left, top-right, bottom-right, bottom-left] × [rx, ry]
+    pub border_radii: [[f32; 2]; 4],
 }
 
 // ─── PositionedChild ─────────────────────────────────────
@@ -123,6 +125,8 @@ pub struct BlockPageable {
     pub children: Vec<PositionedChild>,
     pub pagination: Pagination,
     pub cached_size: Option<Size>,
+    /// Taffy-computed layout size (preserved across wrap() calls for drawing).
+    pub layout_size: Option<Size>,
     pub style: BlockStyle,
 }
 
@@ -146,6 +150,7 @@ impl BlockPageable {
             children: positioned,
             pagination: Pagination::default(),
             cached_size: None,
+            layout_size: None,
             style: BlockStyle::default(),
         }
     }
@@ -155,6 +160,7 @@ impl BlockPageable {
             children,
             pagination: Pagination::default(),
             cached_size: None,
+            layout_size: None,
             style: BlockStyle::default(),
         }
     }
@@ -168,6 +174,101 @@ impl BlockPageable {
         self.style = style;
         self
     }
+}
+
+/// Build a rounded rectangle path using cubic Bézier curves for corners.
+/// radii: [top-left, top-right, bottom-right, bottom-left] × [rx, ry]
+fn build_rounded_rect_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: &[[f32; 2]; 4],
+) -> Option<krilla::geom::Path> {
+    // Bézier approximation constant for quarter circle
+    const KAPPA: f32 = 0.552_284_8;
+
+    // CSS spec: if adjacent radii sum exceeds an edge, scale all radii proportionally.
+    // Compute the minimum scale factor across all four edges.
+    let scale = |a: f32, b: f32, edge: f32| -> f32 {
+        let sum = a + b;
+        if sum > edge && sum > 0.0 {
+            edge / sum
+        } else {
+            1.0
+        }
+    };
+    let f = scale(radii[0][0], radii[1][0], w) // top edge (rx)
+        .min(scale(radii[1][1], radii[2][1], h)) // right edge (ry)
+        .min(scale(radii[2][0], radii[3][0], w)) // bottom edge (rx)
+        .min(scale(radii[3][1], radii[0][1], h)); // left edge (ry)
+
+    let r: [[f32; 2]; 4] = [
+        [radii[0][0] * f, radii[0][1] * f],
+        [radii[1][0] * f, radii[1][1] * f],
+        [radii[2][0] * f, radii[2][1] * f],
+        [radii[3][0] * f, radii[3][1] * f],
+    ];
+
+    let mut pb = krilla::geom::PathBuilder::new();
+
+    // Start at top-left corner (after radius)
+    pb.move_to(x + r[0][0], y);
+
+    // Top edge → top-right corner
+    pb.line_to(x + w - r[1][0], y);
+    if r[1][0] > 0.0 || r[1][1] > 0.0 {
+        pb.cubic_to(
+            x + w - r[1][0] * (1.0 - KAPPA),
+            y,
+            x + w,
+            y + r[1][1] * (1.0 - KAPPA),
+            x + w,
+            y + r[1][1],
+        );
+    }
+
+    // Right edge → bottom-right corner
+    pb.line_to(x + w, y + h - r[2][1]);
+    if r[2][0] > 0.0 || r[2][1] > 0.0 {
+        pb.cubic_to(
+            x + w,
+            y + h - r[2][1] * (1.0 - KAPPA),
+            x + w - r[2][0] * (1.0 - KAPPA),
+            y + h,
+            x + w - r[2][0],
+            y + h,
+        );
+    }
+
+    // Bottom edge → bottom-left corner
+    pb.line_to(x + r[3][0], y + h);
+    if r[3][0] > 0.0 || r[3][1] > 0.0 {
+        pb.cubic_to(
+            x + r[3][0] * (1.0 - KAPPA),
+            y + h,
+            x,
+            y + h - r[3][1] * (1.0 - KAPPA),
+            x,
+            y + h - r[3][1],
+        );
+    }
+
+    // Left edge → top-left corner
+    pb.line_to(x, y + r[0][1]);
+    if r[0][0] > 0.0 || r[0][1] > 0.0 {
+        pb.cubic_to(
+            x,
+            y + r[0][1] * (1.0 - KAPPA),
+            x + r[0][0] * (1.0 - KAPPA),
+            y,
+            x + r[0][0],
+            y,
+        );
+    }
+
+    pb.close();
+    pb.finish()
 }
 
 impl Pageable for BlockPageable {
@@ -302,15 +403,38 @@ impl Pageable for BlockPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
-        let total_height = self.cached_size.map(|s| s.height).unwrap_or(avail_height);
+        // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
+        let total_width = self
+            .layout_size
+            .or(self.cached_size)
+            .map(|s| s.width)
+            .unwrap_or(avail_width);
+        let total_height = self
+            .layout_size
+            .or(self.cached_size)
+            .map(|s| s.height)
+            .unwrap_or(avail_height);
 
         // Draw background
-        if let Some(bg) = &self.style.background_color
-            && let Some(rect) = krilla::geom::Rect::from_xywh(x, y, avail_width, total_height)
-        {
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.push_rect(rect);
-            if let Some(path) = pb.finish() {
+        if let Some(bg) = &self.style.background_color {
+            let has_radius = self
+                .style
+                .border_radii
+                .iter()
+                .any(|r| r[0] > 0.0 || r[1] > 0.0);
+            let path = if has_radius {
+                build_rounded_rect_path(x, y, total_width, total_height, &self.style.border_radii)
+            } else if let Some(rect) =
+                krilla::geom::Rect::from_xywh(x, y, total_width, total_height)
+            {
+                let mut pb = krilla::geom::PathBuilder::new();
+                pb.push_rect(rect);
+                pb.finish()
+            } else {
+                None
+            };
+
+            if let Some(path) = path {
                 canvas.surface.set_fill(Some(krilla::paint::Fill {
                     paint: krilla::color::rgb::Color::new(bg[0], bg[1], bg[2]).into(),
                     opacity: krilla::num::NormalizedF32::new(bg[3] as f32 / 255.0)
@@ -326,64 +450,114 @@ impl Pageable for BlockPageable {
         let [bt, br, bb, bl] = self.style.border_widths;
         if bt > 0.0 || br > 0.0 || bb > 0.0 || bl > 0.0 {
             let bc = &self.style.border_color;
-            let stroke = krilla::paint::Stroke {
-                paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
-                opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
-                    .unwrap_or(krilla::num::NormalizedF32::ONE),
-                ..Default::default()
-            };
+            let has_radius = self
+                .style
+                .border_radii
+                .iter()
+                .any(|r| r[0] > 0.0 || r[1] > 0.0);
 
-            canvas.surface.set_fill(None);
+            let uniform_width = bt == br && br == bb && bb == bl;
+            if has_radius && uniform_width {
+                // For rounded borders with uniform width, use a single stroke path
+                let avg_width = bt;
+                let inset = avg_width / 2.0;
+                let inset_radii: [[f32; 2]; 4] = [
+                    [
+                        (self.style.border_radii[0][0] - inset).max(0.0),
+                        (self.style.border_radii[0][1] - inset).max(0.0),
+                    ],
+                    [
+                        (self.style.border_radii[1][0] - inset).max(0.0),
+                        (self.style.border_radii[1][1] - inset).max(0.0),
+                    ],
+                    [
+                        (self.style.border_radii[2][0] - inset).max(0.0),
+                        (self.style.border_radii[2][1] - inset).max(0.0),
+                    ],
+                    [
+                        (self.style.border_radii[3][0] - inset).max(0.0),
+                        (self.style.border_radii[3][1] - inset).max(0.0),
+                    ],
+                ];
+                if let Some(path) = build_rounded_rect_path(
+                    x + inset,
+                    y + inset,
+                    total_width - inset * 2.0,
+                    total_height - inset * 2.0,
+                    &inset_radii,
+                ) {
+                    canvas.surface.set_fill(None);
+                    canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+                        paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
+                        width: avg_width,
+                        opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
+                            .unwrap_or(krilla::num::NormalizedF32::ONE),
+                        ..Default::default()
+                    }));
+                    canvas.surface.draw_path(&path);
+                    canvas.surface.set_stroke(None);
+                }
+            } else {
+                // Original per-side border drawing for non-rounded borders
+                let stroke = krilla::paint::Stroke {
+                    paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
+                    opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
+                        .unwrap_or(krilla::num::NormalizedF32::ONE),
+                    ..Default::default()
+                };
 
-            if bt > 0.0 {
-                canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                    width: bt,
-                    ..stroke.clone()
-                }));
-                let mut pb = krilla::geom::PathBuilder::new();
-                pb.move_to(x, y + bt / 2.0);
-                pb.line_to(x + avail_width, y + bt / 2.0);
-                if let Some(path) = pb.finish() {
-                    canvas.surface.draw_path(&path);
+                canvas.surface.set_fill(None);
+
+                if bt > 0.0 {
+                    canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+                        width: bt,
+                        ..stroke.clone()
+                    }));
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.move_to(x, y + bt / 2.0);
+                    pb.line_to(x + total_width, y + bt / 2.0);
+                    if let Some(path) = pb.finish() {
+                        canvas.surface.draw_path(&path);
+                    }
                 }
-            }
-            if bb > 0.0 {
-                canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                    width: bb,
-                    ..stroke.clone()
-                }));
-                let mut pb = krilla::geom::PathBuilder::new();
-                pb.move_to(x, y + total_height - bb / 2.0);
-                pb.line_to(x + avail_width, y + total_height - bb / 2.0);
-                if let Some(path) = pb.finish() {
-                    canvas.surface.draw_path(&path);
+                if bb > 0.0 {
+                    canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+                        width: bb,
+                        ..stroke.clone()
+                    }));
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.move_to(x, y + total_height - bb / 2.0);
+                    pb.line_to(x + total_width, y + total_height - bb / 2.0);
+                    if let Some(path) = pb.finish() {
+                        canvas.surface.draw_path(&path);
+                    }
                 }
-            }
-            if bl > 0.0 {
-                canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                    width: bl,
-                    ..stroke.clone()
-                }));
-                let mut pb = krilla::geom::PathBuilder::new();
-                pb.move_to(x + bl / 2.0, y);
-                pb.line_to(x + bl / 2.0, y + total_height);
-                if let Some(path) = pb.finish() {
-                    canvas.surface.draw_path(&path);
+                if bl > 0.0 {
+                    canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+                        width: bl,
+                        ..stroke.clone()
+                    }));
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.move_to(x + bl / 2.0, y);
+                    pb.line_to(x + bl / 2.0, y + total_height);
+                    if let Some(path) = pb.finish() {
+                        canvas.surface.draw_path(&path);
+                    }
                 }
-            }
-            if br > 0.0 {
-                canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                    width: br,
-                    ..stroke
-                }));
-                let mut pb = krilla::geom::PathBuilder::new();
-                pb.move_to(x + avail_width - br / 2.0, y);
-                pb.line_to(x + avail_width - br / 2.0, y + total_height);
-                if let Some(path) = pb.finish() {
-                    canvas.surface.draw_path(&path);
+                if br > 0.0 {
+                    canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+                        width: br,
+                        ..stroke
+                    }));
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.move_to(x + total_width - br / 2.0, y);
+                    pb.line_to(x + total_width - br / 2.0, y + total_height);
+                    if let Some(path) = pb.finish() {
+                        canvas.surface.draw_path(&path);
+                    }
                 }
+                canvas.surface.set_stroke(None);
             }
-            canvas.surface.set_stroke(None);
         }
 
         // Draw children at their Taffy-computed positions
@@ -402,7 +576,10 @@ impl Pageable for BlockPageable {
     }
 
     fn height(&self) -> Pt {
-        self.cached_size.map(|s| s.height).unwrap_or(0.0)
+        self.layout_size
+            .or(self.cached_size)
+            .map(|s| s.height)
+            .unwrap_or(0.0)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
