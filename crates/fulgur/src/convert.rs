@@ -3,8 +3,8 @@
 use crate::gcpm::GcpmContext;
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::pageable::{
-    BlockPageable, BlockStyle, ListItemPageable, Pageable, PositionedChild, Size, SpacerPageable,
-    TablePageable,
+    BlockPageable, BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
+    SpacerPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -555,6 +555,28 @@ fn extract_block_style(node: &Node) -> BlockStyle {
                 resolve_radius(&bl.0.width, width),
                 resolve_radius(&bl.0.height, height),
             ],
+        ];
+
+        // Border styles
+        let convert_border_style = |bs: style::values::specified::BorderStyle| -> BorderStyleValue {
+            use style::values::specified::BorderStyle as BS;
+            match bs {
+                BS::None | BS::Hidden => BorderStyleValue::None,
+                BS::Dashed => BorderStyleValue::Dashed,
+                BS::Dotted => BorderStyleValue::Dotted,
+                BS::Double => BorderStyleValue::Double,
+                BS::Groove => BorderStyleValue::Groove,
+                BS::Ridge => BorderStyleValue::Ridge,
+                BS::Inset => BorderStyleValue::Inset,
+                BS::Outset => BorderStyleValue::Outset,
+                BS::Solid => BorderStyleValue::Solid,
+            }
+        };
+        style.border_styles = [
+            convert_border_style(styles.clone_border_top_style()),
+            convert_border_style(styles.clone_border_right_style()),
+            convert_border_style(styles.clone_border_bottom_style()),
+            convert_border_style(styles.clone_border_left_style()),
         ];
     }
 
