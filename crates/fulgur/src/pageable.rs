@@ -104,6 +104,24 @@ pub struct BlockStyle {
     pub padding: [f32; 4],
     /// Border radii: [top-left, top-right, bottom-right, bottom-left] × [rx, ry]
     pub border_radii: [[f32; 2]; 4],
+    /// Border styles: top, right, bottom, left
+    pub border_styles: [BorderStyleValue; 4],
+}
+
+/// CSS border-style values supported by fulgur.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BorderStyleValue {
+    /// No border drawn
+    None,
+    /// Solid line (default when border-width > 0)
+    #[default]
+    Solid,
+    /// Dashed line
+    Dashed,
+    /// Dotted line
+    Dotted,
+    /// Two parallel lines
+    Double,
 }
 
 impl BlockStyle {
@@ -344,6 +362,101 @@ fn draw_block_background(
 }
 
 /// Draw the border stroke for a block or table element.
+/// Apply border-style dash settings to a stroke.
+fn apply_border_style(
+    stroke: krilla::paint::Stroke,
+    style: BorderStyleValue,
+    width: f32,
+) -> Option<krilla::paint::Stroke> {
+    match style {
+        BorderStyleValue::None => None,
+        BorderStyleValue::Solid => Some(stroke),
+        BorderStyleValue::Dashed => {
+            let dash_len = width * 3.0;
+            Some(krilla::paint::Stroke {
+                dash: Some(krilla::paint::StrokeDash {
+                    array: vec![dash_len, dash_len],
+                    offset: 0.0,
+                }),
+                ..stroke
+            })
+        }
+        BorderStyleValue::Dotted => Some(krilla::paint::Stroke {
+            line_cap: krilla::paint::LineCap::Round,
+            dash: Some(krilla::paint::StrokeDash {
+                array: vec![0.0, width * 2.0],
+                offset: 0.0,
+            }),
+            ..stroke
+        }),
+        BorderStyleValue::Double => Some(stroke), // handled specially at call site
+    }
+}
+
+/// Draw a single border line (or double) between two points.
+#[allow(clippy::too_many_arguments)]
+fn draw_border_line(
+    canvas: &mut Canvas<'_, '_>,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    width: f32,
+    style: BorderStyleValue,
+    base_stroke: &krilla::paint::Stroke,
+) {
+    if width <= 0.0 || style == BorderStyleValue::None {
+        return;
+    }
+
+    let stroke_with_width = krilla::paint::Stroke {
+        width,
+        ..base_stroke.clone()
+    };
+
+    if style == BorderStyleValue::Double {
+        let gap = width / 3.0;
+        // Compute perpendicular offset for the two lines
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len == 0.0 {
+            return;
+        }
+        let nx = -dy / len * gap;
+        let ny = dx / len * gap;
+
+        let thin = krilla::paint::Stroke {
+            width: width / 3.0,
+            ..base_stroke.clone()
+        };
+        // Outer line
+        canvas.surface.set_stroke(Some(thin.clone()));
+        let mut pb = krilla::geom::PathBuilder::new();
+        pb.move_to(x1 + nx, y1 + ny);
+        pb.line_to(x2 + nx, y2 + ny);
+        if let Some(path) = pb.finish() {
+            canvas.surface.draw_path(&path);
+        }
+        // Inner line
+        canvas.surface.set_stroke(Some(thin));
+        let mut pb = krilla::geom::PathBuilder::new();
+        pb.move_to(x1 - nx, y1 - ny);
+        pb.line_to(x2 - nx, y2 - ny);
+        if let Some(path) = pb.finish() {
+            canvas.surface.draw_path(&path);
+        }
+    } else if let Some(styled) = apply_border_style(stroke_with_width, style, width) {
+        canvas.surface.set_stroke(Some(styled));
+        let mut pb = krilla::geom::PathBuilder::new();
+        pb.move_to(x1, y1);
+        pb.line_to(x2, y2);
+        if let Some(path) = pb.finish() {
+            canvas.surface.draw_path(&path);
+        }
+    }
+}
+
 fn draw_block_border(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -353,13 +466,15 @@ fn draw_block_border(
     h: f32,
 ) {
     let [bt, br, bb, bl] = style.border_widths;
+    let [st, sr, sb, sl] = style.border_styles;
     if !(bt > 0.0 || br > 0.0 || bb > 0.0 || bl > 0.0) {
         return;
     }
     let bc = &style.border_color;
 
     let uniform_width = bt == br && br == bb && bb == bl;
-    if style.has_radius() && uniform_width {
+    let uniform_style = st == sr && sr == sb && sb == sl;
+    if style.has_radius() && uniform_width && uniform_style && st != BorderStyleValue::None {
         let inset = bt / 2.0;
         let inset_radii = style
             .border_radii
@@ -371,73 +486,70 @@ fn draw_block_border(
             h - inset * 2.0,
             &inset_radii,
         ) {
-            canvas.surface.set_fill(None);
-            canvas.surface.set_stroke(Some(krilla::paint::Stroke {
+            let base = krilla::paint::Stroke {
                 paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
                 width: bt,
                 opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
                     .unwrap_or(krilla::num::NormalizedF32::ONE),
                 ..Default::default()
-            }));
-            canvas.surface.draw_path(&path);
-            canvas.surface.set_stroke(None);
+            };
+            if let Some(styled) = apply_border_style(base, st, bt) {
+                canvas.surface.set_fill(None);
+                canvas.surface.set_stroke(Some(styled));
+                canvas.surface.draw_path(&path);
+                canvas.surface.set_stroke(None);
+            }
         }
     } else {
-        let stroke = krilla::paint::Stroke {
+        let base_stroke = krilla::paint::Stroke {
             paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
             opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
                 .unwrap_or(krilla::num::NormalizedF32::ONE),
             ..Default::default()
         };
         canvas.surface.set_fill(None);
-        if bt > 0.0 {
-            canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                width: bt,
-                ..stroke.clone()
-            }));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y + bt / 2.0);
-            pb.line_to(x + w, y + bt / 2.0);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
-        }
-        if bb > 0.0 {
-            canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                width: bb,
-                ..stroke.clone()
-            }));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y + h - bb / 2.0);
-            pb.line_to(x + w, y + h - bb / 2.0);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
-        }
-        if bl > 0.0 {
-            canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                width: bl,
-                ..stroke.clone()
-            }));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x + bl / 2.0, y);
-            pb.line_to(x + bl / 2.0, y + h);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
-        }
-        if br > 0.0 {
-            canvas.surface.set_stroke(Some(krilla::paint::Stroke {
-                width: br,
-                ..stroke
-            }));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x + w - br / 2.0, y);
-            pb.line_to(x + w - br / 2.0, y + h);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
-        }
+
+        draw_border_line(
+            canvas,
+            x,
+            y + bt / 2.0,
+            x + w,
+            y + bt / 2.0,
+            bt,
+            st,
+            &base_stroke,
+        );
+        draw_border_line(
+            canvas,
+            x,
+            y + h - bb / 2.0,
+            x + w,
+            y + h - bb / 2.0,
+            bb,
+            sb,
+            &base_stroke,
+        );
+        draw_border_line(
+            canvas,
+            x + bl / 2.0,
+            y,
+            x + bl / 2.0,
+            y + h,
+            bl,
+            sl,
+            &base_stroke,
+        );
+        draw_border_line(
+            canvas,
+            x + w - br / 2.0,
+            y,
+            x + w - br / 2.0,
+            y + h,
+            br,
+            sr,
+            &base_stroke,
+        );
+
         canvas.surface.set_stroke(None);
     }
 }
