@@ -27,7 +27,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install git-cliff
-        run: cargo install git-cliff
+        run: |
+          curl -sSL https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-2.7.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv git-cliff-*/git-cliff /usr/local/bin/
 
       - name: Determine version
         id: version
@@ -72,6 +74,8 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Clean up existing branch/PR if re-running
+          git push origin --delete "$BRANCH" 2>/dev/null || true
           git checkout -b "$BRANCH"
           git add -A
           git commit -m "release: v$VERSION"
@@ -106,6 +110,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          # Delete existing draft release if re-running
+          gh release delete "v$VERSION" --yes 2>/dev/null || true
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --notes-file RELEASE_NOTES.md \

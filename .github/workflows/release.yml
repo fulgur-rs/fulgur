@@ -130,12 +130,20 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Upload binaries and publish draft release
+      - name: Upload binaries and publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ needs.publish.outputs.version }}"
-          # Upload binaries to existing draft release
-          gh release upload "v$VERSION" artifacts/* --repo "${{ github.repository }}"
-          # Publish the draft release
-          gh release edit "v$VERSION" --draft=false --repo "${{ github.repository }}"
+          REPO="${{ github.repository }}"
+          # Create release if draft doesn't exist (fallback)
+          if ! gh release view "v$VERSION" --repo "$REPO" &>/dev/null; then
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --notes "Release v$VERSION" \
+              --draft \
+              --repo "$REPO"
+          fi
+          # Upload binaries and publish
+          gh release upload "v$VERSION" artifacts/* --repo "$REPO"
+          gh release edit "v$VERSION" --draft=false --repo "$REPO"
