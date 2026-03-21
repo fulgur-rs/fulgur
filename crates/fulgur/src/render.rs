@@ -191,16 +191,34 @@ pub fn render_to_pdf_with_gcpm(
                 } else {
                     format!(
                         "<div style=\"{}\">{}</div>",
-                        rule.declarations, content_html
+                        rule.declarations.replace('"', "&quot;"),
+                        content_html
                     )
                 };
                 resolved_htmls.insert(pos, html);
             }
         }
 
-        // Stage 1: Layout all at content_width, populate cache
+        // Stage 1: Layout all at content_width, populate cache.
+        // We do two Blitz passes per unique HTML:
+        //   1. Measure: wrap content in inline-block to get shrink-to-fit (max-content) width
+        //   2. Render: normal block layout for drawing
         for html in resolved_htmls.values() {
             if !layout_cache.contains_key(html) {
+                // Measure pass: inline-block wrapper for max-content width
+                let measure_html = format!(
+                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
+                    margin_css, html
+                );
+                let measure_doc = crate::blitz_adapter::parse_and_layout(
+                    &measure_html,
+                    content_width,
+                    page_size.height,
+                    font_data,
+                );
+                let max_content_width = get_body_child_width(&measure_doc);
+
+                // Render pass: normal block layout for drawing
                 let margin_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
                     margin_css, html
@@ -211,7 +229,6 @@ pub fn render_to_pdf_with_gcpm(
                     page_size.height,
                     font_data,
                 );
-                let max_content_width = get_body_child_width(&margin_doc);
                 let mut dummy_store = RunningElementStore::new();
                 let pageable = crate::convert::dom_to_pageable(&margin_doc, None, &mut dummy_store);
                 layout_cache.insert(
