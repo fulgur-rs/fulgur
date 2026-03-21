@@ -315,6 +315,7 @@ fn convert_table(
         header_height,
         style,
         layout_size: Some(Size { width, height }),
+        width,
         cached_height: height,
     };
     Box::new(table)

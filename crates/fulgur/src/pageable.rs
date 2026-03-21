@@ -749,12 +749,14 @@ pub struct TablePageable {
     pub style: BlockStyle,
     /// Taffy-computed layout size
     pub layout_size: Option<Size>,
+    /// Table width (preserved across splits)
+    pub width: Pt,
     /// Cached height from wrap()
     pub cached_height: Pt,
 }
 
 impl Pageable for TablePageable {
-    fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
         if let Some(ls) = self.layout_size {
             self.cached_height = ls.height;
             return ls;
@@ -766,7 +768,7 @@ impl Pageable for TablePageable {
             .fold(0.0f32, |acc, pc| acc.max(pc.y + pc.child.height()));
         self.cached_height = max_h;
         Size {
-            width: avail_width,
+            width: self.width,
             height: max_h,
         }
     }
@@ -809,6 +811,7 @@ impl Pageable for TablePageable {
                 header_height: self.header_height,
                 style: self.style.clone(),
                 layout_size: None,
+                width: self.width,
                 cached_height: 0.0,
             }),
             Box::new(TablePageable {
@@ -817,13 +820,14 @@ impl Pageable for TablePageable {
                 header_height: self.header_height,
                 style: self.style.clone(),
                 layout_size: None,
+                width: self.width,
                 cached_height: 0.0,
             }),
         ))
     }
 
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, _avail_height: Pt) {
-        let total_width = self.layout_size.map(|s| s.width).unwrap_or(avail_width);
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
+        let total_width = self.width;
         let total_height = self
             .layout_size
             .map(|s| s.height)
@@ -922,7 +926,7 @@ impl Pageable for TablePageable {
 
         for pc in self.header_cells.iter().chain(self.body_cells.iter()) {
             pc.child
-                .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+                .draw(canvas, x + pc.x, y + pc.y, total_width, pc.child.height());
         }
     }
 
