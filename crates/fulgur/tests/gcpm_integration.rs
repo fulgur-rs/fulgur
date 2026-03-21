@@ -125,3 +125,33 @@ fn test_gcpm_counter_only_no_running() {
         "PDF output should start with %PDF-"
     );
 }
+
+#[test]
+fn test_deterministic_output() {
+    let css = r#"
+        .header { position: running(pageHeader); }
+        @page {
+            @top-left { content: element(pageHeader); }
+            @top-right { content: "Page " counter(page) " / " counter(pages); font-size: 8px; }
+            @bottom-center { content: "Footer"; }
+        }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="header">Title</div>
+  <p>Content.</p>
+</body></html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder().assets(assets).build();
+    let pdf1 = engine.render_html(html).unwrap();
+
+    let mut assets2 = AssetBundle::new();
+    assets2.add_css(css);
+    let engine2 = Engine::builder().assets(assets2).build();
+    let pdf2 = engine2.render_html(html).unwrap();
+
+    assert_eq!(pdf1, pdf2, "Same input must produce identical PDF output");
+}
