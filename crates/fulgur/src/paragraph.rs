@@ -4,6 +4,51 @@ use std::sync::Arc;
 
 use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 
+/// Which decoration lines to draw (bitflags).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextDecorationLine(u8);
+
+impl TextDecorationLine {
+    pub const NONE: Self = Self(0);
+    pub const UNDERLINE: Self = Self(1 << 0);
+    pub const OVERLINE: Self = Self(1 << 1);
+    pub const LINE_THROUGH: Self = Self(1 << 2);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for TextDecorationLine {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// Visual style of the decoration line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextDecorationStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Wavy,
+}
+
+/// All text-decoration info for a glyph run.
+#[derive(Clone, Debug, Default)]
+pub struct TextDecoration {
+    pub line: TextDecorationLine,
+    pub style: TextDecorationStyle,
+    pub color: [u8; 4],
+}
+
 /// A pre-extracted glyph for rendering via Krilla.
 #[derive(Clone, Debug)]
 pub struct ShapedGlyph {
@@ -21,6 +66,7 @@ pub struct ShapedGlyphRun {
     pub font_index: u32,
     pub font_size: f32,
     pub color: [u8; 4], // RGBA
+    pub decoration: TextDecoration,
     pub glyphs: Vec<ShapedGlyph>,
     pub text: String,
     pub x_offset: f32,
