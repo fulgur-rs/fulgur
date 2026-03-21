@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-03-21
+
+### Bug Fixes
+
+- adjust decoration line positions using cap_height and font_size ratio
+- address PR review feedback
+- offset inline root children by padding+border in styled blocks
+- use cached width for background/border drawing, handle empty styled elements
+- proportional radius scaling per CSS spec, darken example backgrounds
+- separate layout_size from cached_size, guard non-uniform border widths
+- BlockPageable::height() now respects layout_size
+- recursive child split in BlockPageable and re-wrap after split
+- address PR review — table borders, running elements, split edge cases
+- preserve table width across splits, use width field instead of avail_width
+- snap table split to row boundary instead of cell boundary
+- use strict > 0.0 instead of is_sign_positive for child_avail guard
+- correct groove/ridge normal direction per side
+- correct groove/ridge normal direction for all four border sides
+
+### Documentation
+
+- add text-decoration example
+- add text-align example
+
+### Features
+
+- add TextDecoration types and skrifa dependency
+- extract text-decoration from Stylo computed values
+- draw text-decoration lines with font metrics
+- extract border-radius from Stylo into BlockStyle
+- draw rounded rectangle backgrounds and borders
+- add TablePageable with header repeat on page split
+- detect table elements and build TablePageable with header/body groups
+- border-style support (dashed, dotted, double, none)
+- 3D border styles (groove, ridge, inset, outset)
+
+### Miscellaneous
+
+- regenerate example PDFs
+- add mise task for regenerating example PDFs
+
+### Refactor
+
+- extract shared helpers and eliminate duplication
+- extract draw_block_border helper, regenerate examples
+
+### Styling
+
+- add margins to border-radius example for better spacing
+
+### Testing
+
+- add text-decoration visual test fixture
+- add border-radius integration tests and example
+- add table header repeat tests and example
+
 ## [0.1.1] - 2026-03-21
 
 ### Bug Fixes
@@ -88,5 +144,9 @@ All notable changes to this project will be documented in this file.
 - add integration tests for list marker rendering
 - add integration tests for header/footer with GCPM
 - add deterministic output test for GCPM margin boxes
+
+### Release
+
+- v0.1.1
 
 
