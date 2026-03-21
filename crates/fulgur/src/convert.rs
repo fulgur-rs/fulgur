@@ -559,13 +559,17 @@ fn extract_block_style(node: &Node) -> BlockStyle {
 
         // Border styles
         let convert_border_style = |bs: style::values::specified::BorderStyle| -> BorderStyleValue {
+            use style::values::specified::BorderStyle as BS;
             match bs {
-                style::values::specified::BorderStyle::None
-                | style::values::specified::BorderStyle::Hidden => BorderStyleValue::None,
-                style::values::specified::BorderStyle::Dashed => BorderStyleValue::Dashed,
-                style::values::specified::BorderStyle::Dotted => BorderStyleValue::Dotted,
-                style::values::specified::BorderStyle::Double => BorderStyleValue::Double,
-                _ => BorderStyleValue::Solid, // groove/ridge/inset/outset → solid fallback
+                BS::None | BS::Hidden => BorderStyleValue::None,
+                BS::Dashed => BorderStyleValue::Dashed,
+                BS::Dotted => BorderStyleValue::Dotted,
+                BS::Double => BorderStyleValue::Double,
+                BS::Groove => BorderStyleValue::Groove,
+                BS::Ridge => BorderStyleValue::Ridge,
+                BS::Inset => BorderStyleValue::Inset,
+                BS::Outset => BorderStyleValue::Outset,
+                BS::Solid => BorderStyleValue::Solid,
             }
         };
         style.border_styles = [

@@ -122,6 +122,14 @@ pub enum BorderStyleValue {
     Dotted,
     /// Two parallel lines
     Double,
+    /// 3D grooved effect
+    Groove,
+    /// 3D ridged effect
+    Ridge,
+    /// 3D inset effect
+    Inset,
+    /// 3D outset effect
+    Outset,
 }
 
 impl BlockStyle {
@@ -361,7 +369,69 @@ fn draw_block_background(
     }
 }
 
-/// Draw the border stroke for a block or table element.
+/// Lighten an RGBA color by a factor (0.0–1.0). Higher factor = lighter.
+fn lighten_color(c: &[u8; 4], factor: f32) -> [u8; 4] {
+    [
+        (c[0] as f32 + (255.0 - c[0] as f32) * factor) as u8,
+        (c[1] as f32 + (255.0 - c[1] as f32) * factor) as u8,
+        (c[2] as f32 + (255.0 - c[2] as f32) * factor) as u8,
+        c[3],
+    ]
+}
+
+/// Darken an RGBA color by a factor (0.0–1.0). Higher factor = darker.
+fn darken_color(c: &[u8; 4], factor: f32) -> [u8; 4] {
+    [
+        (c[0] as f32 * (1.0 - factor)) as u8,
+        (c[1] as f32 * (1.0 - factor)) as u8,
+        (c[2] as f32 * (1.0 - factor)) as u8,
+        c[3],
+    ]
+}
+
+/// For 3D border styles, determine the light and dark colors for a given side.
+/// Returns (outer_color, inner_color) for groove/ridge, or just the single color for inset/outset.
+/// `is_top_or_left`: true for top/left sides, false for bottom/right sides.
+fn border_3d_colors(
+    base: &[u8; 4],
+    style: BorderStyleValue,
+    is_top_or_left: bool,
+) -> ([u8; 4], Option<[u8; 4]>) {
+    let light = lighten_color(base, 0.5);
+    let dark = darken_color(base, 0.5);
+    match style {
+        BorderStyleValue::Groove => {
+            if is_top_or_left {
+                (dark, Some(light))
+            } else {
+                (light, Some(dark))
+            }
+        }
+        BorderStyleValue::Ridge => {
+            if is_top_or_left {
+                (light, Some(dark))
+            } else {
+                (dark, Some(light))
+            }
+        }
+        BorderStyleValue::Inset => {
+            if is_top_or_left {
+                (dark, None)
+            } else {
+                (light, None)
+            }
+        }
+        BorderStyleValue::Outset => {
+            if is_top_or_left {
+                (light, None)
+            } else {
+                (dark, None)
+            }
+        }
+        _ => (*base, None),
+    }
+}
+
 /// Apply border-style dash settings to a stroke.
 fn apply_border_style(
     stroke: krilla::paint::Stroke,
@@ -389,11 +459,49 @@ fn apply_border_style(
             }),
             ..stroke
         }),
-        BorderStyleValue::Double => Some(stroke), // handled specially at call site
+        BorderStyleValue::Double
+        | BorderStyleValue::Groove
+        | BorderStyleValue::Ridge
+        | BorderStyleValue::Inset
+        | BorderStyleValue::Outset => Some(stroke), // handled specially at call site
     }
 }
 
-/// Draw a single border line (or double) between two points.
+/// Helper to draw a simple line segment with a given stroke.
+fn stroke_line(
+    canvas: &mut Canvas<'_, '_>,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    stroke: krilla::paint::Stroke,
+) {
+    canvas.surface.set_stroke(Some(stroke));
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.move_to(x1, y1);
+    pb.line_to(x2, y2);
+    if let Some(path) = pb.finish() {
+        canvas.surface.draw_path(&path);
+    }
+}
+
+/// Create a stroke with a specific color and width, inheriting opacity from base.
+fn colored_stroke(
+    color: &[u8; 4],
+    width: f32,
+    opacity: krilla::num::NormalizedF32,
+) -> krilla::paint::Stroke {
+    krilla::paint::Stroke {
+        paint: krilla::color::rgb::Color::new(color[0], color[1], color[2]).into(),
+        width,
+        opacity,
+        ..Default::default()
+    }
+}
+
+/// Draw a single border line with style, handling double and 3D effects.
+/// `base_color` is the original RGBA border color (needed for 3D color computation).
+/// `is_top_or_left` determines the light/dark side for 3D styles.
 #[allow(clippy::too_many_arguments)]
 fn draw_border_line(
     canvas: &mut Canvas<'_, '_>,
@@ -403,56 +511,75 @@ fn draw_border_line(
     y2: f32,
     width: f32,
     style: BorderStyleValue,
-    base_stroke: &krilla::paint::Stroke,
+    base_color: &[u8; 4],
+    opacity: krilla::num::NormalizedF32,
+    is_top_or_left: bool,
 ) {
     if width <= 0.0 || style == BorderStyleValue::None {
         return;
     }
 
-    let stroke_with_width = krilla::paint::Stroke {
-        width,
-        ..base_stroke.clone()
-    };
-
-    if style == BorderStyleValue::Double {
-        let gap = width / 3.0;
-        // Compute perpendicular offset for the two lines
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len == 0.0 {
-            return;
+    match style {
+        BorderStyleValue::Double => {
+            let gap = width / 3.0;
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len == 0.0 {
+                return;
+            }
+            let nx = -dy / len * gap;
+            let ny = dx / len * gap;
+            let thin = colored_stroke(base_color, width / 3.0, opacity);
+            stroke_line(canvas, x1 + nx, y1 + ny, x2 + nx, y2 + ny, thin.clone());
+            stroke_line(canvas, x1 - nx, y1 - ny, x2 - nx, y2 - ny, thin);
         }
-        let nx = -dy / len * gap;
-        let ny = dx / len * gap;
-
-        let thin = krilla::paint::Stroke {
-            width: width / 3.0,
-            ..base_stroke.clone()
-        };
-        // Outer line
-        canvas.surface.set_stroke(Some(thin.clone()));
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.move_to(x1 + nx, y1 + ny);
-        pb.line_to(x2 + nx, y2 + ny);
-        if let Some(path) = pb.finish() {
-            canvas.surface.draw_path(&path);
+        BorderStyleValue::Groove | BorderStyleValue::Ridge => {
+            let (outer_color, inner_color) = border_3d_colors(base_color, style, is_top_or_left);
+            let inner_color = inner_color.unwrap_or(outer_color);
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len == 0.0 {
+                return;
+            }
+            let half = width / 4.0;
+            let nx = -dy / len * half;
+            let ny = dx / len * half;
+            let half_w = width / 2.0;
+            stroke_line(
+                canvas,
+                x1 + nx,
+                y1 + ny,
+                x2 + nx,
+                y2 + ny,
+                colored_stroke(&outer_color, half_w, opacity),
+            );
+            stroke_line(
+                canvas,
+                x1 - nx,
+                y1 - ny,
+                x2 - nx,
+                y2 - ny,
+                colored_stroke(&inner_color, half_w, opacity),
+            );
         }
-        // Inner line
-        canvas.surface.set_stroke(Some(thin));
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.move_to(x1 - nx, y1 - ny);
-        pb.line_to(x2 - nx, y2 - ny);
-        if let Some(path) = pb.finish() {
-            canvas.surface.draw_path(&path);
+        BorderStyleValue::Inset | BorderStyleValue::Outset => {
+            let (color, _) = border_3d_colors(base_color, style, is_top_or_left);
+            stroke_line(
+                canvas,
+                x1,
+                y1,
+                x2,
+                y2,
+                colored_stroke(&color, width, opacity),
+            );
         }
-    } else if let Some(styled) = apply_border_style(stroke_with_width, style, width) {
-        canvas.surface.set_stroke(Some(styled));
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.move_to(x1, y1);
-        pb.line_to(x2, y2);
-        if let Some(path) = pb.finish() {
-            canvas.surface.draw_path(&path);
+        _ => {
+            let base = colored_stroke(base_color, width, opacity);
+            if let Some(styled) = apply_border_style(base, style, width) {
+                stroke_line(canvas, x1, y1, x2, y2, styled);
+            }
         }
     }
 }
@@ -501,14 +628,11 @@ fn draw_block_border(
             }
         }
     } else {
-        let base_stroke = krilla::paint::Stroke {
-            paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
-            opacity: krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
-                .unwrap_or(krilla::num::NormalizedF32::ONE),
-            ..Default::default()
-        };
+        let opacity = krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
+            .unwrap_or(krilla::num::NormalizedF32::ONE);
         canvas.surface.set_fill(None);
 
+        // top (top_or_left = true)
         draw_border_line(
             canvas,
             x,
@@ -517,8 +641,11 @@ fn draw_block_border(
             y + bt / 2.0,
             bt,
             st,
-            &base_stroke,
+            bc,
+            opacity,
+            true,
         );
+        // bottom (top_or_left = false)
         draw_border_line(
             canvas,
             x,
@@ -527,8 +654,11 @@ fn draw_block_border(
             y + h - bb / 2.0,
             bb,
             sb,
-            &base_stroke,
+            bc,
+            opacity,
+            false,
         );
+        // left (top_or_left = true)
         draw_border_line(
             canvas,
             x + bl / 2.0,
@@ -537,8 +667,11 @@ fn draw_block_border(
             y + h,
             bl,
             sl,
-            &base_stroke,
+            bc,
+            opacity,
+            true,
         );
+        // right (top_or_left = false)
         draw_border_line(
             canvas,
             x + w - br / 2.0,
@@ -547,7 +680,9 @@ fn draw_block_border(
             y + h,
             br,
             sr,
-            &base_stroke,
+            bc,
+            opacity,
+            false,
         );
 
         canvas.surface.set_stroke(None);
