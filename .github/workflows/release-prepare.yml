@@ -1,0 +1,91 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0). Leave empty to auto-bump patch.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install git-cliff
+        run: cargo install git-cliff
+
+      - name: Determine version
+        id: version
+        run: |
+          CURRENT=$(grep '^version = ' crates/fulgur/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "current=$CURRENT"
+
+          if [ -z "${{ inputs.version }}" ]; then
+            # Auto-bump patch: 0.1.0 → 0.1.1
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            PATCH=$((PATCH + 1))
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing: $VERSION (was $CURRENT)"
+
+      - name: Update version in Cargo.toml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-cli/Cargo.toml
+          sed -i "s/fulgur = { version = \"[^\"]*\", path/fulgur = { version = \"$VERSION\", path/" crates/fulgur-cli/Cargo.toml
+          cargo check --workspace
+
+      - name: Generate changelog
+        run: git-cliff --tag "v${{ steps.version.outputs.version }}" -o CHANGELOG.md
+
+      - name: Create release PR
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="release/v$VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "release: v$VERSION"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "release: v$VERSION" \
+            --body "$(cat <<EOF
+          ## Release v$VERSION
+
+          - Version bumped in Cargo.toml
+          - CHANGELOG.md updated
+
+          **Merging this PR will automatically:**
+          1. Tag \`v$VERSION\`
+          2. Publish to crates.io
+          3. Build binaries (linux gnu/musl, macOS, Windows)
+          4. Create GitHub Release with assets
+          EOF
+          )" \
+            --base main \
+            --head "$BRANCH"
+        env:
+          GH_TOKEN: ${{ github.token }}
