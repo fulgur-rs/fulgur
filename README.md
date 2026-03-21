@@ -53,10 +53,12 @@ fulgur render -o output.pdf -f fonts/NotoSansJP.ttf --css style.css input.html
 ## Library Usage
 
 ```rust
-use fulgur_core::{Engine, PageSize, Margin};
+use fulgur::engine::Engine;
+use fulgur::config::{PageSize, Margin};
 
 // Convert with default settings
-let pdf = fulgur_core::convert_html("<h1>Hello</h1>")?;
+let engine = fulgur::engine::Engine::builder().build();
+let pdf = engine.render_html("<h1>Hello</h1>")?;
 
 // Custom configuration
 let engine = Engine::builder()
@@ -89,7 +91,7 @@ PDF bytes
 
 ```
 crates/
-├── fulgur-core/   # Core library (conversion, layout, rendering)
+├── fulgur/        # Core library (conversion, layout, rendering)
 └── fulgur-cli/    # CLI tool
 ```
 
