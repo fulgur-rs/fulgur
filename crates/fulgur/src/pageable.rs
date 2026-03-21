@@ -576,7 +576,10 @@ impl Pageable for BlockPageable {
     }
 
     fn height(&self) -> Pt {
-        self.cached_size.map(|s| s.height).unwrap_or(0.0)
+        self.layout_size
+            .or(self.cached_size)
+            .map(|s| s.height)
+            .unwrap_or(0.0)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
