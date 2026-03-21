@@ -786,15 +786,28 @@ impl Pageable for TablePageable {
         avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
         // Find the first body cell that overflows the available height
-        let split_index = self
+        let overflow_index = self
             .body_cells
             .iter()
             .position(|pc| pc.y + pc.child.height() > avail_height);
 
-        let split_index = match split_index {
+        let overflow_index = match overflow_index {
             Some(0) | None => return None,
             Some(i) => i,
         };
+
+        // Snap to the start of the row containing the overflow cell.
+        // Cells in the same row share the same y coordinate.
+        let overflow_y = self.body_cells[overflow_index].y;
+        let split_index = self.body_cells[..overflow_index]
+            .iter()
+            .rposition(|pc| pc.y < overflow_y)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if split_index == 0 {
+            return None;
+        }
 
         let split_y = self.body_cells[split_index].y;
 
