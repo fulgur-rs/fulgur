@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use skrifa::MetadataProvider;
+
 use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 
 /// Which decoration lines to draw (bitflags).
@@ -99,6 +101,180 @@ impl ParagraphPageable {
     }
 }
 
+/// Font metrics for decoration line positioning.
+struct DecorationMetrics {
+    underline_offset: f32,
+    underline_thickness: f32,
+    strikethrough_offset: f32,
+    strikethrough_thickness: f32,
+    ascent: f32,
+}
+
+fn get_decoration_metrics(font_data: &[u8], font_index: u32, font_size: f32) -> DecorationMetrics {
+    let fallback_thickness = font_size * 0.05;
+
+    if let Ok(font_ref) = skrifa::FontRef::from_index(font_data, font_index) {
+        let metrics = font_ref.metrics(
+            skrifa::instance::Size::new(font_size),
+            skrifa::instance::LocationRef::default(),
+        );
+        let underline = metrics.underline.unwrap_or(skrifa::metrics::Decoration {
+            offset: -font_size * 0.1,
+            thickness: fallback_thickness,
+        });
+        let strikeout = metrics.strikeout.unwrap_or(skrifa::metrics::Decoration {
+            offset: font_size * 0.3,
+            thickness: fallback_thickness,
+        });
+        DecorationMetrics {
+            underline_offset: -underline.offset, // skrifa: negative = below baseline; we want positive = below
+            underline_thickness: underline.thickness,
+            strikethrough_offset: strikeout.offset,
+            strikethrough_thickness: strikeout.thickness,
+            ascent: metrics.ascent,
+        }
+    } else {
+        DecorationMetrics {
+            underline_offset: font_size * 0.1,
+            underline_thickness: fallback_thickness,
+            strikethrough_offset: font_size * 0.3,
+            strikethrough_thickness: fallback_thickness,
+            ascent: font_size * 0.8,
+        }
+    }
+}
+
+fn draw_decoration_line(
+    canvas: &mut Canvas<'_, '_>,
+    x: f32,
+    y: f32,
+    width: f32,
+    thickness: f32,
+    color: [u8; 4],
+    style: TextDecorationStyle,
+) {
+    let paint: krilla::paint::Paint =
+        krilla::color::rgb::Color::new(color[0], color[1], color[2]).into();
+    let opacity = krilla::num::NormalizedF32::new(color[3] as f32 / 255.0)
+        .unwrap_or(krilla::num::NormalizedF32::ONE);
+
+    match style {
+        TextDecorationStyle::Solid => {
+            let stroke = krilla::paint::Stroke {
+                paint,
+                width: thickness,
+                opacity,
+                ..Default::default()
+            };
+            canvas.surface.set_fill(None);
+            canvas.surface.set_stroke(Some(stroke));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y);
+            pb.line_to(x + width, y);
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+        TextDecorationStyle::Dashed => {
+            let dash_len = thickness * 3.0;
+            let stroke = krilla::paint::Stroke {
+                paint,
+                width: thickness,
+                opacity,
+                dash: Some(krilla::paint::StrokeDash {
+                    array: vec![dash_len, dash_len],
+                    offset: 0.0,
+                }),
+                ..Default::default()
+            };
+            canvas.surface.set_fill(None);
+            canvas.surface.set_stroke(Some(stroke));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y);
+            pb.line_to(x + width, y);
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+        TextDecorationStyle::Dotted => {
+            let dot_spacing = thickness * 2.0;
+            let stroke = krilla::paint::Stroke {
+                paint,
+                width: thickness,
+                opacity,
+                line_cap: krilla::paint::LineCap::Round,
+                dash: Some(krilla::paint::StrokeDash {
+                    array: vec![0.0, dot_spacing],
+                    offset: 0.0,
+                }),
+                ..Default::default()
+            };
+            canvas.surface.set_fill(None);
+            canvas.surface.set_stroke(Some(stroke));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y);
+            pb.line_to(x + width, y);
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+        TextDecorationStyle::Double => {
+            let gap = thickness * 1.5;
+            let stroke = krilla::paint::Stroke {
+                paint,
+                width: thickness,
+                opacity,
+                ..Default::default()
+            };
+            canvas.surface.set_fill(None);
+            // First line
+            canvas.surface.set_stroke(Some(stroke.clone()));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y - gap / 2.0);
+            pb.line_to(x + width, y - gap / 2.0);
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+            // Second line
+            canvas.surface.set_stroke(Some(stroke));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y + gap / 2.0);
+            pb.line_to(x + width, y + gap / 2.0);
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+        TextDecorationStyle::Wavy => {
+            let amplitude = thickness * 1.5;
+            let wavelength = thickness * 4.0;
+            let stroke = krilla::paint::Stroke {
+                paint,
+                width: thickness,
+                opacity,
+                ..Default::default()
+            };
+            canvas.surface.set_fill(None);
+            canvas.surface.set_stroke(Some(stroke));
+            let mut pb = krilla::geom::PathBuilder::new();
+            pb.move_to(x, y);
+            let mut cx = x;
+            let half = wavelength / 2.0;
+            let mut up = true;
+            while cx < x + width {
+                let end_x = (cx + half).min(x + width);
+                let dy = if up { -amplitude } else { amplitude };
+                pb.cubic_to(cx + half * 0.33, y + dy, cx + half * 0.67, y + dy, end_x, y);
+                cx = end_x;
+                up = !up;
+            }
+            if let Some(path) = pb.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+    }
+    canvas.surface.set_stroke(None);
+}
+
 /// Draw pre-shaped text lines at the given position.
 pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
     let mut current_y = y;
@@ -152,6 +328,55 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                 run.font_size,
                 false,
             );
+
+            // Draw text decorations
+            if !run.decoration.line.is_none() {
+                let metrics = get_decoration_metrics(&run.font_data, run.font_index, run.font_size);
+                // Calculate run width from glyphs
+                let run_width: f32 = run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
+                let run_x = x + run.x_offset;
+
+                if run.decoration.line.contains(TextDecorationLine::UNDERLINE) {
+                    let line_y = baseline_y + metrics.underline_offset;
+                    draw_decoration_line(
+                        canvas,
+                        run_x,
+                        line_y,
+                        run_width,
+                        metrics.underline_thickness,
+                        run.decoration.color,
+                        run.decoration.style,
+                    );
+                }
+                if run.decoration.line.contains(TextDecorationLine::OVERLINE) {
+                    let line_y = baseline_y - metrics.ascent;
+                    draw_decoration_line(
+                        canvas,
+                        run_x,
+                        line_y,
+                        run_width,
+                        metrics.underline_thickness,
+                        run.decoration.color,
+                        run.decoration.style,
+                    );
+                }
+                if run
+                    .decoration
+                    .line
+                    .contains(TextDecorationLine::LINE_THROUGH)
+                {
+                    let line_y = baseline_y - metrics.strikethrough_offset;
+                    draw_decoration_line(
+                        canvas,
+                        run_x,
+                        line_y,
+                        run_width,
+                        metrics.strikethrough_thickness,
+                        run.decoration.color,
+                        run.decoration.style,
+                    );
+                }
+            }
         }
 
         current_y += line.height;
