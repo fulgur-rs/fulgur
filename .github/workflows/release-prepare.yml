@@ -42,6 +42,13 @@ jobs:
             VERSION="$MAJOR.$MINOR.$PATCH"
           else
             VERSION="${{ inputs.version }}"
+            # Strip leading 'v' if present
+            VERSION="${VERSION#v}"
+            # Validate semver format
+            echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || {
+              echo "::error::Version must be semver format, e.g. 0.2.0 (not v0.2.0)"
+              exit 1
+            }
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

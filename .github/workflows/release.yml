@@ -46,13 +46,22 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p fulgur
 
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish fulgur-cli
+      - name: Publish fulgur-cli (with retry)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p fulgur-cli
+        run: |
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "Attempt $i: publishing fulgur-cli..."
+            if cargo publish -p fulgur-cli 2>&1; then
+              echo "Published successfully."
+              exit 0
+            fi
+            WAIT=$((15 * i))
+            echo "Failed. Waiting ${WAIT}s for crates.io index..."
+            sleep "$WAIT"
+          done
+          echo "::error::Failed to publish fulgur-cli after 8 attempts"
+          exit 1
 
   build-binaries:
     name: Build ${{ matrix.target }}
