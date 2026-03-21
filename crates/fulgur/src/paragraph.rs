@@ -51,6 +51,13 @@ pub struct TextDecoration {
     pub color: [u8; 4],
 }
 
+impl TextDecoration {
+    /// Check if two decorations have the same visual appearance.
+    fn same_appearance(&self, other: &TextDecoration) -> bool {
+        self.line == other.line && self.style == other.style && self.color == other.color
+    }
+}
+
 /// A pre-extracted glyph for rendering via Krilla.
 #[derive(Clone, Debug)]
 pub struct ShapedGlyph {
@@ -140,11 +147,14 @@ fn get_decoration_metrics(font_data: &[u8], font_index: u32, font_size: f32) -> 
         // overline: use cap_height if available, otherwise 90% of ascent
         let overline_pos = metrics.cap_height.unwrap_or(metrics.ascent * 0.9);
 
+        // Guard against zero thickness (some fonts report 0 in OS/2 table)
+        let min_thickness = font_size * 0.02;
+
         DecorationMetrics {
             underline_offset,
-            underline_thickness: underline.thickness,
+            underline_thickness: underline.thickness.max(min_thickness),
             strikethrough_offset,
-            strikethrough_thickness: strikeout.thickness,
+            strikethrough_thickness: strikeout.thickness.max(min_thickness),
             overline_pos,
         }
     } else {
@@ -155,6 +165,24 @@ fn get_decoration_metrics(font_data: &[u8], font_index: u32, font_size: f32) -> 
             strikethrough_thickness: fallback_thickness,
             overline_pos: font_size * 0.7,
         }
+    }
+}
+
+/// Draw a straight line with the given stroke (shared by Solid, Dashed, Dotted).
+fn draw_straight_line(
+    canvas: &mut Canvas<'_, '_>,
+    x: f32,
+    y: f32,
+    width: f32,
+    stroke: krilla::paint::Stroke,
+) {
+    canvas.surface.set_fill(None);
+    canvas.surface.set_stroke(Some(stroke));
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.move_to(x, y);
+    pb.line_to(x + width, y);
+    if let Some(path) = pb.finish() {
+        canvas.surface.draw_path(&path);
     }
 }
 
@@ -174,63 +202,57 @@ fn draw_decoration_line(
 
     match style {
         TextDecorationStyle::Solid => {
-            let stroke = krilla::paint::Stroke {
-                paint,
-                width: thickness,
-                opacity,
-                ..Default::default()
-            };
-            canvas.surface.set_fill(None);
-            canvas.surface.set_stroke(Some(stroke));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y);
-            pb.line_to(x + width, y);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
+            draw_straight_line(
+                canvas,
+                x,
+                y,
+                width,
+                krilla::paint::Stroke {
+                    paint,
+                    width: thickness,
+                    opacity,
+                    ..Default::default()
+                },
+            );
         }
         TextDecorationStyle::Dashed => {
             let dash_len = thickness * 3.0;
-            let stroke = krilla::paint::Stroke {
-                paint,
-                width: thickness,
-                opacity,
-                dash: Some(krilla::paint::StrokeDash {
-                    array: vec![dash_len, dash_len],
-                    offset: 0.0,
-                }),
-                ..Default::default()
-            };
-            canvas.surface.set_fill(None);
-            canvas.surface.set_stroke(Some(stroke));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y);
-            pb.line_to(x + width, y);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
+            draw_straight_line(
+                canvas,
+                x,
+                y,
+                width,
+                krilla::paint::Stroke {
+                    paint,
+                    width: thickness,
+                    opacity,
+                    dash: Some(krilla::paint::StrokeDash {
+                        array: vec![dash_len, dash_len],
+                        offset: 0.0,
+                    }),
+                    ..Default::default()
+                },
+            );
         }
         TextDecorationStyle::Dotted => {
             let dot_spacing = thickness * 2.0;
-            let stroke = krilla::paint::Stroke {
-                paint,
-                width: thickness,
-                opacity,
-                line_cap: krilla::paint::LineCap::Round,
-                dash: Some(krilla::paint::StrokeDash {
-                    array: vec![0.0, dot_spacing],
-                    offset: 0.0,
-                }),
-                ..Default::default()
-            };
-            canvas.surface.set_fill(None);
-            canvas.surface.set_stroke(Some(stroke));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y);
-            pb.line_to(x + width, y);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
+            draw_straight_line(
+                canvas,
+                x,
+                y,
+                width,
+                krilla::paint::Stroke {
+                    paint,
+                    width: thickness,
+                    opacity,
+                    line_cap: krilla::paint::LineCap::Round,
+                    dash: Some(krilla::paint::StrokeDash {
+                        array: vec![0.0, dot_spacing],
+                        offset: 0.0,
+                    }),
+                    ..Default::default()
+                },
+            );
         }
         TextDecorationStyle::Double => {
             let gap = thickness * 1.5;
@@ -240,53 +262,161 @@ fn draw_decoration_line(
                 opacity,
                 ..Default::default()
             };
-            canvas.surface.set_fill(None);
-            // First line
-            canvas.surface.set_stroke(Some(stroke.clone()));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y - gap / 2.0);
-            pb.line_to(x + width, y - gap / 2.0);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
-            // Second line
-            canvas.surface.set_stroke(Some(stroke));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y + gap / 2.0);
-            pb.line_to(x + width, y + gap / 2.0);
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
-            }
+            draw_straight_line(canvas, x, y - gap / 2.0, width, stroke.clone());
+            draw_straight_line(canvas, x, y + gap / 2.0, width, stroke);
         }
         TextDecorationStyle::Wavy => {
             let amplitude = thickness * 1.5;
             let wavelength = thickness * 4.0;
-            let stroke = krilla::paint::Stroke {
-                paint,
-                width: thickness,
-                opacity,
-                ..Default::default()
-            };
-            canvas.surface.set_fill(None);
-            canvas.surface.set_stroke(Some(stroke));
-            let mut pb = krilla::geom::PathBuilder::new();
-            pb.move_to(x, y);
-            let mut cx = x;
             let half = wavelength / 2.0;
-            let mut up = true;
-            while cx < x + width {
-                let end_x = (cx + half).min(x + width);
-                let dy = if up { -amplitude } else { amplitude };
-                pb.cubic_to(cx + half * 0.33, y + dy, cx + half * 0.67, y + dy, end_x, y);
-                cx = end_x;
-                up = !up;
-            }
-            if let Some(path) = pb.finish() {
-                canvas.surface.draw_path(&path);
+
+            // Guard against zero/tiny wavelength to prevent infinite loop
+            if half < 0.01 {
+                draw_straight_line(
+                    canvas,
+                    x,
+                    y,
+                    width,
+                    krilla::paint::Stroke {
+                        paint,
+                        width: thickness,
+                        opacity,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                let stroke = krilla::paint::Stroke {
+                    paint,
+                    width: thickness,
+                    opacity,
+                    ..Default::default()
+                };
+                canvas.surface.set_fill(None);
+                canvas.surface.set_stroke(Some(stroke));
+                let mut pb = krilla::geom::PathBuilder::new();
+                pb.move_to(x, y);
+                let mut cx = x;
+                let mut up = true;
+                while cx < x + width {
+                    let end_x = (cx + half).min(x + width);
+                    let segment = end_x - cx;
+                    let dy = if up { -amplitude } else { amplitude };
+                    pb.cubic_to(
+                        cx + segment * 0.33,
+                        y + dy,
+                        cx + segment * 0.67,
+                        y + dy,
+                        end_x,
+                        y,
+                    );
+                    cx = end_x;
+                    up = !up;
+                }
+                if let Some(path) = pb.finish() {
+                    canvas.surface.draw_path(&path);
+                }
             }
         }
     }
     canvas.surface.set_stroke(None);
+}
+
+/// A contiguous span of runs sharing the same decoration attributes.
+struct DecorationSpan {
+    x: f32,
+    width: f32,
+    decoration: TextDecoration,
+    /// Use metrics from the first run in the span
+    font_data: Arc<Vec<u8>>,
+    font_index: u32,
+    font_size: f32,
+}
+
+/// Collect contiguous runs with the same decoration into spans, then draw each span once.
+fn draw_line_decorations(
+    canvas: &mut Canvas<'_, '_>,
+    runs: &[ShapedGlyphRun],
+    x: Pt,
+    baseline_y: Pt,
+) {
+    let mut spans: Vec<DecorationSpan> = Vec::new();
+
+    for run in runs {
+        if run.decoration.line.is_none() {
+            continue;
+        }
+
+        let run_x = x + run.x_offset;
+        let run_width: f32 = run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
+
+        // Try to extend the previous span if decoration matches
+        if let Some(last) = spans.last_mut() {
+            let last_end = last.x + last.width;
+            let gap = (run_x - last_end).abs();
+            if last.decoration.same_appearance(&run.decoration) && gap < 0.5 {
+                last.width = (run_x + run_width) - last.x;
+                continue;
+            }
+        }
+
+        spans.push(DecorationSpan {
+            x: run_x,
+            width: run_width,
+            decoration: TextDecoration {
+                line: run.decoration.line,
+                style: run.decoration.style,
+                color: run.decoration.color,
+            },
+            font_data: Arc::clone(&run.font_data),
+            font_index: run.font_index,
+            font_size: run.font_size,
+        });
+    }
+
+    for span in &spans {
+        let metrics = get_decoration_metrics(&span.font_data, span.font_index, span.font_size);
+
+        if span.decoration.line.contains(TextDecorationLine::UNDERLINE) {
+            let line_y = baseline_y + metrics.underline_offset;
+            draw_decoration_line(
+                canvas,
+                span.x,
+                line_y,
+                span.width,
+                metrics.underline_thickness,
+                span.decoration.color,
+                span.decoration.style,
+            );
+        }
+        if span.decoration.line.contains(TextDecorationLine::OVERLINE) {
+            let line_y = baseline_y - metrics.overline_pos;
+            draw_decoration_line(
+                canvas,
+                span.x,
+                line_y,
+                span.width,
+                metrics.underline_thickness,
+                span.decoration.color,
+                span.decoration.style,
+            );
+        }
+        if span
+            .decoration
+            .line
+            .contains(TextDecorationLine::LINE_THROUGH)
+        {
+            let line_y = baseline_y - metrics.strikethrough_offset;
+            draw_decoration_line(
+                canvas,
+                span.x,
+                line_y,
+                span.width,
+                metrics.strikethrough_thickness,
+                span.decoration.color,
+                span.decoration.style,
+            );
+        }
+    }
 }
 
 /// Draw pre-shaped text lines at the given position.
@@ -342,56 +472,10 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                 run.font_size,
                 false,
             );
-
-            // Draw text decorations
-            if !run.decoration.line.is_none() {
-                let metrics = get_decoration_metrics(&run.font_data, run.font_index, run.font_size);
-                // Calculate run width from glyphs
-                let run_width: f32 = run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
-                let run_x = x + run.x_offset;
-
-                if run.decoration.line.contains(TextDecorationLine::UNDERLINE) {
-                    let line_y = baseline_y + metrics.underline_offset;
-                    draw_decoration_line(
-                        canvas,
-                        run_x,
-                        line_y,
-                        run_width,
-                        metrics.underline_thickness,
-                        run.decoration.color,
-                        run.decoration.style,
-                    );
-                }
-                if run.decoration.line.contains(TextDecorationLine::OVERLINE) {
-                    let line_y = baseline_y - metrics.overline_pos;
-                    draw_decoration_line(
-                        canvas,
-                        run_x,
-                        line_y,
-                        run_width,
-                        metrics.underline_thickness,
-                        run.decoration.color,
-                        run.decoration.style,
-                    );
-                }
-                if run
-                    .decoration
-                    .line
-                    .contains(TextDecorationLine::LINE_THROUGH)
-                {
-                    let line_y = baseline_y - metrics.strikethrough_offset;
-                    draw_decoration_line(
-                        canvas,
-                        run_x,
-                        line_y,
-                        run_width,
-                        metrics.strikethrough_thickness,
-                        run.decoration.color,
-                        run.decoration.style,
-                    );
-                }
-            }
         }
+
+        // Draw decorations after all glyphs so lines appear on top
+        draw_line_decorations(canvas, &line.glyph_runs, x, baseline_y);
 
         current_y += line.height;
     }
