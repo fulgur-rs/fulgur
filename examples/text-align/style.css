@@ -1,0 +1,32 @@
+body {
+  font-family: sans-serif;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #333;
+}
+
+h1 {
+  font-size: 20px;
+  margin-bottom: 16px;
+  color: #111;
+}
+
+h2 {
+  font-size: 14px;
+  margin-top: 20px;
+  margin-bottom: 8px;
+  color: #222;
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 3px;
+}
+
+.box {
+  background-color: #f5f5f5;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.left { text-align: left; }
+.center { text-align: center; }
+.right { text-align: right; }
+.justify { text-align: justify; }
