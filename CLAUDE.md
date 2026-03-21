@@ -50,6 +50,7 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 - **config.rs** — Page size, margins, orientation, metadata
 - **asset.rs** — `AssetBundle` manages CSS, fonts, and images (offline-first, all assets explicitly registered)
 - **paragraph.rs** — Text line layout and drawing
+- **gcpm/** — CSS Generated Content for Paged Media: parser, margin boxes, running elements, counters
 
 ### Design Principles
 
@@ -57,3 +58,10 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 - **Deterministic**: Same input always produces same output
 - **Hybrid layout**: Taffy pre-computes sizes, Pageable reuses them during pagination (no re-layout after splitting)
 - **Adapter isolation**: Blitz API surface is contained in `blitz_adapter.rs`
+
+### Gotchas
+
+- Integration tests require `--test-threads=1` (Blitz not thread-safe)
+- Use `BTreeMap` (not `HashMap`) for iteration that affects PDF output (determinism)
+- Blitz: `!important` unreliable, `padding-top` on inline roots ignored (use `margin-top`)
+- `cargo fmt --check` enforced by CI
