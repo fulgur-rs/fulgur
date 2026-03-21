@@ -58,7 +58,7 @@ jobs:
       - name: Generate changelog
         run: git-cliff --tag "v${{ steps.version.outputs.version }}" -o CHANGELOG.md
 
-      - name: Create release PR
+      - name: Create release branch and PR
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BRANCH="release/v$VERSION"
@@ -77,15 +77,29 @@ jobs:
 
           - Version bumped in Cargo.toml
           - CHANGELOG.md updated
+          - Draft GitHub Release created
 
           **Merging this PR will automatically:**
           1. Tag \`v$VERSION\`
           2. Publish to crates.io
           3. Build binaries (linux gnu/musl, macOS, Windows)
-          4. Create GitHub Release with assets
+          4. Publish the draft GitHub Release with binary assets
           EOF
           )" \
             --base main \
             --head "$BRANCH"
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Generate release notes for draft
+        run: git-cliff --tag "v${{ steps.version.outputs.version }}" --latest --strip header -o RELEASE_NOTES.md
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file RELEASE_NOTES.md \
+            --draft
