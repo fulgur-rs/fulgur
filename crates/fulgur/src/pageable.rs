@@ -273,6 +273,12 @@ fn build_rounded_rect_path(
 
 impl Pageable for BlockPageable {
     fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
+        // Ensure children have been wrapped (split() creates unwrapped children)
+        for pc in &mut self.children {
+            if pc.child.height() == 0.0 {
+                pc.child.wrap(avail_width, 10000.0);
+            }
+        }
         // Use max of children's (y + height) for total height
         let total_height = self.children.iter_mut().fold(0.0f32, |max_h, pc| {
             let child_h = pc.child.height();
@@ -317,11 +323,15 @@ impl Pageable for BlockPageable {
             }
 
             if pc.y + pc.child.height() > avail_height {
-                if i == 0 && self.children.len() == 1 {
-                    // Only child overflows — try to split it recursively
+                // Try to split this child recursively first
+                let child_avail = avail_height - pc.y;
+                if child_avail > 0.0 && pc.child.split(0.0, child_avail).is_some() {
                     overflow_child_index = Some(i);
+                } else if i == 0 {
+                    // First child can't be split — nothing fits on this page
+                    return None;
                 } else {
-                    split_index = i.max(1);
+                    split_index = i;
                 }
                 break;
             }
@@ -332,23 +342,43 @@ impl Pageable for BlockPageable {
             }
         }
 
-        // Handle the case where a single child overflows: split it recursively
+        // Handle the case where a child overflows: split it recursively
         if let Some(idx) = overflow_child_index {
             let pc = &self.children[idx];
             let child_avail = avail_height - pc.y;
             if child_avail > 0.0
                 && let Some((first_part, second_part)) = pc.child.split(0.0, child_avail)
             {
-                let first = vec![PositionedChild {
+                // First page: all children before idx + first part of split child
+                let mut first: Vec<PositionedChild> = self.children[..idx]
+                    .iter()
+                    .map(|c| PositionedChild {
+                        child: c.child.clone_box(),
+                        x: c.x,
+                        y: c.y,
+                    })
+                    .collect();
+                first.push(PositionedChild {
                     child: first_part,
                     x: pc.x,
                     y: pc.y,
-                }];
-                let second = vec![PositionedChild {
+                });
+
+                // Second page: second part of split child + remaining children
+                let mut second = vec![PositionedChild {
                     child: second_part,
                     x: pc.x,
                     y: 0.0,
                 }];
+                let split_y = pc.y;
+                for c in &self.children[idx + 1..] {
+                    second.push(PositionedChild {
+                        child: c.child.clone_box(),
+                        x: c.x,
+                        y: c.y - split_y,
+                    });
+                }
+
                 return Some((
                     Box::new(
                         BlockPageable::with_positioned_children(first)
