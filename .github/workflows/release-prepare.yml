@@ -112,7 +112,7 @@ jobs:
       - name: Generate release notes for draft
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: git-cliff --tag "v$VERSION" --latest --strip header -o RELEASE_NOTES.md
+        run: git-cliff --tag "v$VERSION" --unreleased --strip header -o RELEASE_NOTES.md
 
       - name: Create draft GitHub Release
         env:
