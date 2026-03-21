@@ -107,7 +107,8 @@ struct DecorationMetrics {
     underline_thickness: f32,
     strikethrough_offset: f32,
     strikethrough_thickness: f32,
-    ascent: f32,
+    /// Position for overline (cap_height or approximation)
+    overline_pos: f32,
 }
 
 fn get_decoration_metrics(font_data: &[u8], font_index: u32, font_size: f32) -> DecorationMetrics {
@@ -126,20 +127,33 @@ fn get_decoration_metrics(font_data: &[u8], font_index: u32, font_size: f32) -> 
             offset: font_size * 0.3,
             thickness: fallback_thickness,
         });
+        // skrifa underline.offset is very small for some fonts (e.g. -0.23 for 12pt).
+        // Use a minimum offset based on font size to ensure underline is visually distinct
+        // but not too far from the baseline.
+        let min_underline_offset = font_size * 0.075;
+        let underline_offset = (-underline.offset).max(min_underline_offset);
+
+        // strikethrough should be at ~40% of ascent (x-height center area).
+        // Some fonts report it too low; clamp to reasonable range.
+        let strikethrough_offset = strikeout.offset.max(metrics.ascent * 0.35);
+
+        // overline: use cap_height if available, otherwise 90% of ascent
+        let overline_pos = metrics.cap_height.unwrap_or(metrics.ascent * 0.9);
+
         DecorationMetrics {
-            underline_offset: -underline.offset, // skrifa: negative = below baseline; we want positive = below
+            underline_offset,
             underline_thickness: underline.thickness,
-            strikethrough_offset: strikeout.offset,
+            strikethrough_offset,
             strikethrough_thickness: strikeout.thickness,
-            ascent: metrics.ascent,
+            overline_pos,
         }
     } else {
         DecorationMetrics {
-            underline_offset: font_size * 0.1,
+            underline_offset: font_size * 0.075,
             underline_thickness: fallback_thickness,
             strikethrough_offset: font_size * 0.3,
             strikethrough_thickness: fallback_thickness,
-            ascent: font_size * 0.8,
+            overline_pos: font_size * 0.7,
         }
     }
 }
@@ -349,7 +363,7 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                     );
                 }
                 if run.decoration.line.contains(TextDecorationLine::OVERLINE) {
-                    let line_y = baseline_y - metrics.ascent;
+                    let line_y = baseline_y - metrics.overline_pos;
                     draw_decoration_line(
                         canvas,
                         run_x,
