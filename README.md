@@ -73,7 +73,7 @@ engine.render_html_to_file(html, "output.pdf")?;
 
 ## Architecture
 
-```
+```text
 HTML/CSS input
   ↓
 Blitz (HTML parse → DOM → style resolution → Taffy layout)
@@ -89,7 +89,7 @@ PDF bytes
 
 ## Project Structure
 
-```
+```text
 crates/
 ├── fulgur/        # Core library (conversion, layout, rendering)
 └── fulgur-cli/    # CLI tool

@@ -13,11 +13,13 @@
 ### Task 1: cssparser を直接依存に追加
 
 **Files:**
+
 - Modify: `crates/fulgur/Cargo.toml`
 
 **Step 1: Cargo.toml に cssparser を追加**
 
 `[dependencies]` セクションに追加:
+
 ```toml
 cssparser = "0.35"
 ```
@@ -39,6 +41,7 @@ git commit -m "chore: add cssparser as direct dependency for GCPM parser"
 ### Task 2: cssparser ベースの parse_gcpm() を実装（テストは既存を流用）
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/parser.rs`
 
 **注意:** 既存の `parser.rs` のテストモジュール（`mod tests`）は変更しない。このタスクでは `parse_gcpm()` 関数と内部ヘルパーの実装を書き直し、既存テストがそのまま通ることを確認する。
@@ -77,6 +80,7 @@ cssparser のトレイトを使った実装構造:
    - 既存の手書き実装と同等の動作
 
 公開 API:
+
 ```rust
 pub fn parse_gcpm(css: &str) -> GcpmContext
 ```
@@ -100,6 +104,7 @@ git commit -m "refactor: rewrite parse_gcpm() using cssparser crate"
 ### Task 3: エッジケーステストの追加
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/parser.rs`（テストモジュール）
 
 **Step 1: cssparser 化で正しく処理されることを確認するテストを追加**
@@ -182,6 +187,7 @@ git commit -m "test: add edge case tests for cssparser-based GCPM parser"
 ### Task 4: 統合テストの実行確認
 
 **Files:**
+
 - なし（既存テストの実行のみ）
 
 **Step 1: ユニットテスト全体を実行**

@@ -13,6 +13,7 @@
 ### Task 1: Add ListItemPageable struct
 
 **Files:**
+
 - Modify: `crates/fulgur-core/src/pageable.rs`
 
 **Step 1: Write the failing test**
@@ -182,6 +183,7 @@ git commit -m "feat: add ListItemPageable struct with wrap/split/draw"
 ### Task 2: Extract draw_shaped_lines helper from ParagraphPageable
 
 **Files:**
+
 - Modify: `crates/fulgur-core/src/paragraph.rs`
 
 The marker drawing reuses the same glyph rendering logic as ParagraphPageable. Extract the draw loop into a shared function.
@@ -223,6 +225,7 @@ git commit -m "refactor: extract draw_shaped_lines from ParagraphPageable"
 ### Task 3: Extract marker glyphs from Blitz's Parley Layout
 
 **Files:**
+
 - Modify: `crates/fulgur-core/src/convert.rs`
 
 **Step 1: Add `extract_marker_lines` function**
@@ -333,6 +336,7 @@ git commit -m "feat: add extract_marker_lines for list marker glyph extraction"
 ### Task 4: Wire up ListItemPageable in convert_node
 
 **Files:**
+
 - Modify: `crates/fulgur-core/src/convert.rs`
 
 **Step 1: Detect li elements and create ListItemPageable**
@@ -389,6 +393,7 @@ git commit -m "feat: wire ListItemPageable into DOM conversion for li elements"
 ### Task 5: Add integration test for list rendering
 
 **Files:**
+
 - Create: `crates/fulgur-core/tests/list_test.rs`
 
 **Step 1: Write integration tests**
@@ -548,6 +553,7 @@ Create `tmp/list_test.html`:
 Run: `cargo run -p fulgur-cli -- render -o tmp/list_test.pdf tmp/list_test.html`
 
 Open `tmp/list_test.pdf` and verify:
+
 - Disc markers appear to the left of ul items
 - Numbers appear to the left of ol items
 - Nested lists have correct indentation and marker style changes

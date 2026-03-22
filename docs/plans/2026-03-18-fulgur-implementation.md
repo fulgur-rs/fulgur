@@ -13,6 +13,7 @@
 ### Task 1: Project Scaffold — Cargo Workspace
 
 **Files:**
+
 - Create: `Cargo.toml` (workspace root)
 - Create: `crates/fulgur-core/Cargo.toml`
 - Create: `crates/fulgur-core/src/lib.rs`
@@ -100,6 +101,7 @@ git commit -m "feat: scaffold cargo workspace with fulgur-core and fulgur-cli"
 ### Task 2: Config and Error Types
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/config.rs`
 - Create: `crates/fulgur-core/src/error.rs`
 - Test: `crates/fulgur-core/src/config.rs` (unit tests in module)
@@ -355,6 +357,7 @@ git commit -m "feat: add Config, PageSize, Margin, and Error types"
 ### Task 3: Pageable Trait and BlockPageable
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/pageable.rs`
 - Create: `crates/fulgur-core/src/paginate.rs`
 - Modify: `crates/fulgur-core/src/lib.rs`
@@ -819,6 +822,7 @@ git commit -m "feat: add Pageable trait, BlockPageable, SpacerPageable, and pagi
 ### Task 4: Krilla Rendering — Pageable to PDF
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/render.rs`
 - Modify: `crates/fulgur-core/src/lib.rs`
 - Test: Integration test — produce an actual PDF with colored rectangles
@@ -957,6 +961,7 @@ Run: `cargo test -p fulgur-core`
 Expected: All tests pass including integration tests. PDF bytes start with `%PDF`.
 
 Note: If Krilla API doesn't exactly match the code above, the implementor should fix compilation errors by checking `krilla` 0.6.0 API. Common adjustments:
+
 - `Surface` lifetime may require different borrowing patterns
 - `Transform::from_translate` might be `Transform::translate`
 - `Metadata` struct fields may differ
@@ -974,6 +979,7 @@ git commit -m "feat: add PDF rendering via Krilla - Pageable tree to PDF bytes"
 ### Task 5: Minimal Public API (Engine)
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/engine.rs`
 - Modify: `crates/fulgur-core/src/lib.rs`
 - Test: `crates/fulgur-core/tests/engine_test.rs`
@@ -1119,6 +1125,7 @@ git commit -m "feat: add Engine public API for PDF generation"
 ### Task 6: CLI — Basic `render` Subcommand
 
 **Files:**
+
 - Modify: `crates/fulgur-cli/src/main.rs`
 - Modify: `crates/fulgur-cli/Cargo.toml`
 
@@ -1221,6 +1228,7 @@ git commit -m "feat: add CLI with render subcommand (placeholder content)"
 This is the most complex task. It adds blitz-html and blitz-dom to parse HTML, resolve styles, run Taffy layout, and convert the result into a Pageable tree.
 
 **Files:**
+
 - Modify: `crates/fulgur-core/Cargo.toml` (add blitz dependencies)
 - Create: `crates/fulgur-core/src/blitz_adapter.rs`
 - Create: `crates/fulgur-core/src/convert.rs`
@@ -1273,6 +1281,7 @@ pub fn parse_and_layout(
 ```
 
 Note: The exact API may differ. The implementor should check:
+
 - `HtmlDocument::from_html` signature
 - How to set viewport dimensions
 - How `resolve()` is called (it may be on `BaseDocument` rather than `HtmlDocument`)
@@ -1342,6 +1351,7 @@ fn convert_node(doc: &HtmlDocument, node_id: usize) -> Box<dyn Pageable> {
 ```
 
 Note: The exact node access API will need adjustment:
+
 - `doc.root_element()` may return different types
 - `node.children` may be accessed differently
 - `node.final_layout` field names may differ
@@ -1454,6 +1464,7 @@ git commit -m "feat: integrate Blitz for HTML parsing and layout - DOM to Pageab
 ### Task 8: Update CLI to Accept HTML Input
 
 **Files:**
+
 - Modify: `crates/fulgur-cli/src/main.rs`
 
 **Step 1: Update CLI to read HTML files**
@@ -1514,6 +1525,7 @@ git commit -m "feat: CLI accepts HTML file input and stdin"
 This task adds actual text rendering. It reads Parley's text shaping results from Blitz and renders them via Krilla's `draw_glyphs`.
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/pageable/paragraph.rs`
 - Modify: `crates/fulgur-core/src/pageable.rs` (refactor to mod directory)
 - Modify: `crates/fulgur-core/src/convert.rs`
@@ -1525,6 +1537,7 @@ This task is intentionally less prescriptive because the exact API bridge betwee
 **Step 1: Study Parley's glyph run types**
 
 In blitz-dom, after layout, inline root nodes contain `inline_layout_data` with a Parley `Layout`. Iterate:
+
 - `layout.lines()` → each line
 - `line.items()` → `PositionedLayoutItem::GlyphRun(run)`
 - `run.run().font()` → font info
@@ -1533,12 +1546,14 @@ In blitz-dom, after layout, inline root nodes contain `inline_layout_data` with 
 **Step 2: Study Krilla's draw_glyphs types**
 
 `surface.draw_glyphs(start_point, &glyphs, font, text, font_size, outlined)`
+
 - `KrillaGlyph::new(glyph_id, x_advance, y_advance, x_offset, y_offset, text_range, cluster)`
 - `Font::new(data: Arc<Vec<u8>>, index: u32)`
 
 **Step 3: Build the font bridge**
 
 Create a mapping layer that:
+
 1. Takes Parley's font reference → extracts the font file data
 2. Creates a Krilla `Font` from the same data (shared via `Arc`)
 3. Caches font mappings to avoid re-creating Krilla fonts
@@ -1584,6 +1599,7 @@ Split at line boundaries. Respect `orphans` (min lines on first page) and `widow
 **Step 6: Implement draw() — emit Krilla draw_glyphs**
 
 For each line, for each glyph run:
+
 1. Create Krilla `Font` from cached font data
 2. Convert `GlyphInfo` → `KrillaGlyph`
 3. Call `surface.draw_glyphs(point, &glyphs, font, text, size, false)`
@@ -1621,6 +1637,7 @@ git commit -m "feat: add ParagraphPageable with text rendering via Parley->Krill
 ### Task 10: Background and Border Rendering in BlockPageable
 
 **Files:**
+
 - Modify: `crates/fulgur-core/src/pageable.rs` (or `pageable/block.rs`)
 - Modify: `crates/fulgur-core/src/convert.rs`
 
@@ -1639,12 +1656,14 @@ pub struct BlockStyle {
 **Step 2: Update draw() to render backgrounds and borders**
 
 In `BlockPageable::draw()`, before drawing children:
+
 1. Draw background rectangle (if background_color is set) using `surface.set_fill()` + `surface.draw_path()`
 2. Draw border lines using `surface.set_stroke()` + `surface.draw_path()`
 
 **Step 3: Update convert.rs to extract styles from Stylo**
 
 Read `node.primary_styles()` and extract:
+
 - `background_color` → `style.clone_background_color()`
 - `border-*` → `style.clone_border_*_width()`, `style.clone_border_*_color()`
 - `padding-*` → `style.clone_padding_*().to_px()`
@@ -1677,6 +1696,7 @@ git commit -m "feat: render background colors and borders in BlockPageable"
 ### Task 11: Image Rendering — ImagePageable
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/pageable/image.rs` (or add to pageable.rs)
 - Modify: `crates/fulgur-core/src/convert.rs`
 
@@ -1719,6 +1739,7 @@ git commit -m "feat: add ImagePageable for rendering images in PDF"
 ### Task 12: AssetBundle
 
 **Files:**
+
 - Create: `crates/fulgur-core/src/asset.rs`
 - Modify: `crates/fulgur-core/src/engine.rs`
 - Modify: `crates/fulgur-core/src/lib.rs`

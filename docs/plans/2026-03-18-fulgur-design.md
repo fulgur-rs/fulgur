@@ -5,10 +5,12 @@
 Fulgur is a Rust library and CLI tool for converting HTML/CSS to PDF. It combines Blitz (HTML/CSS rendering engine) with Krilla (PDF generation library) through a pagination-aware layout abstraction called "Pageable."
 
 **Target use cases:**
+
 - Server-side report/invoice generation from HTML templates
 - Document conversion (Markdown/HTML to book/manual-style PDF)
 
 **Design principles:**
+
 - Offline-first: no network access, all assets explicitly registered
 - Deterministic: same input always produces the same output
 - Engine reuse: configure once, render many
@@ -17,7 +19,7 @@ Fulgur is a Rust library and CLI tool for converting HTML/CSS to PDF. It combine
 
 ### Processing Pipeline
 
-```
+```text
 HTML + CSS (string)
   -> blitz-html (parse -> DOM)
   -> blitz-dom + Stylo (style resolution -> computed styles)
@@ -31,7 +33,7 @@ HTML + CSS (string)
 
 ### Project Structure
 
-```
+```text
 fulgur/
 ├── crates/
 │   ├── fulgur-core/
@@ -53,7 +55,7 @@ fulgur/
 
 ### Dependencies
 
-```
+```text
 fulgur-core
 ├── blitz-html          # HTML parsing
 ├── blitz-dom           # DOM + Stylo style resolution + Taffy layout
@@ -156,6 +158,7 @@ Taffy handles the actual layout computation (block, flexbox, etc.). Pageable car
 - **draw()**: Uses known positions to render to Krilla
 
 **Re-layout after split:**
+
 - **Block containers**: Child sizes are known; just decide "which children fit on this page"
 - **Paragraph text**: Keep Parley's line layout results (line heights); split at line boundaries
 - **Tables**: Row heights are known; split at row boundaries; add header repetition drawing
@@ -257,7 +260,7 @@ Two-pass rendering: first paginate all content to determine total page count, th
 
 ## CLI Design
 
-```
+```text
 fulgur render input.html -o output.pdf
 fulgur render input.html --size A4 --margin "20mm" -o output.pdf
 fulgur render input.html --landscape --css styles.css -o output.pdf

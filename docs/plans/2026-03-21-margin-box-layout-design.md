@@ -26,13 +26,16 @@ flex_distribute(a_max, b_max, available):
 ### 3箇所の幅決定
 
 **C あり:**
+
 1. C の max-content と 仮想 AC (L+R 合計) の max-content で flex 配分
 2. `L の幅 = R の幅 = (available - C の幅) / 2`
 
 **C なし、L + R:**
+
 - L と R の max-content で flex 配分
 
 **1箇所のみ:**
+
 - 全幅
 
 コーナーは常に固定サイズ（margin 幅 × margin 高さ）。

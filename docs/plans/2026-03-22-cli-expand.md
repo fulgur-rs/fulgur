@@ -13,6 +13,7 @@
 ### Task 1: Config にメタデータフィールドを追加
 
 **Files:**
+
 - Modify: `crates/fulgur/src/config.rs`
 
 **Step 1: Config 構造体にフィールド追加**
@@ -32,6 +33,7 @@ pub struct Config {
 既存の `author: Option<String>` を `authors: Vec<String>` に変更（複数著者対応）。
 
 Default 実装を更新:
+
 - `authors: vec![]`
 - `description: None`
 - `keywords: vec![]`
@@ -51,6 +53,7 @@ pub fn creation_date(mut self, date: impl Into<String>) -> Self { ... }
 ```
 
 既存の `author()` セッターは `authors` に1要素追加する形に変更（後方互換）:
+
 ```rust
 pub fn author(mut self, author: impl Into<String>) -> Self {
     self.config.authors.push(author.into());
@@ -74,6 +77,7 @@ git commit -m "feat: add metadata fields to Config (description, keywords, creat
 ### Task 2: render.rs でメタデータを krilla に反映
 
 **Files:**
+
 - Modify: `crates/fulgur/src/render.rs`
 
 **Step 1: メタデータ構築ヘルパー関数を追加**
@@ -128,6 +132,7 @@ git commit -m "refactor: extract build_metadata helper, add new metadata fields 
 ### Task 3: EngineBuilder にメタデータセッター追加
 
 **Files:**
+
 - Modify: `crates/fulgur/src/engine.rs`
 
 **Step 1: 新しいメタデータセッターを追加**
@@ -159,6 +164,7 @@ git commit -m "feat: add metadata setters to EngineBuilder"
 ### Task 4: CLI に --margin フラグを追加
 
 **Files:**
+
 - Modify: `crates/fulgur-cli/src/main.rs`
 
 **Step 1: --margin 引数を追加**
@@ -216,6 +222,7 @@ git commit -m "feat: add --margin CLI flag with CSS shorthand syntax"
 ### Task 5: CLI にメタデータフラグと stdout 出力を追加
 
 **Files:**
+
 - Modify: `crates/fulgur-cli/src/main.rs`
 
 **Step 1: メタデータ引数を追加**
@@ -257,6 +264,7 @@ creation_date: Option<String>,
 **Step 3: stdout 出力対応**
 
 `-o -` の場合、stdout にバイナリ出力:
+
 ```rust
 if output.as_os_str() == "-" {
     let pdf = engine.render_html(&html)?;
