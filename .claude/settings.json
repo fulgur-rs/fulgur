@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.worktreePath // empty' | { read -r wt; [ -n \"$wt\" ] && git -C \"$wt\" sparse-checkout disable 2>/dev/null; cd \"$wt\" && mise trust 2>/dev/null; } || true"
+          }
+        ]
+      }
+    ]
+  }
+}
