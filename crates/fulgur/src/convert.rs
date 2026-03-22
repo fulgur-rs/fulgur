@@ -1,5 +1,6 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
+use crate::asset::AssetBundle;
 use crate::gcpm::GcpmContext;
 use crate::gcpm::ParsedSelector;
 use crate::gcpm::running::{RunningElementStore, serialize_node};
@@ -16,18 +17,24 @@ use blitz_html::HtmlDocument;
 use std::ops::Deref;
 use std::sync::Arc;
 
+/// Context for DOM-to-Pageable conversion, bundling all shared state.
+pub struct ConvertContext<'a> {
+    pub gcpm: Option<&'a GcpmContext>,
+    pub running_store: &'a mut RunningElementStore,
+    pub assets: Option<&'a AssetBundle>,
+}
+
 /// Convert a resolved Blitz document into a Pageable tree.
 pub fn dom_to_pageable(
     doc: &HtmlDocument,
-    gcpm: Option<&GcpmContext>,
-    running_store: &mut RunningElementStore,
+    ctx: &mut ConvertContext<'_>,
 ) -> Box<dyn Pageable> {
     let root = doc.root_element();
     // Debug: print layout tree structure
     if std::env::var("FULGUR_DEBUG").is_ok() {
         debug_print_tree(doc.deref(), root.id, 0);
     }
-    convert_node(doc.deref(), root.id, gcpm, running_store)
+    convert_node(doc.deref(), root.id, ctx)
 }
 
 fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) {
@@ -59,8 +66,7 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
 fn convert_node(
     doc: &blitz_dom::BaseDocument,
     node_id: usize,
-    gcpm: Option<&GcpmContext>,
-    running_store: &mut RunningElementStore,
+    ctx: &mut ConvertContext<'_>,
 ) -> Box<dyn Pageable> {
     let node = doc.get_node(node_id).unwrap();
     let layout = node.final_layout;
@@ -96,7 +102,7 @@ fn convert_node(
         } else {
             let children: &[usize] = &node.children;
             let positioned_children =
-                collect_positioned_children(doc, children, gcpm, running_store);
+                collect_positioned_children(doc, children, ctx);
             let mut block =
                 BlockPageable::with_positioned_children(positioned_children).with_style(style);
             block.wrap(width, 10000.0);
@@ -119,7 +125,7 @@ fn convert_node(
     if let Some(elem_data) = node.element_data() {
         let tag = elem_data.name.local.as_ref();
         if tag == "table" {
-            return convert_table(doc, node, gcpm, running_store);
+            return convert_table(doc, node, ctx);
         }
     }
 
@@ -161,7 +167,7 @@ fn convert_node(
     }
 
     // Container node — collect children with Taffy-computed positions
-    let positioned_children = collect_positioned_children(doc, children, gcpm, running_store);
+    let positioned_children = collect_positioned_children(doc, children, ctx);
 
     let style = extract_block_style(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children).with_style(style);
@@ -174,8 +180,7 @@ fn convert_node(
 fn collect_positioned_children(
     doc: &blitz_dom::BaseDocument,
     child_ids: &[usize],
-    gcpm: Option<&GcpmContext>,
-    running_store: &mut RunningElementStore,
+    ctx: &mut ConvertContext<'_>,
 ) -> Vec<PositionedChild> {
     let mut result = Vec::new();
     for &child_id in child_ids {
@@ -191,11 +196,11 @@ fn collect_positioned_children(
         }
 
         // GCPM: skip running elements and store their HTML
-        if let Some(ctx) = gcpm {
-            if is_running_element(child_node, ctx) {
+        if let Some(gcpm_ctx) = ctx.gcpm {
+            if is_running_element(child_node, gcpm_ctx) {
                 let html = serialize_node(doc, child_id);
-                if let Some(name) = get_running_name(child_node, ctx) {
-                    running_store.register(name, html);
+                if let Some(name) = get_running_name(child_node, gcpm_ctx) {
+                    ctx.running_store.register(name, html);
                 }
                 continue;
             }
@@ -217,12 +222,12 @@ fn collect_positioned_children(
             && !child_node.children.is_empty()
         {
             let nested =
-                collect_positioned_children(doc, &child_node.children, gcpm, running_store);
+                collect_positioned_children(doc, &child_node.children, ctx);
             result.extend(nested);
             continue;
         }
 
-        let child_pageable = convert_node(doc, child_id, gcpm, running_store);
+        let child_pageable = convert_node(doc, child_id, ctx);
         result.push(PositionedChild {
             child: child_pageable,
             x: child_layout.location.x,
@@ -288,8 +293,7 @@ fn get_running_name(node: &Node, ctx: &GcpmContext) -> Option<String> {
 fn convert_table(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
-    gcpm: Option<&GcpmContext>,
-    running_store: &mut RunningElementStore,
+    ctx: &mut ConvertContext<'_>,
 ) -> Box<dyn Pageable> {
     let layout = node.final_layout;
     let width = layout.size.width;
@@ -312,8 +316,7 @@ fn convert_table(
             is_thead,
             &mut header_cells,
             &mut body_cells,
-            gcpm,
-            running_store,
+            ctx,
         );
     }
 
@@ -350,8 +353,7 @@ fn collect_table_cells(
     is_header: bool,
     header_cells: &mut Vec<PositionedChild>,
     body_cells: &mut Vec<PositionedChild>,
-    gcpm: Option<&GcpmContext>,
-    running_store: &mut RunningElementStore,
+    ctx: &mut ConvertContext<'_>,
 ) {
     let Some(node) = doc.get_node(node_id) else {
         return;
@@ -369,11 +371,11 @@ fn collect_table_cells(
         }
 
         // GCPM: skip running elements and store their HTML
-        if let Some(ctx) = gcpm {
-            if is_running_element(child_node, ctx) {
+        if let Some(gcpm_ctx) = ctx.gcpm {
+            if is_running_element(child_node, gcpm_ctx) {
                 let html = serialize_node(doc, child_id);
-                if let Some(name) = get_running_name(child_node, ctx) {
-                    running_store.register(name, html);
+                if let Some(name) = get_running_name(child_node, gcpm_ctx) {
+                    ctx.running_store.register(name, html);
                 }
                 continue;
             }
@@ -393,8 +395,7 @@ fn collect_table_cells(
                 child_is_header,
                 header_cells,
                 body_cells,
-                gcpm,
-                running_store,
+                ctx,
             );
             continue;
         }
@@ -405,7 +406,7 @@ fn collect_table_cells(
         }
 
         // Actual cell (td/th) — convert and add to appropriate group
-        let cell_pageable = convert_node(doc, child_id, gcpm, running_store);
+        let cell_pageable = convert_node(doc, child_id, ctx);
         let positioned = PositionedChild {
             child: cell_pageable,
             x: child_layout.location.x,

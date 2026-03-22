@@ -1,5 +1,6 @@
 use crate::asset::AssetBundle;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
+use crate::convert::ConvertContext;
 use crate::error::Result;
 use crate::pageable::Pageable;
 use crate::render::render_to_pdf;
@@ -74,7 +75,12 @@ impl Engine {
 
         let gcpm_opt = if gcpm.is_empty() { None } else { Some(&gcpm) };
         let mut running_store = crate::gcpm::running::RunningElementStore::new();
-        let root = crate::convert::dom_to_pageable(&doc, gcpm_opt, &mut running_store);
+        let mut ctx = ConvertContext {
+            gcpm: gcpm_opt,
+            running_store: &mut running_store,
+            assets: self.assets.as_ref(),
+        };
+        let root = crate::convert::dom_to_pageable(&doc, &mut ctx);
 
         if gcpm.is_empty() {
             self.render_pageable(root)

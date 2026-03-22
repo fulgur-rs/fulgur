@@ -332,7 +332,12 @@ pub fn render_to_pdf_with_gcpm(
                     font_data,
                 );
                 let mut dummy_store = RunningElementStore::new();
-                let pageable = crate::convert::dom_to_pageable(&render_doc, None, &mut dummy_store);
+                let mut dummy_ctx = crate::convert::ConvertContext {
+                    gcpm: None,
+                    running_store: &mut dummy_store,
+                    assets: None,
+                };
+                let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);
             }
 
