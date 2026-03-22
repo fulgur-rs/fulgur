@@ -133,6 +133,41 @@ impl EngineBuilder {
         self
     }
 
+    pub fn lang(mut self, lang: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.lang(lang);
+        self
+    }
+
+    pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config_builder = self.config_builder.authors(authors);
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.description(description);
+        self
+    }
+
+    pub fn keywords(mut self, keywords: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config_builder = self.config_builder.keywords(keywords);
+        self
+    }
+
+    pub fn creator(mut self, creator: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.creator(creator);
+        self
+    }
+
+    pub fn producer(mut self, producer: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.producer(producer);
+        self
+    }
+
+    pub fn creation_date(mut self, date: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.creation_date(date);
+        self
+    }
+
     pub fn assets(mut self, assets: AssetBundle) -> Self {
         self.assets = Some(assets);
         self

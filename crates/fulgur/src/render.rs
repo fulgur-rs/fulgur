@@ -47,21 +47,80 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
         // Surface::finish is handled by Drop
     }
 
-    // Set metadata
-    let mut metadata = krilla::metadata::Metadata::new();
-    if let Some(ref title) = config.title {
-        metadata = metadata.title(title.clone());
-    }
-    if let Some(ref author) = config.author {
-        metadata = metadata.authors(vec![author.clone()]);
-    }
-
-    document.set_metadata(metadata);
+    document.set_metadata(build_metadata(config));
 
     let pdf_bytes = document
         .finish()
         .map_err(|e| Error::PdfGeneration(format!("{e:?}")))?;
     Ok(pdf_bytes)
+}
+
+/// Build krilla Metadata from Config.
+fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
+    let mut metadata = krilla::metadata::Metadata::new();
+    if let Some(ref title) = config.title {
+        metadata = metadata.title(title.clone());
+    }
+    if !config.authors.is_empty() {
+        metadata = metadata.authors(config.authors.clone());
+    }
+    if let Some(ref description) = config.description {
+        metadata = metadata.description(description.clone());
+    }
+    if !config.keywords.is_empty() {
+        metadata = metadata.keywords(config.keywords.clone());
+    }
+    if let Some(ref lang) = config.lang {
+        metadata = metadata.language(lang.clone());
+    }
+    if let Some(ref creator) = config.creator {
+        metadata = metadata.creator(creator.clone());
+    }
+    if let Some(ref producer) = config.producer {
+        metadata = metadata.producer(producer.clone());
+    }
+    if let Some(ref date_str) = config.creation_date {
+        if let Some(dt) = parse_datetime(date_str) {
+            metadata = metadata.creation_date(dt);
+        }
+    }
+    metadata
+}
+
+/// Parse an ISO 8601 date string into a krilla DateTime.
+/// Supports: "YYYY", "YYYY-MM", "YYYY-MM-DD", "YYYY-MM-DDThh:mm:ss".
+/// Returns None if any component fails to parse.
+fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
+    let parts: Vec<&str> = s.splitn(2, 'T').collect();
+    let date_tokens: Vec<&str> = parts[0].split('-').collect();
+    let year: u16 = date_tokens.first()?.parse().ok()?;
+    let mut dt = krilla::metadata::DateTime::new(year);
+    if let Some(month_str) = date_tokens.get(1) {
+        let month: u8 = month_str.parse().ok()?;
+        dt = dt.month(month);
+    }
+    if let Some(day_str) = date_tokens.get(2) {
+        let day: u8 = day_str.parse().ok()?;
+        dt = dt.day(day);
+    }
+    if let Some(time_str) = parts.get(1) {
+        // Strip trailing 'Z' for UTC
+        let time_str = time_str.trim_end_matches('Z');
+        let time_tokens: Vec<&str> = time_str.split(':').collect();
+        if let Some(hour_str) = time_tokens.first() {
+            let hour: u8 = hour_str.parse().ok()?;
+            dt = dt.hour(hour);
+        }
+        if let Some(minute_str) = time_tokens.get(1) {
+            let minute: u8 = minute_str.parse().ok()?;
+            dt = dt.minute(minute);
+        }
+        if let Some(second_str) = time_tokens.get(2) {
+            let second: u8 = second_str.parse().ok()?;
+            dt = dt.second(second);
+        }
+    }
+    Some(dt)
 }
 
 /// Cached max-content width and render Pageable for margin boxes.
@@ -292,15 +351,7 @@ pub fn render_to_pdf_with_gcpm(
         );
     }
 
-    // Set metadata (same as render_to_pdf)
-    let mut metadata = krilla::metadata::Metadata::new();
-    if let Some(ref title) = config.title {
-        metadata = metadata.title(title.clone());
-    }
-    if let Some(ref author) = config.author {
-        metadata = metadata.authors(vec![author.clone()]);
-    }
-    document.set_metadata(metadata);
+    document.set_metadata(build_metadata(config));
 
     let pdf_bytes = document
         .finish()

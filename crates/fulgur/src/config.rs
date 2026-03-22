@@ -80,7 +80,12 @@ pub struct Config {
     pub margin: Margin,
     pub landscape: bool,
     pub title: Option<String>,
-    pub author: Option<String>,
+    pub authors: Vec<String>,
+    pub description: Option<String>,
+    pub keywords: Vec<String>,
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+    pub creation_date: Option<String>,
     pub lang: Option<String>,
 }
 
@@ -91,7 +96,12 @@ impl Default for Config {
             margin: Margin::default(),
             landscape: false,
             title: None,
-            author: None,
+            authors: vec![],
+            description: None,
+            keywords: vec![],
+            creator: None,
+            producer: Some(format!("fulgur v{}", env!("CARGO_PKG_VERSION"))),
+            creation_date: None,
             lang: None,
         }
     }
@@ -150,7 +160,41 @@ impl ConfigBuilder {
     }
 
     pub fn author(mut self, author: impl Into<String>) -> Self {
-        self.config.author = Some(author.into());
+        self.config.authors.push(author.into());
+        self
+    }
+
+    pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config
+            .authors
+            .extend(authors.into_iter().map(|a| a.into()));
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.config.description = Some(description.into());
+        self
+    }
+
+    pub fn keywords(mut self, keywords: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config
+            .keywords
+            .extend(keywords.into_iter().map(|k| k.into()));
+        self
+    }
+
+    pub fn creator(mut self, creator: impl Into<String>) -> Self {
+        self.config.creator = Some(creator.into());
+        self
+    }
+
+    pub fn producer(mut self, producer: impl Into<String>) -> Self {
+        self.config.producer = Some(producer.into());
+        self
+    }
+
+    pub fn creation_date(mut self, creation_date: impl Into<String>) -> Self {
+        self.config.creation_date = Some(creation_date.into());
         self
     }
 
