@@ -28,6 +28,48 @@ fn table_no_thead_renders() {
 }
 
 #[test]
+fn table_with_caption_renders() {
+    let html = r#"
+    <table border="1">
+        <caption>Table 1: Sample Data</caption>
+        <thead><tr><th>Name</th><th>Value</th></tr></thead>
+        <tbody><tr><td>A</td><td>1</td></tr></tbody>
+    </table>"#;
+    let pdf = render(html);
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn table_with_caption_bottom_renders() {
+    let html = r#"
+    <table border="1">
+        <caption style="caption-side: bottom">Table 1: Bottom Caption</caption>
+        <thead><tr><th>Name</th><th>Value</th></tr></thead>
+        <tbody><tr><td>A</td><td>1</td></tr></tbody>
+    </table>"#;
+    let pdf = render(html);
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn table_long_with_caption_renders() {
+    let mut rows = String::new();
+    for i in 0..50 {
+        rows.push_str(&format!("<tr><td>Row {i}</td><td>Value {i}</td></tr>"));
+    }
+    let html = format!(
+        r#"
+    <table border="1">
+        <caption style="font-weight: bold">Table 1: Long table with caption</caption>
+        <thead><tr><th>Name</th><th>Value</th></tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"#
+    );
+    let pdf = render(&html);
+    assert!(!pdf.is_empty());
+}
+
+#[test]
 fn table_long_with_thead_renders() {
     let mut rows = String::new();
     for i in 0..50 {
