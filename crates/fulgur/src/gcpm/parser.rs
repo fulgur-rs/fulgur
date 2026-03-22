@@ -1,12 +1,10 @@
-use std::collections::HashSet;
-
 use cssparser::{
     AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, ParseError, Parser,
     ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
 };
 
 use super::margin_box::MarginBoxPosition;
-use super::{ContentItem, CounterType, GcpmContext, MarginBoxRule};
+use super::{ContentItem, CounterType, GcpmContext, MarginBoxRule, ParsedSelector, RunningMapping};
 
 // ---------------------------------------------------------------------------
 // Top-level result types
@@ -31,7 +29,7 @@ struct GcpmSheetParser<'a> {
     /// Byte ranges to remove (for `@page` blocks) or replace (for running decls).
     edits: &'a mut Vec<CssEdit>,
     margin_boxes: &'a mut Vec<MarginBoxRule>,
-    running_names: &'a mut HashSet<String>,
+    running_mappings: &'a mut Vec<RunningMapping>,
 }
 
 /// Describes a region in the original CSS to edit when building `cleaned_css`.
@@ -95,7 +93,7 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
 }
 
 impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
-    type Prelude = ();
+    type Prelude = Option<ParsedSelector>;
     type QualifiedRule = TopLevelItem;
     type Error = ();
 
@@ -103,14 +101,23 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         &mut self,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
-        // Consume the prelude (selector) — we don't need it
+        let selector = match input.next_including_whitespace()?.clone() {
+            Token::Delim('.') => {
+                let name = input.expect_ident()?.clone();
+                Some(ParsedSelector::Class(name.to_string()))
+            }
+            Token::IDHash(ref name) => Some(ParsedSelector::Id(name.to_string())),
+            Token::Ident(ref name) => Some(ParsedSelector::Tag(name.to_string())),
+            _ => None,
+        };
+        // Consume remaining prelude tokens
         while input.next_including_whitespace().is_ok() {}
-        Ok(())
+        Ok(selector)
     }
 
     fn parse_block<'t>(
         &mut self,
-        _prelude: Self::Prelude,
+        prelude: Self::Prelude,
         _start: &cssparser::ParserState,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
@@ -125,8 +132,13 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
             let _ = item;
         }
 
-        if let Some(ref name) = running_name {
-            self.running_names.insert(name.clone());
+        if let Some(running_name) = running_name {
+            if let Some(selector) = prelude {
+                self.running_mappings.push(RunningMapping {
+                    parsed: selector,
+                    running_name,
+                });
+            }
         }
 
         Ok(TopLevelItem::StyleRule)
@@ -435,7 +447,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
 /// - All other CSS is preserved verbatim in `cleaned_css`
 pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut margin_boxes = Vec::new();
-    let mut running_names = HashSet::new();
+    let mut running_mappings = Vec::new();
     let mut edits: Vec<CssEdit> = Vec::new();
 
     // Run the cssparser-based parse to collect GCPM data and edit spans.
@@ -446,7 +458,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         let mut parser = GcpmSheetParser {
             edits: &mut edits,
             margin_boxes: &mut margin_boxes,
-            running_names: &mut running_names,
+            running_mappings: &mut running_mappings,
         };
 
         let iter = StyleSheetParser::new(&mut input, &mut parser);
@@ -460,7 +472,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
 
     GcpmContext {
         margin_boxes,
-        running_names,
+        running_mappings,
         cleaned_css,
     }
 }
@@ -533,7 +545,7 @@ mod tests {
     fn test_empty_css() {
         let css = "body { color: red; }\np { margin: 0; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.is_empty());
+        assert!(ctx.running_mappings.is_empty());
         assert!(ctx.margin_boxes.is_empty());
         assert_eq!(ctx.cleaned_css, css);
     }
@@ -542,7 +554,11 @@ mod tests {
     fn test_extract_running_name() {
         let css = ".header { position: running(pageHeader); font-size: 12px; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.contains("pageHeader"));
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "pageHeader")
+        );
         assert!(ctx.cleaned_css.contains("display: none"));
         assert!(!ctx.cleaned_css.contains("running"));
         assert!(ctx.cleaned_css.contains("font-size: 12px"));
@@ -629,7 +645,7 @@ mod tests {
     fn test_ignores_gcpm_in_string_literals() {
         let css = r#"body { content: "position: running(x)"; color: blue; }"#;
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.is_empty());
+        assert!(ctx.running_mappings.is_empty());
     }
 
     #[test]
@@ -637,7 +653,11 @@ mod tests {
         // POSITION: Running(name) — プロパティ名の大文字小文字
         let css = ".header { POSITION: running(pageHeader); }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.contains("pageHeader"));
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "pageHeader")
+        );
         assert!(ctx.cleaned_css.contains("display: none"));
     }
 
@@ -645,8 +665,8 @@ mod tests {
     fn test_multiple_running_names() {
         let css = ".h { position: running(hdr); } .f { position: running(ftr); }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.contains("hdr"));
-        assert!(ctx.running_names.contains("ftr"));
+        assert!(ctx.running_mappings.iter().any(|m| m.running_name == "hdr"));
+        assert!(ctx.running_mappings.iter().any(|m| m.running_name == "ftr"));
     }
 
     #[test]
@@ -654,7 +674,7 @@ mod tests {
         // running() 以外の宣言が cleaned_css に残ること
         let css = ".header { color: red; position: running(hdr); font-size: 14px; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.running_names.contains("hdr"));
+        assert!(ctx.running_mappings.iter().any(|m| m.running_name == "hdr"));
         assert!(ctx.cleaned_css.contains("color: red"));
         assert!(ctx.cleaned_css.contains("font-size: 14px"));
     }
@@ -690,5 +710,41 @@ mod tests {
             ctx.margin_boxes[1].page_selector,
             Some(":right".to_string())
         );
+    }
+
+    #[test]
+    fn test_class_selector_extraction() {
+        let css = ".my-header { position: running(pageHeader); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.running_mappings.len(), 1);
+        assert_eq!(
+            ctx.running_mappings[0].parsed,
+            ParsedSelector::Class("my-header".to_string())
+        );
+        assert_eq!(ctx.running_mappings[0].running_name, "pageHeader");
+    }
+
+    #[test]
+    fn test_id_selector_extraction() {
+        let css = "#main-title { position: running(docTitle); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.running_mappings.len(), 1);
+        assert_eq!(
+            ctx.running_mappings[0].parsed,
+            ParsedSelector::Id("main-title".to_string())
+        );
+        assert_eq!(ctx.running_mappings[0].running_name, "docTitle");
+    }
+
+    #[test]
+    fn test_tag_selector_extraction() {
+        let css = "header { position: running(pageHeader); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.running_mappings.len(), 1);
+        assert_eq!(
+            ctx.running_mappings[0].parsed,
+            ParsedSelector::Tag("header".to_string())
+        );
+        assert_eq!(ctx.running_mappings[0].running_name, "pageHeader");
     }
 }

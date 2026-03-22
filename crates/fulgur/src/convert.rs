@@ -243,7 +243,9 @@ fn is_running_element(node: &Node, ctx: &GcpmContext) -> bool {
     let Some(elem) = node.element_data() else {
         return false;
     };
-    ctx.running_mappings.iter().any(|m| matches_selector(&m.parsed, elem))
+    ctx.running_mappings
+        .iter()
+        .any(|m| matches_selector(&m.parsed, elem))
 }
 
 fn get_class_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
@@ -266,19 +268,11 @@ fn get_tag_name(elem: &blitz_dom::node::ElementData) -> &str {
 
 fn matches_selector(selector: &ParsedSelector, elem: &blitz_dom::node::ElementData) -> bool {
     match selector {
-        ParsedSelector::Class(name) => {
-            get_class_attr(elem)
-                .map(|cls| cls.split_whitespace().any(|c| c == name))
-                .unwrap_or(false)
-        }
-        ParsedSelector::Id(name) => {
-            get_id_attr(elem)
-                .map(|id| id == name)
-                .unwrap_or(false)
-        }
-        ParsedSelector::Tag(name) => {
-            get_tag_name(elem).eq_ignore_ascii_case(name)
-        }
+        ParsedSelector::Class(name) => get_class_attr(elem)
+            .map(|cls| cls.split_whitespace().any(|c| c == name))
+            .unwrap_or(false),
+        ParsedSelector::Id(name) => get_id_attr(elem).map(|id| id == name).unwrap_or(false),
+        ParsedSelector::Tag(name) => get_tag_name(elem).eq_ignore_ascii_case(name),
     }
 }
 
