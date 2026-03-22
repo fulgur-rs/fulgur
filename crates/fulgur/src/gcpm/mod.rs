@@ -3,9 +3,27 @@ pub mod margin_box;
 pub mod parser;
 pub mod running;
 
-use std::collections::HashSet;
-
 use margin_box::MarginBoxPosition;
+
+/// A simple CSS selector parsed from a style rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedSelector {
+    /// A class selector, e.g. `.header`
+    Class(String),
+    /// An ID selector, e.g. `#title`
+    Id(String),
+    /// A tag name selector, e.g. `header`
+    Tag(String),
+}
+
+/// Maps a CSS selector to a running element name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningMapping {
+    /// The parsed CSS selector.
+    pub parsed: ParsedSelector,
+    /// The name from `position: running(name)`.
+    pub running_name: String,
+}
 
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,8 +63,8 @@ pub struct MarginBoxRule {
 pub struct GcpmContext {
     /// All margin box rules found in `@page` rules.
     pub margin_boxes: Vec<MarginBoxRule>,
-    /// Names referenced by `position: running(...)` in the stylesheet.
-    pub running_names: HashSet<String>,
+    /// Mappings from CSS selectors to running element names.
+    pub running_mappings: Vec<RunningMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
@@ -54,7 +72,7 @@ pub struct GcpmContext {
 impl GcpmContext {
     /// Returns `true` if no GCPM features were found.
     pub fn is_empty(&self) -> bool {
-        self.margin_boxes.is_empty() && self.running_names.is_empty()
+        self.margin_boxes.is_empty() && self.running_mappings.is_empty()
     }
 }
 
@@ -66,7 +84,7 @@ mod tests {
     fn test_gcpm_context_is_empty() {
         let ctx = GcpmContext {
             margin_boxes: vec![],
-            running_names: HashSet::new(),
+            running_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -81,7 +99,7 @@ mod tests {
                 content: vec![ContentItem::Counter(CounterType::Page)],
                 declarations: String::new(),
             }],
-            running_names: HashSet::new(),
+            running_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -89,11 +107,12 @@ mod tests {
 
     #[test]
     fn test_gcpm_context_not_empty_with_running_name() {
-        let mut names = HashSet::new();
-        names.insert("header".to_string());
         let ctx = GcpmContext {
             margin_boxes: vec![],
-            running_names: names,
+            running_mappings: vec![RunningMapping {
+                parsed: ParsedSelector::Class("header".to_string()),
+                running_name: "header".to_string(),
+            }],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
