@@ -79,8 +79,40 @@ fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
     if let Some(ref producer) = config.producer {
         metadata = metadata.producer(producer.clone());
     }
-    // TODO: creation_date requires parsing ISO 8601 string into krilla::metadata::DateTime
+    if let Some(ref date_str) = config.creation_date {
+        if let Some(dt) = parse_datetime(date_str) {
+            metadata = metadata.creation_date(dt);
+        }
+    }
     metadata
+}
+
+/// Parse an ISO 8601 date string into a krilla DateTime.
+/// Supports: "YYYY", "YYYY-MM", "YYYY-MM-DD", "YYYY-MM-DDThh:mm:ss".
+fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
+    let parts: Vec<&str> = s.splitn(2, 'T').collect();
+    let date_parts: Vec<u16> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let year = *date_parts.first()?;
+    let mut dt = krilla::metadata::DateTime::new(year);
+    if let Some(&month) = date_parts.get(1) {
+        dt = dt.month(month as u8);
+    }
+    if let Some(&day) = date_parts.get(2) {
+        dt = dt.day(day as u8);
+    }
+    if let Some(time_str) = parts.get(1) {
+        let time_parts: Vec<u8> = time_str.split(':').filter_map(|p| p.parse().ok()).collect();
+        if let Some(&hour) = time_parts.first() {
+            dt = dt.hour(hour);
+        }
+        if let Some(&minute) = time_parts.get(1) {
+            dt = dt.minute(minute);
+        }
+        if let Some(&second) = time_parts.get(2) {
+            dt = dt.second(second);
+        }
+    }
+    Some(dt)
 }
 
 /// Cached max-content width and render Pageable for margin boxes.
