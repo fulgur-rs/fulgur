@@ -55,7 +55,8 @@ pub struct ListItemPageable {
 5. ul/ol nodes convert to BlockPageable as usual
 
 Nested lists work naturally:
-```
+
+```html
 <ul>       → BlockPageable
   <li>     → ListItemPageable (marker + body)
     <ul>   → BlockPageable inside body

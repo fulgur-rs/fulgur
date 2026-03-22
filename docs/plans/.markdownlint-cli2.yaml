@@ -1,0 +1,4 @@
+config:
+  # 計画ドキュメントは **Step X:** パターンを多用するため緩和
+  MD036: false
+  MD001: false

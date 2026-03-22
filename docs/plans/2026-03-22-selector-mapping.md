@@ -13,6 +13,7 @@
 ### Task 1: データ構造の追加と GcpmContext の変更
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/mod.rs`
 
 **Step 1: `ParsedSelector` と `RunningMapping` を追加し、`GcpmContext` を変更**
@@ -42,6 +43,7 @@ pub struct RunningMapping {
 ```
 
 `GcpmContext` を変更:
+
 - `running_names: HashSet<String>` → `running_mappings: Vec<RunningMapping>`
 - `is_empty()` の条件を `running_mappings.is_empty()` に変更
 - `use std::collections::HashSet;` が不要になったら削除
@@ -65,6 +67,7 @@ git commit -m "refactor: replace running_names with running_mappings in GcpmCont
 ### Task 2: パーサーでセレクタを抽出して RunningMapping を生成
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/parser.rs`
 
 **Step 1: パーサーを更新**
@@ -90,6 +93,7 @@ git commit -m "refactor: replace running_names with running_mappings in GcpmCont
 5. **テストモジュールの更新**:
    - `ctx.running_names.contains("pageHeader")` → `ctx.running_mappings.iter().any(|m| m.running_name == "pageHeader")` 等に変更
    - セレクタが正しくパースされることを検証するテストを追加:
+
      ```rust
      #[test]
      fn test_class_selector_extraction() {
@@ -136,11 +140,13 @@ git commit -m "feat: extract CSS selectors for running element mappings"
 ### Task 3: convert.rs の DOM照合を ParsedSelector ベースに変更
 
 **Files:**
+
 - Modify: `crates/fulgur/src/convert.rs`
 
 **Step 1: ヘルパー関数を更新**
 
 1. **`get_id_attr` 関数を追加**（`get_class_attr` と同様）:
+
    ```rust
    fn get_id_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
        elem.attrs()
@@ -151,6 +157,7 @@ git commit -m "feat: extract CSS selectors for running element mappings"
    ```
 
 2. **`get_tag_name` 関数を追加**:
+
    ```rust
    fn get_tag_name(elem: &blitz_dom::node::ElementData) -> &str {
        elem.name.local.as_ref()
@@ -158,6 +165,7 @@ git commit -m "feat: extract CSS selectors for running element mappings"
    ```
 
 3. **`matches_selector` 関数を追加**:
+
    ```rust
    fn matches_selector(selector: &ParsedSelector, elem: &blitz_dom::node::ElementData) -> bool {
        match selector {
@@ -179,6 +187,7 @@ git commit -m "feat: extract CSS selectors for running element mappings"
    ```
 
 4. **`is_running_element` を更新**:
+
    ```rust
    fn is_running_element(node: &Node, ctx: &GcpmContext) -> bool {
        if ctx.running_mappings.is_empty() {
@@ -192,6 +201,7 @@ git commit -m "feat: extract CSS selectors for running element mappings"
    ```
 
 5. **`get_running_name` を更新**:
+
    ```rust
    fn get_running_name(node: &Node, ctx: &GcpmContext) -> Option<String> {
        let elem = node.element_data()?;
@@ -224,6 +234,7 @@ git commit -m "feat: match running elements by CSS selector instead of class nam
 ### Task 4: 統合テストの追加 — セレクタ≠running名のケース
 
 **Files:**
+
 - Modify: `crates/fulgur/tests/gcpm_integration.rs`
 
 **Step 1: 既存テストの確認**

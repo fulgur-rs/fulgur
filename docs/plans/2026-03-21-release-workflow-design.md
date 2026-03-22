@@ -11,10 +11,12 @@
 **トリガー:** `workflow_dispatch` with optional `version` input
 
 **バージョン決定:**
+
 - 未指定: 現在のバージョンの patch を自動バンプ (0.1.0 → 0.1.1)
 - 指定: その値を使用 (semver バリデーション付き、`v` プレフィックス自動除去)
 
 **ステップ:**
+
 1. `Cargo.toml` バージョン更新 (fulgur + fulgur-cli)
 2. git-cliff で `CHANGELOG.md` 生成
 3. `release/v$VERSION` ブランチ作成 + PR

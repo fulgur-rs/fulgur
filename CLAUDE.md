@@ -21,6 +21,7 @@ cargo test -p fulgur --test gcpm_integration -- --test-threads=1
 # Lint
 cargo clippy
 cargo fmt --check
+npx markdownlint-cli2 '**/*.md'
 
 # Run CLI
 cargo run --bin fulgur -- render input.html -o output.pdf
@@ -31,7 +32,7 @@ cargo run --bin fulgur -- render input.html --size A4 --landscape -o output.pdf
 
 The processing pipeline flows:
 
-```
+```text
 HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting → Krilla PDF
 ```
 

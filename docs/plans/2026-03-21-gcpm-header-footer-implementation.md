@@ -13,11 +13,13 @@
 ### Task 1: `config.rs` から未実装の `header_html` / `footer_html` を削除
 
 **Files:**
+
 - Modify: `crates/fulgur/src/config.rs:85-86,98-99,166-174`
 
 **Step 1: `Config` 構造体から `header_html` / `footer_html` フィールドを削除**
 
 `config.rs` の `Config` 構造体から以下を削除:
+
 ```rust
 // 削除: 85-86行目
 pub header_html: Option<String>,
@@ -25,6 +27,7 @@ pub footer_html: Option<String>,
 ```
 
 `Default` impl から以下を削除:
+
 ```rust
 // 削除: 98-99行目
 header_html: None,
@@ -32,6 +35,7 @@ footer_html: None,
 ```
 
 `ConfigBuilder` から以下のメソッドを削除:
+
 ```rust
 // 削除: 166-174行目
 pub fn header_html(mut self, html: impl Into<String>) -> Self { ... }
@@ -55,6 +59,7 @@ git commit -m "chore: remove unused header_html/footer_html from Config"
 ### Task 2: `gcpm/margin_box.rs` — MarginBoxPosition enum と位置計算の型定義
 
 **Files:**
+
 - Create: `crates/fulgur/src/gcpm/margin_box.rs`
 - Test: `crates/fulgur/src/gcpm/margin_box.rs` (同ファイル内 `#[cfg(test)]`)
 
@@ -300,6 +305,7 @@ git commit -m "feat(gcpm): add MarginBoxPosition enum with bounding rect calcula
 ### Task 3: `gcpm/mod.rs` — GcpmContext と ContentItem 型定義
 
 **Files:**
+
 - Create: `crates/fulgur/src/gcpm/mod.rs`
 - Modify: `crates/fulgur/src/lib.rs:1` (モジュール追加)
 
@@ -366,6 +372,7 @@ impl GcpmContext {
 **Step 2: `lib.rs` にモジュール追加**
 
 `crates/fulgur/src/lib.rs` の先頭モジュール一覧に追加:
+
 ```rust
 pub mod gcpm;
 ```
@@ -373,16 +380,19 @@ pub mod gcpm;
 **Step 3: スタブモジュールを作成**
 
 `crates/fulgur/src/gcpm/parser.rs`:
+
 ```rust
 // GCPM CSS parser — implemented in Task 4
 ```
 
 `crates/fulgur/src/gcpm/running.rs`:
+
 ```rust
 // Running elements lifecycle — implemented in Task 6
 ```
 
 `crates/fulgur/src/gcpm/counter.rs`:
+
 ```rust
 // Page counter resolution — implemented in Task 5
 ```
@@ -404,6 +414,7 @@ git commit -m "feat(gcpm): add GcpmContext, ContentItem, MarginBoxRule types"
 ### Task 4: `gcpm/parser.rs` — cssparser による GCPM 構文抽出
 
 **Files:**
+
 - Modify: `crates/fulgur/Cargo.toml` (cssparser 依存追加)
 - Modify: `crates/fulgur/src/gcpm/parser.rs`
 - Test: 同ファイル内 `#[cfg(test)]`
@@ -411,6 +422,7 @@ git commit -m "feat(gcpm): add GcpmContext, ContentItem, MarginBoxRule types"
 **Step 1: `cssparser` を依存に追加**
 
 `crates/fulgur/Cargo.toml` の `[dependencies]` に追加:
+
 ```toml
 cssparser = "0.34"
 ```
@@ -525,6 +537,7 @@ Expected: FAIL
 **Step 4: `parse_gcpm` を実装**
 
 パーサーの戦略: `cssparser` の低レベルトークナイザを使わず、文字列ベースの前処理で十分。理由:
+
 - `position: running(name)` はプロパティ値の単純なパターンマッチ
 - `@page { @top-center { ... } }` はネスト構造だが、ブレース追跡で抽出可能
 - `content: element(name) counter(page) "str"` はトークン列の順次パース
@@ -814,6 +827,7 @@ git commit -m "feat(gcpm): implement CSS parser for @page margin boxes and runni
 ### Task 5: `gcpm/counter.rs` — ページカウンター解決
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/counter.rs`
 - Test: 同ファイル内 `#[cfg(test)]`
 
@@ -949,6 +963,7 @@ git commit -m "feat(gcpm): implement page counter resolution"
 ### Task 6: `gcpm/running.rs` — Running Elements 管理 + DOM シリアライザ
 
 **Files:**
+
 - Modify: `crates/fulgur/src/gcpm/running.rs`
 - Test: 同ファイル内 `#[cfg(test)]`
 
@@ -1093,6 +1108,7 @@ git commit -m "feat(gcpm): add RunningElementStore and DOM serializer"
 ### Task 7: `convert.rs` — Running 要素の除外と HTML 片抽出
 
 **Files:**
+
 - Modify: `crates/fulgur/src/convert.rs:13,48-49,144-189`
 
 **Step 1: `dom_to_pageable` のシグネチャ変更**
@@ -1244,6 +1260,7 @@ git commit -m "feat(gcpm): add running element detection and exclusion in conver
 ### Task 8: `engine.rs` + `render.rs` — GCPM パイプライン統合と2パスレンダリング
 
 **Files:**
+
 - Modify: `crates/fulgur/src/engine.rs:37-69`
 - Modify: `crates/fulgur/src/render.rs`
 
@@ -1453,6 +1470,7 @@ git commit -m "feat(gcpm): integrate 2-pass rendering pipeline with margin box s
 ### Task 9: 統合テスト — ヘッダー/フッター付き PDF 生成
 
 **Files:**
+
 - Create: `crates/fulgur/tests/gcpm_integration.rs`
 
 **Step 1: 統合テストを作成**
@@ -1548,6 +1566,7 @@ git commit -m "test(gcpm): add integration tests for header/footer with GCPM"
 ### Task 10: CLI 対応 — `--header` / `--footer` を GCPM 経由に
 
 **Files:**
+
 - Check: `crates/fulgur-cli/src/main.rs` (CLI の引数定義を確認)
 
 Note: CLI の `--header` / `--footer` オプションは GCPM が CSS で定義されるため不要になる可能性がある。ユーザーは CSS ファイル内に GCPM ルールを記述し、`--css` オプションで指定する。CLI に特別な変更は不要かもしれないが、CLI コードを確認して判断する。

@@ -1,0 +1,17 @@
+config:
+  # 行の長さ制限を無効化（ドキュメントの可読性を優先）
+  MD013: false
+  # CHANGELOG等で同名見出しを許可（siblings_onlyで同階層のみ許可）
+  MD024:
+    siblings_only: true
+  # インラインHTMLを許可
+  MD033: false
+  # テーブルのコンパクトスタイルを許可
+  MD060: false
+
+ignores:
+  - "node_modules/**"
+  - "target/**"
+  - ".worktrees/**"
+  - ".git/**"
+  - ".beads/**"
