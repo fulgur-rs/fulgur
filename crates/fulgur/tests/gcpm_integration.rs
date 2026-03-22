@@ -155,3 +155,49 @@ fn test_deterministic_output() {
 
     assert_eq!(pdf1, pdf2, "Same input must produce identical PDF output");
 }
+
+#[test]
+fn test_gcpm_id_selector_running_element() {
+    let css = r#"
+        #doc-title { position: running(pageTitle); }
+        @page { @top-center { content: element(pageTitle); } }
+    "#;
+    let html = r#"<!DOCTYPE html>
+    <html><body>
+      <div id="doc-title">My Document</div>
+      <p>Body content</p>
+    </body></html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render with ID selector running element");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_gcpm_tag_selector_running_element() {
+    let css = r#"
+        header { position: running(pageHeader); }
+        @page { @top-center { content: element(pageHeader); } }
+    "#;
+    let html = r#"<!DOCTYPE html>
+    <html><body>
+      <header>Document Header</header>
+      <p>Body content</p>
+    </body></html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render with tag selector running element");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}

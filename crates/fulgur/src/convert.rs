@@ -1,6 +1,7 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
 use crate::gcpm::GcpmContext;
+use crate::gcpm::ParsedSelector;
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::pageable::{
     BlockPageable, BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
@@ -233,17 +234,18 @@ fn collect_positioned_children(
 
 /// Check if a node is a running element.
 /// Since the CSS preprocessor replaced `position: running(name)` with `display: none`,
-/// we identify running elements by checking if they have a class matching a known running name.
-/// Elements with `display: none` will typically have zero-size layout, but we rely on the
-/// class name match against `running_names` from the GCPM context.
+/// we identify running elements by matching them against parsed CSS selectors (class, id,
+/// or tag) from the GCPM context's `running_mappings`.
 fn is_running_element(node: &Node, ctx: &GcpmContext) -> bool {
-    if ctx.running_names.is_empty() {
+    if ctx.running_mappings.is_empty() {
         return false;
     }
     let Some(elem) = node.element_data() else {
         return false;
     };
-    has_matching_running_name(elem, ctx)
+    ctx.running_mappings
+        .iter()
+        .any(|m| matches_selector(&m.parsed, elem))
 }
 
 fn get_class_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
@@ -253,22 +255,33 @@ fn get_class_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
         .map(|a| a.value.as_ref())
 }
 
-fn has_matching_running_name(elem: &blitz_dom::node::ElementData, ctx: &GcpmContext) -> bool {
-    let Some(class_attr) = get_class_attr(elem) else {
-        return false;
-    };
-    class_attr
-        .split_whitespace()
-        .any(|cls| ctx.running_names.contains(cls))
+fn get_id_attr(elem: &blitz_dom::node::ElementData) -> Option<&str> {
+    elem.attrs()
+        .iter()
+        .find(|a| a.name.local.as_ref() == "id")
+        .map(|a| a.value.as_ref())
+}
+
+fn get_tag_name(elem: &blitz_dom::node::ElementData) -> &str {
+    elem.name.local.as_ref()
+}
+
+fn matches_selector(selector: &ParsedSelector, elem: &blitz_dom::node::ElementData) -> bool {
+    match selector {
+        ParsedSelector::Class(name) => get_class_attr(elem)
+            .map(|cls| cls.split_whitespace().any(|c| c == name))
+            .unwrap_or(false),
+        ParsedSelector::Id(name) => get_id_attr(elem).map(|id| id == name).unwrap_or(false),
+        ParsedSelector::Tag(name) => get_tag_name(elem).eq_ignore_ascii_case(name),
+    }
 }
 
 fn get_running_name(node: &Node, ctx: &GcpmContext) -> Option<String> {
     let elem = node.element_data()?;
-    let class_attr = get_class_attr(elem)?;
-    class_attr
-        .split_whitespace()
-        .find(|cls| ctx.running_names.contains(*cls))
-        .map(|s| s.to_string())
+    ctx.running_mappings
+        .iter()
+        .find(|m| matches_selector(&m.parsed, elem))
+        .map(|m| m.running_name.clone())
 }
 
 /// Convert a table element into a TablePageable with header/body cell groups.
