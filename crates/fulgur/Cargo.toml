@@ -15,6 +15,7 @@ categories = ["text-processing", "command-line-utilities"]
 libc = "0.2"
 
 [dependencies]
+cssparser = "0.35"
 krilla = "0.6.0"
 blitz-html = "0.2"
 blitz-dom = "0.2"
