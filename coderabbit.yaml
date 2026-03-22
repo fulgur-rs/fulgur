@@ -1,0 +1,5 @@
+reviews:
+  tools:
+    markdownlint-cli2:
+      path_filters:
+        - "!docs/plans/**"
