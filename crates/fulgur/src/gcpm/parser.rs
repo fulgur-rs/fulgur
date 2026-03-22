@@ -506,6 +506,15 @@ fn build_cleaned_css(css: &str, edits: &mut [CssEdit]) -> String {
         }
 
         cursor = end;
+
+        // For Remove edits, cssparser's parse_block ends before the closing '}'.
+        // Skip the '}' that the framework consumes after parse_block returns.
+        if matches!(edit, CssEdit::Remove { .. })
+            && cursor < css.len()
+            && css.as_bytes()[cursor] == b'}'
+        {
+            cursor += 1;
+        }
     }
 
     // Copy any remaining text after the last edit
@@ -582,6 +591,16 @@ mod tests {
         assert!(ctx.cleaned_css.contains("body { color: red; }"));
         assert!(ctx.cleaned_css.contains("p { margin: 0; }"));
         assert!(!ctx.cleaned_css.contains("@page"));
+        // Verify no stray closing brace from @page removal
+        let without_rules = ctx
+            .cleaned_css
+            .replace("body { color: red; }", "")
+            .replace("p { margin: 0; }", "");
+        assert!(
+            !without_rules.contains('}'),
+            "stray brace in cleaned_css: {:?}",
+            ctx.cleaned_css
+        );
     }
 
     #[test]

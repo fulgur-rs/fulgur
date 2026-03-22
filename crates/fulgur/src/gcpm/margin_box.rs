@@ -46,7 +46,10 @@ impl MarginBoxPosition {
     ///
     /// Accepts names like `"top-center"`, `"bottom-left-corner"`, etc.
     pub fn from_at_keyword(name: &str) -> Option<Self> {
-        match name {
+        // CSS at-rule names are ASCII case-insensitive.
+        // cssparser does not lowercase at-rule names before passing them here.
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
             "top-left-corner" => Some(Self::TopLeftCorner),
             "top-left" => Some(Self::TopLeft),
             "top-center" => Some(Self::TopCenter),
