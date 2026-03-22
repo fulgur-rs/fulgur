@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-03-22
+
+### Bug Fixes
+
+- use --unreleased instead of --latest for release notes generation
+- correct crate name in README (fulgur_core → fulgur)
+- use imported Engine instead of fully-qualified path in README
+- address PR review — stray } in cleaned_css, case-insensitive at-rules
+- reject compound/group selectors, add regression tests and PDF header checks
+- skip running extraction for unsupported selectors to prevent stale display:none
+
+### Documentation
+
+- add cssparser rewrite implementation plan
+
+### Features
+
+- add ParsedSelector and RunningMapping types, replace running_names in GcpmContext
+
+### Miscellaneous
+
+- stop tracking .beads/issues.jsonl
+- enable beads sync-branch config
+- add cssparser as direct dependency for GCPM parser
+
+### Refactor
+
+- rewrite GCPM parser to use cssparser crate
+- simplify QualifiedRuleParser prelude type and remove dead code
+- switch convert.rs DOM matching from class names to ParsedSelector
+
+### Styling
+
+- apply cargo fmt
+
+### Testing
+
+- add edge case tests for cssparser-based GCPM parser
+- add integration tests for ID and tag selector running elements
+
 ## [0.2.0] - 2026-03-21
 
 ### Bug Fixes
@@ -57,6 +97,10 @@ All notable changes to this project will be documented in this file.
 - add text-decoration visual test fixture
 - add border-radius integration tests and example
 - add table header repeat tests and example
+
+### Release
+
+- v0.2.0
 
 ## [0.1.1] - 2026-03-21
 
