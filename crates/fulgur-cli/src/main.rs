@@ -94,10 +94,15 @@ fn parse_page_size(s: &str) -> PageSize {
 }
 
 fn parse_margin(s: &str) -> Margin {
-    let values: Vec<f32> = s
-        .split_whitespace()
-        .filter_map(|v| v.parse().ok())
-        .collect();
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let values: Vec<f32> = tokens.iter().filter_map(|v| v.parse().ok()).collect();
+    if values.len() != tokens.len() {
+        eprintln!(
+            "Invalid margin '{}': all values must be numbers (mm). Using default 20mm",
+            s
+        );
+        return Margin::default();
+    }
     let to_pt = |mm: f32| mm * 72.0 / 25.4;
     match values.as_slice() {
         [all] => Margin::uniform(to_pt(*all)),
@@ -136,7 +141,7 @@ fn main() {
             authors,
             description,
             keywords,
-            language: _,
+            language,
             creator,
             producer,
             creation_date,
@@ -194,6 +199,9 @@ fn main() {
             }
             if !keywords.is_empty() {
                 builder = builder.keywords(keywords);
+            }
+            if let Some(language) = language {
+                builder = builder.lang(language);
             }
             if let Some(creator) = creator {
                 builder = builder.creator(creator);

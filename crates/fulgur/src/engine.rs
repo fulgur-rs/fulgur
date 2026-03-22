@@ -133,6 +133,11 @@ impl EngineBuilder {
         self
     }
 
+    pub fn lang(mut self, lang: impl Into<String>) -> Self {
+        self.config_builder = self.config_builder.lang(lang);
+        self
+    }
+
     pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config_builder = self.config_builder.authors(authors);
         self
