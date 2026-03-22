@@ -1,7 +1,434 @@
 use std::collections::HashSet;
 
+use cssparser::{
+    AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, ParseError, Parser,
+    ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
+};
+
 use super::margin_box::MarginBoxPosition;
 use super::{ContentItem, CounterType, GcpmContext, MarginBoxRule};
+
+// ---------------------------------------------------------------------------
+// Top-level result types
+// ---------------------------------------------------------------------------
+
+/// A parsed item from the top-level stylesheet scan.
+/// The variants carry no data; results are accumulated via mutable references.
+enum TopLevelItem {
+    /// An `@page` rule was found.
+    PageRule,
+    /// A qualified rule (style rule) was found.
+    StyleRule,
+}
+
+// ---------------------------------------------------------------------------
+// 1. Top-level parser (GcpmSheetParser)
+// ---------------------------------------------------------------------------
+
+/// Collects byte-offset spans of `@page` rules and `position: running(...)` declarations
+/// so that `cleaned_css` can be assembled from the original source.
+struct GcpmSheetParser<'a> {
+    /// Byte ranges to remove (for `@page` blocks) or replace (for running decls).
+    edits: &'a mut Vec<CssEdit>,
+    margin_boxes: &'a mut Vec<MarginBoxRule>,
+    running_names: &'a mut HashSet<String>,
+}
+
+/// Describes a region in the original CSS to edit when building `cleaned_css`.
+enum CssEdit {
+    /// Remove the byte range entirely (used for `@page` blocks).
+    Remove { start: usize, end: usize },
+    /// Replace the byte range with the given text (used for `position: running(...)`).
+    Replace {
+        start: usize,
+        end: usize,
+        replacement: String,
+    },
+}
+
+impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
+    type Prelude = Option<String>; // page selector
+    type AtRule = TopLevelItem;
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        if !name.eq_ignore_ascii_case("page") {
+            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+        }
+
+        // Optional page selector like `:first`
+        let page_selector = input
+            .try_parse(|input| -> Result<String, ParseError<'i, ()>> {
+                input.expect_colon()?;
+                let ident = input.expect_ident()?.clone();
+                Ok(format!(":{}", &*ident))
+            })
+            .ok();
+
+        Ok(page_selector)
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        page_selector: Self::Prelude,
+        start: &cssparser::ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        let mut boxes = Vec::new();
+        parse_page_block(input, &page_selector, &mut boxes);
+
+        // Record the full @page rule span for removal.
+        let start_offset = start.position().byte_index();
+        let end_offset = input.position().byte_index();
+        self.edits.push(CssEdit::Remove {
+            start: start_offset,
+            end: end_offset,
+        });
+
+        self.margin_boxes.extend(boxes);
+        Ok(TopLevelItem::PageRule)
+    }
+}
+
+impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
+    type Prelude = usize; // byte offset of rule start (before selector)
+    type QualifiedRule = TopLevelItem;
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        let rule_start = input.position().byte_index();
+        // Consume the prelude (selector) — we don't need it
+        while input.next_including_whitespace().is_ok() {}
+        Ok(rule_start)
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        _prelude: Self::Prelude,
+        _start: &cssparser::ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
+        let mut running_name: Option<String> = None;
+
+        let mut parser = StyleRuleParser {
+            edits: self.edits,
+            running_name: &mut running_name,
+        };
+        let iter = RuleBodyParser::new(input, &mut parser);
+        for item in iter {
+            let _ = item;
+        }
+
+        if let Some(ref name) = running_name {
+            self.running_names.insert(name.clone());
+        }
+
+        Ok(TopLevelItem::StyleRule)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. @page block parser (PageRuleParser) — uses RuleBodyParser
+// ---------------------------------------------------------------------------
+
+fn parse_page_block(
+    input: &mut Parser<'_, '_>,
+    page_selector: &Option<String>,
+    boxes: &mut Vec<MarginBoxRule>,
+) {
+    let mut parser = PageRuleParser {
+        page_selector,
+        boxes,
+    };
+    let iter = RuleBodyParser::new(input, &mut parser);
+    for item in iter {
+        let _ = item;
+    }
+}
+
+struct PageRuleParser<'a> {
+    page_selector: &'a Option<String>,
+    boxes: &'a mut Vec<MarginBoxRule>,
+}
+
+impl<'i, 'a> AtRuleParser<'i> for PageRuleParser<'a> {
+    type Prelude = MarginBoxPosition;
+    type AtRule = ();
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        let _ = input;
+        MarginBoxPosition::from_at_keyword(&name)
+            .ok_or_else(|| input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        position: Self::Prelude,
+        _start: &cssparser::ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        let mut content_items = Vec::new();
+        let mut declarations = String::new();
+
+        let mut parser = MarginBoxParser {
+            content: &mut content_items,
+            declarations: &mut declarations,
+        };
+        let iter = RuleBodyParser::new(input, &mut parser);
+        for item in iter {
+            let _ = item;
+        }
+
+        self.boxes.push(MarginBoxRule {
+            page_selector: self.page_selector.clone(),
+            position,
+            content: content_items,
+            declarations,
+        });
+
+        Ok(())
+    }
+}
+
+impl<'i, 'a> DeclarationParser<'i> for PageRuleParser<'a> {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _start: &cssparser::ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        // Skip declarations directly inside @page (not inside margin boxes)
+        let _ = name;
+        while input.next().is_ok() {}
+        Ok(())
+    }
+}
+
+impl<'i, 'a> QualifiedRuleParser<'i> for PageRuleParser<'a> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for PageRuleParser<'a> {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Margin box block parser (MarginBoxParser)
+// ---------------------------------------------------------------------------
+
+struct MarginBoxParser<'a> {
+    content: &'a mut Vec<ContentItem>,
+    declarations: &'a mut String,
+}
+
+impl<'i, 'a> DeclarationParser<'i> for MarginBoxParser<'a> {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _start: &cssparser::ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        if name.eq_ignore_ascii_case("content") {
+            *self.content = parse_content_value(input);
+        } else {
+            // Accumulate other declarations as raw text
+            let start_pos = input.position();
+            while input.next_including_whitespace().is_ok() {}
+            let value_str = input.slice_from(start_pos).trim();
+            if !self.declarations.is_empty() {
+                self.declarations.push_str("; ");
+            }
+            self.declarations.push_str(&name);
+            self.declarations.push_str(": ");
+            self.declarations.push_str(value_str);
+        }
+        Ok(())
+    }
+}
+
+impl<'i, 'a> AtRuleParser<'i> for MarginBoxParser<'a> {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
+
+impl<'i, 'a> QualifiedRuleParser<'i> for MarginBoxParser<'a> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for MarginBoxParser<'a> {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. Style rule block parser (StyleRuleParser)
+// ---------------------------------------------------------------------------
+
+struct StyleRuleParser<'a> {
+    edits: &'a mut Vec<CssEdit>,
+    running_name: &'a mut Option<String>,
+}
+
+impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        decl_start: &cssparser::ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        if !name.eq_ignore_ascii_case("position") {
+            // Skip non-position declarations
+            while input.next().is_ok() {}
+            return Ok(());
+        }
+
+        // Try to parse `running(<name>)`
+        let result = input.try_parse(|input| {
+            let fn_name = input.expect_function()?.clone();
+            if !fn_name.eq_ignore_ascii_case("running") {
+                return Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid));
+            }
+            input.parse_nested_block(|input| {
+                let ident = input.expect_ident()?.clone();
+                Ok(ident.to_string())
+            })
+        });
+
+        if let Ok(running_name) = result {
+            *self.running_name = Some(running_name);
+
+            // Record the edit: replace `position: running(...)` with `display: none`
+            // The decl_start points to just before the property name (the ident token).
+            let decl_start_byte = decl_start.position().byte_index();
+            let end_byte = input.position().byte_index();
+            self.edits.push(CssEdit::Replace {
+                start: decl_start_byte,
+                end: end_byte,
+                replacement: "display: none".to_string(),
+            });
+        } else {
+            // Not running(...), skip the rest
+            while input.next().is_ok() {}
+        }
+
+        Ok(())
+    }
+}
+
+impl<'i, 'a> AtRuleParser<'i> for StyleRuleParser<'a> {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
+
+impl<'i, 'a> QualifiedRuleParser<'i> for StyleRuleParser<'a> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for StyleRuleParser<'a> {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Content value parser
+// ---------------------------------------------------------------------------
+
+/// Parse a `content` property value into a list of `ContentItem`s using cssparser.
+/// Handles: `element(<name>)`, `counter(page)`, `counter(pages)`, `"string"`.
+fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
+    let mut items = Vec::new();
+
+    loop {
+        if input.is_exhausted() {
+            break;
+        }
+
+        let result: Result<(), ParseError<'_, ()>> = input.try_parse(|input| {
+            let token = input.next_including_whitespace()?.clone();
+            match token {
+                Token::QuotedString(ref s) => {
+                    items.push(ContentItem::String(s.to_string()));
+                }
+                Token::Function(ref name) => {
+                    let fn_name = name.clone();
+                    input.parse_nested_block(|input| {
+                        let arg = input.expect_ident()?.clone();
+                        if fn_name.eq_ignore_ascii_case("element") {
+                            items.push(ContentItem::Element(arg.to_string()));
+                        } else if fn_name.eq_ignore_ascii_case("counter") {
+                            match &*arg {
+                                "page" => items.push(ContentItem::Counter(CounterType::Page)),
+                                "pages" => items.push(ContentItem::Counter(CounterType::Pages)),
+                                _ => {} // unknown counter
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                Token::WhiteSpace(_) | Token::Comment(_) => {
+                    // skip
+                }
+                _ => {
+                    // skip unknown tokens
+                }
+            }
+            Ok(())
+        });
+
+        if result.is_err() {
+            // If we can't parse the next token at all, break out
+            break;
+        }
+    }
+
+    items
+}
+
+// ---------------------------------------------------------------------------
+// 6. Main entry point
+// ---------------------------------------------------------------------------
 
 /// Parse a CSS string, extracting GCPM constructs and returning a `GcpmContext`.
 ///
@@ -9,97 +436,29 @@ use super::{ContentItem, CounterType, GcpmContext, MarginBoxRule};
 /// - `@page { @<position> { content: ...; } }` blocks are extracted as margin box rules
 /// - All other CSS is preserved verbatim in `cleaned_css`
 pub fn parse_gcpm(css: &str) -> GcpmContext {
-    let mut running_names = HashSet::new();
     let mut margin_boxes = Vec::new();
-    let mut cleaned_css = String::with_capacity(css.len());
+    let mut running_names = HashSet::new();
+    let mut edits: Vec<CssEdit> = Vec::new();
 
-    let len = css.len();
-    let mut i = 0;
+    // Run the cssparser-based parse to collect GCPM data and edit spans.
+    {
+        let mut input = ParserInput::new(css);
+        let mut input = Parser::new(&mut input);
 
-    while i < len {
-        let remaining = &css[i..];
-        let ch = remaining.chars().next().unwrap();
-        let ch_len = ch.len_utf8();
+        let mut parser = GcpmSheetParser {
+            edits: &mut edits,
+            margin_boxes: &mut margin_boxes,
+            running_names: &mut running_names,
+        };
 
-        // Skip CSS comments /* ... */
-        if remaining.starts_with("/*") {
-            if let Some(end) = css[i + 2..].find("*/") {
-                cleaned_css.push_str(&css[i..i + 2 + end + 2]);
-                i += 2 + end + 2;
-            } else {
-                // Unterminated comment — copy the rest
-                cleaned_css.push_str(remaining);
-                break;
-            }
-            continue;
+        let iter = StyleSheetParser::new(&mut input, &mut parser);
+        for item in iter {
+            let _ = item;
         }
-
-        // Skip string literals "..." and '...'
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
-            let mut j = i + 1;
-            while j < len {
-                let c = css[j..].chars().next().unwrap();
-                if c == '\\' {
-                    j += c.len_utf8();
-                    if j < len {
-                        j += css[j..].chars().next().unwrap().len_utf8();
-                    }
-                } else if c == quote {
-                    j += 1;
-                    break;
-                } else {
-                    j += c.len_utf8();
-                }
-            }
-            cleaned_css.push_str(&css[i..j]);
-            i = j;
-            continue;
-        }
-
-        // Check for @page rule
-        if ch == '@' {
-            if let Some(rest) = css.get(i + 1..) {
-                if rest.starts_with("page") {
-                    let after_page = i + 5; // after "@page"
-                    let after_page_ch = css[after_page..].chars().next();
-                    // Make sure it's not @page-something (must be followed by whitespace, {, or :)
-                    if after_page >= len
-                        || matches!(after_page_ch, Some(c) if c.is_ascii_whitespace() || c == '{' || c == ':')
-                    {
-                        if let Some((consumed, page_sel, boxes)) = parse_page_rule(&css[i..]) {
-                            margin_boxes.extend(boxes);
-                            // Skip the entire @page block (don't add to cleaned_css)
-                            // but preserve a newline to avoid merging adjacent rules
-                            if !cleaned_css.is_empty()
-                                && !cleaned_css.ends_with('\n')
-                                && !cleaned_css.ends_with(' ')
-                            {
-                                cleaned_css.push('\n');
-                            }
-                            let _ = page_sel; // used inside parse_page_rule
-                            i += consumed;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check for position: running(...)
-        if ch == 'p' || ch == 'P' {
-            if let Some(result) = try_parse_running(&css[i..]) {
-                let (name, replacement, consumed) = result;
-                running_names.insert(name);
-                cleaned_css.push_str(&replacement);
-                i += consumed;
-                continue;
-            }
-        }
-
-        cleaned_css.push_str(&css[i..i + ch_len]);
-        i += ch_len;
     }
+
+    // Build cleaned_css by applying edits to the original CSS.
+    let cleaned_css = build_cleaned_css(css, &mut edits);
 
     GcpmContext {
         margin_boxes,
@@ -108,342 +467,55 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     }
 }
 
-/// Try to parse `position\s*:\s*running\s*(\s*<name>\s*)` at the current position.
-/// Returns (name, replacement_text, chars_consumed) or None.
-fn try_parse_running(s: &str) -> Option<(String, String, usize)> {
-    // Match "position" case-insensitively
-    let lower = s.get(..8)?;
-    if !lower.eq_ignore_ascii_case("position") {
-        return None;
+/// Build `cleaned_css` from the original CSS and a list of edits.
+/// Edits must not overlap. They are sorted by start position.
+fn build_cleaned_css(css: &str, edits: &mut [CssEdit]) -> String {
+    if edits.is_empty() {
+        return css.to_string();
     }
 
-    let rest = &s[8..];
-    let mut idx = 0;
+    // Sort by start position
+    edits.sort_by_key(|e| match e {
+        CssEdit::Remove { start, .. } => *start,
+        CssEdit::Replace { start, .. } => *start,
+    });
 
-    // Skip whitespace
-    while idx < rest.len() && rest.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
+    let mut result = String::with_capacity(css.len());
+    let mut cursor = 0;
 
-    // Expect ':'
-    if idx >= rest.len() || rest.as_bytes()[idx] != b':' {
-        return None;
-    }
-    idx += 1;
+    for edit in edits.iter() {
+        let (start, end) = match edit {
+            CssEdit::Remove { start, end } => (*start, *end),
+            CssEdit::Replace { start, end, .. } => (*start, *end),
+        };
 
-    // Skip whitespace
-    while idx < rest.len() && rest.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-
-    // Expect "running"
-    let after_colon = &rest[idx..];
-    if !after_colon.starts_with("running") {
-        return None;
-    }
-    idx += 7;
-
-    // Skip whitespace
-    while idx < rest.len() && rest.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-
-    // Expect '('
-    if idx >= rest.len() || rest.as_bytes()[idx] != b'(' {
-        return None;
-    }
-    idx += 1;
-
-    // Skip whitespace
-    while idx < rest.len() && rest.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-
-    // Read name (alphanumeric, hyphen, underscore)
-    let name_start = idx;
-    while idx < rest.len() {
-        let c = rest.as_bytes()[idx];
-        if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' {
-            idx += 1;
-        } else {
-            break;
+        // Copy verbatim text before this edit
+        if cursor < start {
+            result.push_str(&css[cursor..start]);
         }
-    }
-    let name = rest[name_start..idx].to_string();
-    if name.is_empty() {
-        return None;
-    }
 
-    // Skip whitespace
-    while idx < rest.len() && rest.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-
-    // Expect ')'
-    if idx >= rest.len() || rest.as_bytes()[idx] != b')' {
-        return None;
-    }
-    idx += 1;
-
-    let total_consumed = 8 + idx; // "position" + rest consumed
-    Some((name, "display: none".to_string(), total_consumed))
-}
-
-/// Parse an `@page` rule starting at `s`.
-/// Returns (chars_consumed, page_selector, Vec<MarginBoxRule>) or None.
-fn parse_page_rule(s: &str) -> Option<(usize, Option<String>, Vec<MarginBoxRule>)> {
-    // s starts with "@page"
-    let mut idx = 5; // skip "@page"
-
-    // Skip whitespace
-    while idx < s.len() && s.as_bytes()[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-
-    // Check for optional page selector (e.g. ":first", ":left", ":right")
-    let mut page_selector = None;
-    if idx < s.len() && s.as_bytes()[idx] == b':' {
-        let sel_start = idx;
-        idx += 1;
-        // Read selector name
-        while idx < s.len() && s.as_bytes()[idx].is_ascii_alphanumeric() {
-            idx += 1;
-        }
-        page_selector = Some(s[sel_start..idx].to_string());
-
-        // Skip whitespace after selector
-        while idx < s.len() && s.as_bytes()[idx].is_ascii_whitespace() {
-            idx += 1;
-        }
-    }
-
-    // Expect '{'
-    if idx >= s.len() || s.as_bytes()[idx] != b'{' {
-        return None;
-    }
-
-    // Find matching brace
-    let (inner, end_pos) = find_matching_brace(&s[idx..])?;
-    let total_consumed = idx + end_pos + 1; // +1 for closing '}'
-
-    let mut boxes = Vec::new();
-    parse_margin_boxes(&inner, &page_selector, &mut boxes);
-
-    Some((total_consumed, page_selector, boxes))
-}
-
-/// Given a string starting with '{', find the matching '}' and return
-/// (inner_content_without_braces, position_of_closing_brace_relative_to_input).
-fn find_matching_brace(s: &str) -> Option<(String, usize)> {
-    if s.as_bytes().first()? != &b'{' {
-        return None;
-    }
-
-    let mut depth = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((s[1..i].to_string(), i));
+        // Apply the edit
+        match edit {
+            CssEdit::Remove { .. } => {
+                // For @page removal, insert a newline separator if needed
+                if !result.is_empty() && !result.ends_with('\n') && !result.ends_with(' ') {
+                    result.push('\n');
                 }
             }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Parse the inner content of an `@page { ... }` block for margin box at-rules.
-fn parse_margin_boxes(
-    content: &str,
-    page_selector: &Option<String>,
-    boxes: &mut Vec<MarginBoxRule>,
-) {
-    let bytes = content.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        // Look for @<keyword>
-        if bytes[i] == b'@' {
-            i += 1;
-            // Skip whitespace
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            // Read keyword
-            let kw_start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-') {
-                i += 1;
-            }
-            let keyword = &content[kw_start..i];
-
-            // Skip whitespace
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-
-            // Expect '{'
-            if i < bytes.len() && bytes[i] == b'{' {
-                if let Some(position) = MarginBoxPosition::from_at_keyword(keyword) {
-                    if let Some((inner, end_pos)) = find_matching_brace(&content[i..]) {
-                        let (content_items, declarations) = parse_content_property(&inner);
-                        boxes.push(MarginBoxRule {
-                            page_selector: page_selector.clone(),
-                            position,
-                            content: content_items,
-                            declarations,
-                        });
-                        i += end_pos + 1;
-                        continue;
-                    }
-                }
-                // Unknown at-rule or parse failure — skip the block
-                if let Some((_, end_pos)) = find_matching_brace(&content[i..]) {
-                    i += end_pos + 1;
-                    continue;
-                }
+            CssEdit::Replace { replacement, .. } => {
+                result.push_str(replacement);
             }
         }
 
-        i += 1;
-    }
-}
-
-/// Parse the declarations block of a margin box, extracting the `content` property
-/// and returning (content_items, remaining_declarations).
-fn parse_content_property(block: &str) -> (Vec<ContentItem>, String) {
-    let mut content_items = Vec::new();
-    let mut declarations = String::new();
-
-    // Split by semicolons (simple approach — works for non-nested values)
-    for decl in block.split(';') {
-        let trimmed = decl.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Split on first ':'
-        if let Some(colon_pos) = trimmed.find(':') {
-            let prop = trimmed[..colon_pos].trim();
-            let value = trimmed[colon_pos + 1..].trim();
-
-            if prop.eq_ignore_ascii_case("content") {
-                content_items = parse_content_value(value);
-            } else {
-                if !declarations.is_empty() {
-                    declarations.push_str("; ");
-                }
-                declarations.push_str(trimmed);
-            }
-        }
+        cursor = end;
     }
 
-    (content_items, declarations)
-}
-
-/// Parse a `content` property value into a list of ContentItems.
-/// Handles: `element(<name>)`, `counter(page)`, `counter(pages)`, `"string"`.
-fn parse_content_value(value: &str) -> Vec<ContentItem> {
-    let mut items = Vec::new();
-    let bytes = value.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        // Skip whitespace
-        if bytes[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-
-        // String literal
-        if bytes[i] == b'"' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1; // skip escaped char
-                }
-                i += 1;
-            }
-            items.push(ContentItem::String(value[start..i].to_string()));
-            if i < bytes.len() {
-                i += 1; // skip closing quote
-            }
-            continue;
-        }
-
-        // Single-quoted string
-        if bytes[i] == b'\'' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'\'' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            items.push(ContentItem::String(value[start..i].to_string()));
-            if i < bytes.len() {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Function-like: element(...) or counter(...)
-        if bytes[i].is_ascii_alphabetic() {
-            let fn_start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_')
-            {
-                i += 1;
-            }
-            let fn_name = &value[fn_start..i];
-
-            // Skip whitespace
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-
-            if i < bytes.len() && bytes[i] == b'(' {
-                i += 1;
-                // Skip whitespace
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                let arg_start = i;
-                while i < bytes.len() && bytes[i] != b')' && !bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                let arg = value[arg_start..i].trim();
-                // Skip to closing paren
-                while i < bytes.len() && bytes[i] != b')' {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1; // skip ')'
-                }
-
-                match fn_name {
-                    "element" => {
-                        items.push(ContentItem::Element(arg.to_string()));
-                    }
-                    "counter" => match arg {
-                        "page" => items.push(ContentItem::Counter(CounterType::Page)),
-                        "pages" => items.push(ContentItem::Counter(CounterType::Pages)),
-                        _ => {} // unknown counter
-                    },
-                    _ => {} // unknown function
-                }
-            }
-            continue;
-        }
-
-        i += 1;
+    // Copy any remaining text after the last edit
+    if cursor < css.len() {
+        result.push_str(&css[cursor..]);
     }
 
-    items
+    result
 }
 
 #[cfg(test)]
