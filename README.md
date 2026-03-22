@@ -10,6 +10,7 @@ Integrates [Blitz](https://github.com/nickelpack/blitz) (HTML parsing, CSS style
 - Automatic page splitting with CSS pagination control (`break-before`, `break-after`, `break-inside`, orphans/widows)
 - Text shaping via Parley
 - Background colors, borders, and padding
+- Deterministic output (same input always produces same PDF)
 - Image embedding (PNG / JPEG / GIF)
 - Custom font bundling
 - External CSS file injection
@@ -36,6 +37,9 @@ fulgur render -o output.pdf -s Letter -l --title "My Document" input.html
 
 # Custom fonts and CSS
 fulgur render -o output.pdf -f fonts/NotoSansJP.ttf --css style.css input.html
+
+# With images
+fulgur render -o output.pdf -i logo.png=assets/logo.png -i photo.png=assets/photo.png input.html
 ```
 
 ### Options
@@ -48,12 +52,14 @@ fulgur render -o output.pdf -f fonts/NotoSansJP.ttf --css style.css input.html
 | `--title` | PDF title metadata | — |
 | `-f, --font` | Bundle font files (repeatable) | — |
 | `--css` | External CSS files (repeatable) | — |
+| `-i, --image` | Bundle image files (name=path or path, repeatable) | — |
 | `--stdin` | Read HTML from stdin | false |
 
 ## Library Usage
 
 ```rust
 use fulgur::engine::Engine;
+use fulgur::asset::AssetBundle;
 use fulgur::config::{PageSize, Margin};
 
 // Convert with default settings
@@ -69,6 +75,18 @@ let engine = Engine::builder()
 
 let pdf = engine.render_html(html)?;
 engine.render_html_to_file(html, "output.pdf")?;
+
+// With images
+let mut assets = AssetBundle::new();
+assets.add_image_file("logo.png", "assets/logo.png")?;
+
+let engine = Engine::builder()
+    .page_size(PageSize::A4)
+    .assets(assets)
+    .build();
+
+let html = r#"<img src="logo.png" style="display:block;width:100px;height:100px">"#;
+let pdf = engine.render_html(html)?;
 ```
 
 ## Architecture
