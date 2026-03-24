@@ -104,3 +104,85 @@ pub fn parse_and_layout(
 
     doc
 }
+
+/// Context available to each DOM pass.
+pub struct PassContext<'a> {
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub font_data: &'a [Arc<Vec<u8>>],
+}
+
+/// A single transformation step applied to the parsed DOM before layout resolution.
+pub trait DomPass {
+    fn apply(&self, doc: &mut HtmlDocument, ctx: &PassContext<'_>);
+}
+
+/// Parse HTML into a document without resolving styles or layout.
+pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
+    let viewport = Viewport::new(viewport_width as u32, 10000, 1.0, ColorScheme::Light);
+
+    let font_ctx = if font_data.is_empty() {
+        None
+    } else {
+        let mut ctx = FontContext::new();
+        for data in font_data {
+            let blob: parley::fontique::Blob<u8> = (**data).clone().into();
+            ctx.collection.register_fonts(blob, None);
+        }
+        Some(ctx)
+    };
+
+    let config = DocumentConfig {
+        viewport: Some(viewport),
+        font_ctx,
+        base_url: Some("file:///".to_string()),
+        ..DocumentConfig::default()
+    };
+
+    suppress_stdout(|| HtmlDocument::from_html(html, config))
+}
+
+/// Apply a sequence of DOM passes to a parsed document.
+pub fn apply_passes(doc: &mut HtmlDocument, passes: &[Box<dyn DomPass>], ctx: &PassContext<'_>) {
+    for pass in passes {
+        pass.apply(doc, ctx);
+    }
+}
+
+/// Resolve styles (Stylo) and compute layout (Taffy).
+pub fn resolve(doc: &mut HtmlDocument) {
+    doc.resolve(0.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoOpPass;
+    impl DomPass for NoOpPass {
+        fn apply(&self, _doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {}
+    }
+
+    #[test]
+    fn test_parse_resolve_roundtrip() {
+        let html = "<html><body><p>Hello</p></body></html>";
+        let mut doc = parse(html, 400.0, &[]);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(NoOpPass)], &ctx);
+        resolve(&mut doc);
+        let root = doc.root_element();
+        assert!(!root.children.is_empty());
+    }
+
+    #[test]
+    fn test_parse_and_layout_unchanged() {
+        let html = "<html><body><p>Test</p></body></html>";
+        let doc = parse_and_layout(html, 400.0, 600.0, &[]);
+        let root = doc.root_element();
+        assert!(!root.children.is_empty());
+    }
+}
