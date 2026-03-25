@@ -1,5 +1,20 @@
 coverage:
   paths:
     - lcov.info
+codeToTestRatio:
+  code:
+    - "crates/fulgur/src/**/*.rs"
+    - "!crates/fulgur/src/**/*test*"
+  test:
+    - "crates/fulgur/src/**/*test*"
+    - "crates/fulgur/tests/**/*.rs"
 comment:
   if: is_pull_request
+  deletePrevious: true
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+report:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+  if: is_default_branch
