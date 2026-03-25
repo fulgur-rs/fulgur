@@ -181,11 +181,17 @@ impl DomPass for InjectCssPass {
             }
         };
 
-        // Create <style> element, append to <head>, set innerHTML
-        let mut mutator = doc.mutate();
-        let style_id = mutator.create_element(make_qual_name("style"), vec![]);
-        mutator.append_children(head_id, &[style_id]);
-        mutator.set_inner_html(style_id, &self.css);
+        // Create <style> element with a text node child, then register with Stylo.
+        // Note: set_inner_html doesn't work because Blitz uses DummyHtmlParserProvider.
+        let style_id = {
+            let mut mutator = doc.mutate();
+            let style_id = mutator.create_element(make_qual_name("style"), vec![]);
+            let text_id = mutator.create_text_node(&self.css);
+            mutator.append_children(head_id, &[style_id]);
+            mutator.append_children(style_id, &[text_id]);
+            style_id
+        };
+        doc.upsert_stylesheet_for_node(style_id);
     }
 }
 
