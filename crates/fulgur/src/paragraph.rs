@@ -421,10 +421,10 @@ fn draw_line_decorations(
 
 /// Draw pre-shaped text lines at the given position.
 pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
-    let mut current_y = y;
-
     for line in lines {
-        let baseline_y = current_y + line.baseline;
+        // line.baseline is an absolute offset from the paragraph's top edge (from Parley),
+        // so use the paragraph start `y` directly — not a per-line accumulated offset.
+        let baseline_y = y + line.baseline;
 
         for run in &line.glyph_runs {
             // Create Krilla font from cached data
@@ -476,8 +476,6 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
 
         // Draw decorations after all glyphs so lines appear on top
         draw_line_decorations(canvas, &line.glyph_runs, x, baseline_y);
-
-        current_y += line.height;
     }
 }
 
