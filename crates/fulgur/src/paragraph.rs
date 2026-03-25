@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use skrifa::MetadataProvider;
 
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size, SplitResult};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -542,6 +542,13 @@ impl Pageable for ParagraphPageable {
         let second = ParagraphPageable::new(second_lines);
 
         Some((Box::new(first), Box::new(second)))
+    }
+
+    fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult {
+        match self.split(avail_width, avail_height) {
+            Some(pair) => Ok(pair),
+            None => Err(self),
+        }
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {

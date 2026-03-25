@@ -12,15 +12,15 @@ pub fn paginate(
     let mut remaining = root;
 
     loop {
-        match remaining.split(page_width, page_height) {
-            Some((this_page, rest)) => {
+        match remaining.split_boxed(page_width, page_height) {
+            Ok((this_page, rest)) => {
                 pages.push(this_page);
                 remaining = rest;
                 // Re-wrap the remaining content
                 remaining.wrap(page_width, page_height);
             }
-            None => {
-                pages.push(remaining);
+            Err(unsplit) => {
+                pages.push(unsplit);
                 break;
             }
         }

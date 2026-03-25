@@ -65,6 +65,11 @@ pub trait Pageable: Send + Sync {
         avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)>;
 
+    /// Split consuming the boxed value (avoids cloning children).
+    /// Returns `Ok((first, second))` on success, or `Err(self)` when no split is
+    /// possible, giving the caller back ownership.
+    fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult;
+
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
 
@@ -165,6 +170,7 @@ pub struct PositionedChild {
 }
 
 type SplitPair = (Box<dyn Pageable>, Box<dyn Pageable>);
+pub type SplitResult = Result<SplitPair, Box<dyn Pageable>>;
 
 // ─── BlockPageable ───────────────────────────────────────
 
@@ -821,6 +827,121 @@ impl Pageable for BlockPageable {
         ))
     }
 
+    fn split_boxed(self: Box<Self>, _avail_width: Pt, avail_height: Pt) -> SplitResult {
+        if self.pagination.break_inside == BreakInside::Avoid {
+            return Err(self);
+        }
+
+        let has_forced_break = self.children.iter().enumerate().any(|(i, pc)| {
+            (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
+                || (pc.child.pagination().break_after == BreakAfter::Page
+                    && i < self.children.len() - 1)
+        });
+
+        let total_height = self.cached_size.map(|s| s.height).unwrap_or(0.0);
+        if total_height <= avail_height && !has_forced_break {
+            return Err(self);
+        }
+
+        let mut split_index = self.children.len();
+        let mut split_result: Option<(usize, SplitPair)> = None;
+
+        for (i, pc) in self.children.iter().enumerate() {
+            if pc.child.pagination().break_before == BreakBefore::Page && i > 0 && pc.y > 0.0 {
+                split_index = i;
+                break;
+            }
+
+            if pc.y + pc.child.height() > avail_height {
+                let child_avail = avail_height - pc.y;
+                if let Some(parts) = (child_avail > 0.0)
+                    .then(|| pc.child.split(0.0, child_avail))
+                    .flatten()
+                {
+                    split_result = Some((i, parts));
+                } else if i == 0 && self.children.len() == 1 {
+                    return Err(self);
+                } else {
+                    split_index = i.max(1);
+                }
+                break;
+            }
+
+            if pc.child.pagination().break_after == BreakAfter::Page {
+                split_index = i + 1;
+                break;
+            }
+        }
+
+        let mut me = *self;
+
+        if let Some((idx, (first_part, second_part))) = split_result {
+            let split_child_x = me.children[idx].x;
+            let split_child_y = me.children[idx].y;
+
+            let mut tail = me.children.split_off(idx + 1);
+            let _split_child = me.children.pop().unwrap(); // remove the split child
+            let mut first = me.children; // children[..idx]
+
+            first.push(PositionedChild {
+                child: first_part,
+                x: split_child_x,
+                y: split_child_y,
+            });
+
+            // Shift tail y coordinates
+            for pc in &mut tail {
+                pc.y -= split_child_y;
+            }
+
+            let mut second = vec![PositionedChild {
+                child: second_part,
+                x: split_child_x,
+                y: 0.0,
+            }];
+            second.append(&mut tail);
+
+            return Ok((
+                Box::new(
+                    BlockPageable::with_positioned_children(first)
+                        .with_pagination(me.pagination)
+                        .with_style(me.style.clone()),
+                ),
+                Box::new(
+                    BlockPageable::with_positioned_children(second)
+                        .with_pagination(me.pagination)
+                        .with_style(me.style),
+                ),
+            ));
+        }
+
+        if split_index == 0 || split_index >= me.children.len() {
+            return Err(Box::new(me));
+        }
+
+        let split_y = me.children[split_index].y;
+        let mut second_children = me.children.split_off(split_index);
+        let first_children = me.children;
+
+        // Shift y coordinates on second fragment
+        for pc in &mut second_children {
+            pc.y -= split_y;
+        }
+
+        Ok((
+            Box::new(
+                BlockPageable::with_positioned_children(first_children)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style.clone()),
+            ),
+            Box::new(
+                BlockPageable::with_positioned_children(second_children)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style),
+            ),
+        ))
+    }
+
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
         let total_width = self
@@ -893,6 +1014,10 @@ impl Pageable for SpacerPageable {
         None
     }
 
+    fn split_boxed(self: Box<Self>, _avail_width: Pt, _avail_height: Pt) -> SplitResult {
+        Err(self)
+    }
+
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {
         // Spacers are invisible
     }
@@ -962,6 +1087,34 @@ impl Pageable for ListItemPageable {
                 body: bottom_body,
                 style: self.style.clone(),
                 width: self.width,
+                height: 0.0,
+            }),
+        ))
+    }
+
+    fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult {
+        let me = *self;
+        let (top_body, bottom_body) = match me.body.split_boxed(avail_width, avail_height) {
+            Ok(pair) => pair,
+            Err(body) => {
+                return Err(Box::new(ListItemPageable { body, ..me }));
+            }
+        };
+        Ok((
+            Box::new(ListItemPageable {
+                marker_lines: me.marker_lines,
+                marker_width: me.marker_width,
+                body: top_body,
+                style: me.style.clone(),
+                width: me.width,
+                height: 0.0,
+            }),
+            Box::new(ListItemPageable {
+                marker_lines: Vec::new(),
+                marker_width: 0.0,
+                body: bottom_body,
+                style: me.style,
+                width: me.width,
                 height: 0.0,
             }),
         ))
@@ -1094,6 +1247,67 @@ impl Pageable for TablePageable {
                 style: self.style.clone(),
                 layout_size: None,
                 width: self.width,
+                cached_height: 0.0,
+            }),
+        ))
+    }
+
+    fn split_boxed(self: Box<Self>, _avail_width: Pt, avail_height: Pt) -> SplitResult {
+        // Find the first body cell that overflows the available height
+        let overflow_index = self
+            .body_cells
+            .iter()
+            .position(|pc| pc.y + pc.child.height() > avail_height);
+
+        let overflow_index = match overflow_index {
+            Some(0) | None => return Err(self),
+            Some(i) => i,
+        };
+
+        // Snap to the start of the row containing the overflow cell.
+        let overflow_y = self.body_cells[overflow_index].y;
+        let split_index = self.body_cells[..overflow_index]
+            .iter()
+            .rposition(|pc| pc.y < overflow_y)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if split_index == 0 {
+            return Err(self);
+        }
+
+        let split_y = self.body_cells[split_index].y;
+        let mut me = *self;
+
+        let mut second_body = me.body_cells.split_off(split_index);
+        let first_body = me.body_cells;
+
+        // Shift y coordinates on second fragment body cells
+        let header_height = me.header_height;
+        for pc in &mut second_body {
+            pc.y = header_height + (pc.y - split_y);
+        }
+
+        // Headers: clone for first, move for second
+        let first_header = clone_children(&me.header_cells, 0.0);
+
+        Ok((
+            Box::new(TablePageable {
+                header_cells: first_header,
+                body_cells: first_body,
+                header_height,
+                style: me.style.clone(),
+                layout_size: None,
+                width: me.width,
+                cached_height: 0.0,
+            }),
+            Box::new(TablePageable {
+                header_cells: me.header_cells,
+                body_cells: second_body,
+                header_height,
+                style: me.style,
+                layout_size: None,
+                width: me.width,
                 cached_height: 0.0,
             }),
         ))
