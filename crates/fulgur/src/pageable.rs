@@ -68,7 +68,12 @@ pub trait Pageable: Send + Sync {
     /// Split consuming the boxed value (avoids cloning children).
     /// Returns `Ok((first, second))` on success, or `Err(self)` when no split is
     /// possible, giving the caller back ownership.
-    fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult;
+    fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult {
+        match self.split(avail_width, avail_height) {
+            Some(pair) => Ok(pair),
+            None => Err(self.clone_box()),
+        }
+    }
 
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
@@ -994,10 +999,6 @@ impl Pageable for SpacerPageable {
         None
     }
 
-    fn split_boxed(self: Box<Self>, _avail_width: Pt, _avail_height: Pt) -> SplitResult {
-        Err(self)
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {
         // Spacers are invisible
     }
@@ -1438,5 +1439,82 @@ mod tests {
         // Second part has no marker
         let second_item = second.as_any().downcast_ref::<ListItemPageable>().unwrap();
         assert!((second_item.marker_width - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_table_split_boxed_repeats_headers_and_rebases_y() {
+        // Header row at y=0, height=30
+        let header = vec![PositionedChild {
+            child: make_spacer(30.0),
+            x: 0.0,
+            y: 0.0,
+        }];
+
+        // Three body rows at y=30, y=80, y=130 (each 50pt tall)
+        let body = vec![
+            PositionedChild {
+                child: make_spacer(50.0),
+                x: 0.0,
+                y: 30.0,
+            },
+            PositionedChild {
+                child: make_spacer(50.0),
+                x: 0.0,
+                y: 80.0,
+            },
+            PositionedChild {
+                child: make_spacer(50.0),
+                x: 0.0,
+                y: 130.0,
+            },
+        ];
+
+        let mut table = TablePageable {
+            header_cells: header,
+            body_cells: body,
+            header_height: 30.0,
+            style: BlockStyle::default(),
+            layout_size: None,
+            width: 200.0,
+            cached_height: 0.0,
+        };
+        table.wrap(200.0, 1000.0);
+
+        // Available height = 120pt → header(30) + first body row(50) fits,
+        // second body row at y=80 with height 50 overflows (80+50=130 > 120).
+        let concrete: Box<TablePageable> = Box::new(table);
+
+        let result = concrete.split_boxed(200.0, 120.0);
+        assert!(result.is_ok(), "split_boxed should return Ok");
+
+        let (first, second) = match result {
+            Ok(pair) => pair,
+            Err(_) => panic!("split_boxed returned Err"),
+        };
+        let first_table = first.as_any().downcast_ref::<TablePageable>().unwrap();
+        let second_table = second.as_any().downcast_ref::<TablePageable>().unwrap();
+
+        // Both fragments have headers
+        assert_eq!(first_table.header_cells.len(), 1);
+        assert_eq!(second_table.header_cells.len(), 1);
+
+        // First fragment: 1 body row
+        assert_eq!(first_table.body_cells.len(), 1);
+        assert!((first_table.body_cells[0].y - 30.0).abs() < 0.01);
+
+        // Second fragment: 2 body rows, y rebased to header_height
+        assert_eq!(second_table.body_cells.len(), 2);
+        // First body cell: header_height + (80 - 80) = 30
+        assert!(
+            (second_table.body_cells[0].y - 30.0).abs() < 0.01,
+            "expected y=30.0, got {}",
+            second_table.body_cells[0].y
+        );
+        // Second body cell: header_height + (130 - 80) = 80
+        assert!(
+            (second_table.body_cells[1].y - 80.0).abs() < 0.01,
+            "expected y=80.0, got {}",
+            second_table.body_cells[1].y
+        );
     }
 }

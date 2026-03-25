@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size, SplitResult};
+use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 
 /// Image format detected from data.
 #[derive(Clone, Debug)]
@@ -60,10 +60,6 @@ impl Pageable for ImagePageable {
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
         // Images cannot be split
         None
-    }
-
-    fn split_boxed(self: Box<Self>, _avail_width: Pt, _avail_height: Pt) -> SplitResult {
-        Err(self)
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
