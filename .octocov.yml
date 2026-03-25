@@ -3,6 +3,3 @@ coverage:
     - lcov.info
 comment:
   if: is_pull_request
-diff:
-  datastores:
-    - artifact://lcov
