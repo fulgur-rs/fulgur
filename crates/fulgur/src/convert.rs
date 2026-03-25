@@ -15,6 +15,7 @@ use crate::paragraph::{
 };
 use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -23,6 +24,25 @@ pub struct ConvertContext<'a> {
     pub gcpm: Option<&'a GcpmContext>,
     pub running_store: &'a mut RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
+    /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
+    pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
+}
+
+impl ConvertContext<'_> {
+    /// Return a shared Arc for the given font data, caching by data pointer + index.
+    ///
+    /// Safety assumption: Parley font data pointers remain stable for the lifetime of
+    /// this ConvertContext (scoped to a single `dom_to_pageable` call). HashMap is used
+    /// (not BTreeMap) because this cache is lookup-only — iteration order does not
+    /// affect PDF output.
+    fn get_or_insert_font(&mut self, font: &parley::FontData) -> Arc<Vec<u8>> {
+        let key = (font.data.data().as_ptr() as usize, font.index);
+        Arc::clone(
+            self.font_cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(font.data.data().to_vec())),
+        )
+    }
 }
 
 /// Convert a resolved Blitz document into a Pageable tree.
@@ -75,12 +95,12 @@ fn convert_node(
     if let Some(elem_data) = node.element_data()
         && elem_data.list_item_data.is_some()
     {
-        let (marker_lines, marker_width) = extract_marker_lines(doc, node);
+        let (marker_lines, marker_width) = extract_marker_lines(doc, node, ctx);
         let style = extract_block_style(node);
 
         // Build body: if inline root, use paragraph; otherwise collect block children
         let body: Box<dyn Pageable> = if node.flags.is_inline_root()
-            && let Some(paragraph) = extract_paragraph(doc, node)
+            && let Some(paragraph) = extract_paragraph(doc, node, ctx)
         {
             if style.has_visual_style() {
                 let (child_x, child_y) = style.content_inset();
@@ -134,7 +154,7 @@ fn convert_node(
 
     // Check if this is an inline root (contains text layout)
     if node.flags.is_inline_root()
-        && let Some(paragraph) = extract_paragraph(doc, node)
+        && let Some(paragraph) = extract_paragraph(doc, node, ctx)
     {
         let style = extract_block_style(node);
         if style.has_visual_style() {
@@ -458,7 +478,11 @@ fn collect_table_cells(
 }
 
 /// Extract a ParagraphPageable from an inline root node.
-fn extract_paragraph(doc: &blitz_dom::BaseDocument, node: &Node) -> Option<ParagraphPageable> {
+fn extract_paragraph(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+) -> Option<ParagraphPageable> {
     let elem_data = node.element_data()?;
     let text_layout = elem_data.inline_layout_data.as_ref()?;
 
@@ -474,9 +498,9 @@ fn extract_paragraph(doc: &blitz_dom::BaseDocument, node: &Node) -> Option<Parag
         for item in line.items() {
             if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
                 let run = glyph_run.run();
-                let font_data = run.font();
-                let font_bytes: Vec<u8> = font_data.data.data().to_vec();
-                let font_index = font_data.index;
+                let font_ref = run.font();
+                let font_index = font_ref.index;
+                let font_arc = ctx.get_or_insert_font(font_ref);
                 let font_size = run.font_size();
 
                 // Get text color from the brush (node ID) → computed styles
@@ -501,7 +525,7 @@ fn extract_paragraph(doc: &blitz_dom::BaseDocument, node: &Node) -> Option<Parag
                     let run_text = text.clone();
 
                     glyph_runs.push(ShapedGlyphRun {
-                        font_data: Arc::new(font_bytes),
+                        font_data: font_arc,
                         font_index,
                         font_size,
                         color,
@@ -647,7 +671,11 @@ fn is_non_visual_element(node: &Node) -> bool {
 }
 
 /// Extract shaped lines from a list marker's Parley layout.
-fn extract_marker_lines(doc: &blitz_dom::BaseDocument, node: &Node) -> (Vec<ShapedLine>, f32) {
+fn extract_marker_lines(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+) -> (Vec<ShapedLine>, f32) {
     let elem_data = match node.element_data() {
         Some(d) => d,
         None => return (Vec::new(), 0.0),
@@ -680,9 +708,9 @@ fn extract_marker_lines(doc: &blitz_dom::BaseDocument, node: &Node) -> (Vec<Shap
         for item in line.items() {
             if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
                 let run = glyph_run.run();
-                let font_data = run.font();
-                let font_bytes: Vec<u8> = font_data.data.data().to_vec();
-                let font_index = font_data.index;
+                let font_ref = run.font();
+                let font_index = font_ref.index;
+                let font_arc = ctx.get_or_insert_font(font_ref);
                 let font_size = run.font_size();
 
                 let brush = &glyph_run.style().brush;
@@ -703,7 +731,7 @@ fn extract_marker_lines(doc: &blitz_dom::BaseDocument, node: &Node) -> (Vec<Shap
 
                 if !glyphs.is_empty() {
                     glyph_runs.push(ShapedGlyphRun {
-                        font_data: Arc::new(font_bytes),
+                        font_data: font_arc,
                         font_index,
                         font_size,
                         color,
