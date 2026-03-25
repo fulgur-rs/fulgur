@@ -17,5 +17,4 @@ diff:
 report:
   datastores:
     - artifact://${GITHUB_REPOSITORY}
-    - github://mitsuru/octocovs/reports
   if: is_default_branch
