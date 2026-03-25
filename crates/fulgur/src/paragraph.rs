@@ -85,6 +85,7 @@ pub struct ShapedGlyphRun {
 #[derive(Clone)]
 pub struct ShapedLine {
     pub height: f32,
+    /// Absolute offset from the paragraph's top edge to this line's baseline (from Parley).
     pub baseline: f32,
     pub glyph_runs: Vec<ShapedGlyphRun>,
 }
@@ -421,10 +422,8 @@ fn draw_line_decorations(
 
 /// Draw pre-shaped text lines at the given position.
 pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
-    let mut current_y = y;
-
     for line in lines {
-        let baseline_y = current_y + line.baseline;
+        let baseline_y = y + line.baseline;
 
         for run in &line.glyph_runs {
             // Create Krilla font from cached data
@@ -476,8 +475,6 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
 
         // Draw decorations after all glyphs so lines appear on top
         draw_line_decorations(canvas, &line.glyph_runs, x, baseline_y);
-
-        current_y += line.height;
     }
 }
 
@@ -531,7 +528,18 @@ impl Pageable for ParagraphPageable {
         }
 
         let first = ParagraphPageable::new(self.lines[..split_at].to_vec());
-        let second = ParagraphPageable::new(self.lines[split_at..].to_vec());
+
+        // Rebase second fragment: baseline is absolute from paragraph top,
+        // so subtract the consumed height to make it relative to the new fragment.
+        let second_lines: Vec<ShapedLine> = self.lines[split_at..]
+            .iter()
+            .cloned()
+            .map(|mut line| {
+                line.baseline -= consumed;
+                line
+            })
+            .collect();
+        let second = ParagraphPageable::new(second_lines);
 
         Some((Box::new(first), Box::new(second)))
     }
