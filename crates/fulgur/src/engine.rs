@@ -4,6 +4,7 @@ use crate::convert::ConvertContext;
 use crate::error::Result;
 use crate::pageable::Pageable;
 use crate::render::render_to_pdf;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Reusable PDF generation engine.
@@ -80,7 +81,7 @@ impl Engine {
             gcpm: gcpm_opt,
             running_store: &mut running_store,
             assets: self.assets.as_ref(),
-            font_cache: std::collections::HashMap::new(),
+            font_cache: HashMap::new(),
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 

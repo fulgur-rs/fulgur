@@ -25,20 +25,23 @@ pub struct ConvertContext<'a> {
     pub running_store: &'a mut RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
-    pub font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
+    pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
 }
 
 impl ConvertContext<'_> {
     /// Return a shared Arc for the given font data, caching by data pointer + index.
+    ///
+    /// Safety assumption: Parley font data pointers remain stable for the lifetime of
+    /// this ConvertContext (scoped to a single `dom_to_pageable` call). HashMap is used
+    /// (not BTreeMap) because this cache is lookup-only — iteration order does not
+    /// affect PDF output.
     fn get_or_insert_font(&mut self, font: &parley::FontData) -> Arc<Vec<u8>> {
         let key = (font.data.data().as_ptr() as usize, font.index);
-        if let Some(cached) = self.font_cache.get(&key) {
-            Arc::clone(cached)
-        } else {
-            let arc = Arc::new(font.data.data().to_vec());
-            self.font_cache.insert(key, Arc::clone(&arc));
-            arc
-        }
+        Arc::clone(
+            self.font_cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(font.data.data().to_vec())),
+        )
     }
 }
 
