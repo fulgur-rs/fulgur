@@ -528,7 +528,18 @@ impl Pageable for ParagraphPageable {
         }
 
         let first = ParagraphPageable::new(self.lines[..split_at].to_vec());
-        let second = ParagraphPageable::new(self.lines[split_at..].to_vec());
+
+        // Rebase second fragment: baseline is absolute from paragraph top,
+        // so subtract the consumed height to make it relative to the new fragment.
+        let second_lines: Vec<ShapedLine> = self.lines[split_at..]
+            .iter()
+            .cloned()
+            .map(|mut line| {
+                line.baseline -= consumed;
+                line
+            })
+            .collect();
+        let second = ParagraphPageable::new(second_lines);
 
         Some((Box::new(first), Box::new(second)))
     }
