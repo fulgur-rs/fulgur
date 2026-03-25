@@ -63,11 +63,11 @@ jobs:
         with:
           name: lcov
           path: lcov.info
+          if-no-files-found: error
 
   octocov:
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: write
