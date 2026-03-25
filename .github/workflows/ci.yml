@@ -54,15 +54,12 @@ jobs:
       - name: Build tests
         if: ${{ !matrix.coverage }}
         run: cargo test --no-run
-      - name: Build tests with coverage
-        if: matrix.coverage
-        run: cargo llvm-cov --no-report --no-cfg-coverage
       - name: Run tests
         if: ${{ !matrix.coverage }}
         run: cargo test
       - name: Run tests with coverage
         if: matrix.coverage
-        run: cargo llvm-cov --no-clean --lcov --output-path lcov.info
+        run: cargo llvm-cov --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
         uses: actions/upload-artifact@v4
