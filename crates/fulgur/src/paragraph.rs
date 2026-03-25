@@ -85,6 +85,7 @@ pub struct ShapedGlyphRun {
 #[derive(Clone)]
 pub struct ShapedLine {
     pub height: f32,
+    /// Absolute offset from the paragraph's top edge to this line's baseline (from Parley).
     pub baseline: f32,
     pub glyph_runs: Vec<ShapedGlyphRun>,
 }
@@ -422,8 +423,6 @@ fn draw_line_decorations(
 /// Draw pre-shaped text lines at the given position.
 pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
     for line in lines {
-        // line.baseline is an absolute offset from the paragraph's top edge (from Parley),
-        // so use the paragraph start `y` directly — not a per-line accumulated offset.
         let baseline_y = y + line.baseline;
 
         for run in &line.glyph_runs {
