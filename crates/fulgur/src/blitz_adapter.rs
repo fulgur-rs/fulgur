@@ -195,6 +195,95 @@ impl DomPass for InjectCssPass {
     }
 }
 
+use crate::gcpm::running::{RunningElementStore, serialize_node};
+use crate::gcpm::{GcpmContext, ParsedSelector};
+use std::cell::RefCell;
+
+/// Extracts running elements from the DOM and stores their serialized HTML.
+pub struct RunningElementPass {
+    gcpm: GcpmContext,
+    store: RefCell<RunningElementStore>,
+}
+
+impl RunningElementPass {
+    pub fn new(gcpm: GcpmContext) -> Self {
+        Self {
+            gcpm,
+            store: RefCell::new(RunningElementStore::new()),
+        }
+    }
+
+    pub fn into_running_store(self) -> RunningElementStore {
+        self.store.into_inner()
+    }
+}
+
+impl DomPass for RunningElementPass {
+    fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
+        if self.gcpm.running_mappings.is_empty() {
+            return;
+        }
+        let root = doc.root_element();
+        let root_id = root.id;
+        self.walk_tree(doc, root_id);
+    }
+}
+
+impl RunningElementPass {
+    fn walk_tree(&self, doc: &HtmlDocument, node_id: usize) {
+        let Some(node) = doc.get_node(node_id) else {
+            return;
+        };
+
+        if let Some(elem) = node.element_data() {
+            if let Some(running_name) = self.find_running_name(elem) {
+                let html = serialize_node(doc, node_id);
+                self.store.borrow_mut().register(running_name, html);
+                return;
+            }
+        }
+
+        let children: Vec<usize> = node.children.clone();
+        for child_id in children {
+            self.walk_tree(doc, child_id);
+        }
+    }
+
+    fn find_running_name(&self, elem: &blitz_dom::node::ElementData) -> Option<String> {
+        self.gcpm
+            .running_mappings
+            .iter()
+            .find(|m| self.matches_selector(&m.parsed, elem))
+            .map(|m| m.running_name.clone())
+    }
+
+    fn matches_selector(
+        &self,
+        selector: &ParsedSelector,
+        elem: &blitz_dom::node::ElementData,
+    ) -> bool {
+        match selector {
+            ParsedSelector::Class(name) => elem
+                .attrs()
+                .iter()
+                .find(|a| a.name.local.as_ref() == "class")
+                .is_some_and(|a| {
+                    let cls: &str = &a.value;
+                    cls.split_whitespace().any(|c| c == name.as_str())
+                }),
+            ParsedSelector::Id(name) => elem
+                .attrs()
+                .iter()
+                .find(|a| a.name.local.as_ref() == "id")
+                .is_some_and(|a| {
+                    let id: &str = &a.value;
+                    id == name.as_str()
+                }),
+            ParsedSelector::Tag(name) => elem.name.local.as_ref().eq_ignore_ascii_case(name),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +352,95 @@ mod tests {
             find_element_by_tag(&doc, "style").is_none(),
             "Expected no <style> element when CSS is empty"
         );
+    }
+
+    #[test]
+    fn test_running_element_pass_extracts_by_class() {
+        let html = r#"<html><head><style>.header { display: none; }</style></head><body>
+            <div class="header">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let gcpm = crate::gcpm::GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("header".to_string()),
+                running_name: "pageHeader".to_string(),
+            }],
+            cleaned_css: String::new(),
+        };
+
+        let pass = RunningElementPass::new(gcpm);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert!(
+            store.get("pageHeader").is_some(),
+            "Expected running element 'pageHeader' to be extracted"
+        );
+        let html_content = store.get("pageHeader").unwrap();
+        assert!(
+            html_content.contains("Header Content"),
+            "Expected serialized HTML to contain 'Header Content', got: {html_content}"
+        );
+    }
+
+    #[test]
+    fn test_running_element_pass_extracts_by_id() {
+        let html = r#"<html><head><style>#title { display: none; }</style></head><body>
+            <h1 id="title">Doc Title</h1>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let gcpm = crate::gcpm::GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("title".to_string()),
+                running_name: "pageTitle".to_string(),
+            }],
+            cleaned_css: String::new(),
+        };
+
+        let pass = RunningElementPass::new(gcpm);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert!(store.get("pageTitle").is_some());
+        assert!(store.get("pageTitle").unwrap().contains("Doc Title"));
+    }
+
+    #[test]
+    fn test_running_element_pass_no_mappings_is_noop() {
+        let html = "<html><body><p>Hello</p></body></html>";
+        let mut doc = parse(html, 400.0, &[]);
+
+        let gcpm = crate::gcpm::GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![],
+            cleaned_css: String::new(),
+        };
+
+        let pass = RunningElementPass::new(gcpm);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert!(store.get("anything").is_none());
     }
 }
