@@ -1,9 +1,7 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
 use crate::asset::AssetBundle;
-use crate::gcpm::GcpmContext;
-use crate::gcpm::ParsedSelector;
-use crate::gcpm::running::{RunningElementStore, serialize_node};
+use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
     BlockPageable, BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
@@ -21,7 +19,6 @@ use std::sync::Arc;
 
 /// Context for DOM-to-Pageable conversion, bundling all shared state.
 pub struct ConvertContext<'a> {
-    pub gcpm: Option<&'a GcpmContext>,
     pub running_store: &'a mut RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
@@ -222,17 +219,6 @@ fn collect_positioned_children(
             continue;
         }
 
-        // GCPM: skip running elements and store their HTML
-        if let Some(gcpm_ctx) = ctx.gcpm {
-            if is_running_element(child_node, gcpm_ctx) {
-                let html = serialize_node(doc, child_id);
-                if let Some(name) = get_running_name(child_node, gcpm_ctx) {
-                    ctx.running_store.register(name, html);
-                }
-                continue;
-            }
-        }
-
         let child_layout = child_node.final_layout;
 
         // Zero-size leaf nodes (whitespace text, etc.) — skip
@@ -263,49 +249,11 @@ fn collect_positioned_children(
     result
 }
 
-/// Check if a node is a running element.
-/// Since the CSS preprocessor replaced `position: running(name)` with `display: none`,
-/// we identify running elements by matching them against parsed CSS selectors (class, id,
-/// or tag) from the GCPM context's `running_mappings`.
-fn is_running_element(node: &Node, ctx: &GcpmContext) -> bool {
-    if ctx.running_mappings.is_empty() {
-        return false;
-    }
-    let Some(elem) = node.element_data() else {
-        return false;
-    };
-    ctx.running_mappings
-        .iter()
-        .any(|m| matches_selector(&m.parsed, elem))
-}
-
 fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Option<&'a str> {
     elem.attrs()
         .iter()
         .find(|a| a.name.local.as_ref() == name)
         .map(|a| a.value.as_ref())
-}
-
-fn get_tag_name(elem: &blitz_dom::node::ElementData) -> &str {
-    elem.name.local.as_ref()
-}
-
-fn matches_selector(selector: &ParsedSelector, elem: &blitz_dom::node::ElementData) -> bool {
-    match selector {
-        ParsedSelector::Class(name) => get_attr(elem, "class")
-            .map(|cls| cls.split_whitespace().any(|c| c == name))
-            .unwrap_or(false),
-        ParsedSelector::Id(name) => get_attr(elem, "id").map(|id| id == name).unwrap_or(false),
-        ParsedSelector::Tag(name) => get_tag_name(elem).eq_ignore_ascii_case(name),
-    }
-}
-
-fn get_running_name(node: &Node, ctx: &GcpmContext) -> Option<String> {
-    let elem = node.element_data()?;
-    ctx.running_mappings
-        .iter()
-        .find(|m| matches_selector(&m.parsed, elem))
-        .map(|m| m.running_name.clone())
 }
 
 /// Convert an <img> element into an ImagePageable, wrapped in BlockPageable if styled.
@@ -424,17 +372,6 @@ fn collect_table_cells(
         }
         if is_non_visual_element(child_node) {
             continue;
-        }
-
-        // GCPM: skip running elements and store their HTML
-        if let Some(gcpm_ctx) = ctx.gcpm {
-            if is_running_element(child_node, gcpm_ctx) {
-                let html = serialize_node(doc, child_id);
-                if let Some(name) = get_running_name(child_node, gcpm_ctx) {
-                    ctx.running_store.register(name, html);
-                }
-                continue;
-            }
         }
 
         let child_layout = child_node.final_layout;

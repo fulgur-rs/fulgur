@@ -87,7 +87,6 @@ impl Engine {
 
         // --- Convert DOM to Pageable and render ---
         let mut convert_ctx = ConvertContext {
-            gcpm: None, // Running elements now handled by DomPass
             running_store: &mut running_store,
             assets: self.assets.as_ref(),
             font_cache: HashMap::new(),
