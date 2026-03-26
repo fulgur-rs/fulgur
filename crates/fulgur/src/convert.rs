@@ -249,12 +249,7 @@ fn collect_positioned_children(
     result
 }
 
-fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Option<&'a str> {
-    elem.attrs()
-        .iter()
-        .find(|a| a.name.local.as_ref() == name)
-        .map(|a| a.value.as_ref())
-}
+use crate::blitz_adapter::get_attr;
 
 /// Convert an <img> element into an ImagePageable, wrapped in BlockPageable if styled.
 fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {

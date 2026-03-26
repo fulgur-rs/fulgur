@@ -5,6 +5,7 @@ use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Suppress stdout during a closure. Blitz's HTML parser unconditionally prints
@@ -143,12 +144,47 @@ fn find_element_by_tag_recursive(doc: &HtmlDocument, node_id: usize, tag: &str) 
     None
 }
 
+/// Get the value of an attribute by name from an element.
+pub fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Option<&'a str> {
+    elem.attrs()
+        .iter()
+        .find(|a| a.name.local.as_ref() == name)
+        .map(|a| a.value.as_ref())
+}
+
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
     blitz_dom::QualName::new(
         None,
         blitz_dom::ns!(html),
         blitz_dom::LocalName::from(local),
     )
+}
+
+/// Create a `<style>` element with the given CSS text, attach it to the DOM,
+/// and register it with Stylo. Returns the style node id.
+///
+/// If `insert_before` is `Some(sibling_id)`, the style element is inserted before
+/// that sibling. Otherwise it is appended to `parent_id`.
+fn inject_style_node(
+    doc: &mut HtmlDocument,
+    parent_id: usize,
+    css: &str,
+    insert_before: Option<usize>,
+) -> usize {
+    let style_id = {
+        let mut mutator = doc.mutate();
+        let style_id = mutator.create_element(make_qual_name("style"), vec![]);
+        let text_id = mutator.create_text_node(css);
+        if let Some(sibling) = insert_before {
+            mutator.insert_nodes_before(sibling, &[style_id]);
+        } else {
+            mutator.append_children(parent_id, &[style_id]);
+        }
+        mutator.append_children(style_id, &[text_id]);
+        style_id
+    };
+    doc.upsert_stylesheet_for_node(style_id);
+    style_id
 }
 
 /// Injects CSS text as a `<style>` element into the document's `<head>`.
@@ -181,21 +217,9 @@ impl DomPass for InjectCssPass {
             }
         };
 
-        // Create <style> element with a text node child, then register with Stylo.
-        // Note: set_inner_html doesn't work because Blitz uses DummyHtmlParserProvider.
-        let style_id = {
-            let mut mutator = doc.mutate();
-            let style_id = mutator.create_element(make_qual_name("style"), vec![]);
-            let text_id = mutator.create_text_node(&self.css);
-            mutator.append_children(head_id, &[style_id]);
-            mutator.append_children(style_id, &[text_id]);
-            style_id
-        };
-        doc.upsert_stylesheet_for_node(style_id);
+        inject_style_node(doc, head_id, &self.css, None);
     }
 }
-
-use std::path::PathBuf;
 
 /// Resolves `<link rel="stylesheet" href="...">` tags by reading local CSS files
 /// and injecting them as `<style>` elements.
@@ -229,22 +253,14 @@ impl DomPass for LinkStylesheetPass {
                 continue;
             }
 
-            // Check rel="stylesheet"
-            let is_stylesheet = elem
-                .attrs()
-                .iter()
-                .any(|a| a.name.local.as_ref() == "rel" && &*a.value == "stylesheet");
-            if !is_stylesheet {
+            if get_attr(elem, "rel") != Some("stylesheet") {
                 continue;
             }
 
-            // Get href
-            let href = elem
-                .attrs()
-                .iter()
-                .find(|a| a.name.local.as_ref() == "href")
-                .map(|a| a.value.to_string());
-            let Some(href) = href else { continue };
+            let Some(href) = get_attr(elem, "href") else {
+                continue;
+            };
+            let href = href.to_string();
 
             // Skip http/https URLs (offline-first design)
             if href.starts_with("http://") || href.starts_with("https://") {
@@ -270,20 +286,10 @@ impl DomPass for LinkStylesheetPass {
             }
         }
 
-        // Phase 2: For each collected link, inject <style> with the CSS content
+        // Phase 2: Replace each <link> with a <style> element
         for (link_id, css) in css_entries {
-            let style_id = {
-                let mut mutator = doc.mutate();
-                let style_id = mutator.create_element(make_qual_name("style"), vec![]);
-                let text_id = mutator.create_text_node(&css);
-                // Insert <style> before the <link> (to maintain order)
-                mutator.insert_nodes_before(link_id, &[style_id]);
-                mutator.append_children(style_id, &[text_id]);
-                // Remove the <link> element
-                mutator.remove_node(link_id);
-                style_id
-            };
-            doc.upsert_stylesheet_for_node(style_id);
+            inject_style_node(doc, head_id, &css, Some(link_id));
+            doc.mutate().remove_node(link_id);
         }
     }
 }
@@ -363,22 +369,9 @@ impl RunningElementPass {
         elem: &blitz_dom::node::ElementData,
     ) -> bool {
         match selector {
-            ParsedSelector::Class(name) => elem
-                .attrs()
-                .iter()
-                .find(|a| a.name.local.as_ref() == "class")
-                .is_some_and(|a| {
-                    let cls: &str = &a.value;
-                    cls.split_whitespace().any(|c| c == name.as_str())
-                }),
-            ParsedSelector::Id(name) => elem
-                .attrs()
-                .iter()
-                .find(|a| a.name.local.as_ref() == "id")
-                .is_some_and(|a| {
-                    let id: &str = &a.value;
-                    id == name.as_str()
-                }),
+            ParsedSelector::Class(name) => get_attr(elem, "class")
+                .is_some_and(|cls| cls.split_whitespace().any(|c| c == name.as_str())),
+            ParsedSelector::Id(name) => get_attr(elem, "id") == Some(name.as_str()),
             ParsedSelector::Tag(name) => elem.name.local.as_ref().eq_ignore_ascii_case(name),
         }
     }
