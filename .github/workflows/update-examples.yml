@@ -21,10 +21,11 @@ jobs:
         run: cargo build --bin fulgur --release
       - name: Regenerate example PDFs
         run: |
+          set -e
           for dir in examples/*/; do
-            html="$dir/index.html"
-            css="$dir/style.css"
-            pdf="$dir/index.pdf"
+            html="${dir}index.html"
+            css="${dir}style.css"
+            pdf="${dir}index.pdf"
             [ -f "$html" ] || continue
             if [ -f "$css" ]; then
               target/release/fulgur render "$html" --css "$css" -o "$pdf"
@@ -33,10 +34,11 @@ jobs:
             fi
           done
       - name: Commit updated examples
+        if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
-          git diff --quiet examples/ && exit 0
+          git add examples/
+          git diff --cached --quiet examples/ && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add examples/
           git commit -m "chore: regenerate example PDFs"
           git push
