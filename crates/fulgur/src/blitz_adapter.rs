@@ -253,7 +253,11 @@ impl DomPass for LinkStylesheetPass {
                 continue;
             }
 
-            if get_attr(elem, "rel") != Some("stylesheet") {
+            let is_stylesheet = get_attr(elem, "rel").is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+            });
+            if !is_stylesheet {
                 continue;
             }
 
