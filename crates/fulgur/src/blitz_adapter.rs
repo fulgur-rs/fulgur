@@ -236,6 +236,14 @@ impl RunningElementPass {
         };
 
         if let Some(elem) = node.element_data() {
+            // Skip non-visual elements (head, script, style, etc.) to match
+            // the old convert.rs behavior and avoid false matches inside <head>.
+            if matches!(
+                elem.name.local.as_ref(),
+                "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
+            ) {
+                return;
+            }
             if let Some(running_name) = self.find_running_name(elem) {
                 let html = serialize_node(doc, node_id);
                 self.store.borrow_mut().register(running_name, html);
@@ -442,5 +450,36 @@ mod tests {
 
         let store = pass.into_running_store();
         assert!(store.get("anything").is_none());
+    }
+
+    #[test]
+    fn test_running_element_pass_skips_head_elements() {
+        let html = r#"<html><head><style id="injected">p { color: red; }</style></head><body>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let gcpm = crate::gcpm::GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("injected".to_string()),
+                running_name: "shouldNotMatch".to_string(),
+            }],
+            cleaned_css: String::new(),
+        };
+
+        let pass = RunningElementPass::new(gcpm);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert!(
+            store.get("shouldNotMatch").is_none(),
+            "Elements inside <head> (like <style>) should not be matched as running elements"
+        );
     }
 }
