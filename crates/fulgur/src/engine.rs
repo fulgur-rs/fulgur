@@ -1,4 +1,5 @@
 use crate::asset::AssetBundle;
+use crate::blitz_adapter::DomPass;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
@@ -72,13 +73,20 @@ impl Engine {
             font_data: fonts,
         };
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        // Extract running elements via DomPass (before resolve)
+        let mut running_store = if !gcpm.is_empty() {
+            let pass = crate::blitz_adapter::RunningElementPass::new(gcpm.clone());
+            pass.apply(&mut doc, &ctx);
+            pass.into_running_store()
+        } else {
+            crate::gcpm::running::RunningElementStore::new()
+        };
+
         crate::blitz_adapter::resolve(&mut doc);
 
         // --- Convert DOM to Pageable and render ---
-        let gcpm_opt = if gcpm.is_empty() { None } else { Some(&gcpm) };
-        let mut running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
-            gcpm: gcpm_opt,
             running_store: &mut running_store,
             assets: self.assets.as_ref(),
             font_cache: HashMap::new(),

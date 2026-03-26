@@ -333,7 +333,6 @@ pub fn render_to_pdf_with_gcpm(
                 );
                 let mut dummy_store = RunningElementStore::new();
                 let mut dummy_ctx = crate::convert::ConvertContext {
-                    gcpm: None,
                     running_store: &mut dummy_store,
                     assets: None,
                     font_cache: HashMap::new(),
