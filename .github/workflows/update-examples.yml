@@ -1,0 +1,46 @@
+name: Update Examples
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  update-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fulgur
+        run: cargo build --bin fulgur --release
+      - name: Regenerate example PDFs
+        run: |
+          set -e
+          for dir in examples/*/; do
+            html="${dir}index.html"
+            css="${dir}style.css"
+            pdf="${dir}index.pdf"
+            [ -f "$html" ] || continue
+            args=()
+            [ -f "$css" ] && args+=(--css "$css")
+            for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif; do
+              [ -f "$img" ] || continue
+              args+=(--image "$(basename "$img")=$img")
+            done
+            target/release/fulgur render "$html" "${args[@]}" -o "$pdf"
+          done
+      - name: Commit updated examples
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          git add examples/
+          git diff --cached --quiet examples/ && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: regenerate example PDFs"
+          git push

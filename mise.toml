@@ -10,10 +10,12 @@ for dir in examples/*/; do
   css="$dir/style.css"
   pdf="$dir/index.pdf"
   [ -f "$html" ] || continue
-  if [ -f "$css" ]; then
-    target/release/fulgur render "$html" --css "$css" -o "$pdf"
-  else
-    target/release/fulgur render "$html" -o "$pdf"
-  fi
+  args=()
+  [ -f "$css" ] && args+=(--css "$css")
+  for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif; do
+    [ -f "$img" ] || continue
+    args+=(--image "$(basename "$img")=$img")
+  done
+  target/release/fulgur render "$html" "${args[@]}" -o "$pdf"
 done
 """
