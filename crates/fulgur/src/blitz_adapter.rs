@@ -251,8 +251,7 @@ impl RunningElementPass {
             }
         }
 
-        let children: Vec<usize> = node.children.clone();
-        for child_id in children {
+        for &child_id in &node.children {
             self.walk_tree(doc, child_id);
         }
     }
