@@ -24,3 +24,6 @@ parley = "0.6"
 skrifa = "0.37"
 stylo = "0.8.0"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.27.0"

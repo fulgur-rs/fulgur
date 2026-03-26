@@ -195,6 +195,99 @@ impl DomPass for InjectCssPass {
     }
 }
 
+use std::path::PathBuf;
+
+/// Resolves `<link rel="stylesheet" href="...">` tags by reading local CSS files
+/// and injecting them as `<style>` elements.
+pub struct LinkStylesheetPass {
+    pub base_path: PathBuf,
+}
+
+impl DomPass for LinkStylesheetPass {
+    fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
+        // Phase 1: Collect link elements and their CSS content
+        let head_id = match find_element_by_tag(doc, "head") {
+            Some(id) => id,
+            None => return,
+        };
+
+        let mut css_entries: Vec<(usize, String)> = Vec::new(); // (link_node_id, css_content)
+
+        let head_children: Vec<usize> = doc
+            .get_node(head_id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+
+        for &child_id in &head_children {
+            let Some(node) = doc.get_node(child_id) else {
+                continue;
+            };
+            let Some(elem) = node.element_data() else {
+                continue;
+            };
+            if elem.name.local.as_ref() != "link" {
+                continue;
+            }
+
+            // Check rel="stylesheet"
+            let is_stylesheet = elem
+                .attrs()
+                .iter()
+                .any(|a| a.name.local.as_ref() == "rel" && &*a.value == "stylesheet");
+            if !is_stylesheet {
+                continue;
+            }
+
+            // Get href
+            let href = elem
+                .attrs()
+                .iter()
+                .find(|a| a.name.local.as_ref() == "href")
+                .map(|a| a.value.to_string());
+            let Some(href) = href else { continue };
+
+            // Skip http/https URLs (offline-first design)
+            if href.starts_with("http://") || href.starts_with("https://") {
+                continue;
+            }
+
+            // Resolve path
+            let path = if std::path::Path::new(&href).is_absolute() {
+                PathBuf::from(&href)
+            } else {
+                self.base_path.join(&href)
+            };
+
+            // Read file (skip with warning if missing)
+            if let Ok(css) = std::fs::read_to_string(&path) {
+                css_entries.push((child_id, css));
+            } else {
+                eprintln!(
+                    "Warning: could not read stylesheet '{}' (resolved to '{}')",
+                    href,
+                    path.display()
+                );
+            }
+        }
+
+        // Phase 2: For each collected link, inject <style> with the CSS content
+        for (link_id, css) in css_entries {
+            let style_id = {
+                let mut mutator = doc.mutate();
+                let style_id = mutator.create_element(make_qual_name("style"), vec![]);
+                let text_id = mutator.create_text_node(&css);
+                // Insert <style> before the <link> (to maintain order)
+                mutator.insert_nodes_before(link_id, &[style_id]);
+                mutator.append_children(style_id, &[text_id]);
+                // Remove the <link> element
+                mutator.remove_node(link_id);
+                style_id
+            };
+            doc.upsert_stylesheet_for_node(style_id);
+        }
+    }
+}
+
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::{GcpmContext, ParsedSelector};
 use std::cell::RefCell;
@@ -479,6 +572,135 @@ mod tests {
         assert!(
             store.get("shouldNotMatch").is_none(),
             "Elements inside <head> (like <style>) should not be matched as running elements"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_resolves_local_css() {
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("style.css");
+        std::fs::write(&css_path, "p { color: red; }").unwrap();
+
+        let html = r#"<html><head><link rel="stylesheet" href="style.css"></head><body><p>Hello</p></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: dir.path().to_path_buf(),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_some(),
+            "Expected a <style> element to be injected from <link> stylesheet"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_ignores_http() {
+        let html = r#"<html><head><link rel="stylesheet" href="https://example.com/style.css"></head><body><p>Hello</p></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: PathBuf::from("/tmp"),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_none(),
+            "Expected no <style> element for https:// link"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_ignores_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = r#"<html><head><link rel="stylesheet" href="nonexistent.css"></head><body><p>Hello</p></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: dir.path().to_path_buf(),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_none(),
+            "Expected no <style> element for missing file"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_multiple_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.css"), "p { color: red; }").unwrap();
+        std::fs::write(dir.path().join("b.css"), "h1 { font-size: 2em; }").unwrap();
+
+        let html = r#"<html><head><link rel="stylesheet" href="a.css"><link rel="stylesheet" href="b.css"></head><body><p>Hello</p></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: dir.path().to_path_buf(),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+
+        // Count <style> elements by walking head children
+        let head_id = find_element_by_tag(&doc, "head").unwrap();
+        let head_node = doc.get_node(head_id).unwrap();
+        let style_count = head_node
+            .children
+            .iter()
+            .filter(|&&cid| {
+                doc.get_node(cid)
+                    .and_then(|n| n.element_data())
+                    .is_some_and(|e| e.name.local.as_ref() == "style")
+            })
+            .count();
+        assert_eq!(
+            style_count, 2,
+            "Expected 2 <style> elements for 2 CSS files"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("abs.css");
+        std::fs::write(&css_path, "body { margin: 0; }").unwrap();
+
+        let html = format!(
+            r#"<html><head><link rel="stylesheet" href="{}"></head><body><p>Hello</p></body></html>"#,
+            css_path.display()
+        );
+        let mut doc = parse(&html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: PathBuf::from("/nonexistent"),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_some(),
+            "Expected a <style> element when using absolute path in href"
         );
     }
 }
