@@ -1,0 +1,21 @@
+<html>
+<head>
+  <style>
+    body { font-family: sans-serif; margin: 40px; }
+    h1 { color: #333; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+  </style>
+</head>
+<body>
+  <h1>{{ title }}</h1>
+  <p>Date: {{ date }}</p>
+  <table>
+    <tr><th>Item</th><th>Qty</th><th>Price</th></tr>
+    {% for row in items %}
+    <tr><td>{{ row.name }}</td><td>{{ row.qty }}</td><td>{{ row.price }}</td></tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
