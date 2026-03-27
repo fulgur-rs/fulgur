@@ -14,6 +14,20 @@ pub enum Error {
 
     #[error("Asset error: {0}")]
     Asset(String),
+
+    #[error("Template error: {0}")]
+    Template(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_error_display() {
+        let err = Error::Template("syntax error at line 3".into());
+        assert!(err.to_string().contains("syntax error at line 3"));
+    }
+}
