@@ -19,6 +19,12 @@ pub enum Error {
     Template(String),
 }
 
+impl From<minijinja::Error> for Error {
+    fn from(e: minijinja::Error) -> Self {
+        Error::Template(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]

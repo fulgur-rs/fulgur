@@ -1,15 +1,11 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Render a MiniJinja template with JSON data.
 pub fn render_template(name: &str, template_str: &str, data: &serde_json::Value) -> Result<String> {
     let mut env = minijinja::Environment::new();
-    env.add_template(name, template_str)
-        .map_err(|e| Error::Template(e.to_string()))?;
-    let tmpl = env
-        .get_template(name)
-        .map_err(|e| Error::Template(e.to_string()))?;
-    tmpl.render(data)
-        .map_err(|e| Error::Template(e.to_string()))
+    env.add_template(name, template_str)?;
+    let tmpl = env.get_template(name)?;
+    Ok(tmpl.render(data)?)
 }
 
 #[cfg(test)]

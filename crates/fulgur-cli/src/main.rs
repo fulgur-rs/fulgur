@@ -181,21 +181,13 @@ fn main() {
                 })
             };
 
-            // Save template name before input is consumed
-            let template_name = input
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("template.html")
-                .to_string();
-
-            let html = if stdin {
+            let input_content = if stdin {
                 let mut buf = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
                     .expect("Failed to read stdin");
                 buf
-            } else if let Some(input) = input {
-                std::fs::read_to_string(&input).unwrap_or_else(|e| {
+            } else if let Some(ref input) = input {
+                std::fs::read_to_string(input).unwrap_or_else(|e| {
                     eprintln!("Error reading {}: {e}", input.display());
                     std::process::exit(1);
                 })
@@ -295,42 +287,40 @@ fn main() {
                         eprintln!("Error parsing JSON: {e}");
                         std::process::exit(1);
                     });
-                builder = builder.template(&template_name, &html).data(json_data);
+                let template_name = input
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("template.html");
+                builder = builder
+                    .template(template_name, &input_content)
+                    .data(json_data);
             }
 
             let engine = builder.build();
 
-            // Render (template mode uses render(), HTML mode uses render_html())
-            let pdf_result = if data.is_some() {
+            let pdf = if data.is_some() {
                 engine.render()
             } else {
-                engine.render_html(&html)
-            };
+                engine.render_html(&input_content)
+            }
+            .unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
 
             if output.as_os_str() == "-" {
-                let pdf = pdf_result.unwrap_or_else(|e| {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                });
                 use std::io::Write;
                 std::io::stdout().write_all(&pdf).unwrap_or_else(|e| {
                     eprintln!("Error writing to stdout: {e}");
                     std::process::exit(1);
                 });
             } else {
-                match pdf_result {
-                    Ok(pdf) => {
-                        std::fs::write(&output, pdf).unwrap_or_else(|e| {
-                            eprintln!("Error writing to {}: {e}", output.display());
-                            std::process::exit(1);
-                        });
-                        eprintln!("PDF written to {}", output.display());
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
-                    }
-                }
+                std::fs::write(&output, &pdf).unwrap_or_else(|e| {
+                    eprintln!("Error writing to {}: {e}", output.display());
+                    std::process::exit(1);
+                });
+                eprintln!("PDF written to {}", output.display());
             }
         }
     }

@@ -13,8 +13,7 @@ pub struct Engine {
     config: Config,
     assets: Option<AssetBundle>,
     base_path: Option<PathBuf>,
-    template_name: Option<String>,
-    template_str: Option<String>,
+    template: Option<(String, String)>,
     data: Option<serde_json::Value>,
 }
 
@@ -24,8 +23,7 @@ impl Engine {
             config_builder: Config::builder(),
             assets: None,
             base_path: None,
-            template_name: None,
-            template_str: None,
+            template: None,
             data: None,
         }
     }
@@ -131,14 +129,15 @@ impl Engine {
     /// The template is expanded via MiniJinja, then passed to render_html().
     /// Returns an error if no template was set via the builder.
     pub fn render(&self) -> Result<Vec<u8>> {
-        let template_str = self
-            .template_str
-            .as_deref()
+        let (name, content) = self
+            .template
+            .as_ref()
             .ok_or_else(|| crate::error::Error::Template("no template set".into()))?;
-        let template_name = self.template_name.as_deref().unwrap_or("template.html");
-        let empty = serde_json::Value::Object(serde_json::Map::new());
-        let data = self.data.as_ref().unwrap_or(&empty);
-        let html = crate::template::render_template(template_name, template_str, data)?;
+        let data = self
+            .data
+            .as_ref()
+            .map_or_else(|| serde_json::json!({}), Clone::clone);
+        let html = crate::template::render_template(name, content, &data)?;
         self.render_html(&html)
     }
 
@@ -158,8 +157,7 @@ pub struct EngineBuilder {
     config_builder: ConfigBuilder,
     assets: Option<AssetBundle>,
     base_path: Option<PathBuf>,
-    template_name: Option<String>,
-    template_str: Option<String>,
+    template: Option<(String, String)>,
     data: Option<serde_json::Value>,
 }
 
@@ -235,8 +233,7 @@ impl EngineBuilder {
     }
 
     pub fn template(mut self, name: impl Into<String>, template: impl Into<String>) -> Self {
-        self.template_name = Some(name.into());
-        self.template_str = Some(template.into());
+        self.template = Some((name.into(), template.into()));
         self
     }
 
@@ -250,8 +247,7 @@ impl EngineBuilder {
             config: self.config_builder.build(),
             assets: self.assets,
             base_path: self.base_path,
-            template_name: self.template_name,
-            template_str: self.template_str,
+            template: self.template,
             data: self.data,
         }
     }
