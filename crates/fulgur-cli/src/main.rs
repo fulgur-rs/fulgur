@@ -83,6 +83,10 @@ enum Commands {
         /// Example: --image logo.png=assets/logo.png
         #[arg(long = "image", short = 'i')]
         images: Vec<String>,
+
+        /// JSON data file for template mode (use "-" for stdin)
+        #[arg(long = "data", short = 'd')]
+        data: Option<PathBuf>,
     },
 }
 
@@ -153,7 +157,13 @@ fn main() {
             fonts,
             css_files,
             images,
+            data,
         } => {
+            if stdin && data.as_ref().is_some_and(|p| p.as_os_str() == "-") {
+                eprintln!("Error: cannot use --stdin and --data - together (both read stdin)");
+                std::process::exit(1);
+            }
+
             // Compute base_path before consuming input
             let base_path = if stdin {
                 std::env::current_dir().ok()
@@ -170,6 +180,14 @@ fn main() {
                         .or_else(|| std::env::current_dir().ok())
                 })
             };
+
+            // Save template name before input is consumed
+            let template_name = input
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("template.html")
+                .to_string();
 
             let html = if stdin {
                 let mut buf = String::new();
@@ -259,10 +277,38 @@ fn main() {
                 builder = builder.assets(assets);
             }
 
+            // Template mode: add template and data to builder
+            if let Some(ref data_path) = data {
+                let json_str = if data_path.as_os_str() == "-" {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                        .expect("Failed to read JSON from stdin");
+                    buf
+                } else {
+                    std::fs::read_to_string(data_path).unwrap_or_else(|e| {
+                        eprintln!("Error reading data file {}: {e}", data_path.display());
+                        std::process::exit(1);
+                    })
+                };
+                let json_data: serde_json::Value =
+                    serde_json::from_str(&json_str).unwrap_or_else(|e| {
+                        eprintln!("Error parsing JSON: {e}");
+                        std::process::exit(1);
+                    });
+                builder = builder.template(&template_name, &html).data(json_data);
+            }
+
             let engine = builder.build();
 
+            // Render (template mode uses render(), HTML mode uses render_html())
+            let pdf_result = if data.is_some() {
+                engine.render()
+            } else {
+                engine.render_html(&html)
+            };
+
             if output.as_os_str() == "-" {
-                let pdf = engine.render_html(&html).unwrap_or_else(|e| {
+                let pdf = pdf_result.unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 });
@@ -272,8 +318,14 @@ fn main() {
                     std::process::exit(1);
                 });
             } else {
-                match engine.render_html_to_file(&html, &output) {
-                    Ok(()) => eprintln!("PDF written to {}", output.display()),
+                match pdf_result {
+                    Ok(pdf) => {
+                        std::fs::write(&output, pdf).unwrap_or_else(|e| {
+                            eprintln!("Error writing to {}: {e}", output.display());
+                            std::process::exit(1);
+                        });
+                        eprintln!("PDF written to {}", output.display());
+                    }
                     Err(e) => {
                         eprintln!("Error: {e}");
                         std::process::exit(1);
