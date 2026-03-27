@@ -1,0 +1,77 @@
+use crate::error::{Error, Result};
+
+/// Render a MiniJinja template with JSON data.
+pub fn render_template(name: &str, template_str: &str, data: &serde_json::Value) -> Result<String> {
+    let mut env = minijinja::Environment::new();
+    env.add_template(name, template_str)
+        .map_err(|e| Error::Template(e.to_string()))?;
+    let tmpl = env
+        .get_template(name)
+        .map_err(|e| Error::Template(e.to_string()))?;
+    tmpl.render(data)
+        .map_err(|e| Error::Template(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_variable_substitution() {
+        let tmpl = "<h1>{{ title }}</h1>";
+        let data = json!({"title": "Hello"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "<h1>Hello</h1>");
+    }
+
+    #[test]
+    fn test_loop() {
+        let tmpl = "{% for item in items %}<li>{{ item }}</li>{% endfor %}";
+        let data = json!({"items": ["a", "b"]});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "<li>a</li><li>b</li>");
+    }
+
+    #[test]
+    fn test_conditional() {
+        let tmpl = "{% if show %}yes{% else %}no{% endif %}";
+        let data = json!({"show": true});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "yes");
+    }
+
+    #[test]
+    fn test_filter() {
+        let tmpl = "{{ name | upper }}";
+        let data = json!({"name": "hello"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "HELLO");
+    }
+
+    #[test]
+    fn test_syntax_error() {
+        let tmpl = "{% if %}";
+        let data = json!({});
+        let result = render_template("test.html", tmpl, &data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Template error"));
+    }
+
+    #[test]
+    fn test_empty_data() {
+        let tmpl = "<p>static</p>";
+        let data = json!({});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "<p>static</p>");
+    }
+
+    #[test]
+    fn test_html_autoescaping() {
+        let tmpl = "{{ text }}";
+        let data = json!({"text": "<script>alert(1)</script>"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        // MiniJinja auto-escapes HTML by default for .html templates
+        assert!(!result.contains("<script>"));
+    }
+}
