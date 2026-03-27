@@ -20,7 +20,7 @@ fn test_template_to_pdf() {
 
     assert!(!pdf.is_empty());
     // PDF magic bytes
-    assert_eq!(&pdf[..5], b"%PDF-");
+    assert!(pdf.starts_with(b"%PDF-"));
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn test_html_mode_still_works() {
     let html = "<html><body><p>Hello</p></body></html>";
     let pdf = Engine::builder().build().render_html(html).unwrap();
     assert!(!pdf.is_empty());
-    assert_eq!(&pdf[..5], b"%PDF-");
+    assert!(pdf.starts_with(b"%PDF-"));
 }
 
 #[test]
@@ -76,5 +76,5 @@ fn test_template_with_assets() {
         .unwrap();
 
     assert!(!pdf.is_empty());
-    assert_eq!(&pdf[..5], b"%PDF-");
+    assert!(pdf.starts_with(b"%PDF-"));
 }

@@ -3,6 +3,7 @@ use crate::error::Result;
 /// Render a MiniJinja template with JSON data.
 pub fn render_template(name: &str, template_str: &str, data: &serde_json::Value) -> Result<String> {
     let mut env = minijinja::Environment::new();
+    env.set_auto_escape_callback(|_| minijinja::AutoEscape::Html);
     env.add_template(name, template_str)?;
     let tmpl = env.get_template(name)?;
     Ok(tmpl.render(data)?)
@@ -67,7 +68,9 @@ mod tests {
         let tmpl = "{{ text }}";
         let data = json!({"text": "<script>alert(1)</script>"});
         let result = render_template("test.html", tmpl, &data).unwrap();
-        // MiniJinja auto-escapes HTML by default for .html templates
+        assert!(!result.contains("<script>"));
+        // Also works with non-.html names due to forced autoescape
+        let result = render_template("test.txt", tmpl, &data).unwrap();
         assert!(!result.contains("<script>"));
     }
 

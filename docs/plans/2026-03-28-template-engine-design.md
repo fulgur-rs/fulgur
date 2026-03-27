@@ -25,7 +25,7 @@ cat data.json | fulgur render invoice.html --data - -o out.pdf
 
 - `--data <PATH>` — JSONデータファイル。`-` でstdin
 
-テンプレート内の `{% include %}` や `{% extends %}` はテンプレートファイルの親ディレクトリを基準に解決する。
+`{% include %}` や `{% extends %}` のファイルシステム解決は将来拡張として保留。現在は単一テンプレート文字列のレンダリングのみ対応。
 
 ## ライブラリAPI
 
