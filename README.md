@@ -122,13 +122,13 @@ engine.render_html_to_file(html, "output.pdf")?;
 // Template + JSON
 let engine = Engine::builder()
     .template("invoice.html", template_str)
+    .data(serde_json::json!({
+        "invoice_number": "2026-001",
+        "customer_name": "Acme Corp",
+    }))
     .build();
 
-let data = serde_json::json!({
-    "invoice_number": "2026-001",
-    "customer_name": "Acme Corp"
-});
-let pdf = engine.render_template(data)?;
+let pdf = engine.render()?;
 ```
 
 ## Architecture
