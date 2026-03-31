@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-03-31
+
+### Bug Fixes
+
+- remove invalid diff datastore from octocov config
+- pin third-party Actions to commit SHAs
+- fail on missing lcov artifact, run octocov on main push for baseline
+- remove duplicate test execution in coverage path
+- remove cross-repo push, use artifact-only for central mode
+- address review feedback on update-examples workflow
+- pass --image flags when regenerating example PDFs
+- skip non-visual elements in RunningElementPass walk
+- fallback to cwd when input has no parent dir, add http:// test
+- use case-insensitive token matching for rel="stylesheet"
+- address code review feedback
+- correct template API usage in README example
+
+### CI
+
+- add workflow to auto-update example PDFs on PRs
+
+### Documentation
+
+- add octocov coverage badges to README
+- add running element DomPass implementation plan
+- add link-stylesheet example demonstrating <link> CSS loading
+- add template engine example with invoice template
+- add template engine design and implementation plan
+- add generated PDF for template example
+- update README with template engine and improved positioning
+- add 3-value margin shorthand to options table
+
+### Features
+
+- add octocov for PR coverage comments
+- add detailed octocov reporting (code-to-test ratio, diff coverage)
+- send coverage report to octocovs central repo for badge generation
+- add RunningElementPass to DomPass pipeline
+- integrate RunningElementPass into DomPass pipeline
+- add base_path field to Engine for resolving relative stylesheet paths
+- add LinkStylesheetPass to resolve local <link> stylesheets
+- integrate LinkStylesheetPass into Engine pipeline
+- auto-set base_path in CLI for resolving linked stylesheets
+- add minijinja and serde_json dependencies for template engine
+- add Template error variant
+- add template.rs with MiniJinja render_template function
+- add template/data support to Engine and EngineBuilder
+- add --data flag for template mode in CLI
+
+### Miscellaneous
+
+- regenerate example PDFs
+- regenerate example PDFs
+
+### Refactor
+
+- separate build and test steps in CI for clearer timing
+- remove running element detection from convert.rs
+- remove unnecessary Vec clone in walk_tree
+- extract get_attr and inject_style_node helpers in blitz_adapter
+- simplify template engine code
+
+### Testing
+
+- add template engine integration tests
+- add error handling tests for template engine
+
 ## [0.4.0] - 2026-03-25
 
 ### Bug Fixes
@@ -29,6 +96,10 @@ All notable changes to this project will be documented in this file.
 - deduplicate parse_and_layout by delegating to parse + resolve
 - address code review feedback for font cache
 - extract find_split_point to deduplicate split/split_boxed logic
+
+### Release
+
+- v0.4.0
 
 ## [0.3.1] - 2026-03-22
 
