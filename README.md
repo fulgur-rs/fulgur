@@ -91,7 +91,7 @@ fulgur render -o invoice.pdf -d data.json template.html
 | `-o, --output` | Output PDF file path (required, use `-` for stdout) | — |
 | `-s, --size` | Page size (A4, Letter, A3) | A4 |
 | `-l, --landscape` | Landscape orientation | false |
-| `--margin` | Page margins in mm (CSS shorthand: `"20"`, `"20 30"`, `"10 20 30 40"`) | — |
+| `--margin` | Page margins in mm (CSS shorthand: `"20"`, `"20 30"`, `"10 20 30"`, `"10 20 30 40"`) | — |
 | `--title` | PDF title metadata | — |
 | `-f, --font` | Font files to bundle (repeatable) | — |
 | `--css` | CSS files to include (repeatable) | — |
