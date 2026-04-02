@@ -2,9 +2,10 @@
 
 use crate::asset::AssetBundle;
 use crate::gcpm::running::RunningElementStore;
-use crate::image::ImagePageable;
+use crate::image::{ImageFormat, ImagePageable};
 use crate::pageable::{
-    BlockPageable, BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
+    BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
+    BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
     SpacerPageable, TablePageable,
 };
 use crate::paragraph::{
@@ -93,7 +94,7 @@ fn convert_node(
         && elem_data.list_item_data.is_some()
     {
         let (marker_lines, marker_width) = extract_marker_lines(doc, node, ctx);
-        let style = extract_block_style(node);
+        let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
 
         // Build body WITHOUT opacity — ListItemPageable wraps everything in
@@ -164,7 +165,7 @@ fn convert_node(
     if node.flags.is_inline_root()
         && let Some(paragraph) = extract_paragraph(doc, node, ctx)
     {
-        let style = extract_block_style(node);
+        let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
         if style.has_visual_style() {
             let (child_x, child_y) = style.content_inset();
@@ -196,7 +197,7 @@ fn convert_node(
     let children: &[usize] = &node.children;
 
     if children.is_empty() {
-        let style = extract_block_style(node);
+        let style = extract_block_style(node, ctx.assets);
         if style.has_visual_style() || style.has_radius() {
             let (opacity, visible) = extract_opacity_visible(node);
             let mut block = BlockPageable::with_positioned_children(vec![])
@@ -216,7 +217,7 @@ fn convert_node(
     // Container node — collect children with Taffy-computed positions
     let positioned_children = collect_positioned_children(doc, children, ctx);
 
-    let style = extract_block_style(node);
+    let style = extract_block_style(node, ctx.assets);
     let has_style = style.has_visual_style() || style.has_radius();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
@@ -295,7 +296,7 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
     let width = layout.size.width;
     let height = layout.size.height;
 
-    let style = extract_block_style(node);
+    let style = extract_block_style(node, Some(assets));
     let (opacity, visible) = extract_opacity_visible(node);
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
@@ -337,7 +338,7 @@ fn convert_table(
     let layout = node.final_layout;
     let width = layout.size.width;
     let height = layout.size.height;
-    let style = extract_block_style(node);
+    let style = extract_block_style(node, ctx.assets);
 
     let mut header_cells: Vec<PositionedChild> = Vec::new();
     let mut body_cells: Vec<PositionedChild> = Vec::new();
@@ -527,8 +528,8 @@ fn extract_paragraph(
     Some(ParagraphPageable::new(shaped_lines))
 }
 
-/// Extract visual style (background, borders, padding) from a node.
-fn extract_block_style(node: &Node) -> BlockStyle {
+/// Extract visual style (background, borders, padding, background-image) from a node.
+fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle {
     let layout = node.final_layout;
     let mut style = BlockStyle {
         border_widths: [
@@ -627,6 +628,53 @@ fn extract_block_style(node: &Node) -> BlockStyle {
             convert_border_style(styles.clone_border_bottom_style()),
             convert_border_style(styles.clone_border_left_style()),
         ];
+
+        // Background image layers
+        if let Some(assets) = assets {
+            let bg_images = styles.clone_background_image();
+            let bg_sizes = styles.clone_background_size();
+            let bg_pos_x = styles.clone_background_position_x();
+            let bg_pos_y = styles.clone_background_position_y();
+            let bg_repeats = styles.clone_background_repeat();
+            let bg_origins = styles.clone_background_origin();
+            let bg_clips = styles.clone_background_clip();
+
+            for (i, image) in bg_images.0.iter().enumerate() {
+                use style::values::computed::image::Image;
+                if let Image::Url(ref url) = image {
+                    let src = match url {
+                        style::servo::url::ComputedUrl::Valid(ref u) => u.as_str(),
+                        style::servo::url::ComputedUrl::Invalid(ref s) => s.as_str(),
+                    };
+                    if let Some(data) = assets.get_image(src) {
+                        if let Some(format) = ImagePageable::detect_format(data) {
+                            let (iw, ih) = ImagePageable::decode_dimensions(data, format)
+                                .unwrap_or((1, 1));
+
+                            let size = convert_bg_size(&bg_sizes.0, i);
+                            let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                            let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                            let origin = convert_bg_origin(&bg_origins.0, i);
+                            let clip = convert_bg_clip(&bg_clips.0, i);
+
+                            style.background_layers.push(BackgroundLayer {
+                                image_data: Arc::clone(data),
+                                format,
+                                intrinsic_width: iw as f32,
+                                intrinsic_height: ih as f32,
+                                size,
+                                position_x: px,
+                                position_y: py,
+                                repeat_x: rx,
+                                repeat_y: ry,
+                                origin,
+                                clip,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     style
@@ -644,6 +692,91 @@ fn extract_opacity_visible(node: &Node) -> (f32, bool) {
             (opacity, visible)
         })
         .unwrap_or((1.0, true))
+}
+
+fn convert_bg_size(
+    sizes: &[style::values::computed::BackgroundSize],
+    i: usize,
+) -> BgSize {
+    use style::values::generics::background::BackgroundSize as StyloBS;
+    use style::values::generics::length::GenericLengthPercentageOrAuto as LPAuto;
+    let s = &sizes[i % sizes.len()];
+    match s {
+        StyloBS::Cover => BgSize::Cover,
+        StyloBS::Contain => BgSize::Contain,
+        StyloBS::ExplicitSize { width, height } => {
+            let w = match width {
+                LPAuto::Auto => None,
+                LPAuto::LengthPercentage(lp) => Some(convert_lp_to_bg(&lp.0)),
+            };
+            let h = match height {
+                LPAuto::Auto => None,
+                LPAuto::LengthPercentage(lp) => Some(convert_lp_to_bg(&lp.0)),
+            };
+            if w.is_none() && h.is_none() {
+                BgSize::Auto
+            } else {
+                BgSize::Explicit(w, h)
+            }
+        }
+    }
+}
+
+fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthPercentage {
+    if let Some(pct) = lp.to_percentage() {
+        BgLengthPercentage::Percentage(pct.0)
+    } else {
+        BgLengthPercentage::Length(lp.to_length().map(|l| l.px()).unwrap_or(0.0))
+    }
+}
+
+fn convert_bg_position(
+    pos_x: &[style::values::computed::LengthPercentage],
+    pos_y: &[style::values::computed::LengthPercentage],
+    i: usize,
+) -> (BgLengthPercentage, BgLengthPercentage) {
+    let px = &pos_x[i % pos_x.len()];
+    let py = &pos_y[i % pos_y.len()];
+    (convert_lp_to_bg(px), convert_lp_to_bg(py))
+}
+
+fn convert_bg_repeat(
+    repeats: &[style::values::specified::background::BackgroundRepeat],
+    i: usize,
+) -> (BgRepeat, BgRepeat) {
+    use style::values::specified::background::BackgroundRepeatKeyword as BRK;
+    let r = &repeats[i % repeats.len()];
+    let map = |k: BRK| match k {
+        BRK::Repeat => BgRepeat::Repeat,
+        BRK::NoRepeat => BgRepeat::NoRepeat,
+        BRK::Space => BgRepeat::Space,
+        BRK::Round => BgRepeat::Round,
+    };
+    (map(r.0), map(r.1))
+}
+
+fn convert_bg_origin(
+    origins: &[style::properties::longhands::background_origin::computed_value::T],
+    i: usize,
+) -> BgBox {
+    use style::properties::longhands::background_origin::computed_value::T as O;
+    match origins[i % origins.len()] {
+        O::BorderBox => BgBox::BorderBox,
+        O::PaddingBox => BgBox::PaddingBox,
+        O::ContentBox => BgBox::ContentBox,
+    }
+}
+
+fn convert_bg_clip(
+    clips: &[style::properties::longhands::background_clip::computed_value::T],
+    i: usize,
+) -> BgClip {
+    use style::properties::longhands::background_clip::computed_value::T as C;
+    match clips[i % clips.len()] {
+        C::BorderBox => BgClip::BorderBox,
+        C::PaddingBox => BgClip::PaddingBox,
+        C::ContentBox => BgClip::ContentBox,
+    }
 }
 
 /// Check if a node is a non-visual element (head, script, style, etc.)
