@@ -108,8 +108,8 @@ fn convert_node(
                     x: child_x,
                     y: child_y,
                 };
-                let mut block = BlockPageable::with_positioned_children(vec![child])
-                    .with_style(style);
+                let mut block =
+                    BlockPageable::with_positioned_children(vec![child]).with_style(style);
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
@@ -119,8 +119,8 @@ fn convert_node(
         } else {
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children, ctx);
-            let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_style(style);
+            let mut block =
+                BlockPageable::with_positioned_children(positioned_children).with_style(style);
             block.wrap(width, 10000.0);
             Box::new(block)
         };
