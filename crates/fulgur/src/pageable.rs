@@ -201,6 +201,8 @@ pub struct BlockPageable {
     /// Taffy-computed layout size (preserved across wrap() calls for drawing).
     pub layout_size: Option<Size>,
     pub style: BlockStyle,
+    pub opacity: f32,
+    pub visible: bool,
 }
 
 impl BlockPageable {
@@ -225,6 +227,8 @@ impl BlockPageable {
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
+            opacity: 1.0,
+            visible: true,
         }
     }
 
@@ -235,6 +239,8 @@ impl BlockPageable {
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
+            opacity: 1.0,
+            visible: true,
         }
     }
 
@@ -245,6 +251,16 @@ impl BlockPageable {
 
     pub fn with_style(mut self, style: BlockStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    pub fn with_visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
         self
     }
 
@@ -815,12 +831,16 @@ impl Pageable for BlockPageable {
                     Box::new(
                         BlockPageable::with_positioned_children(first)
                             .with_pagination(self.pagination)
-                            .with_style(self.style.clone()),
+                            .with_style(self.style.clone())
+                            .with_opacity(self.opacity)
+                            .with_visible(self.visible),
                     ),
                     Box::new(
                         BlockPageable::with_positioned_children(second)
                             .with_pagination(self.pagination)
-                            .with_style(self.style.clone()),
+                            .with_style(self.style.clone())
+                            .with_opacity(self.opacity)
+                            .with_visible(self.visible),
                     ),
                 ))
             }
@@ -838,12 +858,16 @@ impl Pageable for BlockPageable {
                     Box::new(
                         BlockPageable::with_positioned_children(first)
                             .with_pagination(self.pagination)
-                            .with_style(self.style.clone()),
+                            .with_style(self.style.clone())
+                            .with_opacity(self.opacity)
+                            .with_visible(self.visible),
                     ),
                     Box::new(
                         BlockPageable::with_positioned_children(second)
                             .with_pagination(self.pagination)
-                            .with_style(self.style.clone()),
+                            .with_style(self.style.clone())
+                            .with_opacity(self.opacity)
+                            .with_visible(self.visible),
                     ),
                 ))
             }
@@ -885,12 +909,16 @@ impl Pageable for BlockPageable {
                     Box::new(
                         BlockPageable::with_positioned_children(first)
                             .with_pagination(me.pagination)
-                            .with_style(me.style.clone()),
+                            .with_style(me.style.clone())
+                            .with_opacity(me.opacity)
+                            .with_visible(me.visible),
                     ),
                     Box::new(
                         BlockPageable::with_positioned_children(second)
                             .with_pagination(me.pagination)
-                            .with_style(me.style),
+                            .with_style(me.style)
+                            .with_opacity(me.opacity)
+                            .with_visible(me.visible),
                     ),
                 ))
             }
@@ -915,12 +943,16 @@ impl Pageable for BlockPageable {
                     Box::new(
                         BlockPageable::with_positioned_children(first_children)
                             .with_pagination(me.pagination)
-                            .with_style(me.style.clone()),
+                            .with_style(me.style.clone())
+                            .with_opacity(me.opacity)
+                            .with_visible(me.visible),
                     ),
                     Box::new(
                         BlockPageable::with_positioned_children(second_children)
                             .with_pagination(me.pagination)
-                            .with_style(me.style),
+                            .with_style(me.style)
+                            .with_opacity(me.opacity)
+                            .with_visible(me.visible),
                     ),
                 ))
             }
@@ -928,6 +960,17 @@ impl Pageable for BlockPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
+        if !self.visible || self.opacity == 0.0 {
+            return;
+        }
+
+        let needs_opacity = self.opacity < 1.0;
+        if needs_opacity {
+            let nf = krilla::num::NormalizedF32::new(self.opacity)
+                .unwrap_or(krilla::num::NormalizedF32::ONE);
+            canvas.surface.push_opacity(nf);
+        }
+
         // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
         let total_width = self
             .layout_size
@@ -946,6 +989,10 @@ impl Pageable for BlockPageable {
         for pc in &self.children {
             pc.child
                 .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+        }
+
+        if needs_opacity {
+            canvas.surface.pop();
         }
     }
 
