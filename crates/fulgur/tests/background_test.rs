@@ -29,6 +29,22 @@ fn test_background_image_renders_to_pdf() {
     </body></html>"#;
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
+
+    // PDF with background image should be larger than without (verifies image is embedded)
+    let pdf_no_bg = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .build()
+        .render_html(
+            r#"<html><body><div style="width:200px;height:200px">Hello</div></body></html>"#,
+        )
+        .unwrap();
+    assert!(
+        pdf.len() > pdf_no_bg.len(),
+        "PDF with background-image ({} bytes) should be larger than without ({} bytes)",
+        pdf.len(),
+        pdf_no_bg.len()
+    );
 }
 
 #[test]

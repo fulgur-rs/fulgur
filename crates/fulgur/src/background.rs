@@ -220,6 +220,8 @@ fn compute_clip_rect(
     let pad = &style.padding;
     match clip {
         BgClip::BorderBox => (x, y, w, h),
+        // Text clip: Stylo doesn't expose background-clip: text; falls back to padding-box.
+        // See issue fulgur-5gb for future implementation.
         BgClip::PaddingBox | BgClip::Text => {
             (x + bw[3], y + bw[0], w - bw[1] - bw[3], h - bw[0] - bw[2])
         }
@@ -251,11 +253,17 @@ fn compute_tile_positions(
     let (tile_h, space_y, start_y, end_y) =
         resolve_repeat_axis(repeat_y, pos_y, img_h, clip_y, clip_h);
 
+    // Cap tile count to prevent memory/CPU explosion with tiny images on large containers.
+    const MAX_TILES: usize = 10_000;
+
     let mut ty = start_y;
     while ty < end_y + 0.01 {
         let mut tx = start_x;
         while tx < end_x + 0.01 {
             tiles.push((tx, ty, tile_w, tile_h));
+            if tiles.len() >= MAX_TILES {
+                return tiles;
+            }
             tx += tile_w + space_x;
             if repeat_x == BgRepeat::NoRepeat {
                 break;

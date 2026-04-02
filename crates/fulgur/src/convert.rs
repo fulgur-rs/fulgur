@@ -642,10 +642,13 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
             for (i, image) in bg_images.0.iter().enumerate() {
                 use style::values::computed::image::Image;
                 if let Image::Url(url) = image {
-                    let src = match url {
+                    let raw_src = match url {
                         style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
                         style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
                     };
+                    // Stylo resolves URLs to absolute (e.g. "file:///bg.png").
+                    // Extract the path/filename for AssetBundle lookup.
+                    let src = extract_asset_name(raw_src);
                     if let Some(data) = assets.get_image(src) {
                         if let Some(format) = ImagePageable::detect_format(data) {
                             let (iw, ih) =
@@ -694,6 +697,13 @@ fn extract_opacity_visible(node: &Node) -> (f32, bool) {
         .unwrap_or((1.0, true))
 }
 
+/// Extract the asset name from a URL that Stylo may have resolved to absolute.
+/// e.g. "file:///bg.png" → "bg.png", "file:///images/bg.png" → "images/bg.png",
+/// "bg.png" → "bg.png" (passthrough for unresolved URLs).
+fn extract_asset_name(url: &str) -> &str {
+    url.strip_prefix("file:///").unwrap_or(url)
+}
+
 fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) -> BgSize {
     use style::values::generics::background::BackgroundSize as StyloBS;
     use style::values::generics::length::GenericLengthPercentageOrAuto as LPAuto;
@@ -719,6 +729,9 @@ fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) 
     }
 }
 
+/// Convert Stylo LengthPercentage to BgLengthPercentage.
+/// Note: calc() values (e.g. `calc(50% + 10px)`) are not fully supported —
+/// they fall back to 0.0 if neither pure percentage nor pure length.
 fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthPercentage {
     if let Some(pct) = lp.to_percentage() {
         BgLengthPercentage::Percentage(pct.0)
