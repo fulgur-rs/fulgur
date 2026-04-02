@@ -106,19 +106,26 @@ fn convert_node(
                     x: child_x,
                     y: child_y,
                 };
-                let mut block =
-                    BlockPageable::with_positioned_children(vec![child]).with_style(style);
+                let mut block = BlockPageable::with_positioned_children(vec![child])
+                    .with_style(style)
+                    .with_opacity(extract_opacity(node))
+                    .with_visible(extract_visible(node));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                Box::new(paragraph)
+                let mut p = paragraph;
+                p.opacity = extract_opacity(node);
+                p.visible = extract_visible(node);
+                Box::new(p)
             }
         } else {
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children, ctx);
-            let mut block =
-                BlockPageable::with_positioned_children(positioned_children).with_style(style);
+            let mut block = BlockPageable::with_positioned_children(positioned_children)
+                .with_style(style)
+                .with_opacity(extract_opacity(node))
+                .with_visible(extract_visible(node));
             block.wrap(width, 10000.0);
             Box::new(block)
         };
@@ -161,13 +168,19 @@ fn convert_node(
                 x: child_x,
                 y: child_y,
             };
-            let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+            let mut block = BlockPageable::with_positioned_children(vec![child])
+                .with_style(style)
+                .with_opacity(extract_opacity(node))
+                .with_visible(extract_visible(node));
             block.wrap(width, height);
             // Use Taffy's computed height (includes padding + border) instead of children-only height
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
-        return Box::new(paragraph);
+        let mut p = paragraph;
+        p.opacity = extract_opacity(node);
+        p.visible = extract_visible(node);
+        return Box::new(p);
     }
 
     let children: &[usize] = &node.children;
@@ -175,7 +188,10 @@ fn convert_node(
     if children.is_empty() {
         let style = extract_block_style(node);
         if style.has_visual_style() || style.has_radius() {
-            let mut block = BlockPageable::with_positioned_children(vec![]).with_style(style);
+            let mut block = BlockPageable::with_positioned_children(vec![])
+                .with_style(style)
+                .with_opacity(extract_opacity(node))
+                .with_visible(extract_visible(node));
             block.wrap(width, height);
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
@@ -191,7 +207,10 @@ fn convert_node(
 
     let style = extract_block_style(node);
     let has_style = style.has_visual_style() || style.has_radius();
-    let mut block = BlockPageable::with_positioned_children(positioned_children).with_style(style);
+    let mut block = BlockPageable::with_positioned_children(positioned_children)
+        .with_style(style)
+        .with_opacity(extract_opacity(node))
+        .with_visible(extract_visible(node));
     block.wrap(width, 10000.0);
     if has_style {
         block.layout_size = Some(Size { width, height });
@@ -272,18 +291,25 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         let bottom_inset = style.border_widths[2] + style.padding[2];
         let content_width = (width - cx - right_inset).max(0.0);
         let content_height = (height - cy - bottom_inset).max(0.0);
-        let img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
+        let mut img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
+        img.opacity = extract_opacity(node);
+        img.visible = extract_visible(node);
         let child = PositionedChild {
             child: Box::new(img),
             x: cx,
             y: cy,
         };
-        let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+        let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_style(style)
+            .with_opacity(extract_opacity(node))
+            .with_visible(extract_visible(node));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Some(Box::new(block))
     } else {
-        let img = ImagePageable::new(Arc::clone(data), format, width, height);
+        let mut img = ImagePageable::new(Arc::clone(data), format, width, height);
+        img.opacity = extract_opacity(node);
+        img.visible = extract_visible(node);
         Some(Box::new(img))
     }
 }
@@ -587,6 +613,24 @@ fn extract_block_style(node: &Node) -> BlockStyle {
     }
 
     style
+}
+
+/// Extract opacity from computed styles (default: 1.0 = fully opaque).
+fn extract_opacity(node: &Node) -> f32 {
+    node.primary_styles()
+        .map(|s| s.clone_opacity())
+        .unwrap_or(1.0)
+}
+
+/// Extract visibility from computed styles (default: true = visible).
+fn extract_visible(node: &Node) -> bool {
+    use style::properties::longhands::visibility::computed_value::T as Visibility;
+    node.primary_styles()
+        .map(|s| {
+            let v = s.clone_visibility();
+            v != Visibility::Hidden && v != Visibility::Collapse
+        })
+        .unwrap_or(true)
 }
 
 /// Check if a node is a non-visual element (head, script, style, etc.)
