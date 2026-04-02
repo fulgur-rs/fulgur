@@ -96,6 +96,8 @@ fn convert_node(
         let style = extract_block_style(node);
 
         // Build body: if inline root, use paragraph; otherwise collect block children
+        // Build body WITHOUT opacity/visible — ListItemPageable will handle it
+        // for both marker and body, avoiding double application.
         let body: Box<dyn Pageable> = if node.flags.is_inline_root()
             && let Some(paragraph) = extract_paragraph(doc, node, ctx)
         {
@@ -107,25 +109,18 @@ fn convert_node(
                     y: child_y,
                 };
                 let mut block = BlockPageable::with_positioned_children(vec![child])
-                    .with_style(style)
-                    .with_opacity(extract_opacity(node))
-                    .with_visible(extract_visible(node));
+                    .with_style(style);
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                let mut p = paragraph;
-                p.opacity = extract_opacity(node);
-                p.visible = extract_visible(node);
-                Box::new(p)
+                Box::new(paragraph)
             }
         } else {
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children, ctx);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_style(style)
-                .with_opacity(extract_opacity(node))
-                .with_visible(extract_visible(node));
+                .with_style(style);
             block.wrap(width, 10000.0);
             Box::new(block)
         };
@@ -137,6 +132,8 @@ fn convert_node(
             style: BlockStyle::default(),
             width,
             height: 0.0,
+            opacity: extract_opacity(node),
+            visible: extract_visible(node),
         };
         item.wrap(width, 10000.0);
         return Box::new(item);
@@ -291,9 +288,9 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         let bottom_inset = style.border_widths[2] + style.padding[2];
         let content_width = (width - cx - right_inset).max(0.0);
         let content_height = (height - cy - bottom_inset).max(0.0);
-        let mut img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
-        img.opacity = extract_opacity(node);
-        img.visible = extract_visible(node);
+        let img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
+        // Do NOT set opacity/visible on inner image — the wrapping BlockPageable's
+        // push_opacity will cover it, avoiding double application.
         let child = PositionedChild {
             child: Box::new(img),
             x: cx,

@@ -1082,6 +1082,10 @@ pub struct ListItemPageable {
     pub width: Pt,
     /// Cached height from wrap()
     pub height: Pt,
+    /// CSS opacity (0.0–1.0), applied to both marker and body
+    pub opacity: f32,
+    /// CSS visibility (false = hidden)
+    pub visible: bool,
 }
 
 impl Pageable for ListItemPageable {
@@ -1108,6 +1112,8 @@ impl Pageable for ListItemPageable {
                 style: self.style.clone(),
                 width: self.width,
                 height: 0.0,
+                opacity: self.opacity,
+                visible: self.visible,
             }),
             Box::new(ListItemPageable {
                 marker_lines: Vec::new(),
@@ -1116,6 +1122,8 @@ impl Pageable for ListItemPageable {
                 style: self.style.clone(),
                 width: self.width,
                 height: 0.0,
+                opacity: self.opacity,
+                visible: self.visible,
             }),
         ))
     }
@@ -1136,6 +1144,8 @@ impl Pageable for ListItemPageable {
                 style: me.style.clone(),
                 width: me.width,
                 height: 0.0,
+                opacity: me.opacity,
+                visible: me.visible,
             }),
             Box::new(ListItemPageable {
                 marker_lines: Vec::new(),
@@ -1144,11 +1154,24 @@ impl Pageable for ListItemPageable {
                 style: me.style,
                 width: me.width,
                 height: 0.0,
+                opacity: me.opacity,
+                visible: me.visible,
             }),
         ))
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
+        if !self.visible || self.opacity == 0.0 {
+            return;
+        }
+
+        let needs_opacity = self.opacity < 1.0;
+        if needs_opacity {
+            let nf = krilla::num::NormalizedF32::new(self.opacity)
+                .unwrap_or(krilla::num::NormalizedF32::ONE);
+            canvas.surface.push_opacity(nf);
+        }
+
         // Draw marker to the left of the body
         if !self.marker_lines.is_empty() {
             let marker_x = x - self.marker_width;
@@ -1156,6 +1179,10 @@ impl Pageable for ListItemPageable {
         }
         // Draw body
         self.body.draw(canvas, x, y, avail_width, avail_height);
+
+        if needs_opacity {
+            canvas.surface.pop();
+        }
     }
 
     fn pagination(&self) -> Pagination {
@@ -1455,6 +1482,8 @@ mod tests {
             style: BlockStyle::default(),
             width: 200.0,
             height: 100.0,
+            opacity: 1.0,
+            visible: true,
         };
         let size = item.wrap(200.0, 1000.0);
         assert!((size.height - 100.0).abs() < 0.01);
@@ -1475,6 +1504,8 @@ mod tests {
             style: BlockStyle::default(),
             width: 200.0,
             height: 300.0,
+            opacity: 1.0,
+            visible: true,
         };
         item.wrap(200.0, 1000.0);
         let result = item.split(200.0, 250.0);
