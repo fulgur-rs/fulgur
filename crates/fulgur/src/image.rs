@@ -19,6 +19,8 @@ pub struct ImagePageable {
     pub format: ImageFormat,
     pub width: f32,
     pub height: f32,
+    pub opacity: f32,
+    pub visible: bool,
 }
 
 impl ImagePageable {
@@ -28,6 +30,8 @@ impl ImagePageable {
             format,
             width,
             height,
+            opacity: 1.0,
+            visible: true,
         }
     }
 
@@ -63,6 +67,10 @@ impl Pageable for ImagePageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
+        if !self.visible || self.opacity == 0.0 {
+            return;
+        }
+
         let data: krilla::Data = Arc::clone(&self.image_data).into();
         let image_result = match self.format {
             ImageFormat::Png => krilla::image::Image::from_png(data, true),
@@ -80,7 +88,19 @@ impl Pageable for ImagePageable {
 
         let transform = krilla::geom::Transform::from_translate(x, y);
         canvas.surface.push_transform(&transform);
+
+        let needs_opacity = self.opacity < 1.0;
+        if needs_opacity {
+            let nf = krilla::num::NormalizedF32::new(self.opacity)
+                .unwrap_or(krilla::num::NormalizedF32::ONE);
+            canvas.surface.push_opacity(nf);
+        }
+
         canvas.surface.draw_image(image, size);
+
+        if needs_opacity {
+            canvas.surface.pop();
+        }
         canvas.surface.pop();
     }
 
