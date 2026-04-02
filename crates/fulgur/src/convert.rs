@@ -125,6 +125,7 @@ fn convert_node(
             Box::new(block)
         };
 
+        let (opacity, visible) = extract_opacity_visible(node);
         let mut item = ListItemPageable {
             marker_lines,
             marker_width,
@@ -132,8 +133,8 @@ fn convert_node(
             style: BlockStyle::default(),
             width,
             height: 0.0,
-            opacity: extract_opacity(node),
-            visible: extract_visible(node),
+            opacity,
+            visible,
         };
         item.wrap(width, 10000.0);
         return Box::new(item);
@@ -158,6 +159,7 @@ fn convert_node(
         && let Some(paragraph) = extract_paragraph(doc, node, ctx)
     {
         let style = extract_block_style(node);
+        let (opacity, visible) = extract_opacity_visible(node);
         if style.has_visual_style() {
             let (child_x, child_y) = style.content_inset();
             let child = PositionedChild {
@@ -167,16 +169,16 @@ fn convert_node(
             };
             let mut block = BlockPageable::with_positioned_children(vec![child])
                 .with_style(style)
-                .with_opacity(extract_opacity(node))
-                .with_visible(extract_visible(node));
+                .with_opacity(opacity)
+                .with_visible(visible);
             block.wrap(width, height);
             // Use Taffy's computed height (includes padding + border) instead of children-only height
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
         let mut p = paragraph;
-        p.opacity = extract_opacity(node);
-        p.visible = extract_visible(node);
+        p.opacity = opacity;
+        p.visible = visible;
         return Box::new(p);
     }
 
@@ -185,10 +187,11 @@ fn convert_node(
     if children.is_empty() {
         let style = extract_block_style(node);
         if style.has_visual_style() || style.has_radius() {
+            let (opacity, visible) = extract_opacity_visible(node);
             let mut block = BlockPageable::with_positioned_children(vec![])
                 .with_style(style)
-                .with_opacity(extract_opacity(node))
-                .with_visible(extract_visible(node));
+                .with_opacity(opacity)
+                .with_visible(visible);
             block.wrap(width, height);
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
@@ -204,10 +207,11 @@ fn convert_node(
 
     let style = extract_block_style(node);
     let has_style = style.has_visual_style() || style.has_radius();
+    let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
         .with_style(style)
-        .with_opacity(extract_opacity(node))
-        .with_visible(extract_visible(node));
+        .with_opacity(opacity)
+        .with_visible(visible);
     block.wrap(width, 10000.0);
     if has_style {
         block.layout_size = Some(Size { width, height });
@@ -281,6 +285,7 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
     let height = layout.size.height;
 
     let style = extract_block_style(node);
+    let (opacity, visible) = extract_opacity_visible(node);
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
         // content_inset returns (left, top); compute right/bottom insets for content-box
@@ -288,9 +293,9 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         let bottom_inset = style.border_widths[2] + style.padding[2];
         let content_width = (width - cx - right_inset).max(0.0);
         let content_height = (height - cy - bottom_inset).max(0.0);
-        let img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
         // Do NOT set opacity/visible on inner image — the wrapping BlockPageable's
         // push_opacity will cover it, avoiding double application.
+        let img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
         let child = PositionedChild {
             child: Box::new(img),
             x: cx,
@@ -298,15 +303,15 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_style(style)
-            .with_opacity(extract_opacity(node))
-            .with_visible(extract_visible(node));
+            .with_opacity(opacity)
+            .with_visible(visible);
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Some(Box::new(block))
     } else {
         let mut img = ImagePageable::new(Arc::clone(data), format, width, height);
-        img.opacity = extract_opacity(node);
-        img.visible = extract_visible(node);
+        img.opacity = opacity;
+        img.visible = visible;
         Some(Box::new(img))
     }
 }
@@ -612,22 +617,18 @@ fn extract_block_style(node: &Node) -> BlockStyle {
     style
 }
 
-/// Extract opacity from computed styles (default: 1.0 = fully opaque).
-fn extract_opacity(node: &Node) -> f32 {
-    node.primary_styles()
-        .map(|s| s.clone_opacity())
-        .unwrap_or(1.0)
-}
-
-/// Extract visibility from computed styles (default: true = visible).
-fn extract_visible(node: &Node) -> bool {
+/// Extract CSS opacity and visibility from computed styles.
+/// Returns `(opacity, visible)` with defaults `(1.0, true)`.
+fn extract_opacity_visible(node: &Node) -> (f32, bool) {
     use style::properties::longhands::visibility::computed_value::T as Visibility;
     node.primary_styles()
         .map(|s| {
+            let opacity = s.clone_opacity();
             let v = s.clone_visibility();
-            v != Visibility::Hidden && v != Visibility::Collapse
+            let visible = v != Visibility::Hidden && v != Visibility::Collapse;
+            (opacity, visible)
         })
-        .unwrap_or(true)
+        .unwrap_or((1.0, true))
 }
 
 /// Check if a node is a non-visual element (head, script, style, etc.)

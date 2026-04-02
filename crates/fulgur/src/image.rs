@@ -67,41 +67,29 @@ impl Pageable for ImagePageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        if !self.visible || self.opacity == 0.0 {
-            return;
-        }
+        use crate::pageable::draw_with_opacity;
 
-        let data: krilla::Data = Arc::clone(&self.image_data).into();
-        let image_result = match self.format {
-            ImageFormat::Png => krilla::image::Image::from_png(data, true),
-            ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true),
-            ImageFormat::Gif => krilla::image::Image::from_gif(data, true),
-        };
+        draw_with_opacity(canvas, self.opacity, self.visible, |canvas| {
+            let data: krilla::Data = Arc::clone(&self.image_data).into();
+            let image_result = match self.format {
+                ImageFormat::Png => krilla::image::Image::from_png(data, true),
+                ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true),
+                ImageFormat::Gif => krilla::image::Image::from_gif(data, true),
+            };
 
-        let Ok(image) = image_result else {
-            return;
-        };
+            let Ok(image) = image_result else {
+                return;
+            };
 
-        let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
-            return;
-        };
+            let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
+                return;
+            };
 
-        let transform = krilla::geom::Transform::from_translate(x, y);
-        canvas.surface.push_transform(&transform);
-
-        let needs_opacity = self.opacity < 1.0;
-        if needs_opacity {
-            let nf = krilla::num::NormalizedF32::new(self.opacity)
-                .unwrap_or(krilla::num::NormalizedF32::ONE);
-            canvas.surface.push_opacity(nf);
-        }
-
-        canvas.surface.draw_image(image, size);
-
-        if needs_opacity {
+            let transform = krilla::geom::Transform::from_translate(x, y);
+            canvas.surface.push_transform(&transform);
+            canvas.surface.draw_image(image, size);
             canvas.surface.pop();
-        }
-        canvas.surface.pop();
+        });
     }
 
     fn pagination(&self) -> Pagination {

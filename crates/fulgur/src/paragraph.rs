@@ -553,22 +553,9 @@ impl Pageable for ParagraphPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        if !self.visible || self.opacity == 0.0 {
-            return;
-        }
-
-        let needs_opacity = self.opacity < 1.0;
-        if needs_opacity {
-            let nf = krilla::num::NormalizedF32::new(self.opacity)
-                .unwrap_or(krilla::num::NormalizedF32::ONE);
-            canvas.surface.push_opacity(nf);
-        }
-
-        draw_shaped_lines(canvas, &self.lines, x, y);
-
-        if needs_opacity {
-            canvas.surface.pop();
-        }
+        crate::pageable::draw_with_opacity(canvas, self.opacity, self.visible, |canvas| {
+            draw_shaped_lines(canvas, &self.lines, x, y);
+        });
     }
 
     fn pagination(&self) -> Pagination {

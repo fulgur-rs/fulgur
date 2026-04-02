@@ -52,6 +52,30 @@ pub struct Canvas<'a, 'b> {
     pub surface: &'a mut krilla::surface::Surface<'b>,
 }
 
+/// Run a draw closure wrapped in opacity/visibility guards.
+/// Skips drawing entirely if invisible or fully transparent.
+/// Wraps in a Krilla transparency group if partially transparent.
+pub fn draw_with_opacity(
+    canvas: &mut Canvas<'_, '_>,
+    opacity: f32,
+    visible: bool,
+    f: impl FnOnce(&mut Canvas<'_, '_>),
+) {
+    if !visible || opacity == 0.0 {
+        return;
+    }
+    let needs_opacity = opacity < 1.0;
+    if needs_opacity {
+        let nf =
+            krilla::num::NormalizedF32::new(opacity).unwrap_or(krilla::num::NormalizedF32::ONE);
+        canvas.surface.push_opacity(nf);
+    }
+    f(canvas);
+    if needs_opacity {
+        canvas.surface.pop();
+    }
+}
+
 /// Core pagination-aware layout trait.
 pub trait Pageable: Send + Sync {
     /// Measure size within available area.
@@ -960,40 +984,27 @@ impl Pageable for BlockPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
-        if !self.visible || self.opacity == 0.0 {
-            return;
-        }
+        draw_with_opacity(canvas, self.opacity, self.visible, |canvas| {
+            // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
+            let total_width = self
+                .layout_size
+                .or(self.cached_size)
+                .map(|s| s.width)
+                .unwrap_or(avail_width);
+            let total_height = self
+                .layout_size
+                .or(self.cached_size)
+                .map(|s| s.height)
+                .unwrap_or(avail_height);
 
-        let needs_opacity = self.opacity < 1.0;
-        if needs_opacity {
-            let nf = krilla::num::NormalizedF32::new(self.opacity)
-                .unwrap_or(krilla::num::NormalizedF32::ONE);
-            canvas.surface.push_opacity(nf);
-        }
+            draw_block_background(canvas, &self.style, x, y, total_width, total_height);
+            draw_block_border(canvas, &self.style, x, y, total_width, total_height);
 
-        // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
-        let total_width = self
-            .layout_size
-            .or(self.cached_size)
-            .map(|s| s.width)
-            .unwrap_or(avail_width);
-        let total_height = self
-            .layout_size
-            .or(self.cached_size)
-            .map(|s| s.height)
-            .unwrap_or(avail_height);
-
-        draw_block_background(canvas, &self.style, x, y, total_width, total_height);
-        draw_block_border(canvas, &self.style, x, y, total_width, total_height);
-
-        for pc in &self.children {
-            pc.child
-                .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
-        }
-
-        if needs_opacity {
-            canvas.surface.pop();
-        }
+            for pc in &self.children {
+                pc.child
+                    .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+            }
+        });
     }
 
     fn pagination(&self) -> Pagination {
@@ -1161,28 +1172,15 @@ impl Pageable for ListItemPageable {
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
-        if !self.visible || self.opacity == 0.0 {
-            return;
-        }
-
-        let needs_opacity = self.opacity < 1.0;
-        if needs_opacity {
-            let nf = krilla::num::NormalizedF32::new(self.opacity)
-                .unwrap_or(krilla::num::NormalizedF32::ONE);
-            canvas.surface.push_opacity(nf);
-        }
-
-        // Draw marker to the left of the body
-        if !self.marker_lines.is_empty() {
-            let marker_x = x - self.marker_width;
-            crate::paragraph::draw_shaped_lines(canvas, &self.marker_lines, marker_x, y);
-        }
-        // Draw body
-        self.body.draw(canvas, x, y, avail_width, avail_height);
-
-        if needs_opacity {
-            canvas.surface.pop();
-        }
+        draw_with_opacity(canvas, self.opacity, self.visible, |canvas| {
+            // Draw marker to the left of the body
+            if !self.marker_lines.is_empty() {
+                let marker_x = x - self.marker_width;
+                crate::paragraph::draw_shaped_lines(canvas, &self.marker_lines, marker_x, y);
+            }
+            // Draw body
+            self.body.draw(canvas, x, y, avail_width, avail_height);
+        });
     }
 
     fn pagination(&self) -> Pagination {
