@@ -17,7 +17,10 @@ fn test_opacity_half() {
     </body></html>"#;
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
-    assert!(has_transparency_group(&pdf), "opacity: 0.5 should produce a PDF Transparency Group");
+    assert!(
+        has_transparency_group(&pdf),
+        "opacity: 0.5 should produce a PDF Transparency Group"
+    );
 }
 
 #[test]
@@ -31,7 +34,10 @@ fn test_opacity_zero() {
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // opacity: 0 skips drawing entirely, so no transparency group needed
-    assert!(!has_transparency_group(&pdf), "opacity: 0 should skip drawing, no Transparency Group");
+    assert!(
+        !has_transparency_group(&pdf),
+        "opacity: 0 should skip drawing, no Transparency Group"
+    );
 }
 
 #[test]
@@ -45,7 +51,10 @@ fn test_visibility_hidden() {
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // visibility: hidden skips drawing, so no transparency group
-    assert!(!has_transparency_group(&pdf), "visibility: hidden should skip drawing");
+    assert!(
+        !has_transparency_group(&pdf),
+        "visibility: hidden should skip drawing"
+    );
 }
 
 #[test]
@@ -57,7 +66,10 @@ fn test_opacity_on_div_placeholder() {
     </body></html>"#;
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
-    assert!(has_transparency_group(&pdf), "opacity: 0.7 should produce a Transparency Group");
+    assert!(
+        has_transparency_group(&pdf),
+        "opacity: 0.7 should produce a Transparency Group"
+    );
 }
 
 #[test]
@@ -73,7 +85,10 @@ fn test_nested_opacity() {
     </body></html>"#;
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
-    assert!(has_transparency_group(&pdf), "nested opacity should produce Transparency Groups");
+    assert!(
+        has_transparency_group(&pdf),
+        "nested opacity should produce Transparency Groups"
+    );
 }
 
 #[test]
@@ -86,7 +101,10 @@ fn test_opacity_with_background() {
     </body></html>"#;
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
-    assert!(has_transparency_group(&pdf), "opacity: 0.5 with background should produce a Transparency Group");
+    assert!(
+        has_transparency_group(&pdf),
+        "opacity: 0.5 with background should produce a Transparency Group"
+    );
 }
 
 #[test]
