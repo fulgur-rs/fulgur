@@ -122,3 +122,40 @@ fn test_visibility_hidden_preserves_layout() {
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 1000);
 }
+
+/// Regression test: styled inline root with visibility:hidden must hide text.
+/// Exercises the convert.rs path where a ParagraphPageable is wrapped in a
+/// BlockPageable for background/border — the inner paragraph must inherit visible.
+#[test]
+fn test_visibility_hidden_styled_inline_root() {
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let html_hidden = r#"<html><body>
+        <p style="visibility: hidden; background-color: red; padding: 10px;">
+            Hidden text with styled background
+        </p>
+    </body></html>"#;
+    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    assert!(pdf_hidden.starts_with(b"%PDF"));
+    // visibility:hidden should not produce a transparency group
+    assert!(
+        !has_transparency_group(&pdf_hidden),
+        "styled inline root with visibility:hidden should not produce Transparency Group"
+    );
+}
+
+/// Regression test: list item with visibility:hidden must hide marker and body.
+/// Exercises the convert.rs path where ListItemPageable body is built without
+/// the node's visibility — the body must inherit visible.
+#[test]
+fn test_visibility_hidden_list_item() {
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let html = r#"<html><body>
+        <ul>
+            <li style="visibility: hidden;">Hidden list item</li>
+            <li>Visible list item</li>
+        </ul>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(pdf.len() > 500);
+}
