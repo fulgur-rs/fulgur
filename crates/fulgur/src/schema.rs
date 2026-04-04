@@ -29,6 +29,71 @@ pub fn extract_schema(template_str: &str, template_name: &str) -> crate::error::
     Ok(schema)
 }
 
+/// MiniJinjaテンプレートをサンプルJSONデータと突合し、JSON Schemaを生成する。
+/// テンプレートで使用されている変数のみ出力し、型はサンプルデータから確定する。
+pub fn extract_schema_with_data(
+    template_str: &str,
+    template_name: &str,
+    data: &Value,
+) -> crate::error::Result<Value> {
+    let stmt = parse(
+        template_str,
+        template_name,
+        SyntaxConfig,
+        WhitespaceConfig::default(),
+    )?;
+
+    // Collect used variables from template AST
+    let mut root = BTreeMap::new();
+    let scope = BTreeMap::new();
+    collect_from_stmt(&stmt, &mut root, &scope);
+
+    // Build schema from sample data, but only for variables used in the template
+    let mut properties = serde_json::Map::new();
+    if let Value::Object(data_map) = data {
+        for key in root.keys() {
+            if let Some(val) = data_map.get(key) {
+                properties.insert(key.clone(), value_to_schema(val));
+            }
+        }
+    }
+
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "description": format!("Schema for template {}", template_name),
+        "properties": Value::Object(properties),
+    });
+
+    Ok(schema)
+}
+
+/// Convert a JSON value to its corresponding JSON Schema type definition.
+fn value_to_schema(val: &Value) -> Value {
+    match val {
+        Value::String(_) => json!({"type": "string"}),
+        Value::Number(_) => json!({"type": "number"}),
+        Value::Bool(_) => json!({"type": "boolean"}),
+        Value::Null => json!({"type": "null"}),
+        Value::Array(arr) => {
+            let mut schema = json!({"type": "array"});
+            if let Some(first) = arr.first() {
+                schema["items"] = value_to_schema(first);
+            }
+            schema
+        }
+        Value::Object(obj) => {
+            let mut props = serde_json::Map::new();
+            for (k, v) in obj {
+                props.insert(k.clone(), value_to_schema(v));
+            }
+            let mut schema = json!({"type": "object"});
+            schema["properties"] = Value::Object(props);
+            schema
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum InferredType {
     String,
@@ -462,5 +527,37 @@ mod tests {
         assert_eq!(schema["properties"]["name"]["type"], "string");
         // `greeting` should NOT appear (it's a locally-set variable)
         assert!(schema["properties"]["greeting"].is_null());
+    }
+
+    #[test]
+    fn test_schema_with_sample_data() {
+        let data = json!({
+            "title": "Invoice",
+            "amount": 1234,
+            "paid": true,
+            "items": [{"name": "Widget", "price": 9.99}]
+        });
+        let schema = extract_schema_with_data(
+            "{{ title }} {{ amount }} {% for i in items %}{{ i.name }}{% endfor %}",
+            "test.html",
+            &data,
+        )
+        .unwrap();
+        assert_eq!(schema["properties"]["title"]["type"], "string");
+        assert_eq!(schema["properties"]["amount"]["type"], "number");
+        // "paid" is NOT in the template, so it should NOT be in schema
+        assert!(schema["properties"].get("paid").is_none());
+        let items = &schema["properties"]["items"];
+        assert_eq!(items["type"], "array");
+        assert_eq!(items["items"]["properties"]["name"]["type"], "string");
+        assert_eq!(items["items"]["properties"]["price"]["type"], "number");
+    }
+
+    #[test]
+    fn test_data_only_exports_used_variables() {
+        let data = json!({"used": "yes", "unused": "no"});
+        let schema = extract_schema_with_data("{{ used }}", "test.html", &data).unwrap();
+        assert!(schema["properties"].get("used").is_some());
+        assert!(schema["properties"].get("unused").is_none());
     }
 }
