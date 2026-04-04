@@ -2,7 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.1] - 2026-03-31
+## [0.4.2] - 2026-04-04
+
+### Bug Fixes
+
+- avoid double opacity and add opacity to ListItemPageable
+- correct visibility semantics and add TablePageable opacity support
+- propagate visibility to synthetic children in styled wrappers
+- resolve Stylo absolute URLs for background-image asset lookup
+- correct JPEG SOF offset and add border-radius clip to background images
+- guard against infinite loop on malformed JPEG segment length
+- suppress clippy result_unit_err warning on to_krilla_image
+- early return on non-positive clip box in draw_background_layer
+- compute inner border-radii for background-image clip
+- correct modulo operand order in background repeat tiling
+- address code review issues in schema extraction
+- suppress large_enum_variant clippy warning on Commands enum
+- address AI review feedback on schema extraction
+- recurse into GetAttr base expr when path resolution fails
+- address coderabbit review round 3
+- independent if-branch scoping and List/Map expression collection
+- process remaining stmts with each if-branch scope independently
+
+### Documentation
+
+- add MiniJinja and template schema hint to --data help
+
+### Features
+
+- add opacity and visible fields to ParagraphPageable
+- add opacity and visible fields to ImagePageable
+- add opacity and visible fields to BlockPageable
+- extract opacity and visibility from CSS computed styles
+- add background image data structures to pageable module
+- extract CSS background-image properties from Stylo computed styles
+- add background.rs with image layer rendering (size, position, repeat, clip)
+- enable minijinja unstable_machinery for AST access
+- add AST-based schema extraction from MiniJinja templates
+- add sample JSON data matching for precise type inference
+- add fulgur template schema CLI command
+- support stdin for --data in template schema command
+
+### Miscellaneous
+
+- regenerate example PDFs
+
+### Refactor
+
+- extract draw_with_opacity helper and merge extract functions
+
+### Styling
+
+- fix formatting in convert.rs
+- fix formatting in pageable.rs draw_background calls
+- apply cargo fmt to compute_inner_radii
+
+### Testing
+
+- add integration tests for opacity and visibility
+- verify PDF Transparency Group presence in opacity tests
+- add regression tests for visibility propagation to synthetic children
+- add transparency group assertion to list item visibility test
+
+## [0.4.1] - 2026-04-02
 
 ### Bug Fixes
 
@@ -68,6 +130,10 @@ All notable changes to this project will be documented in this file.
 
 - add template engine integration tests
 - add error handling tests for template engine
+
+### Release
+
+- v0.4.1
 
 ## [0.4.0] - 2026-03-25
 
