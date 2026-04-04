@@ -70,6 +70,9 @@ fn draw_background_layer(
 ) {
     let (ox, oy, ow, oh) = compute_origin_rect(style, &layer.origin, x, y, w, h);
     let (cx, cy, cw, ch) = compute_clip_rect(style, &layer.clip, x, y, w, h);
+    if cw <= 0.0 || ch <= 0.0 {
+        return;
+    }
 
     let (img_w, img_h) = resolve_size(layer, ow, oh);
     if img_w <= 0.0 || img_h <= 0.0 {
