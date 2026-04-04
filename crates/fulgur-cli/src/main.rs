@@ -15,6 +15,28 @@ struct Cli {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Render HTML to PDF
+    #[command(after_long_help = "\
+\x1b[1;4mTemplate filters:\x1b[0m
+
+  When using --data, the input HTML is processed as a MiniJinja template.
+  The following filters are available:
+
+  \x1b[1mBuilt-in filters (MiniJinja):\x1b[0m
+    String:  upper, lower, title, capitalize, trim, replace, split, lines
+    List:    first, last, length, reverse, sort, unique, join, slice, batch
+    Select:  select, reject, selectattr, rejectattr, map, groupby, chain, zip
+    Dict:    items, dictsort, attr
+    Type:    int, float, bool, string, list, abs, round, sum, min, max
+    Format:  format (printf-style), tojson, pprint, urlencode, indent
+    Other:   default (d), safe, escape (e)
+
+  \x1b[1mCustom filters:\x1b[0m
+    numformat(spec)  Python-style numeric formatting
+      {{ price | numformat(\",\") }}      → 1,234,567       (comma separator)
+      {{ price | numformat(\",.2f\") }}   → 1,234,567.89    (comma + 2 decimals)
+      {{ rate  | numformat(\".2f\") }}    → 10.50            (2 decimal places)
+      {{ seq   | numformat(\"04d\") }}    → 0005             (zero-padded)
+")]
     Render {
         /// Input HTML file (omit for --stdin)
         #[arg()]
