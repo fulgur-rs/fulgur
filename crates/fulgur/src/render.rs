@@ -355,28 +355,49 @@ pub fn render_to_pdf_with_gcpm(
         // Stage 2: Group by edge and compute layout
         let mut top_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
         let mut bottom_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
+        let mut left_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
+        let mut right_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
 
         for (&pos, html) in &resolved_htmls {
-            if let Some(&mcw) = measure_cache.get(html) {
-                match pos {
-                    MarginBoxPosition::TopLeft
-                    | MarginBoxPosition::TopCenter
-                    | MarginBoxPosition::TopRight => {
+            match pos {
+                MarginBoxPosition::TopLeft
+                | MarginBoxPosition::TopCenter
+                | MarginBoxPosition::TopRight => {
+                    if let Some(&mcw) = measure_cache.get(html) {
                         top_defined.insert(pos, mcw);
                     }
-                    MarginBoxPosition::BottomLeft
-                    | MarginBoxPosition::BottomCenter
-                    | MarginBoxPosition::BottomRight => {
+                }
+                MarginBoxPosition::BottomLeft
+                | MarginBoxPosition::BottomCenter
+                | MarginBoxPosition::BottomRight => {
+                    if let Some(&mcw) = measure_cache.get(html) {
                         bottom_defined.insert(pos, mcw);
                     }
-                    _ => {} // corners and left/right edges handled separately
                 }
+                MarginBoxPosition::LeftTop
+                | MarginBoxPosition::LeftMiddle
+                | MarginBoxPosition::LeftBottom => {
+                    if let Some(&mch) = height_cache.get(html) {
+                        left_defined.insert(pos, mch);
+                    }
+                }
+                MarginBoxPosition::RightTop
+                | MarginBoxPosition::RightMiddle
+                | MarginBoxPosition::RightBottom => {
+                    if let Some(&mch) = height_cache.get(html) {
+                        right_defined.insert(pos, mch);
+                    }
+                }
+                _ => {} // corners handled separately
             }
         }
 
         let top_rects = compute_edge_layout(Edge::Top, &top_defined, page_size, config.margin);
         let bottom_rects =
             compute_edge_layout(Edge::Bottom, &bottom_defined, page_size, config.margin);
+        let left_rects = compute_edge_layout(Edge::Left, &left_defined, page_size, config.margin);
+        let right_rects =
+            compute_edge_layout(Edge::Right, &right_defined, page_size, config.margin);
 
         // Stage 3: Render at confirmed width and draw.
         // Pageable is created (or fetched from cache) at the final rect width.
@@ -384,6 +405,10 @@ pub fn render_to_pdf_with_gcpm(
             let rect = if let Some(r) = top_rects.get(&pos) {
                 *r
             } else if let Some(r) = bottom_rects.get(&pos) {
+                *r
+            } else if let Some(r) = left_rects.get(&pos) {
+                *r
+            } else if let Some(r) = right_rects.get(&pos) {
                 *r
             } else {
                 pos.bounding_rect(page_size, config.margin)
