@@ -99,7 +99,8 @@ fn draw_background_layer(
     }
 
     let clip_path = if style.has_radius() {
-        crate::pageable::build_rounded_rect_path(cx, cy, cw, ch, &style.border_radii)
+        let clip_radii = compute_inner_radii(&style.border_radii, style, &layer.clip);
+        crate::pageable::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
     } else {
         build_rect_path(cx, cy, cw, ch)
     };
@@ -223,6 +224,39 @@ fn compute_clip_rect(
     }
 }
 
+/// Compute inner border-radii for an inset clip rectangle.
+///
+/// Per CSS Backgrounds §5.3, inner radii are `max(outer_radius - inset, 0)` where
+/// the inset depends on the background-clip box.
+fn compute_inner_radii(
+    outer: &[[f32; 2]; 4],
+    style: &BlockStyle,
+    clip: &BgClip,
+) -> [[f32; 2]; 4] {
+    let bw = &style.border_widths;
+    let pad = &style.padding;
+    // Insets: (top, right, bottom, left)
+    let (top, right, bottom, left) = match clip {
+        BgClip::BorderBox => (0.0, 0.0, 0.0, 0.0),
+        BgClip::PaddingBox | BgClip::Text => (bw[0], bw[1], bw[2], bw[3]),
+        BgClip::ContentBox => (
+            bw[0] + pad[0],
+            bw[1] + pad[1],
+            bw[2] + pad[2],
+            bw[3] + pad[3],
+        ),
+    };
+    // Each corner is adjacent to two edges:
+    // top-left: (top, left), top-right: (top, right),
+    // bottom-right: (bottom, right), bottom-left: (bottom, left)
+    [
+        [f32::max(outer[0][0] - left, 0.0), f32::max(outer[0][1] - top, 0.0)],
+        [f32::max(outer[1][0] - right, 0.0), f32::max(outer[1][1] - top, 0.0)],
+        [f32::max(outer[2][0] - right, 0.0), f32::max(outer[2][1] - bottom, 0.0)],
+        [f32::max(outer[3][0] - left, 0.0), f32::max(outer[3][1] - bottom, 0.0)],
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_tile_positions(
     repeat_x: BgRepeat,
@@ -241,6 +275,10 @@ fn compute_tile_positions(
         resolve_repeat_axis(repeat_x, pos_x, img_w, clip_x, clip_w);
     let (tile_h, space_y, start_y, end_y) =
         resolve_repeat_axis(repeat_y, pos_y, img_h, clip_y, clip_h);
+
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return tiles;
+    }
 
     // Cap tile count to prevent memory/CPU explosion with tiny images on large containers.
     const MAX_TILES: usize = 10_000;
