@@ -14,6 +14,7 @@ pub enum ImageFormat {
 
 impl ImageFormat {
     /// Create a krilla Image from raw data in this format.
+    #[allow(clippy::result_unit_err)]
     pub fn to_krilla_image(self, data: krilla::Data) -> Result<krilla::image::Image, ()> {
         match self {
             ImageFormat::Png => krilla::image::Image::from_png(data, true).map_err(|_| ()),
