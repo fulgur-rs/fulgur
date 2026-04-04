@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::image::ImageFormat;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockStyle, Canvas,
 };
@@ -23,7 +22,13 @@ pub fn draw_background(
     }
 }
 
-/// Draw the background color fill (moved from pageable::draw_block_background).
+fn build_rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {
+    let rect = krilla::geom::Rect::from_xywh(x, y, w, h)?;
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    pb.finish()
+}
+
 fn draw_background_color(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -37,12 +42,8 @@ fn draw_background_color(
     };
     let path = if style.has_radius() {
         crate::pageable::build_rounded_rect_path(x, y, w, h, &style.border_radii)
-    } else if let Some(rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.push_rect(rect);
-        pb.finish()
     } else {
-        None
+        build_rect_path(x, y, w, h)
     };
 
     if let Some(path) = path {
@@ -67,21 +68,17 @@ fn draw_background_layer(
     w: f32,
     h: f32,
 ) {
-    // 1. Compute origin and clip rects.
     let (ox, oy, ow, oh) = compute_origin_rect(style, &layer.origin, x, y, w, h);
     let (cx, cy, cw, ch) = compute_clip_rect(style, &layer.clip, x, y, w, h);
 
-    // 2. Resolve image size relative to origin area.
     let (img_w, img_h) = resolve_size(layer, ow, oh);
     if img_w <= 0.0 || img_h <= 0.0 {
         return;
     }
 
-    // 3. Resolve position within origin area.
     let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
     let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
 
-    // 4. Compute tile positions.
     let tiles = compute_tile_positions(
         layer.repeat_x,
         layer.repeat_y,
@@ -98,13 +95,10 @@ fn draw_background_layer(
         return;
     }
 
-    // 5. Build clip path and push it.
-    let clip_path = if let Some(rect) = krilla::geom::Rect::from_xywh(cx, cy, cw, ch) {
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.push_rect(rect);
-        pb.finish()
+    let clip_path = if style.has_radius() {
+        crate::pageable::build_rounded_rect_path(cx, cy, cw, ch, &style.border_radii)
     } else {
-        None
+        build_rect_path(cx, cy, cw, ch)
     };
     let Some(clip_path) = clip_path else {
         return;
@@ -113,19 +107,12 @@ fn draw_background_layer(
         .surface
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
-    // 6. Create krilla Image from layer data.
     let data: krilla::Data = Arc::clone(&layer.image_data).into();
-    let image_result = match layer.format {
-        ImageFormat::Png => krilla::image::Image::from_png(data, true),
-        ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true),
-        ImageFormat::Gif => krilla::image::Image::from_gif(data, true),
-    };
-    let Ok(image) = image_result else {
+    let Ok(image) = layer.format.to_krilla_image(data) else {
         canvas.surface.pop();
         return;
     };
 
-    // 7. Draw each tile.
     for (tx, ty, tw, th) in &tiles {
         let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
             continue;
@@ -136,7 +123,6 @@ fn draw_background_layer(
         canvas.surface.pop();
     }
 
-    // 8. Pop clip.
     canvas.surface.pop();
 }
 
@@ -320,6 +306,7 @@ fn resolve_repeat_axis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::ImageFormat;
 
     fn make_layer(iw: f32, ih: f32, size: BgSize) -> BackgroundLayer {
         BackgroundLayer {

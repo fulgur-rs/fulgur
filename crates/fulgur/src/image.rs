@@ -12,6 +12,17 @@ pub enum ImageFormat {
     Gif,
 }
 
+impl ImageFormat {
+    /// Create a krilla Image from raw data in this format.
+    pub fn to_krilla_image(self, data: krilla::Data) -> Result<krilla::image::Image, ()> {
+        match self {
+            ImageFormat::Png => krilla::image::Image::from_png(data, true).map_err(|_| ()),
+            ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true).map_err(|_| ()),
+            ImageFormat::Gif => krilla::image::Image::from_gif(data, true).map_err(|_| ()),
+        }
+    }
+}
+
 /// An image element that renders an image at its computed size.
 #[derive(Clone)]
 pub struct ImagePageable {
@@ -75,8 +86,8 @@ impl ImagePageable {
                         if i + 7 > data.len() {
                             return None;
                         }
-                        let h = u16::from_be_bytes([data[i + 1], data[i + 2]]) as u32;
-                        let w = u16::from_be_bytes([data[i + 3], data[i + 4]]) as u32;
+                        let h = u16::from_be_bytes([data[i + 3], data[i + 4]]) as u32;
+                        let w = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
                         return Some((w, h));
                     }
                     if i + 1 >= data.len() {
@@ -194,6 +205,33 @@ mod tests {
     #[test]
     fn test_gif_dimensions() {
         let dims = ImagePageable::decode_dimensions(MINIMAL_GIF, ImageFormat::Gif);
+        assert_eq!(dims, Some((1, 1)));
+    }
+
+    // Minimal 1x1 white JPEG (SOF0 baseline)
+    const MINIMAL_JPEG: &[u8] = &[
+        0xFF, 0xD8, // SOI
+        0xFF, 0xE0, // APP0 (JFIF)
+        0x00, 0x10, // length = 16
+        0x4A, 0x46, 0x49, 0x46, 0x00, // "JFIF\0"
+        0x01, 0x01, // version
+        0x00, // units
+        0x00, 0x01, // X density
+        0x00, 0x01, // Y density
+        0x00, 0x00, // thumbnail
+        0xFF, 0xC0, // SOF0
+        0x00, 0x0B, // length = 11
+        0x08, // precision = 8
+        0x00, 0x01, // height = 1
+        0x00, 0x01, // width = 1
+        0x01, // components = 1
+        0x01, 0x11, 0x00, // component 1
+        0xFF, 0xD9, // EOI
+    ];
+
+    #[test]
+    fn test_jpeg_dimensions() {
+        let dims = ImagePageable::decode_dimensions(MINIMAL_JPEG, ImageFormat::Jpeg);
         assert_eq!(dims, Some((1, 1)));
     }
 
