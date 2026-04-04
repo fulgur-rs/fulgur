@@ -105,7 +105,7 @@ enum TemplateCommands {
         #[arg()]
         input: PathBuf,
 
-        /// Sample JSON data file for precise type inference
+        /// Sample JSON data file for precise type inference (use "-" for stdin)
         #[arg(long = "data", short = 'd')]
         data: Option<PathBuf>,
 
@@ -364,10 +364,17 @@ fn main() {
                     .unwrap_or("template.html");
 
                 let schema = if let Some(ref data_path) = data {
-                    let json_str = std::fs::read_to_string(data_path).unwrap_or_else(|e| {
-                        eprintln!("Error reading {}: {e}", data_path.display());
-                        std::process::exit(1);
-                    });
+                    let json_str = if data_path.as_os_str() == "-" {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                            .expect("Failed to read JSON from stdin");
+                        buf
+                    } else {
+                        std::fs::read_to_string(data_path).unwrap_or_else(|e| {
+                            eprintln!("Error reading {}: {e}", data_path.display());
+                            std::process::exit(1);
+                        })
+                    };
                     let json_data: serde_json::Value = serde_json::from_str(&json_str)
                         .unwrap_or_else(|e| {
                             eprintln!("Error parsing JSON: {e}");
