@@ -238,46 +238,46 @@ fn flex_distribute(a_max: f32, b_max: f32, available: f32) -> (f32, f32) {
     }
 }
 
-/// Distribute available width among up to 3 positions (left, center, right).
-/// Returns the computed width for each defined position.
-fn distribute_widths(
-    left_max: Option<f32>,
+/// Distribute available space among up to 3 positions (first, center, last).
+/// Returns the computed size for each defined position.
+fn distribute_sizes(
+    first_max: Option<f32>,
     center_max: Option<f32>,
-    right_max: Option<f32>,
+    last_max: Option<f32>,
     available: f32,
 ) -> (Option<f32>, Option<f32>, Option<f32>) {
     let defined_count =
-        left_max.is_some() as u8 + center_max.is_some() as u8 + right_max.is_some() as u8;
+        first_max.is_some() as u8 + center_max.is_some() as u8 + last_max.is_some() as u8;
 
     if defined_count == 0 {
         return (None, None, None);
     }
 
-    // 1 position defined: gets full available width
+    // 1 position defined: gets full available space
     if defined_count == 1 {
         return (
-            left_max.map(|_| available),
+            first_max.map(|_| available),
             center_max.map(|_| available),
-            right_max.map(|_| available),
+            last_max.map(|_| available),
         );
     }
 
     if let Some(c_max) = center_max {
-        // Center defined (with or without L/R)
-        let ac_max = left_max.unwrap_or(0.0) + right_max.unwrap_or(0.0);
-        let (c_width, ac_width) = flex_distribute(c_max, ac_max, available);
-        let half_ac = ac_width / 2.0;
+        // Center defined (with or without first/last)
+        let fl_max = first_max.unwrap_or(0.0) + last_max.unwrap_or(0.0);
+        let (c_size, fl_size) = flex_distribute(c_max, fl_max, available);
+        let half_fl = fl_size / 2.0;
         (
-            left_max.map(|_| half_ac),
-            Some(c_width),
-            right_max.map(|_| half_ac),
+            first_max.map(|_| half_fl),
+            Some(c_size),
+            last_max.map(|_| half_fl),
         )
     } else {
-        // C not defined, L + R
-        let l_max = left_max.unwrap_or(0.0);
-        let r_max = right_max.unwrap_or(0.0);
-        let (l_width, r_width) = flex_distribute(l_max, r_max, available);
-        (Some(l_width), None, Some(r_width))
+        // Center not defined, first + last
+        let f_max = first_max.unwrap_or(0.0);
+        let l_max = last_max.unwrap_or(0.0);
+        let (f_size, l_size) = flex_distribute(f_max, l_max, available);
+        (Some(f_size), None, Some(l_size))
     }
 }
 
@@ -307,7 +307,7 @@ pub fn compute_edge_layout(
             let center_max = defined.get(&center_pos).copied();
             let right_max = defined.get(&right_pos).copied();
 
-            let (l_w, c_w, r_w) = distribute_widths(left_max, center_max, right_max, content_width);
+            let (l_w, c_w, r_w) = distribute_sizes(left_max, center_max, right_max, content_width);
 
             // Compute x positions. When center is defined, left and right
             // slots are always equal width (half_ac), even if one is undefined.
@@ -491,11 +491,11 @@ mod tests {
         assert!((b - 150.0).abs() < 0.01);
     }
 
-    // --- distribute_widths tests ---
+    // --- distribute_sizes tests ---
 
     #[test]
     fn test_distribute_center_only() {
-        let (l, c, r) = distribute_widths(None, Some(100.0), None, 600.0);
+        let (l, c, r) = distribute_sizes(None, Some(100.0), None, 600.0);
         assert!(l.is_none());
         assert!((c.unwrap() - 600.0).abs() < 0.01);
         assert!(r.is_none());
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_distribute_left_right() {
-        let (l, c, r) = distribute_widths(Some(100.0), None, Some(200.0), 600.0);
+        let (l, c, r) = distribute_sizes(Some(100.0), None, Some(200.0), 600.0);
         assert!(c.is_none());
         // flex_distribute(100, 200, 600) → (200, 400)
         assert!((l.unwrap() - 200.0).abs() < 0.01);
@@ -517,7 +517,7 @@ mod tests {
         // flex_distribute(200, 100, 600) → total=300, flex_space=300
         //   c_factor = 200/300 = 2/3, c = 200 + 300*2/3 = 400
         //   ac = 100 + 300*1/3 = 200, half_ac = 100
-        let (l, c, r) = distribute_widths(Some(50.0), Some(200.0), Some(50.0), 600.0);
+        let (l, c, r) = distribute_sizes(Some(50.0), Some(200.0), Some(50.0), 600.0);
         assert!((c.unwrap() - 400.0).abs() < 0.01);
         assert!((l.unwrap() - 100.0).abs() < 0.01);
         assert!((r.unwrap() - 100.0).abs() < 0.01);
