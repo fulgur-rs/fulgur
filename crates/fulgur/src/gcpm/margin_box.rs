@@ -3,12 +3,18 @@ use std::collections::{BTreeMap, HashMap};
 use crate::config::{Margin, PageSize};
 
 /// Which edge of the page a set of margin boxes belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Edge {
     Top,
     Bottom,
     Left,
     Right,
+}
+
+impl Edge {
+    pub fn is_horizontal(self) -> bool {
+        matches!(self, Edge::Top | Edge::Bottom)
+    }
 }
 
 /// Rectangle describing a margin box's position and size in page coordinates (points).
@@ -42,6 +48,17 @@ pub enum MarginBoxPosition {
 }
 
 impl MarginBoxPosition {
+    /// Which edge this position belongs to, or `None` for corner boxes.
+    pub fn edge(&self) -> Option<Edge> {
+        match self {
+            Self::TopLeft | Self::TopCenter | Self::TopRight => Some(Edge::Top),
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => Some(Edge::Bottom),
+            Self::LeftTop | Self::LeftMiddle | Self::LeftBottom => Some(Edge::Left),
+            Self::RightTop | Self::RightMiddle | Self::RightBottom => Some(Edge::Right),
+            _ => None,
+        }
+    }
+
     /// Parse a CSS at-keyword name (without the `@`) into a `MarginBoxPosition`.
     ///
     /// Accepts names like `"top-center"`, `"bottom-left-corner"`, etc.
