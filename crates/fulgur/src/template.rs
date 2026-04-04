@@ -76,7 +76,7 @@ fn format_filter(value: &minijinja::Value, spec: &str) -> String {
     if spec.starts_with('0') && spec.ends_with('d') {
         if let Ok(width) = spec[..spec.len() - 1].parse::<usize>() {
             if let Some(n) = as_i64 {
-                return format!("{:0>width$}", n);
+                return format!("{:0width$}", n);
             }
         }
     }
@@ -206,6 +206,14 @@ mod tests {
         let data = json!({"n": -1234567});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "-1,234,567");
+    }
+
+    #[test]
+    fn test_format_zero_pad_negative() {
+        let tmpl = r#"{{ n | numformat("04d") }}"#;
+        let data = json!({"n": -5});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "-005");
     }
 
     #[test]
