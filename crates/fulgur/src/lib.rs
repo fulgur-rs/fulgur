@@ -1,4 +1,5 @@
 pub mod asset;
+pub mod background;
 pub mod blitz_adapter;
 pub mod config;
 pub mod convert;

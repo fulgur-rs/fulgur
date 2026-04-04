@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use crate::image::ImageFormat;
+
 /// Point unit (1/72 inch)
 pub type Pt = f32;
 
@@ -134,6 +138,8 @@ impl Clone for Box<dyn Pageable> {
 pub struct BlockStyle {
     /// Background color as RGBA
     pub background_color: Option<[u8; 4]>,
+    /// Background image layers (first = top-most, rendered in reverse order).
+    pub background_layers: Vec<BackgroundLayer>,
     /// Border color as RGBA
     pub border_color: [u8; 4],
     /// Border widths: top, right, bottom, left
@@ -170,6 +176,72 @@ pub enum BorderStyleValue {
     Outset,
 }
 
+// ─── Background types ────────────────────────────────────
+
+/// A length or percentage value for background positioning/sizing.
+#[derive(Clone, Debug)]
+pub enum BgLengthPercentage {
+    /// Absolute length in points.
+    Length(f32),
+    /// Percentage (0.0–1.0).
+    Percentage(f32),
+}
+
+/// CSS `background-size` value.
+#[derive(Clone, Debug)]
+pub enum BgSize {
+    /// `auto` — use intrinsic image size.
+    Auto,
+    /// `cover` — scale to fill, may crop.
+    Cover,
+    /// `contain` — scale to fit, may letterbox.
+    Contain,
+    /// Explicit `<width> <height>`. `None` means `auto` for that axis.
+    Explicit(Option<BgLengthPercentage>, Option<BgLengthPercentage>),
+}
+
+/// CSS `background-repeat` single-axis keyword.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BgRepeat {
+    Repeat,
+    NoRepeat,
+    Space,
+    Round,
+}
+
+/// CSS box model reference for `background-origin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BgBox {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+}
+
+/// CSS `background-clip` value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BgClip {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+    Text,
+}
+
+/// A single CSS background image layer with all associated properties.
+#[derive(Clone, Debug)]
+pub struct BackgroundLayer {
+    pub image_data: Arc<Vec<u8>>,
+    pub format: ImageFormat,
+    pub intrinsic_width: f32,
+    pub intrinsic_height: f32,
+    pub size: BgSize,
+    pub position_x: BgLengthPercentage,
+    pub position_y: BgLengthPercentage,
+    pub repeat_x: BgRepeat,
+    pub repeat_y: BgRepeat,
+    pub origin: BgBox,
+    pub clip: BgClip,
+}
+
 impl BlockStyle {
     /// Whether any border radius is non-zero.
     pub fn has_radius(&self) -> bool {
@@ -179,6 +251,7 @@ impl BlockStyle {
     /// Whether this style has any visual properties (background, border, or padding).
     pub fn has_visual_style(&self) -> bool {
         self.background_color.is_some()
+            || !self.background_layers.is_empty()
             || self.border_widths.iter().any(|&w| w > 0.0)
             || self.padding.iter().any(|&p| p > 0.0)
     }
@@ -342,7 +415,7 @@ impl BlockPageable {
 
 /// Build a rounded rectangle path using cubic Bézier curves for corners.
 /// radii: [top-left, top-right, bottom-right, bottom-left] × [rx, ry]
-fn build_rounded_rect_path(
+pub fn build_rounded_rect_path(
     x: f32,
     y: f32,
     w: f32,
@@ -447,40 +520,6 @@ fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<Positioned
             y: pc.y - y_offset,
         })
         .collect()
-}
-
-/// Draw the background fill for a block or table element.
-fn draw_block_background(
-    canvas: &mut Canvas<'_, '_>,
-    style: &BlockStyle,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-) {
-    let Some(bg) = &style.background_color else {
-        return;
-    };
-    let path = if style.has_radius() {
-        build_rounded_rect_path(x, y, w, h, &style.border_radii)
-    } else if let Some(rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
-        let mut pb = krilla::geom::PathBuilder::new();
-        pb.push_rect(rect);
-        pb.finish()
-    } else {
-        None
-    };
-
-    if let Some(path) = path {
-        canvas.surface.set_fill(Some(krilla::paint::Fill {
-            paint: krilla::color::rgb::Color::new(bg[0], bg[1], bg[2]).into(),
-            opacity: krilla::num::NormalizedF32::new(bg[3] as f32 / 255.0)
-                .unwrap_or(krilla::num::NormalizedF32::ONE),
-            rule: Default::default(),
-        }));
-        canvas.surface.set_stroke(None);
-        canvas.surface.draw_path(&path);
-    }
 }
 
 /// Lighten an RGBA color by a factor (0.0–1.0). Higher factor = lighter.
@@ -1003,7 +1042,14 @@ impl Pageable for BlockPageable {
 
             // visibility: hidden skips own rendering but children still draw
             if self.visible {
-                draw_block_background(canvas, &self.style, x, y, total_width, total_height);
+                crate::background::draw_background(
+                    canvas,
+                    &self.style,
+                    x,
+                    y,
+                    total_width,
+                    total_height,
+                );
                 draw_block_border(canvas, &self.style, x, y, total_width, total_height);
             }
 
@@ -1391,7 +1437,14 @@ impl Pageable for TablePageable {
                 .unwrap_or(self.cached_height);
 
             if self.visible {
-                draw_block_background(canvas, &self.style, x, y, total_width, total_height);
+                crate::background::draw_background(
+                    canvas,
+                    &self.style,
+                    x,
+                    y,
+                    total_width,
+                    total_height,
+                );
                 draw_block_border(canvas, &self.style, x, y, total_width, total_height);
             }
 
@@ -1614,5 +1667,36 @@ mod tests {
             "expected y=80.0, got {}",
             second_table.body_cells[1].y
         );
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn test_background_layer_defaults() {
+        let style = BlockStyle::default();
+        assert!(style.background_layers.is_empty());
+    }
+
+    #[test]
+    fn test_has_visual_style_with_background_layer() {
+        let mut style = BlockStyle::default();
+        assert!(!style.has_visual_style());
+        style.background_layers.push(BackgroundLayer {
+            image_data: Arc::new(vec![]),
+            format: ImageFormat::Png,
+            intrinsic_width: 100.0,
+            intrinsic_height: 100.0,
+            size: BgSize::Auto,
+            position_x: BgLengthPercentage::Percentage(0.0),
+            position_y: BgLengthPercentage::Percentage(0.0),
+            repeat_x: BgRepeat::Repeat,
+            repeat_y: BgRepeat::Repeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::BorderBox,
+        });
+        assert!(style.has_visual_style());
     }
 }
