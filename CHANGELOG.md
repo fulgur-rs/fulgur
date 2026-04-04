@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.3] - 2026-04-04
+
+### Bug Fixes
+
+- rename format filter to numformat, add built-in filter list to help
+- correct zero-padding for negative numbers in numformat filter
+
+### Documentation
+
+- add template filter reference to render --help
+
+### Features
+
+- add Python-style format filter to MiniJinja templates
+
 ## [0.4.2] - 2026-04-04
 
 ### Bug Fixes
@@ -63,6 +78,10 @@ All notable changes to this project will be documented in this file.
 - verify PDF Transparency Group presence in opacity tests
 - add regression tests for visibility propagation to synthetic children
 - add transparency group assertion to list item visibility test
+
+### Release
+
+- v0.4.2
 
 ## [0.4.1] - 2026-04-02
 
