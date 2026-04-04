@@ -94,35 +94,44 @@ fn convert_node(
     {
         let (marker_lines, marker_width) = extract_marker_lines(doc, node, ctx);
         let style = extract_block_style(node);
+        let (opacity, visible) = extract_opacity_visible(node);
 
-        // Build body: if inline root, use paragraph; otherwise collect block children
+        // Build body WITHOUT opacity — ListItemPageable wraps everything in
+        // a single opacity group. But DO propagate visibility to the body's
+        // own content (paragraph/image), since those are synthetic children
+        // representing the node's own content, not real CSS children.
         let body: Box<dyn Pageable> = if node.flags.is_inline_root()
             && let Some(paragraph) = extract_paragraph(doc, node, ctx)
         {
             if style.has_visual_style() {
                 let (child_x, child_y) = style.content_inset();
+                let mut p = paragraph;
+                p.visible = visible;
                 let child = PositionedChild {
-                    child: Box::new(paragraph),
+                    child: Box::new(p),
                     x: child_x,
                     y: child_y,
                 };
-                let mut block =
-                    BlockPageable::with_positioned_children(vec![child]).with_style(style);
+                let mut block = BlockPageable::with_positioned_children(vec![child])
+                    .with_style(style)
+                    .with_visible(visible);
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                Box::new(paragraph)
+                let mut p = paragraph;
+                p.visible = visible;
+                Box::new(p)
             }
         } else {
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children, ctx);
-            let mut block =
-                BlockPageable::with_positioned_children(positioned_children).with_style(style);
+            let mut block = BlockPageable::with_positioned_children(positioned_children)
+                .with_style(style)
+                .with_visible(visible);
             block.wrap(width, 10000.0);
             Box::new(block)
         };
-
         let mut item = ListItemPageable {
             marker_lines,
             marker_width,
@@ -130,6 +139,8 @@ fn convert_node(
             style: BlockStyle::default(),
             width,
             height: 0.0,
+            opacity,
+            visible,
         };
         item.wrap(width, 10000.0);
         return Box::new(item);
@@ -154,20 +165,32 @@ fn convert_node(
         && let Some(paragraph) = extract_paragraph(doc, node, ctx)
     {
         let style = extract_block_style(node);
+        let (opacity, visible) = extract_opacity_visible(node);
         if style.has_visual_style() {
             let (child_x, child_y) = style.content_inset();
+            // Propagate visibility to the inner paragraph — it's not a real CSS child
+            // but the node's own text content, so it must respect the node's visibility.
+            // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+            let mut p = paragraph;
+            p.visible = visible;
             let child = PositionedChild {
-                child: Box::new(paragraph),
+                child: Box::new(p),
                 x: child_x,
                 y: child_y,
             };
-            let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+            let mut block = BlockPageable::with_positioned_children(vec![child])
+                .with_style(style)
+                .with_opacity(opacity)
+                .with_visible(visible);
             block.wrap(width, height);
             // Use Taffy's computed height (includes padding + border) instead of children-only height
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
-        return Box::new(paragraph);
+        let mut p = paragraph;
+        p.opacity = opacity;
+        p.visible = visible;
+        return Box::new(p);
     }
 
     let children: &[usize] = &node.children;
@@ -175,7 +198,11 @@ fn convert_node(
     if children.is_empty() {
         let style = extract_block_style(node);
         if style.has_visual_style() || style.has_radius() {
-            let mut block = BlockPageable::with_positioned_children(vec![]).with_style(style);
+            let (opacity, visible) = extract_opacity_visible(node);
+            let mut block = BlockPageable::with_positioned_children(vec![])
+                .with_style(style)
+                .with_opacity(opacity)
+                .with_visible(visible);
             block.wrap(width, height);
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
@@ -191,7 +218,11 @@ fn convert_node(
 
     let style = extract_block_style(node);
     let has_style = style.has_visual_style() || style.has_radius();
-    let mut block = BlockPageable::with_positioned_children(positioned_children).with_style(style);
+    let (opacity, visible) = extract_opacity_visible(node);
+    let mut block = BlockPageable::with_positioned_children(positioned_children)
+        .with_style(style)
+        .with_opacity(opacity)
+        .with_visible(visible);
     block.wrap(width, 10000.0);
     if has_style {
         block.layout_size = Some(Size { width, height });
@@ -265,6 +296,7 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
     let height = layout.size.height;
 
     let style = extract_block_style(node);
+    let (opacity, visible) = extract_opacity_visible(node);
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
         // content_inset returns (left, top); compute right/bottom insets for content-box
@@ -272,18 +304,26 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         let bottom_inset = style.border_widths[2] + style.padding[2];
         let content_width = (width - cx - right_inset).max(0.0);
         let content_height = (height - cy - bottom_inset).max(0.0);
-        let img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
+        // Propagate visibility to the inner image — it's the node's own content,
+        // not a real CSS child. Do NOT set opacity — the wrapping block handles it.
+        let mut img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
+        img.visible = visible;
         let child = PositionedChild {
             child: Box::new(img),
             x: cx,
             y: cy,
         };
-        let mut block = BlockPageable::with_positioned_children(vec![child]).with_style(style);
+        let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_style(style)
+            .with_opacity(opacity)
+            .with_visible(visible);
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Some(Box::new(block))
     } else {
-        let img = ImagePageable::new(Arc::clone(data), format, width, height);
+        let mut img = ImagePageable::new(Arc::clone(data), format, width, height);
+        img.opacity = opacity;
+        img.visible = visible;
         Some(Box::new(img))
     }
 }
@@ -324,6 +364,7 @@ fn convert_table(
         .iter()
         .fold(0.0f32, |max_h, pc| max_h.max(pc.y + pc.child.height()));
 
+    let (opacity, visible) = extract_opacity_visible(node);
     let table = TablePageable {
         header_cells,
         body_cells,
@@ -332,6 +373,8 @@ fn convert_table(
         layout_size: Some(Size { width, height }),
         width,
         cached_height: height,
+        opacity,
+        visible,
     };
     Box::new(table)
 }
@@ -587,6 +630,20 @@ fn extract_block_style(node: &Node) -> BlockStyle {
     }
 
     style
+}
+
+/// Extract CSS opacity and visibility from computed styles.
+/// Returns `(opacity, visible)` with defaults `(1.0, true)`.
+fn extract_opacity_visible(node: &Node) -> (f32, bool) {
+    use style::properties::longhands::visibility::computed_value::T as Visibility;
+    node.primary_styles()
+        .map(|s| {
+            let opacity = s.clone_opacity();
+            let v = s.clone_visibility();
+            let visible = v != Visibility::Hidden && v != Visibility::Collapse;
+            (opacity, visible)
+        })
+        .unwrap_or((1.0, true))
 }
 
 /// Check if a node is a non-visual element (head, script, style, etc.)

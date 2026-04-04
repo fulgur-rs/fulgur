@@ -96,6 +96,8 @@ pub struct ParagraphPageable {
     pub lines: Vec<ShapedLine>,
     pub pagination: Pagination,
     pub cached_height: f32,
+    pub opacity: f32,
+    pub visible: bool,
 }
 
 impl ParagraphPageable {
@@ -105,6 +107,8 @@ impl ParagraphPageable {
             lines,
             pagination: Pagination::default(),
             cached_height,
+            opacity: 1.0,
+            visible: true,
         }
     }
 }
@@ -527,7 +531,9 @@ impl Pageable for ParagraphPageable {
             // split_at = adjusted; -- would break orphan rule
         }
 
-        let first = ParagraphPageable::new(self.lines[..split_at].to_vec());
+        let mut first = ParagraphPageable::new(self.lines[..split_at].to_vec());
+        first.opacity = self.opacity;
+        first.visible = self.visible;
 
         // Rebase second fragment: baseline is absolute from paragraph top,
         // so subtract the consumed height to make it relative to the new fragment.
@@ -539,13 +545,20 @@ impl Pageable for ParagraphPageable {
                 line
             })
             .collect();
-        let second = ParagraphPageable::new(second_lines);
+        let mut second = ParagraphPageable::new(second_lines);
+        second.opacity = self.opacity;
+        second.visible = self.visible;
 
         Some((Box::new(first), Box::new(second)))
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        draw_shaped_lines(canvas, &self.lines, x, y);
+        if !self.visible {
+            return;
+        }
+        crate::pageable::draw_with_opacity(canvas, self.opacity, |canvas| {
+            draw_shaped_lines(canvas, &self.lines, x, y);
+        });
     }
 
     fn pagination(&self) -> Pagination {
