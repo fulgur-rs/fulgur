@@ -88,7 +88,7 @@ fn format_filter(value: &minijinja::Value, spec: &str) -> String {
 pub fn render_template(name: &str, template_str: &str, data: &serde_json::Value) -> Result<String> {
     let mut env = minijinja::Environment::new();
     env.set_auto_escape_callback(|_| minijinja::AutoEscape::Html);
-    env.add_filter("format", format_filter);
+    env.add_filter("numformat", format_filter);
     env.add_template(name, template_str)?;
     let tmpl = env.get_template(name)?;
     Ok(tmpl.render(data)?)
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_format_comma() {
-        let tmpl = r#"{{ n | format(",") }}"#;
+        let tmpl = r#"{{ n | numformat(",") }}"#;
         let data = json!({"n": 1234567});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "1,234,567");
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_format_comma_decimal() {
-        let tmpl = r#"{{ n | format(",.2f") }}"#;
+        let tmpl = r#"{{ n | numformat(",.2f") }}"#;
         let data = json!({"n": 1234567.891});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "1,234,567.89");
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_format_decimal_only() {
-        let tmpl = r#"{{ n | format(".2f") }}"#;
+        let tmpl = r#"{{ n | numformat(".2f") }}"#;
         let data = json!({"n": 3.14159});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "3.14");
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_format_zero_pad() {
-        let tmpl = r#"{{ n | format("04d") }}"#;
+        let tmpl = r#"{{ n | numformat("04d") }}"#;
         let data = json!({"n": 5});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "0005");
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_format_comma_negative() {
-        let tmpl = r#"{{ n | format(",") }}"#;
+        let tmpl = r#"{{ n | numformat(",") }}"#;
         let data = json!({"n": -1234567});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "-1,234,567");
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_format_comma_small() {
-        let tmpl = r#"{{ n | format(",") }}"#;
+        let tmpl = r#"{{ n | numformat(",") }}"#;
         let data = json!({"n": 42});
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "42");

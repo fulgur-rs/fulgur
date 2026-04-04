@@ -18,14 +18,23 @@ enum Commands {
 \x1b[1;4mTemplate filters:\x1b[0m
 
   When using --data, the input HTML is processed as a MiniJinja template.
-  In addition to MiniJinja built-in filters (upper, lower, join, etc.),
-  the following custom filter is available:
+  The following filters are available:
 
-  \x1b[1mformat(spec)\x1b[0m  Python-style numeric formatting
-    {{ price | format(\",\") }}      → 1,234,567       (comma separator)
-    {{ price | format(\",.2f\") }}   → 1,234,567.89    (comma + 2 decimals)
-    {{ rate  | format(\".2f\") }}    → 10.50            (2 decimal places)
-    {{ seq   | format(\"04d\") }}    → 0005             (zero-padded)
+  \x1b[1mBuilt-in filters (MiniJinja):\x1b[0m
+    String:  upper, lower, title, capitalize, trim, replace, split, lines
+    List:    first, last, length, reverse, sort, unique, join, slice, batch
+    Select:  select, reject, selectattr, rejectattr, map, groupby, chain, zip
+    Dict:    items, dictsort, attr
+    Type:    int, float, bool, string, list, abs, round, sum, min, max
+    Format:  format (printf-style), tojson, pprint, urlencode, indent
+    Other:   default (d), safe, escape (e)
+
+  \x1b[1mCustom filters:\x1b[0m
+    numformat(spec)  Python-style numeric formatting
+      {{ price | numformat(\",\") }}      → 1,234,567       (comma separator)
+      {{ price | numformat(\",.2f\") }}   → 1,234,567.89    (comma + 2 decimals)
+      {{ rate  | numformat(\".2f\") }}    → 10.50            (2 decimal places)
+      {{ seq   | numformat(\"04d\") }}    → 0005             (zero-padded)
 ")]
     Render {
         /// Input HTML file (omit for --stdin)
