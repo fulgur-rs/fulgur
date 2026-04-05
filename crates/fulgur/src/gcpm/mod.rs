@@ -55,17 +55,9 @@ pub enum ElementPolicy {
     #[default]
     First,
     /// The element in effect at the start of the current page — i.e., the
-    /// value inherited from the most recent assignment on a previous page if
-    /// no assignment occurs on the current page.
-    ///
-    /// **Implementation note:** Currently resolved identically to `First`
-    /// (same match arm in `resolve_element_policy`). For the typical
-    /// running-element use case — chapter titles placed at the very top of
-    /// a page — this is indistinguishable from the strict WeasyPrint
-    /// interpretation. If a future use case needs the strict "value before
-    /// any assignment on this page" semantics, split the `Start` arm and
-    /// return the last instance of the most recent *preceding* page
-    /// unconditionally.
+    /// last instance from the most recent *preceding* page. Unlike `First`,
+    /// `Start` ignores any assignments on the current page, so a heading
+    /// that switches mid-page does not affect the start-of-page value.
     Start,
     /// Last instance assigned on the current page; if no assignment occurs
     /// on the current page, falls back to the most recent prior assignment.

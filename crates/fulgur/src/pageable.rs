@@ -1189,14 +1189,9 @@ impl Pageable for StringSetPageable {
 /// the marker stays zero-cost and the HTML is looked up by id at render
 /// time via `resolve_element_policy`.
 ///
-/// **Known limitation:** When a running element marker is followed by an
-/// unsplittable Pageable that overflows the current page, the content is
-/// pushed to the next page but the zero-size marker stays behind. For the
-/// typical "chapter title immediately before a large block" layout this
-/// causes the marker to land one page earlier than the content it
-/// conceptually belongs to. A `RunningElementWrapperPageable` analogous
-/// to `StringSetWrapperPageable` would fix this; deferred until a real
-/// use case surfaces the issue.
+/// During convert, markers are attached to the following real child via
+/// `RunningElementWrapperPageable` so that when the child moves to the
+/// next page due to an unsplittable overflow, the marker travels with it.
 #[derive(Clone)]
 pub struct RunningElementMarkerPageable {
     pub name: String,
@@ -1278,6 +1273,73 @@ impl Pageable for StringSetWrapperPageable {
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
         let (first, second) = self.child.split(avail_width, avail_height)?;
         let first_wrapped = StringSetWrapperPageable {
+            markers: self.markers.clone(),
+            child: first,
+        };
+        Some((Box::new(first_wrapped), second))
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
+        self.child.draw(canvas, x, y, avail_width, avail_height);
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        self.child.height()
+    }
+
+    fn pagination(&self) -> Pagination {
+        self.child.pagination()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── RunningElementWrapperPageable ──────────────────────────
+
+/// Wraps a Pageable together with `RunningElementMarkerPageable` markers that
+/// must stay attached to it during pagination.
+///
+/// Running elements are rewritten to `display: none`, so their markers have
+/// no layout of their own. Without this wrapper, a plain marker emitted as
+/// a sibling could be stranded on the previous page when the following
+/// unsplittable child overflows — the marker's zero-size position would
+/// land before the split point while the content conceptually belonging
+/// with it is pushed to the next page. Chapter heading + large figure is
+/// the canonical case.
+///
+/// The wrapper delegates `split()` to the inner child: if the child splits,
+/// markers travel with the first fragment; if the child cannot split, the
+/// wrapper is atomic and the whole thing moves to the next page together.
+#[derive(Clone)]
+pub struct RunningElementWrapperPageable {
+    pub markers: Vec<RunningElementMarkerPageable>,
+    pub child: Box<dyn Pageable>,
+}
+
+impl RunningElementWrapperPageable {
+    pub fn new(markers: Vec<RunningElementMarkerPageable>, child: Box<dyn Pageable>) -> Self {
+        Self { markers, child }
+    }
+}
+
+impl Pageable for RunningElementWrapperPageable {
+    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
+        self.child.wrap(avail_width, avail_height)
+    }
+
+    fn split(
+        &self,
+        avail_width: Pt,
+        avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        let (first, second) = self.child.split(avail_width, avail_height)?;
+        let first_wrapped = RunningElementWrapperPageable {
             markers: self.markers.clone(),
             child: first,
         };

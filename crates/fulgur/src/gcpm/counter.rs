@@ -133,10 +133,13 @@ pub fn resolve_element_policy<'a>(
     let current = page_states.get(page_idx).and_then(|s| s.get(name));
 
     let chosen_id: Option<usize> = match policy {
-        ElementPolicy::First | ElementPolicy::Start => {
-            current.and_then(|s| s.instance_ids.first().copied())
-        }
+        ElementPolicy::First => current.and_then(|s| s.instance_ids.first().copied()),
         ElementPolicy::Last => current.and_then(|s| s.instance_ids.last().copied()),
+        // Start ignores assignments on the current page entirely — it must
+        // return the element that was in effect when this page began, which
+        // is the last instance of the most recent preceding page. Fall
+        // through to the fallback scan below.
+        ElementPolicy::Start => None,
         ElementPolicy::FirstExcept => {
             // Current page has an assignment → suppress.
             // (`collect_running_element_states` only inserts an entry when
@@ -466,14 +469,20 @@ mod tests {
             Some("<h1>C</h1>")
         );
 
-        // start (same as first in our implementation)
+        // start: ignores current-page assignments, returns the last
+        // instance of the most recent preceding page (i.e. the value in
+        // effect at the page boundary).
         assert_eq!(
             resolve_element_policy("hdr", ElementPolicy::Start, 0, &states, &store),
-            Some("<h1>A</h1>")
+            None, // no preceding pages
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Start, 1, &states, &store),
+            Some("<h1>B</h1>"), // P0.instance_ids.last()
         );
         assert_eq!(
             resolve_element_policy("hdr", ElementPolicy::Start, 2, &states, &store),
-            Some("<h1>C</h1>")
+            Some("<h1>C</h1>"), // P1.instance_ids.last()
         );
 
         // first-except: empty where assigned, fallback where unassigned
