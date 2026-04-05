@@ -54,7 +54,7 @@ pub fn resolve_content_to_html(
     let mut out = String::new();
     for item in items {
         match item {
-            ContentItem::String(s) => out.push_str(s),
+            ContentItem::String(s) => push_escaped_html_text(&mut out, s),
             ContentItem::Counter(CounterType::Page) => {
                 out.push_str(&page_num.to_string());
             }
@@ -244,10 +244,41 @@ mod tests {
             ContentItem::String("/".into()),
             ContentItem::Counter(CounterType::Pages),
         ];
-        let (store, states) = single_page_store("hdr", "<span>Title</span>");
+
+        // Build 3 pages of state with distinct running-element instances per
+        // page so that mixing page_num (1-based, for counter(page)) with
+        // page_idx (0-based, for element policy) would be detectable if
+        // swapped.
+        let mut store = RunningElementStore::new();
+        let id0 = store.register(1, "hdr".into(), "<span>P1</span>".into());
+        let id1 = store.register(2, "hdr".into(), "<span>P2</span>".into());
+        let id2 = store.register(3, "hdr".into(), "<span>P3</span>".into());
+        let mk = |ids: Vec<usize>| -> BTreeMap<String, PageRunningState> {
+            let mut m = BTreeMap::new();
+            m.insert("hdr".to_string(), PageRunningState { instance_ids: ids });
+            m
+        };
+        let states = vec![mk(vec![id0]), mk(vec![id1]), mk(vec![id2])];
+
+        // page_num=2 (1-based), page_idx=1 (0-based) → must pick P2.
         assert_eq!(
-            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 2, 8, 0),
-            "<span>Title</span> - Page 2/8"
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 2, 3, 1),
+            "<span>P2</span> - Page 2/3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_html_escapes_literal_string() {
+        // ContentItem::String comes from CSS `content: "literal"` and may
+        // contain `<`, `>`, `&`. It must be HTML-escaped before concatenation
+        // so attackers (or mischievous authors) cannot inject markup into the
+        // margin box via CSS string literals.
+        let items = vec![ContentItem::String("A & B <script>".into())];
+        let store = RunningElementStore::new();
+        let states: Vec<BTreeMap<String, PageRunningState>> = vec![BTreeMap::new()];
+        assert_eq!(
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
+            "A &amp; B &lt;script&gt;"
         );
     }
 

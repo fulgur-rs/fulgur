@@ -388,7 +388,24 @@ fn collect_positioned_children(
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
-            let nested = collect_positioned_children(doc, &child_node.children, ctx);
+            let mut nested = collect_positioned_children(doc, &child_node.children, ctx);
+            // Flush pending running markers to the first real nested child so
+            // they travel with the flattened content on page break. Without
+            // this, the markers would skip over the container's children and
+            // incorrectly attach to the next outer sibling.
+            if !pending_running_markers.is_empty()
+                && let Some(first) = nested.first_mut()
+            {
+                let original = std::mem::replace(
+                    &mut first.child,
+                    // Temporary placeholder; overwritten below.
+                    Box::new(SpacerPageable::new(0.0)),
+                );
+                first.child = Box::new(RunningElementWrapperPageable::new(
+                    std::mem::take(&mut pending_running_markers),
+                    original,
+                ));
+            }
             result.extend(nested);
             continue;
         }
