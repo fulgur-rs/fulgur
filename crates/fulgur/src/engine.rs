@@ -108,6 +108,7 @@ impl Engine {
             running_store: &mut running_store,
             assets: self.assets.as_ref(),
             font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 

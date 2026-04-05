@@ -371,6 +371,7 @@ pub fn render_to_pdf_with_gcpm(
                     running_store: &mut dummy_store,
                     assets: None,
                     font_cache: HashMap::new(),
+                    string_set_by_node: HashMap::new(),
                 };
                 let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);

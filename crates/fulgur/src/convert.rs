@@ -6,7 +6,7 @@ use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
     BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
-    SpacerPageable, TablePageable,
+    SpacerPageable, StringSetPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -24,6 +24,8 @@ pub struct ConvertContext<'a> {
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
     pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
+    /// String-set entries from DOM walk, keyed by node_id for O(1) lookup.
+    pub string_set_by_node: HashMap<usize, Vec<(String, String)>>,
 }
 
 impl ConvertContext<'_> {
@@ -80,6 +82,44 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
 }
 
 fn convert_node(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    ctx: &mut ConvertContext<'_>,
+) -> Box<dyn Pageable> {
+    let result = convert_node_inner(doc, node_id, ctx);
+    maybe_prepend_string_set(node_id, result, ctx)
+}
+
+/// If the given node has string-set entries, wrap the pageable in a BlockPageable
+/// with StringSetPageable markers prepended. Otherwise return the pageable as-is.
+fn maybe_prepend_string_set(
+    node_id: usize,
+    child: Box<dyn Pageable>,
+    ctx: &mut ConvertContext<'_>,
+) -> Box<dyn Pageable> {
+    let entries = ctx.string_set_by_node.remove(&node_id);
+    match entries {
+        Some(entries) if !entries.is_empty() => {
+            let mut children = Vec::with_capacity(entries.len() + 1);
+            for (name, value) in entries {
+                children.push(PositionedChild {
+                    child: Box::new(StringSetPageable::new(name, value)),
+                    x: 0.0,
+                    y: 0.0,
+                });
+            }
+            children.push(PositionedChild {
+                child,
+                x: 0.0,
+                y: 0.0,
+            });
+            Box::new(BlockPageable::with_positioned_children(children))
+        }
+        _ => child,
+    }
+}
+
+fn convert_node_inner(
     doc: &blitz_dom::BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
