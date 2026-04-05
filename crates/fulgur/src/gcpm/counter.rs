@@ -1,9 +1,16 @@
-use super::{ContentItem, CounterType};
+use super::{ContentItem, CounterType, StringPolicy};
+use crate::paginate::StringSetPageState;
+use std::collections::BTreeMap;
 
 /// Resolve content items to a plain string.
 ///
 /// `Element` references are skipped in plain string mode.
-pub fn resolve_content_to_string(items: &[ContentItem], page: usize, total_pages: usize) -> String {
+pub fn resolve_content_to_string(
+    items: &[ContentItem],
+    string_set_states: &BTreeMap<String, StringSetPageState>,
+    page: usize,
+    total_pages: usize,
+) -> String {
     let mut out = String::new();
     for item in items {
         match item {
@@ -14,7 +21,12 @@ pub fn resolve_content_to_string(items: &[ContentItem], page: usize, total_pages
             ContentItem::Counter(CounterType::Pages) => {
                 out.push_str(&total_pages.to_string());
             }
-            ContentItem::Element(_) | ContentItem::StringRef { .. } => {}
+            ContentItem::Element(_) => {}
+            ContentItem::StringRef { name, policy } => {
+                if let Some(state) = string_set_states.get(name) {
+                    out.push_str(&resolve_string_policy(state, *policy));
+                }
+            }
         }
     }
     out
@@ -27,6 +39,7 @@ pub fn resolve_content_to_string(items: &[ContentItem], page: usize, total_pages
 pub fn resolve_content_to_html(
     items: &[ContentItem],
     running_elements: &[(String, String)],
+    string_set_states: &BTreeMap<String, StringSetPageState>,
     page: usize,
     total_pages: usize,
 ) -> String {
@@ -45,10 +58,38 @@ pub fn resolve_content_to_html(
                     out.push_str(html);
                 }
             }
-            ContentItem::StringRef { .. } => {}
+            ContentItem::StringRef { name, policy } => {
+                if let Some(state) = string_set_states.get(name) {
+                    out.push_str(&resolve_string_policy(state, *policy));
+                }
+            }
         }
     }
     out
+}
+
+fn resolve_string_policy(state: &StringSetPageState, policy: StringPolicy) -> String {
+    match policy {
+        StringPolicy::Start => state.start.clone().unwrap_or_default(),
+        StringPolicy::First => state
+            .first
+            .clone()
+            .or_else(|| state.start.clone())
+            .unwrap_or_default(),
+        StringPolicy::Last => state
+            .last
+            .clone()
+            .or_else(|| state.first.clone())
+            .or_else(|| state.start.clone())
+            .unwrap_or_default(),
+        StringPolicy::FirstExcept => {
+            if state.first.is_some() {
+                String::new() // Empty on pages where string is set
+            } else {
+                state.start.clone().unwrap_or_default() // Same as First when not set
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +104,10 @@ mod tests {
             ContentItem::String(" of ".into()),
             ContentItem::Counter(CounterType::Pages),
         ];
-        assert_eq!(resolve_content_to_string(&items, 3, 10), "Page 3 of 10");
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 3, 10),
+            "Page 3 of 10"
+        );
     }
 
     #[test]
@@ -73,7 +117,10 @@ mod tests {
             ContentItem::Element("hdr".into()),
             ContentItem::String("After".into()),
         ];
-        assert_eq!(resolve_content_to_string(&items, 1, 5), "BeforeAfter");
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 5),
+            "BeforeAfter"
+        );
     }
 
     #[test]
@@ -81,7 +128,7 @@ mod tests {
         let items = vec![ContentItem::Element("hdr".into())];
         let running = vec![("hdr".to_string(), "<b>Header</b>".to_string())];
         assert_eq!(
-            resolve_content_to_html(&items, &running, 1, 1),
+            resolve_content_to_html(&items, &running, &BTreeMap::new(), 1, 1),
             "<b>Header</b>"
         );
     }
@@ -97,8 +144,140 @@ mod tests {
         ];
         let running = vec![("hdr".to_string(), "<span>Title</span>".to_string())];
         assert_eq!(
-            resolve_content_to_html(&items, &running, 2, 8),
+            resolve_content_to_html(&items, &running, &BTreeMap::new(), 2, 8),
             "<span>Title</span> - Page 2/8"
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_first() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::First,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: Some("Previous".to_string()),
+                first: Some("Current".to_string()),
+                last: Some("Current".to_string()),
+            },
+        );
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &state, 1, 1),
+            "Current"
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_first_falls_back_to_start() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::First,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: Some("Inherited".to_string()),
+                first: None,
+                last: None,
+            },
+        );
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &state, 1, 1),
+            "Inherited"
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_start() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::Start,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: Some("Start Value".to_string()),
+                first: Some("First Value".to_string()),
+                last: Some("Last Value".to_string()),
+            },
+        );
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &state, 1, 1),
+            "Start Value"
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_last() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::Last,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: None,
+                first: Some("First".to_string()),
+                last: Some("Last".to_string()),
+            },
+        );
+        assert_eq!(resolve_content_to_html(&items, &[], &state, 1, 1), "Last");
+    }
+
+    #[test]
+    fn test_resolve_string_ref_first_except_on_set_page() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::FirstExcept,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: Some("Old".to_string()),
+                first: Some("New".to_string()),
+                last: Some("New".to_string()),
+            },
+        );
+        assert_eq!(resolve_content_to_html(&items, &[], &state, 1, 1), "");
+    }
+
+    #[test]
+    fn test_resolve_string_ref_first_except_on_no_set_page() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::FirstExcept,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: Some("Inherited".to_string()),
+                first: None,
+                last: None,
+            },
+        );
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &state, 1, 1),
+            "Inherited"
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_unknown_name() {
+        let items = vec![ContentItem::StringRef {
+            name: "nonexistent".to_string(),
+            policy: StringPolicy::First,
+        }];
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &BTreeMap::new(), 1, 1),
+            ""
         );
     }
 }

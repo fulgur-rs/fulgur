@@ -249,8 +249,13 @@ pub fn render_to_pdf_with_gcpm(
         // with the margin box's own declarations (font-size, color, margin, etc.)
         let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
         for (&pos, rule) in &effective_boxes {
-            let content_html =
-                resolve_content_to_html(&rule.content, &running_pairs, page_num, total_pages);
+            let content_html = resolve_content_to_html(
+                &rule.content,
+                &running_pairs,
+                &std::collections::BTreeMap::new(),
+                page_num,
+                total_pages,
+            );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {
                     content_html
