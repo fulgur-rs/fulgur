@@ -92,6 +92,10 @@ fn convert_node(
 
 /// If the given node has string-set entries, wrap the pageable in a BlockPageable
 /// with StringSetPageable markers prepended. Otherwise return the pageable as-is.
+///
+/// The wrapper propagates `pagination()` from the original child so that
+/// `break-before`/`break-after`/`break-inside` properties on the string-set
+/// target element (e.g. `<h1>`) remain visible to the paginator.
 fn maybe_prepend_string_set(
     node_id: usize,
     child: Box<dyn Pageable>,
@@ -100,6 +104,7 @@ fn maybe_prepend_string_set(
     let entries = ctx.string_set_by_node.remove(&node_id);
     match entries {
         Some(entries) if !entries.is_empty() => {
+            let child_pagination = child.pagination();
             let mut children = Vec::with_capacity(entries.len() + 1);
             for (name, value) in entries {
                 children.push(PositionedChild {
@@ -113,7 +118,9 @@ fn maybe_prepend_string_set(
                 x: 0.0,
                 y: 0.0,
             });
-            Box::new(BlockPageable::with_positioned_children(children))
+            Box::new(
+                BlockPageable::with_positioned_children(children).with_pagination(child_pagination),
+            )
         }
         _ => child,
     }
