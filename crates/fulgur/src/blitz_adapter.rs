@@ -465,6 +465,7 @@ mod tests {
                 parsed: crate::gcpm::ParsedSelector::Class("header".to_string()),
                 running_name: "pageHeader".to_string(),
             }],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -502,6 +503,7 @@ mod tests {
                 parsed: crate::gcpm::ParsedSelector::Id("title".to_string()),
                 running_name: "pageTitle".to_string(),
             }],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -526,6 +528,7 @@ mod tests {
         let gcpm = crate::gcpm::GcpmContext {
             margin_boxes: vec![],
             running_mappings: vec![],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -554,6 +557,7 @@ mod tests {
                 parsed: crate::gcpm::ParsedSelector::Id("injected".to_string()),
                 running_name: "shouldNotMatch".to_string(),
             }],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
 

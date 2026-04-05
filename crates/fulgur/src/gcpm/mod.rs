@@ -25,6 +25,45 @@ pub struct RunningMapping {
     pub running_name: String,
 }
 
+/// Policy for selecting which value of a named string to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringPolicy {
+    /// The first assignment on the current page, or the last from the previous page if none.
+    Start,
+    /// The first assignment on the current page.
+    First,
+    /// The last assignment on the current page.
+    Last,
+    /// Like `First`, but returns an empty string on the page where the string is first assigned.
+    FirstExcept,
+}
+
+/// A single value component within a `string-set` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringSetValue {
+    /// The text content of the element.
+    ContentText,
+    /// The `::before` pseudo-element content.
+    ContentBefore,
+    /// The `::after` pseudo-element content.
+    ContentAfter,
+    /// The value of the named attribute.
+    Attr(String),
+    /// A literal string value.
+    Literal(String),
+}
+
+/// Maps a CSS selector to a named string via `string-set`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringSetMapping {
+    /// The parsed CSS selector that triggers this mapping.
+    pub parsed: ParsedSelector,
+    /// The name of the string being set.
+    pub name: String,
+    /// The value components to concatenate.
+    pub values: Vec<StringSetValue>,
+}
+
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
@@ -34,6 +73,13 @@ pub enum ContentItem {
     Counter(CounterType),
     /// A literal string, e.g. `"Page "`.
     String(String),
+    /// A named string reference, e.g. `string(chapter-title, first)`.
+    StringRef {
+        /// The name of the string to reference.
+        name: String,
+        /// The policy for selecting the string value.
+        policy: StringPolicy,
+    },
 }
 
 /// Counter types supported by GCPM.
@@ -65,6 +111,8 @@ pub struct GcpmContext {
     pub margin_boxes: Vec<MarginBoxRule>,
     /// Mappings from CSS selectors to running element names.
     pub running_mappings: Vec<RunningMapping>,
+    /// Mappings from CSS selectors to named strings via `string-set`.
+    pub string_set_mappings: Vec<StringSetMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
@@ -72,7 +120,9 @@ pub struct GcpmContext {
 impl GcpmContext {
     /// Returns `true` if no GCPM features were found.
     pub fn is_empty(&self) -> bool {
-        self.margin_boxes.is_empty() && self.running_mappings.is_empty()
+        self.margin_boxes.is_empty()
+            && self.running_mappings.is_empty()
+            && self.string_set_mappings.is_empty()
     }
 }
 
@@ -85,6 +135,7 @@ mod tests {
         let ctx = GcpmContext {
             margin_boxes: vec![],
             running_mappings: vec![],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -100,6 +151,7 @@ mod tests {
                 declarations: String::new(),
             }],
             running_mappings: vec![],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -113,6 +165,7 @@ mod tests {
                 parsed: ParsedSelector::Class("header".to_string()),
                 running_name: "header".to_string(),
             }],
+            string_set_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());

@@ -14,7 +14,7 @@ pub fn resolve_content_to_string(items: &[ContentItem], page: usize, total_pages
             ContentItem::Counter(CounterType::Pages) => {
                 out.push_str(&total_pages.to_string());
             }
-            ContentItem::Element(_) => {}
+            ContentItem::Element(_) | ContentItem::StringRef { .. } => {}
         }
     }
     out
@@ -45,6 +45,7 @@ pub fn resolve_content_to_html(
                     out.push_str(html);
                 }
             }
+            ContentItem::StringRef { .. } => {}
         }
     }
     out
