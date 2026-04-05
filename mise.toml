@@ -4,6 +4,7 @@ rust = "latest"
 [tasks.update-examples]
 description = "Regenerate all example PDFs"
 run = """
+#!/usr/bin/env bash
 cargo build --bin fulgur --release 2>&1 | tail -1
 for dir in examples/*/; do
   html="$dir/index.html"
