@@ -5,8 +5,8 @@ use cssparser::{
 
 use super::margin_box::MarginBoxPosition;
 use super::{
-    ContentItem, CounterType, GcpmContext, MarginBoxRule, ParsedSelector, RunningMapping,
-    StringPolicy, StringSetMapping, StringSetValue,
+    ContentItem, CounterType, ElementPolicy, GcpmContext, MarginBoxRule, ParsedSelector,
+    RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
 };
 
 // ---------------------------------------------------------------------------
@@ -532,8 +532,41 @@ fn parse_string_policy<'i>(input: &mut Parser<'i, '_>) -> Result<StringPolicy, P
     }
 }
 
+/// Parse the policy argument of `element(name, <policy>)`.
+fn parse_element_policy<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<ElementPolicy, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    if ident.eq_ignore_ascii_case("start") {
+        Ok(ElementPolicy::Start)
+    } else if ident.eq_ignore_ascii_case("last") {
+        Ok(ElementPolicy::Last)
+    } else if ident.eq_ignore_ascii_case("first-except") {
+        Ok(ElementPolicy::FirstExcept)
+    } else if ident.eq_ignore_ascii_case("first") {
+        let has_except = input
+            .try_parse(|input| {
+                input.expect_delim('-')?;
+                let next = input.expect_ident()?.clone();
+                if next.eq_ignore_ascii_case("except") {
+                    Ok(())
+                } else {
+                    Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                }
+            })
+            .is_ok();
+        Ok(if has_except {
+            ElementPolicy::FirstExcept
+        } else {
+            ElementPolicy::First
+        })
+    } else {
+        Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+    }
+}
+
 /// Parse a `content` property value into a list of `ContentItem`s using cssparser.
-/// Handles: `element(<name>)`, `counter(page)`, `counter(pages)`, `string(<name>, <policy>)`, `"string"`.
+/// Handles: `element(<name>, <policy>)`, `counter(page)`, `counter(pages)`, `string(<name>, <policy>)`, `"string"`.
 fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
     let mut items = Vec::new();
 
@@ -553,7 +586,22 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                     input.parse_nested_block(|input| {
                         let arg = input.expect_ident()?.clone();
                         if fn_name.eq_ignore_ascii_case("element") {
-                            items.push(ContentItem::Element(arg.to_string()));
+                            let name = arg.to_string();
+                            // Optional second argument: policy identifier.
+                            // If a comma is present but the policy is invalid,
+                            // drop the item entirely.
+                            let had_comma = input.try_parse(|input| input.expect_comma()).is_ok();
+                            if had_comma {
+                                if let Ok(policy) = parse_element_policy(input) {
+                                    items.push(ContentItem::Element { name, policy });
+                                }
+                                // Invalid policy — reject this call.
+                            } else {
+                                items.push(ContentItem::Element {
+                                    name,
+                                    policy: ElementPolicy::First,
+                                });
+                            }
                         } else if fn_name.eq_ignore_ascii_case("counter") {
                             match &*arg {
                                 "page" => items.push(ContentItem::Counter(CounterType::Page)),
@@ -733,7 +781,10 @@ mod tests {
         assert_eq!(mb.page_selector, None);
         assert_eq!(
             mb.content,
-            vec![ContentItem::Element("pageHeader".to_string())]
+            vec![ContentItem::Element {
+                name: "pageHeader".to_string(),
+                policy: ElementPolicy::First,
+            }]
         );
         // @page block should be removed from cleaned_css
         assert!(!ctx.cleaned_css.contains("@page"));
@@ -788,7 +839,10 @@ mod tests {
         assert_eq!(mb.position, MarginBoxPosition::TopCenter);
         assert_eq!(
             mb.content,
-            vec![ContentItem::Element("firstHeader".to_string())]
+            vec![ContentItem::Element {
+                name: "firstHeader".to_string(),
+                policy: ElementPolicy::First,
+            }]
         );
     }
 
@@ -851,7 +905,13 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.margin_boxes.len(), 1);
         let mb = &ctx.margin_boxes[0];
-        assert_eq!(mb.content, vec![ContentItem::Element("hdr".to_string())]);
+        assert_eq!(
+            mb.content,
+            vec![ContentItem::Element {
+                name: "hdr".to_string(),
+                policy: ElementPolicy::First,
+            }]
+        );
         assert!(mb.declarations.contains("font-size"));
         assert!(mb.declarations.contains("color"));
     }
@@ -1018,6 +1078,55 @@ mod tests {
                 policy_str
             );
         }
+    }
+
+    #[test]
+    fn test_parse_element_function_default_policy() {
+        let css = "@page { @top-center { content: element(hdr); } }";
+        let ctx = parse_gcpm(css);
+        let rule = ctx.margin_boxes.first().unwrap();
+        assert_eq!(
+            rule.content,
+            vec![ContentItem::Element {
+                name: "hdr".into(),
+                policy: ElementPolicy::First,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_element_function_all_policies() {
+        for (policy_str, policy) in [
+            ("first", ElementPolicy::First),
+            ("start", ElementPolicy::Start),
+            ("last", ElementPolicy::Last),
+            ("first-except", ElementPolicy::FirstExcept),
+        ] {
+            let css = format!(
+                "@page {{ @top-center {{ content: element(hdr, {}); }} }}",
+                policy_str
+            );
+            let ctx = parse_gcpm(&css);
+            let rule = ctx.margin_boxes.first().unwrap();
+            assert_eq!(
+                rule.content,
+                vec![ContentItem::Element {
+                    name: "hdr".into(),
+                    policy,
+                }],
+                "Failed for policy: {}",
+                policy_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_element_function_invalid_policy() {
+        // Unknown policy identifier — the whole element() call should be dropped.
+        let css = "@page { @top-center { content: element(hdr, bogus); } }";
+        let ctx = parse_gcpm(css);
+        let rule = ctx.margin_boxes.first().unwrap();
+        assert!(rule.content.is_empty());
     }
 
     #[test]
