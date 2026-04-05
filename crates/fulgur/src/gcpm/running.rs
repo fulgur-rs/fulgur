@@ -3,12 +3,11 @@
 //! Manages running elements extracted from the DOM via `position: running(name)`.
 //! These elements are serialized to HTML and stored for later re-layout in margin boxes.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A single running element assignment, identified by a numeric instance id.
 #[derive(Debug, Clone)]
 pub struct RunningInstance {
-    pub id: usize,
     pub name: String,
     pub html: String,
 }
@@ -20,27 +19,32 @@ pub struct RunningInstance {
 /// can pick the correct one. The DOM `node_id` → `instance_id` map lets the
 /// convert stage emit zero-size markers at the source position of each
 /// running element.
+///
+/// Instances are append-only — once registered, they remain in the store for
+/// the lifetime of the pass. This is what allows `instance_id` to be a stable
+/// index into `instances`.
 pub struct RunningElementStore {
     instances: Vec<RunningInstance>,
-    node_to_instance: HashMap<usize, usize>,
+    node_to_instance: BTreeMap<usize, usize>,
 }
 
 impl RunningElementStore {
     pub fn new() -> Self {
         Self {
             instances: Vec::new(),
-            node_to_instance: HashMap::new(),
+            node_to_instance: BTreeMap::new(),
         }
     }
 
     /// Register a running element instance. Returns the assigned instance_id.
     pub fn register(&mut self, node_id: usize, name: String, html: String) -> usize {
+        debug_assert!(
+            !self.node_to_instance.contains_key(&node_id),
+            "RunningElementStore: node_id {} registered twice",
+            node_id
+        );
         let id = self.instances.len();
-        self.instances.push(RunningInstance {
-            id,
-            name,
-            html,
-        });
+        self.instances.push(RunningInstance { name, html });
         self.node_to_instance.insert(node_id, id);
         id
     }
@@ -158,5 +162,12 @@ mod tests {
         let mut store = RunningElementStore::new();
         let id = store.register(5, "footer".to_string(), "<p>F</p>".to_string());
         assert_eq!(store.name_of(id), Some("footer"));
+    }
+
+    #[test]
+    fn test_running_store_invalid_instance_id_returns_none() {
+        let store = RunningElementStore::new();
+        assert!(store.get_html(999).is_none());
+        assert!(store.name_of(999).is_none());
     }
 }
