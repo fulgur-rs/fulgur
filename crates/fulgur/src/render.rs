@@ -187,14 +187,13 @@ pub fn render_to_pdf_with_gcpm(
     } else {
         crate::paginate::collect_string_set_states(&pages)
     };
+    let running_states = crate::paginate::collect_running_element_states(&pages);
 
     let page_size = if config.landscape {
         config.page_size.landscape()
     } else {
         config.page_size
     };
-
-    let running_pairs = running_store.to_pairs();
 
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
@@ -256,10 +255,12 @@ pub fn render_to_pdf_with_gcpm(
         for (&pos, rule) in &effective_boxes {
             let content_html = resolve_content_to_html(
                 &rule.content,
-                &running_pairs,
+                running_store,
+                &running_states,
                 &string_set_states[page_idx],
                 page_num,
                 total_pages,
+                page_idx,
             );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {

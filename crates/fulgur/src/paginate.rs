@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::pageable::{
-    BlockPageable, ListItemPageable, Pageable, Pt, RunningElementMarkerPageable,
-    StringSetPageable, StringSetWrapperPageable, TablePageable,
+    BlockPageable, ListItemPageable, Pageable, Pt, RunningElementMarkerPageable, StringSetPageable,
+    StringSetWrapperPageable, TablePageable,
 };
 
 /// Per-page state for a named string.
@@ -353,23 +353,41 @@ mod tests {
     fn test_collect_running_element_states_splits_across_pages() {
         use crate::pageable::RunningElementMarkerPageable;
 
+        // Need total_height > page_height for paginate() to split.
+        // Use positioned y coordinates so children stack vertically rather
+        // than overlapping at y=0 (which defeats wrap()'s max(y+h) total).
         let marker_a: Box<dyn Pageable> =
             Box::new(RunningElementMarkerPageable::new("hdr".into(), 0));
         let marker_b: Box<dyn Pageable> =
             Box::new(RunningElementMarkerPageable::new("hdr".into(), 1));
         let block = BlockPageable::with_positioned_children(vec![
-            pos(marker_a),
-            pos(make_spacer(100.0)),
-            pos(make_spacer(100.0)),
-            pos(marker_b),
-            pos(make_spacer(100.0)),
+            PositionedChild {
+                child: marker_a,
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: marker_b,
+                x: 0.0,
+                y: 120.0,
+            },
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 120.0,
+            },
         ]);
-        let pages = paginate(Box::new(block), 200.0, 200.0);
+        let pages = paginate(Box::new(block), 200.0, 100.0);
         assert!(pages.len() >= 2);
         let states = collect_running_element_states(&pages);
-        // marker_a is before any spacers — on page 1
+        // marker_a sits before the first spacer on page 1.
         assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![0]);
-        // marker_b is between spacer 2 and 3 — should be on page 2
+        // marker_b sits with the second spacer, which overflows to page 2.
         assert_eq!(states[1].get("hdr").unwrap().instance_ids, vec![1]);
     }
 

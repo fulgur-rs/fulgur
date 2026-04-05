@@ -1,6 +1,6 @@
 use super::{ContentItem, CounterType, StringPolicy};
-use crate::gcpm::running::RunningElementStore;
 use crate::gcpm::ElementPolicy;
+use crate::gcpm::running::RunningElementStore;
 use crate::paginate::{PageRunningState, StringSetPageState};
 use std::collections::BTreeMap;
 
@@ -182,7 +182,10 @@ mod tests {
         );
     }
 
-    fn single_page_store(name: &str, html: &str) -> (RunningElementStore, Vec<BTreeMap<String, PageRunningState>>) {
+    fn single_page_store(
+        name: &str,
+        html: &str,
+    ) -> (RunningElementStore, Vec<BTreeMap<String, PageRunningState>>) {
         let mut store = RunningElementStore::new();
         let id = store.register(1, name.to_string(), html.to_string());
         let mut page_state = BTreeMap::new();
@@ -321,7 +324,10 @@ mod tests {
                 last: Some("Last".to_string()),
             },
         );
-        assert_eq!(resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0), "Last");
+        assert_eq!(
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            "Last"
+        );
     }
 
     #[test]
@@ -339,7 +345,10 @@ mod tests {
                 last: Some("New".to_string()),
             },
         );
-        assert_eq!(resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0), "");
+        assert_eq!(
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            ""
+        );
     }
 
     #[test]
@@ -370,7 +379,15 @@ mod tests {
             policy: StringPolicy::First,
         }];
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &BTreeMap::new(), 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &BTreeMap::new(),
+                1,
+                1,
+                0
+            ),
             ""
         );
     }
