@@ -1127,6 +1127,55 @@ impl Pageable for SpacerPageable {
     }
 }
 
+// ─── StringSetPageable ──────────────────────────────────
+
+/// Zero-size marker for named string values.
+/// Inserted into the Pageable tree to track string-set positions during pagination.
+#[derive(Clone)]
+pub struct StringSetPageable {
+    pub name: String,
+    pub value: String,
+}
+
+impl StringSetPageable {
+    pub fn new(name: String, value: String) -> Self {
+        Self { name, value }
+    }
+}
+
+impl Pageable for StringSetPageable {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn split(
+        &self,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        None
+    }
+
+    fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {
+        // Markers are invisible
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        0.0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 // ─── ListItemPageable ───────────────────────────────────
 
 use crate::paragraph::ShapedLine;
@@ -1667,6 +1716,28 @@ mod tests {
             "expected y=80.0, got {}",
             second_table.body_cells[1].y
         );
+    }
+
+    #[test]
+    fn test_string_set_pageable_zero_size() {
+        let mut p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
+        let size = p.wrap(100.0, 100.0);
+        assert_eq!(size.width, 0.0);
+        assert_eq!(size.height, 0.0);
+        assert_eq!(p.height(), 0.0);
+    }
+
+    #[test]
+    fn test_string_set_pageable_no_split() {
+        let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
+        assert!(p.split(100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn test_string_set_pageable_fields() {
+        let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
+        assert_eq!(p.name, "title");
+        assert_eq!(p.value, "Chapter 1");
     }
 }
 
