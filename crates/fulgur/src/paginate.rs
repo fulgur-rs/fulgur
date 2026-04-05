@@ -79,25 +79,27 @@ pub fn collect_string_set_states(
 }
 
 /// Recursively find all StringSetPageable markers in a Pageable tree.
+///
+/// Only traverses container types that can contain markers. Markers are always
+/// inserted as direct children of `BlockPageable` (see `convert::maybe_prepend_string_set`),
+/// but we also descend into `TablePageable` / `ListItemPageable` bodies to find
+/// markers inserted on descendants of table cells or list items.
 fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>) {
-    if let Some(marker) = pageable.as_any().downcast_ref::<StringSetPageable>() {
+    let any = pageable.as_any();
+    if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
         markers.push((marker.name.clone(), marker.value.clone()));
-        return;
-    }
-    if let Some(block) = pageable.as_any().downcast_ref::<BlockPageable>() {
+    } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
         for child in &block.children {
             collect_markers(child.child.as_ref(), markers);
         }
-    }
-    if let Some(table) = pageable.as_any().downcast_ref::<TablePageable>() {
+    } else if let Some(table) = any.downcast_ref::<TablePageable>() {
         for child in &table.header_cells {
             collect_markers(child.child.as_ref(), markers);
         }
         for child in &table.body_cells {
             collect_markers(child.child.as_ref(), markers);
         }
-    }
-    if let Some(list_item) = pageable.as_any().downcast_ref::<ListItemPageable>() {
+    } else if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
         collect_markers(list_item.body.as_ref(), markers);
     }
 }

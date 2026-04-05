@@ -24,7 +24,7 @@ pub fn resolve_content_to_string(
             ContentItem::Element(_) => {}
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
-                    out.push_str(&resolve_string_policy(state, *policy));
+                    out.push_str(resolve_string_policy(state, *policy));
                 }
             }
         }
@@ -60,7 +60,7 @@ pub fn resolve_content_to_html(
             }
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
-                    out.push_str(&resolve_string_policy(state, *policy));
+                    out.push_str(resolve_string_policy(state, *policy));
                 }
             }
         }
@@ -68,27 +68,24 @@ pub fn resolve_content_to_html(
     out
 }
 
-fn resolve_string_policy(state: &StringSetPageState, policy: StringPolicy) -> String {
+fn resolve_string_policy(state: &StringSetPageState, policy: StringPolicy) -> &str {
     match policy {
-        StringPolicy::Start => state.start.clone().unwrap_or_default(),
+        StringPolicy::Start => state.start.as_deref().unwrap_or(""),
         StringPolicy::First => state
             .first
-            .clone()
-            .or_else(|| state.start.clone())
-            .unwrap_or_default(),
+            .as_deref()
+            .or(state.start.as_deref())
+            .unwrap_or(""),
         StringPolicy::Last => state
             .last
-            .clone()
-            .or_else(|| state.first.clone())
-            .or_else(|| state.start.clone())
-            .unwrap_or_default(),
-        StringPolicy::FirstExcept => {
-            if state.first.is_some() {
-                String::new() // Empty on pages where string is set
-            } else {
-                state.start.clone().unwrap_or_default() // Same as First when not set
-            }
-        }
+            .as_deref()
+            .or(state.first.as_deref())
+            .or(state.start.as_deref())
+            .unwrap_or(""),
+        // first-except: empty on pages where the string was set this page,
+        // otherwise falls back to the inherited start value.
+        StringPolicy::FirstExcept if state.first.is_some() => "",
+        StringPolicy::FirstExcept => state.start.as_deref().unwrap_or(""),
     }
 }
 

@@ -300,19 +300,38 @@ impl DomPass for LinkStylesheetPass {
 
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
-use crate::gcpm::{GcpmContext, ParsedSelector, StringSetValue};
+use crate::gcpm::{ParsedSelector, RunningMapping, StringSetMapping, StringSetValue};
 use std::cell::RefCell;
+
+/// Returns true for elements that should never be walked for GCPM detection
+/// (head, script, style, etc.) — they contain no user-visible content.
+fn is_non_visual_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
+    )
+}
+
+/// Check whether a `ParsedSelector` (simple class/id/tag selector) matches the given element.
+fn selector_matches(selector: &ParsedSelector, elem: &blitz_dom::node::ElementData) -> bool {
+    match selector {
+        ParsedSelector::Class(name) => get_attr(elem, "class")
+            .is_some_and(|cls| cls.split_whitespace().any(|c| c == name.as_str())),
+        ParsedSelector::Id(name) => get_attr(elem, "id") == Some(name.as_str()),
+        ParsedSelector::Tag(name) => elem.name.local.as_ref().eq_ignore_ascii_case(name),
+    }
+}
 
 /// Extracts running elements from the DOM and stores their serialized HTML.
 pub struct RunningElementPass {
-    gcpm: GcpmContext,
+    mappings: Vec<RunningMapping>,
     store: RefCell<RunningElementStore>,
 }
 
 impl RunningElementPass {
-    pub fn new(gcpm: GcpmContext) -> Self {
+    pub fn new(mappings: Vec<RunningMapping>) -> Self {
         Self {
-            gcpm,
+            mappings,
             store: RefCell::new(RunningElementStore::new()),
         }
     }
@@ -324,7 +343,7 @@ impl RunningElementPass {
 
 impl DomPass for RunningElementPass {
     fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
-        if self.gcpm.running_mappings.is_empty() {
+        if self.mappings.is_empty() {
             return;
         }
         let root = doc.root_element();
@@ -340,17 +359,13 @@ impl RunningElementPass {
         };
 
         if let Some(elem) = node.element_data() {
-            // Skip non-visual elements (head, script, style, etc.) to match
-            // the old convert.rs behavior and avoid false matches inside <head>.
-            if matches!(
-                elem.name.local.as_ref(),
-                "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
-            ) {
+            if is_non_visual_tag(elem.name.local.as_ref()) {
                 return;
             }
             if let Some(running_name) = self.find_running_name(elem) {
                 let html = serialize_node(doc, node_id);
                 self.store.borrow_mut().register(running_name, html);
+                // Running elements are removed from flow — don't recurse.
                 return;
             }
         }
@@ -361,37 +376,23 @@ impl RunningElementPass {
     }
 
     fn find_running_name(&self, elem: &blitz_dom::node::ElementData) -> Option<String> {
-        self.gcpm
-            .running_mappings
+        self.mappings
             .iter()
-            .find(|m| self.matches_selector(&m.parsed, elem))
+            .find(|m| selector_matches(&m.parsed, elem))
             .map(|m| m.running_name.clone())
-    }
-
-    fn matches_selector(
-        &self,
-        selector: &ParsedSelector,
-        elem: &blitz_dom::node::ElementData,
-    ) -> bool {
-        match selector {
-            ParsedSelector::Class(name) => get_attr(elem, "class")
-                .is_some_and(|cls| cls.split_whitespace().any(|c| c == name.as_str())),
-            ParsedSelector::Id(name) => get_attr(elem, "id") == Some(name.as_str()),
-            ParsedSelector::Tag(name) => elem.name.local.as_ref().eq_ignore_ascii_case(name),
-        }
     }
 }
 
 /// Extracts string-set values from the DOM by walking the tree and resolving text content.
 pub struct StringSetPass {
-    gcpm: GcpmContext,
+    mappings: Vec<StringSetMapping>,
     store: RefCell<StringSetStore>,
 }
 
 impl StringSetPass {
-    pub fn new(gcpm: GcpmContext) -> Self {
+    pub fn new(mappings: Vec<StringSetMapping>) -> Self {
         Self {
-            gcpm,
+            mappings,
             store: RefCell::new(StringSetStore::new()),
         }
     }
@@ -403,7 +404,7 @@ impl StringSetPass {
 
 impl DomPass for StringSetPass {
     fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
-        if self.gcpm.string_set_mappings.is_empty() {
+        if self.mappings.is_empty() {
             return;
         }
         let root = doc.root_element();
@@ -419,82 +420,55 @@ impl StringSetPass {
         };
 
         if let Some(elem) = node.element_data() {
-            if matches!(
-                elem.name.local.as_ref(),
-                "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
-            ) {
+            if is_non_visual_tag(elem.name.local.as_ref()) {
                 return;
             }
-            if let Some((name, values)) = self.find_string_set(elem) {
-                let value = self.resolve_values(doc, node_id, elem, &values);
+            if let Some(mapping) = self.find_string_set(elem) {
+                let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
                 self.store.borrow_mut().push(StringSetEntry {
-                    name,
+                    name: mapping.name.clone(),
                     value,
                     node_id,
                 });
             }
         }
 
-        // Always recurse (string-set elements stay in document flow)
-        let children: Vec<usize> = doc
-            .get_node(node_id)
-            .map(|n| n.children.clone())
-            .unwrap_or_default();
-        for child_id in children {
+        // string-set targets stay in document flow — always recurse into children.
+        for &child_id in &node.children {
             self.walk_tree(doc, child_id);
         }
     }
 
-    fn find_string_set(
-        &self,
-        elem: &blitz_dom::node::ElementData,
-    ) -> Option<(String, Vec<StringSetValue>)> {
-        self.gcpm
-            .string_set_mappings
+    fn find_string_set(&self, elem: &blitz_dom::node::ElementData) -> Option<&StringSetMapping> {
+        self.mappings
             .iter()
-            .find(|m| self.matches_selector(&m.parsed, elem))
-            .map(|m| (m.name.clone(), m.values.clone()))
+            .find(|m| selector_matches(&m.parsed, elem))
     }
+}
 
-    fn matches_selector(
-        &self,
-        selector: &ParsedSelector,
-        elem: &blitz_dom::node::ElementData,
-    ) -> bool {
-        match selector {
-            ParsedSelector::Class(name) => get_attr(elem, "class")
-                .is_some_and(|cls| cls.split_whitespace().any(|c| c == name.as_str())),
-            ParsedSelector::Id(name) => get_attr(elem, "id") == Some(name.as_str()),
-            ParsedSelector::Tag(name) => elem.name.local.as_ref().eq_ignore_ascii_case(name),
-        }
-    }
-
-    fn resolve_values(
-        &self,
-        doc: &HtmlDocument,
-        node_id: usize,
-        elem: &blitz_dom::node::ElementData,
-        values: &[StringSetValue],
-    ) -> String {
-        let mut out = String::new();
-        for val in values {
-            match val {
-                StringSetValue::ContentText => {
-                    out.push_str(&extract_text_content(doc, node_id));
-                }
-                StringSetValue::ContentBefore | StringSetValue::ContentAfter => {
-                    // Skip for now (requires Stylo computed styles, rarely used)
-                }
-                StringSetValue::Attr(attr_name) => {
-                    if let Some(v) = get_attr(elem, attr_name) {
-                        out.push_str(v);
-                    }
-                }
-                StringSetValue::Literal(s) => out.push_str(s),
+fn resolve_string_set_values(
+    doc: &HtmlDocument,
+    node_id: usize,
+    elem: &blitz_dom::node::ElementData,
+    values: &[StringSetValue],
+) -> String {
+    let mut out = String::new();
+    for val in values {
+        match val {
+            StringSetValue::ContentText => {
+                out.push_str(&extract_text_content(doc, node_id));
             }
+            // content(before)/content(after) require pseudo-element computed styles.
+            StringSetValue::ContentBefore | StringSetValue::ContentAfter => {}
+            StringSetValue::Attr(attr_name) => {
+                if let Some(v) = get_attr(elem, attr_name) {
+                    out.push_str(v);
+                }
+            }
+            StringSetValue::Literal(s) => out.push_str(s),
         }
-        out
     }
+    out
 }
 
 #[cfg(test)]
@@ -585,7 +559,7 @@ mod tests {
             cleaned_css: String::new(),
         };
 
-        let pass = RunningElementPass::new(gcpm);
+        let pass = RunningElementPass::new(gcpm.running_mappings);
         let ctx = PassContext {
             viewport_width: 400.0,
             viewport_height: 10000.0,
@@ -623,7 +597,7 @@ mod tests {
             cleaned_css: String::new(),
         };
 
-        let pass = RunningElementPass::new(gcpm);
+        let pass = RunningElementPass::new(gcpm.running_mappings);
         let ctx = PassContext {
             viewport_width: 400.0,
             viewport_height: 10000.0,
@@ -648,7 +622,7 @@ mod tests {
             cleaned_css: String::new(),
         };
 
-        let pass = RunningElementPass::new(gcpm);
+        let pass = RunningElementPass::new(gcpm.running_mappings);
         let ctx = PassContext {
             viewport_width: 400.0,
             viewport_height: 10000.0,
@@ -677,7 +651,7 @@ mod tests {
             cleaned_css: String::new(),
         };
 
-        let pass = RunningElementPass::new(gcpm);
+        let pass = RunningElementPass::new(gcpm.running_mappings);
         let ctx = PassContext {
             viewport_width: 400.0,
             viewport_height: 10000.0,

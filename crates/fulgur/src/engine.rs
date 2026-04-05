@@ -93,17 +93,17 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         // Extract running elements via DomPass (before resolve)
-        let mut running_store = if !gcpm.is_empty() {
-            let pass = crate::blitz_adapter::RunningElementPass::new(gcpm.clone());
+        let mut running_store = if !gcpm.running_mappings.is_empty() {
+            let pass = crate::blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
             pass.apply(&mut doc, &ctx);
             pass.into_running_store()
         } else {
             crate::gcpm::running::RunningElementStore::new()
         };
 
-        // Extract string-set values via DomPass (before resolve, after running elements)
+        // Extract string-set values via DomPass
         let string_set_store = if !gcpm.string_set_mappings.is_empty() {
-            let pass = crate::blitz_adapter::StringSetPass::new(gcpm.clone());
+            let pass = crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
             pass.apply(&mut doc, &ctx);
             pass.into_store()
         } else {

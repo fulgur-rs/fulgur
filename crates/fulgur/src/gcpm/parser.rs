@@ -491,6 +491,41 @@ fn parse_string_set_value<'i, 't>(
 // 6. Content value parser
 // ---------------------------------------------------------------------------
 
+/// Parse the policy argument of `string(name, <policy>)`.
+///
+/// Handles cssparser tokenization of `first-except`, which may arrive either as
+/// a single ident or as `first` + `-` + `except` depending on context.
+fn parse_string_policy<'i>(input: &mut Parser<'i, '_>) -> Result<StringPolicy, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    if ident.eq_ignore_ascii_case("start") {
+        Ok(StringPolicy::Start)
+    } else if ident.eq_ignore_ascii_case("last") {
+        Ok(StringPolicy::Last)
+    } else if ident.eq_ignore_ascii_case("first-except") {
+        Ok(StringPolicy::FirstExcept)
+    } else if ident.eq_ignore_ascii_case("first") {
+        // Try to consume a trailing `-except` (cssparser may split the hyphenated ident).
+        let has_except = input
+            .try_parse(|input| {
+                input.expect_delim('-')?;
+                let next = input.expect_ident()?.clone();
+                if next.eq_ignore_ascii_case("except") {
+                    Ok(())
+                } else {
+                    Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                }
+            })
+            .is_ok();
+        Ok(if has_except {
+            StringPolicy::FirstExcept
+        } else {
+            StringPolicy::First
+        })
+    } else {
+        Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+    }
+}
+
 /// Parse a `content` property value into a list of `ContentItem`s using cssparser.
 /// Handles: `element(<name>)`, `counter(page)`, `counter(pages)`, `string(<name>, <policy>)`, `"string"`.
 fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
@@ -524,37 +559,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                             let policy = input
                                 .try_parse(|input| {
                                     input.expect_comma()?;
-                                    let ident = input.expect_ident()?.clone();
-                                    let policy_str = if ident.eq_ignore_ascii_case("first-except") {
-                                        "first-except".to_string()
-                                    } else if ident.eq_ignore_ascii_case("first") {
-                                        input
-                                            .try_parse(|input| {
-                                                input.expect_delim('-')?;
-                                                let next = input.expect_ident()?;
-                                                if next.eq_ignore_ascii_case("except") {
-                                                    Ok("first-except".to_string())
-                                                } else {
-                                                    Err(input.new_error::<()>(
-                                                        BasicParseErrorKind::QualifiedRuleInvalid,
-                                                    ))
-                                                }
-                                            })
-                                            .unwrap_or_else(|_: ParseError<'_, ()>| {
-                                                "first".to_string()
-                                            })
-                                    } else {
-                                        ident.to_string()
-                                    };
-                                    match policy_str.as_str() {
-                                        "start" => Ok(StringPolicy::Start),
-                                        "first" => Ok(StringPolicy::First),
-                                        "last" => Ok(StringPolicy::Last),
-                                        "first-except" => Ok(StringPolicy::FirstExcept),
-                                        _ => Err(input.new_error::<()>(
-                                            BasicParseErrorKind::QualifiedRuleInvalid,
-                                        )),
-                                    }
+                                    parse_string_policy(input)
                                 })
                                 .unwrap_or(StringPolicy::First);
                             items.push(ContentItem::StringRef { name, policy });

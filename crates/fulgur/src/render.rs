@@ -182,7 +182,11 @@ pub fn render_to_pdf_with_gcpm(
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
     let total_pages = pages.len();
-    let string_set_states = crate::paginate::collect_string_set_states(&pages);
+    let string_set_states = if gcpm.string_set_mappings.is_empty() {
+        vec![BTreeMap::new(); pages.len()]
+    } else {
+        crate::paginate::collect_string_set_states(&pages)
+    };
 
     let page_size = if config.landscape {
         config.page_size.landscape()
