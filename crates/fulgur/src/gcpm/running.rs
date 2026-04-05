@@ -71,6 +71,13 @@ impl Default for RunningElementStore {
     }
 }
 
+#[cfg(test)]
+impl RunningElementStore {
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+}
+
 /// Serialize a Blitz DOM node subtree back to an HTML string.
 ///
 /// Used to extract running elements for re-layout in margin boxes.

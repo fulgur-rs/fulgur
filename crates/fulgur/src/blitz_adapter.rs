@@ -364,7 +364,9 @@ impl RunningElementPass {
             }
             if let Some(running_name) = self.find_running_name(elem) {
                 let html = serialize_node(doc, node_id);
-                self.store.borrow_mut().register(running_name, html);
+                self.store
+                    .borrow_mut()
+                    .register(node_id, running_name, html);
                 // Running elements are removed from flow — don't recurse.
                 return;
             }
@@ -568,11 +570,13 @@ mod tests {
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
-        assert!(
-            store.get("pageHeader").is_some(),
-            "Expected running element 'pageHeader' to be extracted"
+        assert_eq!(
+            store.instance_count(),
+            1,
+            "Expected exactly one running element instance to be registered"
         );
-        let html_content = store.get("pageHeader").unwrap();
+        assert_eq!(store.name_of(0), Some("pageHeader"));
+        let html_content = store.get_html(0).unwrap();
         assert!(
             html_content.contains("Header Content"),
             "Expected serialized HTML to contain 'Header Content', got: {html_content}"
@@ -606,8 +610,9 @@ mod tests {
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
-        assert!(store.get("pageTitle").is_some());
-        assert!(store.get("pageTitle").unwrap().contains("Doc Title"));
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(store.name_of(0), Some("pageTitle"));
+        assert!(store.get_html(0).unwrap().contains("Doc Title"));
     }
 
     #[test]
@@ -631,7 +636,7 @@ mod tests {
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
-        assert!(store.get("anything").is_none());
+        assert_eq!(store.instance_count(), 0);
     }
 
     #[test]
@@ -660,8 +665,9 @@ mod tests {
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
-        assert!(
-            store.get("shouldNotMatch").is_none(),
+        assert_eq!(
+            store.instance_count(),
+            0,
             "Elements inside <head> (like <style>) should not be matched as running elements"
         );
     }
