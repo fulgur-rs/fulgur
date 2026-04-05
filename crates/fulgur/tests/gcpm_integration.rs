@@ -201,3 +201,134 @@ fn test_gcpm_tag_selector_running_element() {
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF-"));
 }
+
+#[test]
+fn test_gcpm_left_right_margin_boxes() {
+    let css = r#"
+        @page {
+            margin: 72pt;
+            @left-middle { content: "Left Side"; font-size: 8px; }
+            @right-middle { content: "Page " counter(page); font-size: 8px; }
+        }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <p>Body content with left and right margin boxes.</p>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render with left/right margin boxes");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_gcpm_all_side_margin_boxes() {
+    let css = r#"
+        @page {
+            margin: 72pt;
+            @left-top { content: "LT"; }
+            @left-middle { content: "LM"; }
+            @left-bottom { content: "LB"; }
+            @right-top { content: "RT"; }
+            @right-middle { content: "RM"; }
+            @right-bottom { content: "RB"; }
+            @top-center { content: "Page " counter(page); }
+            @bottom-center { content: "Footer"; }
+        }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <p>Body content with all margin box positions.</p>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render with all side margin boxes");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_gcpm_left_right_with_running_element() {
+    let css = r#"
+        .sidebar-label { position: running(sideLabel); }
+        @page {
+            margin: 72pt;
+            @left-top { content: element(sideLabel); }
+            @right-bottom { content: "Page " counter(page) " / " counter(pages); font-size: 8px; }
+        }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <div class="sidebar-label">Chapter 1</div>
+  <p>Content of chapter 1.</p>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render left/right with running elements");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+/// Regression: same running element on both sides with asymmetric margins
+/// exercises the height_cache width-dependent key and per-side measurement.
+#[test]
+fn test_gcpm_side_boxes_asymmetric_margins() {
+    let css = r#"
+        .sidebar-label { position: running(sideLabel); }
+        @page {
+            margin-top: 72pt;
+            margin-right: 144pt;
+            margin-bottom: 72pt;
+            margin-left: 36pt;
+            @left-middle { content: element(sideLabel) " - " counter(page); font-size: 8px; }
+            @right-middle { content: element(sideLabel) " - " counter(page); font-size: 8px; }
+        }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <div class="sidebar-label">A very long chapter label that should wrap differently on each side</div>
+  <p>Body content with asymmetric side margins.</p>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("should render side boxes with asymmetric widths and mixed content");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}

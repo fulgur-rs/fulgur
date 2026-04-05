@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
-use crate::gcpm::margin_box::{Edge, MarginBoxPosition, compute_edge_layout};
+use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
 use crate::pageable::{Canvas, Pageable};
 use crate::paginate::paginate;
@@ -125,36 +125,36 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 
 /// Cached max-content width and render Pageable for margin boxes.
 /// Measure cache: html → max-content width (measured once at content_width).
-/// Render cache: (html, final_width as bits) → Pageable (laid out at confirmed width).
+/// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
 type MeasureCache = HashMap<String, f32>;
-type RenderCache = HashMap<(String, u32), Box<dyn Pageable>>;
+type RenderCache = HashMap<(String, u32, u32), Box<dyn Pageable>>;
 
 fn width_key(w: f32) -> u32 {
     w.to_bits()
 }
 
-/// Get the width of the first non-zero-width child of `<body>` in a Blitz document.
-/// This represents the max-content width of the margin box content.
-fn get_body_child_width(doc: &blitz_html::HtmlDocument) -> f32 {
+/// Get a layout dimension of the first non-zero child of `<body>` in a Blitz document.
+/// When `use_width` is true, returns max-content width; otherwise returns height.
+fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> f32 {
     use std::ops::Deref;
     let root = doc.root_element();
     let base_doc = doc.deref();
-    // Walk: html → body → first child with size
     if let Some(root_node) = base_doc.get_node(root.id) {
         for &child_id in &root_node.children {
             if let Some(child) = base_doc.get_node(child_id) {
                 if let blitz_dom::NodeData::Element(elem) = &child.data {
                     if elem.name.local.as_ref() == "body" {
-                        // Get first child of body with non-zero width
                         for &body_child_id in &child.children {
                             if let Some(body_child) = base_doc.get_node(body_child_id) {
-                                let w = body_child.final_layout.size.width;
-                                if w > 0.0 {
-                                    return w;
+                                let size = &body_child.final_layout.size;
+                                let v = if use_width { size.width } else { size.height };
+                                if v > 0.0 {
+                                    return v;
                                 }
                             }
                         }
-                        return child.final_layout.size.width;
+                        let size = &child.final_layout.size;
+                        return if use_width { size.width } else { size.height };
                     }
                 }
             }
@@ -195,8 +195,10 @@ pub fn render_to_pdf_with_gcpm(
     // injected for running elements (they need to be visible in margin boxes).
     let margin_css = strip_display_none(&gcpm.cleaned_css);
 
-    // Caches: measure (html → max-content width), render (html+width → Pageable)
+    // Caches: measure (html → max-content width), height ((html, layout_width) → max-content height),
+    // render (html+width → Pageable)
     let mut measure_cache: MeasureCache = HashMap::new();
+    let mut height_cache: HashMap<(String, u32), f32> = HashMap::new();
     let mut render_cache: RenderCache = HashMap::new();
 
     let mut document = krilla::Document::new();
@@ -263,9 +265,12 @@ pub fn render_to_pdf_with_gcpm(
             }
         }
 
-        // Stage 1: Measure max-content width for each unique HTML.
+        // Stage 1a: Measure max-content width for top/bottom boxes.
         // Uses inline-block wrapper so Blitz computes shrink-to-fit width.
-        for html in resolved_htmls.values() {
+        for (&pos, html) in &resolved_htmls {
+            if !pos.edge().is_some_and(|e| e.is_horizontal()) {
+                continue;
+            }
             if !measure_cache.contains_key(html) {
                 let measure_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
@@ -277,49 +282,79 @@ pub fn render_to_pdf_with_gcpm(
                     page_size.height,
                     font_data,
                 );
-                let max_content_width = get_body_child_width(&measure_doc);
+                let max_content_width = get_body_child_dimension(&measure_doc, true);
                 measure_cache.insert(html.clone(), max_content_width);
             }
         }
 
+        // Stage 1b: Measure max-content height for left/right boxes.
+        // Layout at fixed margin width, then read the resulting height.
+        for (&pos, html) in &resolved_htmls {
+            let fixed_width = match pos.edge() {
+                Some(Edge::Left) => config.margin.left,
+                Some(Edge::Right) => config.margin.right,
+                _ => continue,
+            };
+            let hc_key = (html.clone(), width_key(fixed_width));
+            height_cache.entry(hc_key).or_insert_with(|| {
+                let measure_html = format!(
+                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
+                    margin_css, html
+                );
+                let measure_doc = crate::blitz_adapter::parse_and_layout(
+                    &measure_html,
+                    fixed_width,
+                    page_size.height,
+                    font_data,
+                );
+                get_body_child_dimension(&measure_doc, false)
+            });
+        }
+
         // Stage 2: Group by edge and compute layout
-        let mut top_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
-        let mut bottom_defined: BTreeMap<MarginBoxPosition, f32> = BTreeMap::new();
+        let mut edge_defined: BTreeMap<Edge, BTreeMap<MarginBoxPosition, f32>> = BTreeMap::new();
 
         for (&pos, html) in &resolved_htmls {
-            if let Some(&mcw) = measure_cache.get(html) {
-                match pos {
-                    MarginBoxPosition::TopLeft
-                    | MarginBoxPosition::TopCenter
-                    | MarginBoxPosition::TopRight => {
-                        top_defined.insert(pos, mcw);
-                    }
-                    MarginBoxPosition::BottomLeft
-                    | MarginBoxPosition::BottomCenter
-                    | MarginBoxPosition::BottomRight => {
-                        bottom_defined.insert(pos, mcw);
-                    }
-                    _ => {} // corners and left/right edges handled separately
-                }
+            let edge = match pos.edge() {
+                Some(e) => e,
+                None => continue, // corners
+            };
+            let size = if edge.is_horizontal() {
+                measure_cache.get(html).copied()
+            } else {
+                let fixed_width = if edge == Edge::Left {
+                    config.margin.left
+                } else {
+                    config.margin.right
+                };
+                height_cache
+                    .get(&(html.clone(), width_key(fixed_width)))
+                    .copied()
+            };
+            if let Some(s) = size {
+                edge_defined.entry(edge).or_default().insert(pos, s);
             }
         }
 
-        let top_rects = compute_edge_layout(Edge::Top, &top_defined, page_size, config.margin);
-        let bottom_rects =
-            compute_edge_layout(Edge::Bottom, &bottom_defined, page_size, config.margin);
+        let mut all_rects: HashMap<MarginBoxPosition, MarginBoxRect> = HashMap::new();
+        for (edge, defined) in &edge_defined {
+            all_rects.extend(compute_edge_layout(
+                *edge,
+                defined,
+                page_size,
+                config.margin,
+            ));
+        }
 
         // Stage 3: Render at confirmed width and draw.
         // Pageable is created (or fetched from cache) at the final rect width.
         for (&pos, html) in &resolved_htmls {
-            let rect = if let Some(r) = top_rects.get(&pos) {
-                *r
-            } else if let Some(r) = bottom_rects.get(&pos) {
-                *r
-            } else {
-                pos.bounding_rect(page_size, config.margin)
-            };
+            let rect = all_rects
+                .get(&pos)
+                .copied()
+                .unwrap_or_else(|| pos.bounding_rect(page_size, config.margin));
 
-            let cache_key = (html.clone(), width_key(rect.width));
+            let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
             if !render_cache.contains_key(&cache_key) {
                 let render_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
