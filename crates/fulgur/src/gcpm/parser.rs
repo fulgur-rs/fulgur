@@ -4,7 +4,10 @@ use cssparser::{
 };
 
 use super::margin_box::MarginBoxPosition;
-use super::{ContentItem, CounterType, GcpmContext, MarginBoxRule, ParsedSelector, RunningMapping};
+use super::{
+    ContentItem, CounterType, GcpmContext, MarginBoxRule, ParsedSelector, RunningMapping,
+    StringPolicy, StringSetMapping, StringSetValue,
+};
 
 // ---------------------------------------------------------------------------
 // Top-level result types
@@ -30,6 +33,7 @@ struct GcpmSheetParser<'a> {
     edits: &'a mut Vec<CssEdit>,
     margin_boxes: &'a mut Vec<MarginBoxRule>,
     running_mappings: &'a mut Vec<RunningMapping>,
+    string_set_mappings: &'a mut Vec<StringSetMapping>,
 }
 
 /// Describes a region in the original CSS to edit when building `cleaned_css`.
@@ -147,10 +151,12 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         };
 
         let mut running_name: Option<String> = None;
+        let mut string_set: Option<(String, Vec<StringSetValue>)> = None;
 
         let mut parser = StyleRuleParser {
             edits: self.edits,
             running_name: &mut running_name,
+            string_set: &mut string_set,
         };
         let iter = RuleBodyParser::new(input, &mut parser);
         for item in iter {
@@ -159,8 +165,16 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
 
         if let Some(running_name) = running_name {
             self.running_mappings.push(RunningMapping {
-                parsed: selector,
+                parsed: selector.clone(),
                 running_name,
+            });
+        }
+
+        if let Some((name, values)) = string_set {
+            self.string_set_mappings.push(StringSetMapping {
+                parsed: selector,
+                name,
+                values,
             });
         }
 
@@ -332,6 +346,7 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for MarginBoxParser<'a> {
 struct StyleRuleParser<'a> {
     edits: &'a mut Vec<CssEdit>,
     running_name: &'a mut Option<String>,
+    string_set: &'a mut Option<(String, Vec<StringSetValue>)>,
 }
 
 impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
@@ -344,38 +359,48 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
         input: &mut Parser<'i, 't>,
         decl_start: &cssparser::ParserState,
     ) -> Result<(), ParseError<'i, ()>> {
-        if !name.eq_ignore_ascii_case("position") {
-            // Skip non-position declarations
-            while input.next().is_ok() {}
-            return Ok(());
-        }
-
-        // Try to parse `running(<name>)`
-        let result = input.try_parse(|input| {
-            let fn_name = input.expect_function()?.clone();
-            if !fn_name.eq_ignore_ascii_case("running") {
-                return Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid));
-            }
-            input.parse_nested_block(|input| {
-                let ident = input.expect_ident()?.clone();
-                Ok(ident.to_string())
-            })
-        });
-
-        if let Ok(running_name) = result {
-            *self.running_name = Some(running_name);
-
-            // Record the edit: replace `position: running(...)` with `display: none`
-            // The decl_start points to just before the property name (the ident token).
-            let decl_start_byte = decl_start.position().byte_index();
-            let end_byte = input.position().byte_index();
-            self.edits.push(CssEdit::Replace {
-                start: decl_start_byte,
-                end: end_byte,
-                replacement: "display: none".to_string(),
+        if name.eq_ignore_ascii_case("position") {
+            // Try to parse `running(<name>)`
+            let result = input.try_parse(|input| {
+                let fn_name = input.expect_function()?.clone();
+                if !fn_name.eq_ignore_ascii_case("running") {
+                    return Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid));
+                }
+                input.parse_nested_block(|input| {
+                    let ident = input.expect_ident()?.clone();
+                    Ok(ident.to_string())
+                })
             });
+
+            if let Ok(running_name) = result {
+                *self.running_name = Some(running_name);
+
+                let decl_start_byte = decl_start.position().byte_index();
+                let end_byte = input.position().byte_index();
+                self.edits.push(CssEdit::Replace {
+                    start: decl_start_byte,
+                    end: end_byte,
+                    replacement: "display: none".to_string(),
+                });
+            } else {
+                while input.next().is_ok() {}
+            }
+        } else if name.eq_ignore_ascii_case("string-set") {
+            // Parse `string-set: <name> <value>+`
+            if let Ok((set_name, values)) = parse_string_set_value(input) {
+                *self.string_set = Some((set_name, values));
+
+                let decl_start_byte = decl_start.position().byte_index();
+                let end_byte = input.position().byte_index();
+                self.edits.push(CssEdit::Remove {
+                    start: decl_start_byte,
+                    end: end_byte,
+                });
+            } else {
+                while input.next().is_ok() {}
+            }
         } else {
-            // Not running(...), skip the rest
+            // Skip other declarations
             while input.next().is_ok() {}
         }
 
@@ -405,7 +430,65 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for StyleRuleParser<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Content value parser
+// 5. string-set value parser
+// ---------------------------------------------------------------------------
+
+/// Parse the value of a `string-set` declaration: `<name> <value>+`.
+fn parse_string_set_value<'i, 't>(
+    input: &mut Parser<'i, 't>,
+) -> Result<(String, Vec<StringSetValue>), ParseError<'i, ()>> {
+    let name = input.expect_ident()?.clone().to_string();
+    let mut values = Vec::new();
+
+    loop {
+        if input.is_exhausted() {
+            break;
+        }
+
+        let result: Result<(), ParseError<'_, ()>> = input.try_parse(|input| {
+            let token = input.next_including_whitespace()?.clone();
+            match token {
+                Token::QuotedString(ref s) => {
+                    values.push(StringSetValue::Literal(s.to_string()));
+                }
+                Token::Function(ref fn_name) => {
+                    let fn_name = fn_name.clone();
+                    input.parse_nested_block(|input| {
+                        if fn_name.eq_ignore_ascii_case("content") {
+                            let arg = input.expect_ident()?.clone();
+                            match &*arg {
+                                "text" => values.push(StringSetValue::ContentText),
+                                "before" => values.push(StringSetValue::ContentBefore),
+                                "after" => values.push(StringSetValue::ContentAfter),
+                                _ => {}
+                            }
+                        } else if fn_name.eq_ignore_ascii_case("attr") {
+                            let arg = input.expect_ident()?.clone();
+                            values.push(StringSetValue::Attr(arg.to_string()));
+                        }
+                        Ok(())
+                    })?;
+                }
+                Token::WhiteSpace(_) | Token::Comment(_) => {}
+                _ => {}
+            }
+            Ok(())
+        });
+
+        if result.is_err() {
+            break;
+        }
+    }
+
+    if values.is_empty() {
+        return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid));
+    }
+
+    Ok((name, values))
+}
+
+// ---------------------------------------------------------------------------
+// 6. Content value parser
 // ---------------------------------------------------------------------------
 
 /// Parse a `content` property value into a list of `ContentItem`s using cssparser.
@@ -436,6 +519,43 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 "pages" => items.push(ContentItem::Counter(CounterType::Pages)),
                                 _ => {} // unknown counter
                             }
+                        } else if fn_name.eq_ignore_ascii_case("string") {
+                            let name = arg.to_string();
+                            let policy = input
+                                .try_parse(|input| {
+                                    input.expect_comma()?;
+                                    let ident = input.expect_ident()?.clone();
+                                    let policy_str = if ident.eq_ignore_ascii_case("first") {
+                                        input
+                                            .try_parse(|input| {
+                                                input.expect_delim('-')?;
+                                                let next = input.expect_ident()?;
+                                                if next.eq_ignore_ascii_case("except") {
+                                                    Ok("first-except".to_string())
+                                                } else {
+                                                    Err(input.new_error::<()>(
+                                                        BasicParseErrorKind::QualifiedRuleInvalid,
+                                                    ))
+                                                }
+                                            })
+                                            .unwrap_or_else(|_: ParseError<'_, ()>| {
+                                                "first".to_string()
+                                            })
+                                    } else {
+                                        ident.to_string()
+                                    };
+                                    match policy_str.as_str() {
+                                        "start" => Ok(StringPolicy::Start),
+                                        "first" => Ok(StringPolicy::First),
+                                        "last" => Ok(StringPolicy::Last),
+                                        "first-except" => Ok(StringPolicy::FirstExcept),
+                                        _ => Err(input.new_error::<()>(
+                                            BasicParseErrorKind::QualifiedRuleInvalid,
+                                        )),
+                                    }
+                                })
+                                .unwrap_or(StringPolicy::First);
+                            items.push(ContentItem::StringRef { name, policy });
                         }
                         Ok(())
                     })?;
@@ -471,6 +591,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
 pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut margin_boxes = Vec::new();
     let mut running_mappings = Vec::new();
+    let mut string_set_mappings = Vec::new();
     let mut edits: Vec<CssEdit> = Vec::new();
 
     // Run the cssparser-based parse to collect GCPM data and edit spans.
@@ -482,6 +603,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
             edits: &mut edits,
             margin_boxes: &mut margin_boxes,
             running_mappings: &mut running_mappings,
+            string_set_mappings: &mut string_set_mappings,
         };
 
         let iter = StyleSheetParser::new(&mut input, &mut parser);
@@ -496,7 +618,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     GcpmContext {
         margin_boxes,
         running_mappings,
-        string_set_mappings: Vec::new(),
+        string_set_mappings,
         cleaned_css,
     }
 }
@@ -786,5 +908,113 @@ mod tests {
         let css = ".a, .b { position: running(hdr); }";
         let ctx = parse_gcpm(css);
         assert!(ctx.running_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_string_set_content_text() {
+        let css = "h1 { string-set: chapter-title content(text); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        let m = &ctx.string_set_mappings[0];
+        assert_eq!(m.parsed, ParsedSelector::Tag("h1".to_string()));
+        assert_eq!(m.name, "chapter-title");
+        assert_eq!(m.values, vec![StringSetValue::ContentText]);
+        assert!(!ctx.cleaned_css.contains("string-set"));
+    }
+
+    #[test]
+    fn test_parse_string_set_multiple_values() {
+        let css = r#"h1 { string-set: title "Chapter " content(text) " - " attr(data-sub); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        let m = &ctx.string_set_mappings[0];
+        assert_eq!(m.name, "title");
+        assert_eq!(
+            m.values,
+            vec![
+                StringSetValue::Literal("Chapter ".to_string()),
+                StringSetValue::ContentText,
+                StringSetValue::Literal(" - ".to_string()),
+                StringSetValue::Attr("data-sub".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_string_set_content_before_after() {
+        let css = "h2 { string-set: sec content(before) content(text) content(after); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![
+                StringSetValue::ContentBefore,
+                StringSetValue::ContentText,
+                StringSetValue::ContentAfter,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_string_function_default_policy() {
+        let css = r#"@page { @top-center { content: string(chapter-title); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "chapter-title".to_string(),
+                policy: StringPolicy::First,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_string_function_with_policy() {
+        let css = r#"@page { @top-center { content: string(title, last); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "title".to_string(),
+                policy: StringPolicy::Last,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_string_function_all_policies() {
+        for (policy_str, policy) in [
+            ("first", StringPolicy::First),
+            ("start", StringPolicy::Start),
+            ("last", StringPolicy::Last),
+            ("first-except", StringPolicy::FirstExcept),
+        ] {
+            let css = format!(
+                r#"@page {{ @top-center {{ content: string(title, {}); }} }}"#,
+                policy_str
+            );
+            let ctx = parse_gcpm(&css);
+            assert_eq!(
+                ctx.margin_boxes[0].content,
+                vec![ContentItem::StringRef {
+                    name: "title".to_string(),
+                    policy,
+                }],
+                "Failed for policy: {}",
+                policy_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_string_set_with_class_selector() {
+        let css = ".chapter-heading { string-set: chapter content(text); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].parsed,
+            ParsedSelector::Class("chapter-heading".to_string())
+        );
     }
 }
