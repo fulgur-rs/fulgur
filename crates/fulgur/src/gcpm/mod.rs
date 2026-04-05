@@ -44,17 +44,26 @@ pub enum StringPolicy {
 }
 
 /// Policy for `element(name, <policy>)` — determines which running element
-/// instance to show on a given page. WeasyPrint-compatible semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// instance to show on a given page. Parallels [`StringPolicy`] but applies
+/// to running elements extracted via `position: running(name)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ElementPolicy {
-    /// First instance assigned on the current page (default).
+    /// First instance assigned on the current page; if no assignment occurs
+    /// on the current page, falls back to the most recent prior assignment.
+    /// This is the default when `element(name)` is written without a second
+    /// argument.
+    #[default]
     First,
-    /// Element in effect at start of page. Implemented identically to `First`
-    /// with fallback (WeasyPrint has the same effective behavior).
+    /// The element in effect at the start of the current page — i.e., the
+    /// value inherited from the most recent assignment on a previous page if
+    /// no assignment occurs on the current page.
     Start,
-    /// Last instance assigned on the current page.
+    /// Last instance assigned on the current page; if no assignment occurs
+    /// on the current page, falls back to the most recent prior assignment.
     Last,
-    /// Like `First`, but empty on pages where the element is assigned.
+    /// Returns the empty value on pages that contain an assignment to this
+    /// running element; otherwise falls back to the most recent prior
+    /// assignment (same as `First` on unassigned pages).
     FirstExcept,
 }
 
