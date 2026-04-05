@@ -1174,6 +1174,58 @@ impl Pageable for StringSetPageable {
     }
 }
 
+// ─── RunningElementMarkerPageable ────────────────────────
+
+/// Zero-size marker for a running element instance.
+///
+/// Inserted into the Pageable tree at the source position where
+/// `position: running(name)` was declared, so that pagination can track
+/// which running element instances fall on which page. The actual HTML of
+/// the running element lives in `RunningElementStore`, keyed by
+/// `instance_id`.
+#[derive(Clone)]
+pub struct RunningElementMarkerPageable {
+    pub name: String,
+    pub instance_id: usize,
+}
+
+impl RunningElementMarkerPageable {
+    pub fn new(name: String, instance_id: usize) -> Self {
+        Self { name, instance_id }
+    }
+}
+
+impl Pageable for RunningElementMarkerPageable {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn split(
+        &self,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        None
+    }
+
+    fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        0.0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 // ─── StringSetWrapperPageable ──────────────────────────────
 
 /// Wraps a Pageable together with `StringSetPageable` markers that must stay
@@ -1801,6 +1853,18 @@ mod tests {
         let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
         assert_eq!(p.name, "title");
         assert_eq!(p.value, "Chapter 1");
+    }
+
+    #[test]
+    fn test_running_element_marker_is_zero_size_noop() {
+        let mut m = RunningElementMarkerPageable::new("header".to_string(), 42);
+        let size = m.wrap(100.0, 100.0);
+        assert_eq!(size.width, 0.0);
+        assert_eq!(size.height, 0.0);
+        assert_eq!(m.height(), 0.0);
+        assert_eq!(m.name, "header");
+        assert_eq!(m.instance_id, 42);
+        assert!(m.split(100.0, 100.0).is_none());
     }
 }
 
