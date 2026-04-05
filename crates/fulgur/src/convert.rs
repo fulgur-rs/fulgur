@@ -6,7 +6,7 @@ use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
     BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
-    SpacerPageable, StringSetPageable, TablePageable,
+    SpacerPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -90,12 +90,9 @@ fn convert_node(
     maybe_prepend_string_set(node_id, result, ctx)
 }
 
-/// If the given node has string-set entries, wrap the pageable in a BlockPageable
-/// with StringSetPageable markers prepended. Otherwise return the pageable as-is.
-///
-/// The wrapper propagates `pagination()` from the original child so that
-/// `break-before`/`break-after`/`break-inside` properties on the string-set
-/// target element (e.g. `<h1>`) remain visible to the paginator.
+/// If the given node has string-set entries, wrap the pageable in a
+/// `StringSetWrapperPageable` that keeps markers attached to the child during
+/// pagination. Otherwise return the pageable as-is.
 fn maybe_prepend_string_set(
     node_id: usize,
     child: Box<dyn Pageable>,
@@ -104,23 +101,11 @@ fn maybe_prepend_string_set(
     let entries = ctx.string_set_by_node.remove(&node_id);
     match entries {
         Some(entries) if !entries.is_empty() => {
-            let child_pagination = child.pagination();
-            let mut children = Vec::with_capacity(entries.len() + 1);
-            for (name, value) in entries {
-                children.push(PositionedChild {
-                    child: Box::new(StringSetPageable::new(name, value)),
-                    x: 0.0,
-                    y: 0.0,
-                });
-            }
-            children.push(PositionedChild {
-                child,
-                x: 0.0,
-                y: 0.0,
-            });
-            Box::new(
-                BlockPageable::with_positioned_children(children).with_pagination(child_pagination),
-            )
+            let markers = entries
+                .into_iter()
+                .map(|(name, value)| StringSetPageable::new(name, value))
+                .collect();
+            Box::new(StringSetWrapperPageable::new(markers, child))
         }
         _ => child,
     }

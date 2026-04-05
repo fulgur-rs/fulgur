@@ -35,7 +35,9 @@ pub fn resolve_content_to_string(
 /// Resolve content items to an HTML string.
 ///
 /// `Element(name)` references are looked up in `running_elements` (a `&[(name, html)]` slice)
-/// and the matching HTML is appended.
+/// and the matching HTML is appended. `StringRef` values come from the DOM
+/// (via `string-set: content(text) | attr(...)`) and are HTML-escaped before
+/// concatenation so characters like `<` and `&` do not corrupt the margin box.
 pub fn resolve_content_to_html(
     items: &[ContentItem],
     running_elements: &[(String, String)],
@@ -60,12 +62,27 @@ pub fn resolve_content_to_html(
             }
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
-                    out.push_str(resolve_string_policy(state, *policy));
+                    push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
                 }
             }
         }
     }
     out
+}
+
+/// Append `text` to `out` with HTML special characters escaped.
+///
+/// Used for string-set values, which originate from arbitrary DOM text and
+/// would otherwise break the margin box HTML if they contained `<`, `>`, or `&`.
+fn push_escaped_html_text(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
 }
 
 fn resolve_string_policy(state: &StringSetPageState, policy: StringPolicy) -> &str {
@@ -275,6 +292,27 @@ mod tests {
         assert_eq!(
             resolve_content_to_html(&items, &[], &BTreeMap::new(), 1, 1),
             ""
+        );
+    }
+
+    #[test]
+    fn test_resolve_string_ref_html_escapes_special_characters() {
+        let items = vec![ContentItem::StringRef {
+            name: "title".to_string(),
+            policy: StringPolicy::First,
+        }];
+        let mut state = BTreeMap::new();
+        state.insert(
+            "title".to_string(),
+            StringSetPageState {
+                start: None,
+                first: Some("A & B <script>".to_string()),
+                last: Some("A & B <script>".to_string()),
+            },
+        );
+        assert_eq!(
+            resolve_content_to_html(&items, &[], &state, 1, 1),
+            "A &amp; B &lt;script&gt;"
         );
     }
 }

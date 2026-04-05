@@ -45,11 +45,17 @@ impl Default for StringSetStore {
     }
 }
 
-/// Extract the text content of a DOM node (recursive).
+/// Extract the text content of a DOM subtree.
+///
+/// Runs of ASCII whitespace are collapsed to a single space and leading/
+/// trailing whitespace is trimmed, matching CSS's default white-space handling.
+/// Without this, indented templates like
+/// `<h1>\n    Chapter 1\n  </h1>` would produce a named string with stray
+/// newlines and indentation.
 pub fn extract_text_content(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
-    let mut out = String::new();
-    collect_text(doc, node_id, &mut out);
-    out
+    let mut raw = String::new();
+    collect_text(doc, node_id, &mut raw);
+    normalize_whitespace(&raw)
 }
 
 fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String) {
@@ -64,6 +70,23 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String)
             }
         }
     }
+}
+
+fn normalize_whitespace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_space = false;
+    for ch in input.chars() {
+        if ch.is_ascii_whitespace() {
+            in_space = true;
+        } else {
+            if in_space && !out.is_empty() {
+                out.push(' ');
+            }
+            out.push(ch);
+            in_space = false;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -103,5 +126,15 @@ mod tests {
             node_id: 30,
         });
         assert_eq!(store.entries().len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_whitespace_collapses_runs() {
+        assert_eq!(normalize_whitespace("Chapter  1"), "Chapter 1");
+        assert_eq!(normalize_whitespace("  Chapter\n\t 1 "), "Chapter 1");
+        assert_eq!(normalize_whitespace("\n    Chapter 1\n  "), "Chapter 1");
+        assert_eq!(normalize_whitespace(""), "");
+        assert_eq!(normalize_whitespace("   "), "");
+        assert_eq!(normalize_whitespace("no-whitespace"), "no-whitespace");
     }
 }

@@ -29,13 +29,17 @@ pub struct RunningMapping {
 /// Policy for selecting which value of a named string to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringPolicy {
-    /// The first assignment on the current page, or the last from the previous page if none.
+    /// The value inherited at the start of the current page
+    /// (i.e. the last assignment from a previous page).
     Start,
-    /// The first assignment on the current page.
+    /// The first assignment on the current page, falling back to `Start`
+    /// if no assignment happens on this page.
     First,
     /// The last assignment on the current page.
     Last,
-    /// Like `First`, but returns an empty string on the page where the string is first assigned.
+    /// Like `First`, but returns the empty string on pages where the
+    /// string is assigned (showing only the inherited value on pages
+    /// that don't reset it).
     FirstExcept,
 }
 

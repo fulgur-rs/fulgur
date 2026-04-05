@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::pageable::{
-    BlockPageable, ListItemPageable, Pageable, Pt, StringSetPageable, TablePageable,
+    BlockPageable, ListItemPageable, Pageable, Pt, StringSetPageable, StringSetWrapperPageable,
+    TablePageable,
 };
 
 /// Per-page state for a named string.
@@ -78,15 +79,20 @@ pub fn collect_string_set_states(
     result
 }
 
-/// Recursively find all StringSetPageable markers in a Pageable tree.
+/// Recursively find all string-set markers in a Pageable tree.
 ///
-/// Only traverses container types that can contain markers. Markers are always
-/// inserted as direct children of `BlockPageable` (see `convert::maybe_prepend_string_set`),
-/// but we also descend into `TablePageable` / `ListItemPageable` bodies to find
-/// markers inserted on descendants of table cells or list items.
+/// Markers are inserted via `StringSetWrapperPageable` in `convert.rs`. The
+/// wrapper also keeps markers attached to the first fragment of its child on
+/// split, so the markers always travel with the content they describe.
 fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>) {
     let any = pageable.as_any();
-    if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
+    if let Some(wrapper) = any.downcast_ref::<StringSetWrapperPageable>() {
+        for m in &wrapper.markers {
+            markers.push((m.name.clone(), m.value.clone()));
+        }
+        collect_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
+        // Used by unit tests that construct markers directly.
         markers.push((marker.name.clone(), marker.value.clone()));
     } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
         for child in &block.children {
@@ -214,5 +220,48 @@ mod tests {
         assert_eq!(states[0].len(), 2);
         assert_eq!(states[0]["chapter"].first, Some("Ch1".to_string()));
         assert_eq!(states[0]["section"].first, Some("Sec1".to_string()));
+    }
+
+    /// Regression: when an unsplittable child with a string-set marker is
+    /// pushed to the next page (because it cannot fit on the current one),
+    /// the marker must travel with it and NOT orphan on the previous page.
+    #[test]
+    fn test_string_set_wrapper_keeps_markers_with_unsplittable_child() {
+        use crate::pageable::StringSetWrapperPageable;
+
+        // Page height is 100pt.
+        // Page 1: 80pt filler + (wrapped 60pt spacer can't fit) -> wrapper moves to page 2.
+        let mut filler = SpacerPageable::new(80.0);
+        filler.wrap(100.0, 1000.0);
+
+        let mut content = SpacerPageable::new(60.0);
+        content.wrap(100.0, 1000.0);
+
+        let markers = vec![StringSetPageable::new("title".into(), "Ch2".into())];
+        let wrapper = StringSetWrapperPageable::new(markers, Box::new(content));
+
+        let mut block = BlockPageable::with_positioned_children(vec![
+            pos(Box::new(filler)),
+            PositionedChild {
+                child: Box::new(wrapper),
+                x: 0.0,
+                y: 80.0,
+            },
+        ]);
+        block.wrap(100.0, 1000.0);
+
+        let pages = paginate(Box::new(block), 100.0, 100.0);
+        let states = collect_string_set_states(&pages);
+
+        assert_eq!(pages.len(), 2, "content should span two pages");
+        assert!(
+            !states[0].contains_key("title"),
+            "marker must NOT be on page 1 (content was pushed to page 2)"
+        );
+        assert_eq!(
+            states[1].get("title").and_then(|s| s.first.clone()),
+            Some("Ch2".to_string()),
+            "marker must be on page 2 with its content"
+        );
     }
 }
