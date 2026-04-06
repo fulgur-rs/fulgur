@@ -73,12 +73,22 @@ impl Default for Margin {
     }
 }
 
+/// Tracks which Config fields were explicitly set by the caller (CLI/API).
+/// When true, the field takes precedence over CSS @page declarations.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfigOverrides {
+    pub page_size: bool,
+    pub margin: bool,
+    pub landscape: bool,
+}
+
 /// PDF generation configuration
 #[derive(Debug, Clone)]
 pub struct Config {
     pub page_size: PageSize,
     pub margin: Margin,
     pub landscape: bool,
+    pub overrides: ConfigOverrides,
     pub title: Option<String>,
     pub authors: Vec<String>,
     pub description: Option<String>,
@@ -95,6 +105,7 @@ impl Default for Config {
             page_size: PageSize::A4,
             margin: Margin::default(),
             landscape: false,
+            overrides: ConfigOverrides::default(),
             title: None,
             authors: vec![],
             description: None,
@@ -141,16 +152,19 @@ pub struct ConfigBuilder {
 impl ConfigBuilder {
     pub fn page_size(mut self, size: PageSize) -> Self {
         self.config.page_size = size;
+        self.config.overrides.page_size = true;
         self
     }
 
     pub fn margin(mut self, margin: Margin) -> Self {
         self.config.margin = margin;
+        self.config.overrides.margin = true;
         self
     }
 
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.config.landscape = landscape;
+        self.config.overrides.landscape = true;
         self
     }
 
@@ -245,6 +259,25 @@ mod tests {
             .build();
         assert!((config.content_width() - (841.89 - 144.0)).abs() < 0.01);
         assert!((config.content_height() - (595.28 - 144.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_config_overrides_default() {
+        let config = Config::default();
+        assert!(!config.overrides.page_size);
+        assert!(!config.overrides.margin);
+        assert!(!config.overrides.landscape);
+    }
+
+    #[test]
+    fn test_config_builder_tracks_overrides() {
+        let config = Config::builder()
+            .page_size(PageSize::LETTER)
+            .margin(Margin::uniform_mm(10.0))
+            .build();
+        assert!(config.overrides.page_size);
+        assert!(config.overrides.margin);
+        assert!(!config.overrides.landscape);
     }
 
     #[test]
