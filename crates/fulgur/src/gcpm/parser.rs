@@ -199,35 +199,13 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
 // CSS length unit → points converter
 // ---------------------------------------------------------------------------
 
-/// Parses a CSS length string (e.g. "20mm", "1in") and returns the equivalent
-/// value in PDF points (1 pt = 1/72 inch).
-#[allow(dead_code)] // will be used by @page size/margin parser (Task 3)
-fn parse_css_length(s: &str) -> Option<f32> {
-    let s = s.trim();
-    // Find where the numeric part ends and the unit begins.
-    let unit_start = s
-        .find(|c: char| c.is_ascii_alphabetic())
-        .filter(|&i| i > 0)?;
-    let (num_str, unit) = s.split_at(unit_start);
-    let value: f32 = num_str.parse().ok()?;
-    let factor = match unit {
-        "mm" => 72.0 / 25.4,
-        "cm" => 72.0 / 2.54,
-        "in" => 72.0,
-        "pt" => 1.0,
-        "px" => 72.0 / 96.0,
-        _ => return None,
-    };
-    Some(value * factor)
-}
-
 // ---------------------------------------------------------------------------
 // @page size/margin value parsers
 // ---------------------------------------------------------------------------
 
 /// Convert a CSS dimension value+unit to PDF points.
 fn css_unit_to_pt(value: f32, unit: &str) -> Option<f32> {
-    let factor = match unit.to_ascii_lowercase().as_str() {
+    let factor = match unit {
         "mm" => 72.0 / 25.4,
         "cm" => 72.0 / 2.54,
         "in" => 72.0,
@@ -269,13 +247,14 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
             }
         }
         Token::Dimension { value, unit, .. } => {
-            let w = css_unit_to_pt(value, &unit)?;
+            let w = css_unit_to_pt(value, &unit).filter(|v| *v > 0.0)?;
             // Try to read a second dimension for height
             let h = input
                 .try_parse(|input| {
                     let tok = input.next()?.clone();
                     match tok {
                         Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
+                            .filter(|v| *v > 0.0)
                             .ok_or_else(|| {
                                 input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
                             }),
@@ -301,6 +280,7 @@ fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PageMarginDecl>
                         input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
                     })
                 }
+                Token::Number { value: 0.0, .. } => Ok(0.0_f32),
                 _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
             }
         });
@@ -1335,37 +1315,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_css_length_mm() {
-        assert!((parse_css_length("20mm").unwrap() - 56.6929).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_css_length_cm() {
-        assert!((parse_css_length("2cm").unwrap() - 56.6929).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_css_length_in() {
-        assert!((parse_css_length("1in").unwrap() - 72.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_css_length_pt() {
-        assert!((parse_css_length("72pt").unwrap() - 72.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_css_length_px() {
-        assert!((parse_css_length("96px").unwrap() - 72.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_css_length_invalid() {
-        assert!(parse_css_length("20em").is_none());
-        assert!(parse_css_length("abc").is_none());
-    }
-
     // -----------------------------------------------------------------------
     // @page size/margin parsing tests
     // -----------------------------------------------------------------------
@@ -1481,5 +1430,21 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.page_settings.len(), 1);
         assert_eq!(ctx.margin_boxes.len(), 1);
+    }
+
+    #[test]
+    fn test_page_margin_zero() {
+        let css = "@page { margin: 0; }";
+        let ctx = parse_gcpm(css);
+        let m = ctx.page_settings[0].margin.as_ref().unwrap();
+        assert!((m.top).abs() < 0.01);
+        assert!((m.right).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_page_size_negative_rejected() {
+        let css = "@page { size: -10mm 297mm; }";
+        let ctx = parse_gcpm(css);
+        assert!(ctx.page_settings.is_empty() || ctx.page_settings[0].size.is_none());
     }
 }
