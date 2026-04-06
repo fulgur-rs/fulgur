@@ -468,3 +468,117 @@ fn test_gcpm_string_set_with_policies() {
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF-"));
 }
+
+#[test]
+fn test_element_policy_multiple_chapters_last() {
+    let css = r#"
+        @page {
+            size: 400pt 300pt;
+            margin: 40pt;
+            @top-center { content: element(title, last); }
+        }
+        .title { position: running(title); }
+        .big { height: 250pt; border: 1px solid black; }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <h1 class="title">Chapter 1</h1>
+  <div class="big">Chapter 1 body</div>
+  <h1 class="title">Chapter 2</h1>
+  <div class="big">Chapter 2 body</div>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("render should succeed with element(title, last) across multiple chapters");
+
+    assert!(
+        pdf.len() > 1000,
+        "PDF seems empty or too small: {} bytes",
+        pdf.len()
+    );
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_element_policy_first_except() {
+    let css = r#"
+        @page {
+            size: 400pt 300pt;
+            margin: 40pt;
+            @top-center { content: element(title, first-except); }
+        }
+        .title { position: running(title); }
+        .big { height: 250pt; border: 1px solid black; }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <h1 class="title">Chapter 1</h1>
+  <div class="big">Chapter 1 body</div>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("render should succeed with element(title, first-except)");
+
+    assert!(
+        pdf.len() > 1000,
+        "PDF seems empty or too small: {} bytes",
+        pdf.len()
+    );
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_element_default_policy_still_works() {
+    // Baseline: element(title) without an explicit policy must still render
+    // (default = first), matching pre-policy behavior.
+    let css = r#"
+        @page {
+            size: 400pt 300pt;
+            margin: 40pt;
+            @top-center { content: element(title); }
+        }
+        .title { position: running(title); }
+    "#;
+
+    let html = r#"<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+  <h1 class="title">My Title</h1>
+  <p>Body content.</p>
+</body>
+</html>"#;
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+
+    let engine = Engine::builder().assets(assets).build();
+    let pdf = engine
+        .render_html(html)
+        .expect("render should succeed with default element() policy");
+
+    assert!(
+        pdf.len() > 1000,
+        "PDF seems empty or too small: {} bytes",
+        pdf.len()
+    );
+    assert!(pdf.starts_with(b"%PDF-"));
+}

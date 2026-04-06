@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::pageable::{
-    BlockPageable, ListItemPageable, Pageable, Pt, StringSetPageable, StringSetWrapperPageable,
-    TablePageable,
+    BlockPageable, ListItemPageable, Pageable, Pt, RunningElementMarkerPageable,
+    RunningElementWrapperPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
 };
 
 /// Per-page state for a named string.
@@ -91,6 +91,8 @@ fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>)
             markers.push((m.name.clone(), m.value.clone()));
         }
         collect_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(wrapper) = any.downcast_ref::<RunningElementWrapperPageable>() {
+        collect_markers(wrapper.child.as_ref(), markers);
     } else if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
         // Used by unit tests that construct markers directly.
         markers.push((marker.name.clone(), marker.value.clone()));
@@ -107,6 +109,86 @@ fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>)
         }
     } else if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
         collect_markers(list_item.body.as_ref(), markers);
+    }
+}
+
+/// Per-page state for running element instances of a given name.
+#[derive(Debug, Clone, Default)]
+pub struct PageRunningState {
+    /// Instance IDs of running elements whose source position falls on this
+    /// page, in source order.
+    pub instance_ids: Vec<usize>,
+}
+
+/// Walk paginated pages and collect `RunningElementMarkerPageable` markers
+/// per page, keyed by running element name.
+///
+/// Each `instance_id` is adopted only on the first page where it appears.
+/// This is necessary because some containers (e.g. `TablePageable`
+/// `header_cells`) are replicated on every page that shows the table; without
+/// deduplication, a running element declared inside a `<thead>` would be
+/// counted as a fresh assignment on every subsequent page and break
+/// `first` / `last` / `first-except` semantics.
+///
+/// Used by the render stage together with `resolve_element_policy` to
+/// determine which running element instance should be shown in each
+/// margin box on each page.
+pub fn collect_running_element_states(
+    pages: &[Box<dyn Pageable>],
+) -> Vec<BTreeMap<String, PageRunningState>> {
+    let mut result: Vec<BTreeMap<String, PageRunningState>> = Vec::with_capacity(pages.len());
+    let mut adopted: BTreeSet<usize> = BTreeSet::new();
+
+    for page in pages {
+        let mut page_state: BTreeMap<String, PageRunningState> = BTreeMap::new();
+        let mut markers = Vec::new();
+        collect_running_markers(page.as_ref(), &mut markers);
+        for (name, instance_id) in markers {
+            if !adopted.insert(instance_id) {
+                continue; // already adopted on an earlier page
+            }
+            page_state
+                .entry(name)
+                .or_default()
+                .instance_ids
+                .push(instance_id);
+        }
+        result.push(page_state);
+    }
+
+    result
+}
+
+/// Recursively find all running element markers in a Pageable tree.
+///
+/// Mirrors `collect_markers` (for string-set) but looks for
+/// `RunningElementMarkerPageable` instances. Descends into both
+/// `StringSetWrapperPageable` and `RunningElementWrapperPageable` so markers
+/// wrapped by either mechanism are still discovered.
+fn collect_running_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, usize)>) {
+    let any = pageable.as_any();
+    if let Some(m) = any.downcast_ref::<RunningElementMarkerPageable>() {
+        markers.push((m.name.clone(), m.instance_id));
+    } else if let Some(wrapper) = any.downcast_ref::<RunningElementWrapperPageable>() {
+        for m in &wrapper.markers {
+            markers.push((m.name.clone(), m.instance_id));
+        }
+        collect_running_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(wrapper) = any.downcast_ref::<StringSetWrapperPageable>() {
+        collect_running_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        for child in &block.children {
+            collect_running_markers(child.child.as_ref(), markers);
+        }
+    } else if let Some(table) = any.downcast_ref::<TablePageable>() {
+        for child in &table.header_cells {
+            collect_running_markers(child.child.as_ref(), markers);
+        }
+        for child in &table.body_cells {
+            collect_running_markers(child.child.as_ref(), markers);
+        }
+    } else if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        collect_running_markers(list_item.body.as_ref(), markers);
     }
 }
 
@@ -263,5 +345,120 @@ mod tests {
             Some("Ch2".to_string()),
             "marker must be on page 2 with its content"
         );
+    }
+
+    // ─── Running element collection tests ────────────────────
+
+    #[test]
+    fn test_collect_running_element_states_single_page() {
+        use crate::pageable::RunningElementMarkerPageable;
+
+        let marker_a: Box<dyn Pageable> =
+            Box::new(RunningElementMarkerPageable::new("hdr".into(), 0));
+        let marker_b: Box<dyn Pageable> =
+            Box::new(RunningElementMarkerPageable::new("hdr".into(), 1));
+        let block = BlockPageable::with_positioned_children(vec![
+            pos(marker_a),
+            pos(make_spacer(50.0)),
+            pos(marker_b),
+            pos(make_spacer(50.0)),
+        ]);
+        let pages = paginate(Box::new(block), 200.0, 500.0);
+        assert_eq!(pages.len(), 1);
+        let states = collect_running_element_states(&pages);
+        assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_collect_running_element_states_splits_across_pages() {
+        use crate::pageable::RunningElementMarkerPageable;
+
+        // Need total_height > page_height for paginate() to split.
+        // Use positioned y coordinates so children stack vertically rather
+        // than overlapping at y=0 (which defeats wrap()'s max(y+h) total).
+        let marker_a: Box<dyn Pageable> =
+            Box::new(RunningElementMarkerPageable::new("hdr".into(), 0));
+        let marker_b: Box<dyn Pageable> =
+            Box::new(RunningElementMarkerPageable::new("hdr".into(), 1));
+        let block = BlockPageable::with_positioned_children(vec![
+            PositionedChild {
+                child: marker_a,
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: marker_b,
+                x: 0.0,
+                y: 120.0,
+            },
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 120.0,
+            },
+        ]);
+        let pages = paginate(Box::new(block), 200.0, 100.0);
+        assert!(pages.len() >= 2);
+        let states = collect_running_element_states(&pages);
+        // marker_a sits before the first spacer on page 1.
+        assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![0]);
+        // marker_b sits with the second spacer, which overflows to page 2.
+        assert_eq!(states[1].get("hdr").unwrap().instance_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_collect_running_element_states_empty() {
+        // No markers — result is Vec of empty BTreeMaps.
+        let block = BlockPageable::with_positioned_children(vec![pos(make_spacer(100.0))]);
+        let pages = paginate(Box::new(block), 200.0, 500.0);
+        let states = collect_running_element_states(&pages);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
+    }
+
+    #[test]
+    fn test_collect_running_element_states_deduplicates_instance_ids() {
+        // Simulates a marker that appears on multiple pages — e.g. inside a
+        // repeated table header. The same instance_id must only count once,
+        // adopted on the first page it appears.
+        use crate::pageable::RunningElementMarkerPageable;
+
+        let marker = || -> Box<dyn Pageable> {
+            Box::new(RunningElementMarkerPageable::new("hdr".into(), 7))
+        };
+
+        let page1 = BlockPageable::with_positioned_children(vec![pos(marker())]);
+        let page2 = BlockPageable::with_positioned_children(vec![pos(marker())]);
+        let pages: Vec<Box<dyn Pageable>> = vec![Box::new(page1), Box::new(page2)];
+
+        let states = collect_running_element_states(&pages);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![7]);
+        assert!(
+            states[1].get("hdr").is_none(),
+            "instance_id 7 must not be re-counted on the second page"
+        );
+    }
+
+    #[test]
+    fn test_collect_running_markers_descends_into_wrapper() {
+        // Markers attached via RunningElementWrapperPageable must still be
+        // discovered by collect_running_element_states.
+        use crate::pageable::{RunningElementMarkerPageable, RunningElementWrapperPageable};
+
+        let marker = RunningElementMarkerPageable::new("hdr".into(), 3);
+        let child: Box<dyn Pageable> = make_spacer(50.0);
+        let wrapper = RunningElementWrapperPageable::new(vec![marker], child);
+        let block = BlockPageable::with_positioned_children(vec![pos(Box::new(wrapper))]);
+        let pages = paginate(Box::new(block), 200.0, 500.0);
+
+        let states = collect_running_element_states(&pages);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![3]);
     }
 }

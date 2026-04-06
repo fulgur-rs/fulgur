@@ -5,8 +5,9 @@ use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
-    BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild, Size,
-    SpacerPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
+    BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild,
+    RunningElementMarkerPageable, RunningElementWrapperPageable, Size, SpacerPageable,
+    StringSetPageable, StringSetWrapperPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 /// Context for DOM-to-Pageable conversion, bundling all shared state.
 pub struct ConvertContext<'a> {
-    pub running_store: &'a mut RunningElementStore,
+    pub running_store: &'a RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
     pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
@@ -145,6 +146,28 @@ fn emit_orphan_string_set_markers(
             });
         }
     }
+}
+
+/// If `node_id` corresponds to a running element instance registered by
+/// `RunningElementPass`, return a fresh `RunningElementMarkerPageable` for it.
+///
+/// Running elements are rewritten to `display: none` by the GCPM parser, so
+/// their DOM nodes land in the zero-size branches of
+/// `collect_positioned_children`. Instead of pushing the marker directly into
+/// the parent's child list, the caller buffers it and attaches it to the
+/// following real child via `RunningElementWrapperPageable` — otherwise the
+/// marker could be stranded on the previous page when the following child
+/// overflows to the next page.
+fn take_running_marker(
+    node_id: usize,
+    ctx: &ConvertContext<'_>,
+) -> Option<RunningElementMarkerPageable> {
+    let instance_id = ctx.running_store.instance_for_node(node_id)?;
+    let name = ctx.running_store.name_of(instance_id)?;
+    Some(RunningElementMarkerPageable::new(
+        name.to_string(),
+        instance_id,
+    ))
 }
 
 fn convert_node_inner(
@@ -301,12 +324,19 @@ fn convert_node_inner(
 
 /// Collect positioned children, flattening zero-size pass-through containers
 /// (like thead, tbody, tr) so their children appear directly in the parent.
+///
+/// Running element markers discovered on zero-size nodes are buffered and
+/// attached to the next real child via `RunningElementWrapperPageable`. This
+/// keeps the marker with its associated content when pagination pushes the
+/// content to the next page.
 fn collect_positioned_children(
     doc: &blitz_dom::BaseDocument,
     child_ids: &[usize],
     ctx: &mut ConvertContext<'_>,
 ) -> Vec<PositionedChild> {
     let mut result = Vec::new();
+    let mut pending_running_markers: Vec<RunningElementMarkerPageable> = Vec::new();
+
     for &child_id in child_ids {
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
@@ -335,6 +365,9 @@ fn collect_positioned_children(
                 ctx,
                 &mut result,
             );
+            if let Some(marker) = take_running_marker(child_id, ctx) {
+                pending_running_markers.push(marker);
+            }
             continue;
         }
 
@@ -352,18 +385,56 @@ fn collect_positioned_children(
                 ctx,
                 &mut result,
             );
-            let nested = collect_positioned_children(doc, &child_node.children, ctx);
+            if let Some(marker) = take_running_marker(child_id, ctx) {
+                pending_running_markers.push(marker);
+            }
+            let mut nested = collect_positioned_children(doc, &child_node.children, ctx);
+            // Flush pending running markers to the first real nested child so
+            // they travel with the flattened content on page break. Without
+            // this, the markers would skip over the container's children and
+            // incorrectly attach to the next outer sibling.
+            if !pending_running_markers.is_empty()
+                && let Some(first) = nested.first_mut()
+            {
+                let original = std::mem::replace(
+                    &mut first.child,
+                    // Temporary placeholder; overwritten below.
+                    Box::new(SpacerPageable::new(0.0)),
+                );
+                first.child = Box::new(RunningElementWrapperPageable::new(
+                    std::mem::take(&mut pending_running_markers),
+                    original,
+                ));
+            }
             result.extend(nested);
             continue;
         }
 
-        let child_pageable = convert_node(doc, child_id, ctx);
+        let mut child_pageable = convert_node(doc, child_id, ctx);
+        if !pending_running_markers.is_empty() {
+            child_pageable = Box::new(RunningElementWrapperPageable::new(
+                std::mem::take(&mut pending_running_markers),
+                child_pageable,
+            ));
+        }
         result.push(PositionedChild {
             child: child_pageable,
             x: child_layout.location.x,
             y: child_layout.location.y,
         });
     }
+
+    // Running markers with no subsequent real child — emit as bare
+    // PositionedChild fallback so they aren't lost entirely. This covers the
+    // edge case of a running element at the very end of a parent.
+    for marker in pending_running_markers {
+        result.push(PositionedChild {
+            child: Box::new(marker),
+            x: 0.0,
+            y: 0.0,
+        });
+    }
+
     result
 }
 

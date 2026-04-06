@@ -1,5 +1,7 @@
 use super::{ContentItem, CounterType, StringPolicy};
-use crate::paginate::StringSetPageState;
+use crate::gcpm::ElementPolicy;
+use crate::gcpm::running::RunningElementStore;
+use crate::paginate::{PageRunningState, StringSetPageState};
 use std::collections::BTreeMap;
 
 /// Resolve content items to a plain string.
@@ -21,7 +23,7 @@ pub fn resolve_content_to_string(
             ContentItem::Counter(CounterType::Pages) => {
                 out.push_str(&total_pages.to_string());
             }
-            ContentItem::Element(_) => {}
+            ContentItem::Element { .. } => {}
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
                     out.push_str(resolve_string_policy(state, *policy));
@@ -34,29 +36,35 @@ pub fn resolve_content_to_string(
 
 /// Resolve content items to an HTML string.
 ///
-/// `Element(name)` references are looked up in `running_elements` (a `&[(name, html)]` slice)
-/// and the matching HTML is appended. `StringRef` values come from the DOM
-/// (via `string-set: content(text) | attr(...)`) and are HTML-escaped before
-/// concatenation so characters like `<` and `&` do not corrupt the margin box.
+/// `Element { name, policy }` references are resolved via the per-page
+/// running-element state and `RunningElementStore`, using the
+/// WeasyPrint-compatible policy rules (see `resolve_element_policy`).
+/// `StringRef` values come from the DOM (via `string-set: content(text) |
+/// attr(...)`) and are HTML-escaped before concatenation so characters like
+/// `<` and `&` do not corrupt the margin box.
 pub fn resolve_content_to_html(
     items: &[ContentItem],
-    running_elements: &[(String, String)],
+    store: &RunningElementStore,
+    running_states: &[BTreeMap<String, PageRunningState>],
     string_set_states: &BTreeMap<String, StringSetPageState>,
-    page: usize,
+    page_num: usize,
     total_pages: usize,
+    page_idx: usize,
 ) -> String {
     let mut out = String::new();
     for item in items {
         match item {
-            ContentItem::String(s) => out.push_str(s),
+            ContentItem::String(s) => push_escaped_html_text(&mut out, s),
             ContentItem::Counter(CounterType::Page) => {
-                out.push_str(&page.to_string());
+                out.push_str(&page_num.to_string());
             }
             ContentItem::Counter(CounterType::Pages) => {
                 out.push_str(&total_pages.to_string());
             }
-            ContentItem::Element(name) => {
-                if let Some((_, html)) = running_elements.iter().find(|(n, _)| n == name) {
+            ContentItem::Element { name, policy } => {
+                if let Some(html) =
+                    resolve_element_policy(name, *policy, page_idx, running_states, store)
+                {
                     out.push_str(html);
                 }
             }
@@ -106,6 +114,61 @@ fn resolve_string_policy(state: &StringSetPageState, policy: StringPolicy) -> &s
     }
 }
 
+/// Resolve an `element(name, policy)` reference to the HTML of the chosen
+/// running element instance for the given page (0-based `page_idx`).
+///
+/// WeasyPrint-compatible semantics:
+/// - `first`: first instance assigned on the current page.
+/// - `start`: ignores current-page assignments and returns the last instance
+///   of the most recent preceding page (the value in effect at page start).
+/// - `last`: last instance assigned on the current page.
+/// - `first-except`: returns `None` if the current page has any assignment.
+/// - Fallback (any policy, no resolution on current page): the last instance
+///   of the most recent preceding page that had an assignment.
+pub fn resolve_element_policy<'a>(
+    name: &str,
+    policy: ElementPolicy,
+    page_idx: usize,
+    page_states: &[BTreeMap<String, PageRunningState>],
+    store: &'a RunningElementStore,
+) -> Option<&'a str> {
+    let current = page_states.get(page_idx).and_then(|s| s.get(name));
+
+    let chosen_id: Option<usize> = match policy {
+        ElementPolicy::First => current.and_then(|s| s.instance_ids.first().copied()),
+        ElementPolicy::Last => current.and_then(|s| s.instance_ids.last().copied()),
+        // Start ignores assignments on the current page entirely — it must
+        // return the element that was in effect when this page began, which
+        // is the last instance of the most recent preceding page. Fall
+        // through to the fallback scan below.
+        ElementPolicy::Start => None,
+        ElementPolicy::FirstExcept => {
+            // Current page has an assignment → suppress.
+            // (`collect_running_element_states` only inserts an entry when
+            // it pushes an instance_id, so `current.is_some()` suffices.)
+            if current.is_some() {
+                return None;
+            }
+            None
+        }
+    };
+
+    if let Some(id) = chosen_id {
+        return store.get_html(id);
+    }
+
+    // Fallback: scan preceding pages for the most recent assignment.
+    for prev in (0..page_idx).rev() {
+        if let Some(state) = page_states.get(prev).and_then(|s| s.get(name)) {
+            if let Some(&last_id) = state.instance_ids.last() {
+                return store.get_html(last_id);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,11 +187,30 @@ mod tests {
         );
     }
 
+    fn single_page_store(
+        name: &str,
+        html: &str,
+    ) -> (RunningElementStore, Vec<BTreeMap<String, PageRunningState>>) {
+        let mut store = RunningElementStore::new();
+        let id = store.register(1, name.to_string(), html.to_string());
+        let mut page_state = BTreeMap::new();
+        page_state.insert(
+            name.to_string(),
+            PageRunningState {
+                instance_ids: vec![id],
+            },
+        );
+        (store, vec![page_state])
+    }
+
     #[test]
     fn test_element_becomes_empty() {
         let items = vec![
             ContentItem::String("Before".into()),
-            ContentItem::Element("hdr".into()),
+            ContentItem::Element {
+                name: "hdr".into(),
+                policy: ElementPolicy::First,
+            },
             ContentItem::String("After".into()),
         ];
         assert_eq!(
@@ -139,10 +221,13 @@ mod tests {
 
     #[test]
     fn test_resolve_html_with_running_element() {
-        let items = vec![ContentItem::Element("hdr".into())];
-        let running = vec![("hdr".to_string(), "<b>Header</b>".to_string())];
+        let items = vec![ContentItem::Element {
+            name: "hdr".into(),
+            policy: ElementPolicy::First,
+        }];
+        let (store, states) = single_page_store("hdr", "<b>Header</b>");
         assert_eq!(
-            resolve_content_to_html(&items, &running, &BTreeMap::new(), 1, 1),
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
             "<b>Header</b>"
         );
     }
@@ -150,16 +235,50 @@ mod tests {
     #[test]
     fn test_resolve_html_mixed() {
         let items = vec![
-            ContentItem::Element("hdr".into()),
+            ContentItem::Element {
+                name: "hdr".into(),
+                policy: ElementPolicy::First,
+            },
             ContentItem::String(" - Page ".into()),
             ContentItem::Counter(CounterType::Page),
             ContentItem::String("/".into()),
             ContentItem::Counter(CounterType::Pages),
         ];
-        let running = vec![("hdr".to_string(), "<span>Title</span>".to_string())];
+
+        // Build 3 pages of state with distinct running-element instances per
+        // page so that mixing page_num (1-based, for counter(page)) with
+        // page_idx (0-based, for element policy) would be detectable if
+        // swapped.
+        let mut store = RunningElementStore::new();
+        let id0 = store.register(1, "hdr".into(), "<span>P1</span>".into());
+        let id1 = store.register(2, "hdr".into(), "<span>P2</span>".into());
+        let id2 = store.register(3, "hdr".into(), "<span>P3</span>".into());
+        let mk = |ids: Vec<usize>| -> BTreeMap<String, PageRunningState> {
+            let mut m = BTreeMap::new();
+            m.insert("hdr".to_string(), PageRunningState { instance_ids: ids });
+            m
+        };
+        let states = vec![mk(vec![id0]), mk(vec![id1]), mk(vec![id2])];
+
+        // page_num=2 (1-based), page_idx=1 (0-based) → must pick P2.
         assert_eq!(
-            resolve_content_to_html(&items, &running, &BTreeMap::new(), 2, 8),
-            "<span>Title</span> - Page 2/8"
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 2, 3, 1),
+            "<span>P2</span> - Page 2/3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_html_escapes_literal_string() {
+        // ContentItem::String comes from CSS `content: "literal"` and may
+        // contain `<`, `>`, `&`. It must be HTML-escaped before concatenation
+        // so attackers (or mischievous authors) cannot inject markup into the
+        // margin box via CSS string literals.
+        let items = vec![ContentItem::String("A & B <script>".into())];
+        let store = RunningElementStore::new();
+        let states: Vec<BTreeMap<String, PageRunningState>> = vec![BTreeMap::new()];
+        assert_eq!(
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
+            "A &amp; B &lt;script&gt;"
         );
     }
 
@@ -179,7 +298,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &[], &state, 1, 1),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Current"
         );
     }
@@ -200,7 +319,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &[], &state, 1, 1),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Inherited"
         );
     }
@@ -221,7 +340,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &[], &state, 1, 1),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Start Value"
         );
     }
@@ -241,7 +360,10 @@ mod tests {
                 last: Some("Last".to_string()),
             },
         );
-        assert_eq!(resolve_content_to_html(&items, &[], &state, 1, 1), "Last");
+        assert_eq!(
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            "Last"
+        );
     }
 
     #[test]
@@ -259,7 +381,10 @@ mod tests {
                 last: Some("New".to_string()),
             },
         );
-        assert_eq!(resolve_content_to_html(&items, &[], &state, 1, 1), "");
+        assert_eq!(
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            ""
+        );
     }
 
     #[test]
@@ -278,7 +403,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &[], &state, 1, 1),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Inherited"
         );
     }
@@ -290,7 +415,15 @@ mod tests {
             policy: StringPolicy::First,
         }];
         assert_eq!(
-            resolve_content_to_html(&items, &[], &BTreeMap::new(), 1, 1),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &BTreeMap::new(),
+                1,
+                1,
+                0
+            ),
             ""
         );
     }
@@ -311,8 +444,131 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &[], &state, 1, 1),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "A &amp; B &lt;script&gt;"
+        );
+    }
+
+    #[test]
+    fn test_resolve_element_policy_scenarios() {
+        let mut store = RunningElementStore::new();
+        let id_a = store.register(1, "hdr".into(), "<h1>A</h1>".into());
+        let id_b = store.register(2, "hdr".into(), "<h1>B</h1>".into());
+        let id_c = store.register(3, "hdr".into(), "<h1>C</h1>".into());
+
+        // P0 = [A, B], P1 = [C], P2 = []
+        let mut p0 = BTreeMap::new();
+        p0.insert(
+            "hdr".to_string(),
+            PageRunningState {
+                instance_ids: vec![id_a, id_b],
+            },
+        );
+        let mut p1 = BTreeMap::new();
+        p1.insert(
+            "hdr".to_string(),
+            PageRunningState {
+                instance_ids: vec![id_c],
+            },
+        );
+        let p2 = BTreeMap::new();
+        let states = vec![p0, p1, p2];
+
+        // first
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::First, 0, &states, &store),
+            Some("<h1>A</h1>")
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::First, 1, &states, &store),
+            Some("<h1>C</h1>")
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::First, 2, &states, &store),
+            Some("<h1>C</h1>")
+        );
+
+        // last
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Last, 0, &states, &store),
+            Some("<h1>B</h1>")
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Last, 1, &states, &store),
+            Some("<h1>C</h1>")
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Last, 2, &states, &store),
+            Some("<h1>C</h1>")
+        );
+
+        // start: ignores current-page assignments, returns the last
+        // instance of the most recent preceding page (i.e. the value in
+        // effect at the page boundary).
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Start, 0, &states, &store),
+            None, // no preceding pages
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Start, 1, &states, &store),
+            Some("<h1>B</h1>"), // P0.instance_ids.last()
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::Start, 2, &states, &store),
+            Some("<h1>C</h1>"), // P1.instance_ids.last()
+        );
+
+        // first-except: empty where assigned, fallback where unassigned
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::FirstExcept, 0, &states, &store),
+            None
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::FirstExcept, 1, &states, &store),
+            None
+        );
+        assert_eq!(
+            resolve_element_policy("hdr", ElementPolicy::FirstExcept, 2, &states, &store),
+            Some("<h1>C</h1>")
+        );
+    }
+
+    #[test]
+    fn test_resolve_element_policy_no_assignments_anywhere() {
+        let store = RunningElementStore::new();
+        let states: Vec<BTreeMap<String, PageRunningState>> = vec![BTreeMap::new(); 3];
+
+        for policy in [
+            ElementPolicy::First,
+            ElementPolicy::Start,
+            ElementPolicy::Last,
+            ElementPolicy::FirstExcept,
+        ] {
+            for page in 0..3 {
+                assert_eq!(
+                    resolve_element_policy("hdr", policy, page, &states, &store),
+                    None,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_element_policy_name_not_found() {
+        let mut store = RunningElementStore::new();
+        store.register(1, "other".into(), "<h1>X</h1>".into());
+        let mut p0 = BTreeMap::new();
+        p0.insert(
+            "other".to_string(),
+            PageRunningState {
+                instance_ids: vec![0],
+            },
+        );
+        let states = vec![p0];
+
+        assert_eq!(
+            resolve_element_policy("missing", ElementPolicy::First, 0, &states, &store),
+            None,
         );
     }
 }

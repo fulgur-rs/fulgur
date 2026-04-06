@@ -3,47 +3,77 @@
 //! Manages running elements extracted from the DOM via `position: running(name)`.
 //! These elements are serialized to HTML and stored for later re-layout in margin boxes.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-/// Stores running elements keyed by name.
+/// A single running element assignment, identified by a numeric instance id.
+#[derive(Debug, Clone)]
+struct RunningInstance {
+    name: String,
+    html: String,
+}
+
+/// Stores running element instances in source order, keyed by a sequential id.
 ///
-/// Running elements are DOM subtrees that have been extracted from the normal
-/// document flow (via `position: running(...)`) and serialized to HTML strings.
-/// They are later injected into margin boxes via `content: element(name)`.
+/// Multiple assignments to the same running name are preserved as separate
+/// instances so per-page policy resolution (first/start/last/first-except)
+/// can pick the correct one. The DOM `node_id` → `instance_id` map lets the
+/// convert stage emit zero-size markers at the source position of each
+/// running element.
+///
+/// Instances are append-only — once registered, they remain in the store for
+/// the lifetime of the pass. This is what allows `instance_id` to be a stable
+/// index into `instances`.
 pub struct RunningElementStore {
-    elements: HashMap<String, String>,
+    instances: Vec<RunningInstance>,
+    node_to_instance: BTreeMap<usize, usize>,
 }
 
 impl RunningElementStore {
-    /// Create an empty store.
     pub fn new() -> Self {
         Self {
-            elements: HashMap::new(),
+            instances: Vec::new(),
+            node_to_instance: BTreeMap::new(),
         }
     }
 
-    /// Register a running element by name with its serialized HTML.
-    pub fn register(&mut self, name: String, html: String) {
-        self.elements.insert(name, html);
+    /// Register a running element instance. Returns the assigned instance_id.
+    ///
+    /// Invariant: each `node_id` is registered at most once, guaranteed by
+    /// `RunningElementPass::walk_tree` not recursing into running element
+    /// subtrees.
+    pub fn register(&mut self, node_id: usize, name: String, html: String) -> usize {
+        let id = self.instances.len();
+        self.instances.push(RunningInstance { name, html });
+        self.node_to_instance.insert(node_id, id);
+        id
     }
 
-    /// Look up a running element by name.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.elements.get(name).map(|s| s.as_str())
+    /// Look up the instance_id assigned to a DOM node, if any.
+    pub fn instance_for_node(&self, node_id: usize) -> Option<usize> {
+        self.node_to_instance.get(&node_id).copied()
     }
 
-    /// Convert to pairs for counter resolution or other consumers.
-    pub fn to_pairs(&self) -> Vec<(String, String)> {
-        self.elements
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+    /// Get the serialized HTML for a given instance_id.
+    pub fn get_html(&self, instance_id: usize) -> Option<&str> {
+        self.instances.get(instance_id).map(|i| i.html.as_str())
+    }
+
+    /// Get the running name for a given instance_id.
+    pub fn name_of(&self, instance_id: usize) -> Option<&str> {
+        self.instances.get(instance_id).map(|i| i.name.as_str())
     }
 }
 
 impl Default for RunningElementStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl RunningElementStore {
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
     }
 }
 
@@ -120,41 +150,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_running_element_store_and_lookup() {
+    fn test_running_store_instance_registration() {
         let mut store = RunningElementStore::new();
+        let id_a = store.register(10, "header".to_string(), "<h1>A</h1>".to_string());
+        let id_b = store.register(20, "header".to_string(), "<h1>B</h1>".to_string());
 
-        // Initially empty
-        assert!(store.get("header").is_none());
-
-        // Register and retrieve
-        store.register("header".to_string(), "<h1>Title</h1>".to_string());
-        assert_eq!(store.get("header"), Some("<h1>Title</h1>"));
-
-        // Nonexistent key
-        assert!(store.get("footer").is_none());
-
-        // Overwrite
-        store.register("header".to_string(), "<h1>New Title</h1>".to_string());
-        assert_eq!(store.get("header"), Some("<h1>New Title</h1>"));
+        assert_ne!(id_a, id_b);
+        assert_eq!(store.get_html(id_a), Some("<h1>A</h1>"));
+        assert_eq!(store.get_html(id_b), Some("<h1>B</h1>"));
+        assert_eq!(store.instance_for_node(10), Some(id_a));
+        assert_eq!(store.instance_for_node(20), Some(id_b));
+        assert_eq!(store.instance_for_node(99), None);
     }
 
     #[test]
-    fn test_to_pairs() {
+    fn test_running_store_name_lookup() {
         let mut store = RunningElementStore::new();
-        store.register("header".to_string(), "<h1>Title</h1>".to_string());
-        store.register("footer".to_string(), "<footer>F</footer>".to_string());
+        let id = store.register(5, "footer".to_string(), "<p>F</p>".to_string());
+        assert_eq!(store.name_of(id), Some("footer"));
+    }
 
-        let mut pairs = store.to_pairs();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(
-            pairs[0],
-            ("footer".to_string(), "<footer>F</footer>".to_string())
-        );
-        assert_eq!(
-            pairs[1],
-            ("header".to_string(), "<h1>Title</h1>".to_string())
-        );
+    #[test]
+    fn test_running_store_invalid_instance_id_returns_none() {
+        let store = RunningElementStore::new();
+        assert!(store.get_html(999).is_none());
+        assert!(store.name_of(999).is_none());
     }
 }

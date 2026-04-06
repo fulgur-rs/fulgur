@@ -93,7 +93,7 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         // Extract running elements via DomPass (before resolve)
-        let mut running_store = if !gcpm.running_mappings.is_empty() {
+        let running_store = if !gcpm.running_mappings.is_empty() {
             let pass = crate::blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
             pass.apply(&mut doc, &ctx);
             pass.into_running_store()
@@ -125,7 +125,7 @@ impl Engine {
         };
 
         let mut convert_ctx = ConvertContext {
-            running_store: &mut running_store,
+            running_store: &running_store,
             assets: self.assets.as_ref(),
             font_cache: HashMap::new(),
             string_set_by_node,

@@ -43,6 +43,31 @@ pub enum StringPolicy {
     FirstExcept,
 }
 
+/// Policy for `element(name, <policy>)` — determines which running element
+/// instance to show on a given page. Parallels [`StringPolicy`] but applies
+/// to running elements extracted via `position: running(name)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ElementPolicy {
+    /// First instance assigned on the current page; if no assignment occurs
+    /// on the current page, falls back to the most recent prior assignment.
+    /// This is the default when `element(name)` is written without a second
+    /// argument.
+    #[default]
+    First,
+    /// The element in effect at the start of the current page — i.e., the
+    /// last instance from the most recent *preceding* page. Unlike `First`,
+    /// `Start` ignores any assignments on the current page, so a heading
+    /// that switches mid-page does not affect the start-of-page value.
+    Start,
+    /// Last instance assigned on the current page; if no assignment occurs
+    /// on the current page, falls back to the most recent prior assignment.
+    Last,
+    /// Returns the empty value on pages that contain an assignment to this
+    /// running element; otherwise falls back to the most recent prior
+    /// assignment (same as `First` on unassigned pages).
+    FirstExcept,
+}
+
 /// A single value component within a `string-set` declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringSetValue {
@@ -72,8 +97,13 @@ pub struct StringSetMapping {
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
-    /// A running element reference, e.g. `element(title)`.
-    Element(String),
+    /// A running element reference, e.g. `element(title)` or `element(title, first)`.
+    Element {
+        /// The running element name.
+        name: String,
+        /// The policy for selecting which instance to show.
+        policy: ElementPolicy,
+    },
     /// A counter reference, e.g. `counter(page)`.
     Counter(CounterType),
     /// A literal string, e.g. `"Page "`.
