@@ -701,6 +701,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         margin_boxes,
         running_mappings,
         string_set_mappings,
+        page_settings: vec![],
         cleaned_css,
     }
 }

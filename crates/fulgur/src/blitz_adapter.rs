@@ -558,6 +558,7 @@ mod tests {
                 running_name: "pageHeader".to_string(),
             }],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -598,6 +599,7 @@ mod tests {
                 running_name: "pageTitle".to_string(),
             }],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -624,6 +626,7 @@ mod tests {
             margin_boxes: vec![],
             running_mappings: vec![],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -653,6 +656,7 @@ mod tests {
                 running_name: "shouldNotMatch".to_string(),
             }],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
 

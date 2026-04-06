@@ -94,6 +94,39 @@ pub struct StringSetMapping {
     pub values: Vec<StringSetValue>,
 }
 
+/// Parsed `size` declaration from `@page`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageSizeDecl {
+    /// A named page size, e.g. `A4`, `letter`.
+    Keyword(String),
+    /// A named page size with orientation, e.g. `A4 landscape`.
+    KeywordWithOrientation(String, bool),
+    /// Explicit width × height, e.g. `210mm 297mm`. Values in points.
+    Custom(f32, f32),
+    /// `auto` — use Config default.
+    Auto,
+}
+
+/// Parsed `margin` declaration from `@page`. All values in points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageMarginDecl {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+/// A parsed `@page { size: ...; margin: ...; }` settings rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageSettingsRule {
+    /// Optional page selector (e.g. `:first`, `:left`). `None` means all pages.
+    pub page_selector: Option<String>,
+    /// Parsed `size` declaration, if present.
+    pub size: Option<PageSizeDecl>,
+    /// Parsed `margin` declaration, if present.
+    pub margin: Option<PageMarginDecl>,
+}
+
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
@@ -148,6 +181,8 @@ pub struct GcpmContext {
     pub running_mappings: Vec<RunningMapping>,
     /// Mappings from CSS selectors to named strings via `string-set`.
     pub string_set_mappings: Vec<StringSetMapping>,
+    /// Page settings rules parsed from `@page { size: ...; margin: ...; }`.
+    pub page_settings: Vec<PageSettingsRule>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
@@ -158,6 +193,7 @@ impl GcpmContext {
         self.margin_boxes.is_empty()
             && self.running_mappings.is_empty()
             && self.string_set_mappings.is_empty()
+            && self.page_settings.is_empty()
     }
 }
 
@@ -171,6 +207,7 @@ mod tests {
             margin_boxes: vec![],
             running_mappings: vec![],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -187,6 +224,7 @@ mod tests {
             }],
             running_mappings: vec![],
             string_set_mappings: vec![],
+            page_settings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -201,6 +239,23 @@ mod tests {
                 running_name: "header".to_string(),
             }],
             string_set_mappings: vec![],
+            page_settings: vec![],
+            cleaned_css: String::new(),
+        };
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn test_gcpm_context_not_empty_with_page_settings() {
+        let ctx = GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![],
+            string_set_mappings: vec![],
+            page_settings: vec![PageSettingsRule {
+                page_selector: None,
+                size: Some(PageSizeDecl::Keyword("A4".into())),
+                margin: None,
+            }],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
