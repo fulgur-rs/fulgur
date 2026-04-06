@@ -193,12 +193,6 @@ pub fn render_to_pdf_with_gcpm(
         crate::paginate::collect_running_element_states(&pages)
     };
 
-    let page_size = if config.landscape {
-        config.page_size.landscape()
-    } else {
-        config.page_size
-    };
-
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
     let margin_css = strip_display_none(&gcpm.cleaned_css);
@@ -214,6 +208,20 @@ pub fn render_to_pdf_with_gcpm(
     // Pass 2: render each page with margin boxes
     for (page_idx, page_content) in pages.iter().enumerate() {
         let page_num = page_idx + 1;
+
+        // Resolve per-page size, margin, and landscape from @page rules + CLI overrides
+        let (resolved_size, resolved_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &gcpm.page_settings,
+                page_num,
+                total_pages,
+                config,
+            );
+        let page_size = if resolved_landscape {
+            resolved_size.landscape()
+        } else {
+            resolved_size
+        };
 
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
@@ -306,8 +314,8 @@ pub fn render_to_pdf_with_gcpm(
         // Layout at fixed margin width, then read the resulting height.
         for (&pos, html) in &resolved_htmls {
             let fixed_width = match pos.edge() {
-                Some(Edge::Left) => config.margin.left,
-                Some(Edge::Right) => config.margin.right,
+                Some(Edge::Left) => resolved_margin.left,
+                Some(Edge::Right) => resolved_margin.right,
                 _ => continue,
             };
             let hc_key = (html.clone(), width_key(fixed_width));
@@ -338,9 +346,9 @@ pub fn render_to_pdf_with_gcpm(
                 measure_cache.get(html).copied()
             } else {
                 let fixed_width = if edge == Edge::Left {
-                    config.margin.left
+                    resolved_margin.left
                 } else {
-                    config.margin.right
+                    resolved_margin.right
                 };
                 height_cache
                     .get(&(html.clone(), width_key(fixed_width)))
@@ -357,7 +365,7 @@ pub fn render_to_pdf_with_gcpm(
                 *edge,
                 defined,
                 page_size,
-                config.margin,
+                resolved_margin,
             ));
         }
 
@@ -367,7 +375,7 @@ pub fn render_to_pdf_with_gcpm(
             let rect = all_rects
                 .get(&pos)
                 .copied()
-                .unwrap_or_else(|| pos.bounding_rect(page_size, config.margin));
+                .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
 
             let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
             if !render_cache.contains_key(&cache_key) {
@@ -397,13 +405,15 @@ pub fn render_to_pdf_with_gcpm(
             }
         }
 
-        // Draw body content
+        // Draw body content with resolved per-page margin
+        let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
+        let page_content_height = page_size.height - resolved_margin.top - resolved_margin.bottom;
         page_content.draw(
             &mut canvas,
-            config.margin.left,
-            config.margin.top,
-            content_width,
-            content_height,
+            resolved_margin.left,
+            resolved_margin.top,
+            page_content_width,
+            page_content_height,
         );
     }
 
