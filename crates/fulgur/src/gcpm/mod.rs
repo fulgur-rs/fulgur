@@ -108,15 +108,6 @@ pub enum PageSizeDecl {
     Auto,
 }
 
-/// Parsed `margin` declaration from `@page`. All values in points.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PageMarginDecl {
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
-    pub left: f32,
-}
-
 /// A parsed `@page { size: ...; margin: ...; }` settings rule.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageSettingsRule {
@@ -124,8 +115,8 @@ pub struct PageSettingsRule {
     pub page_selector: Option<String>,
     /// Parsed `size` declaration, if present.
     pub size: Option<PageSizeDecl>,
-    /// Parsed `margin` declaration, if present.
-    pub margin: Option<PageMarginDecl>,
+    /// Parsed `margin` declaration, if present. Values in points.
+    pub margin: Option<crate::config::Margin>,
 }
 
 /// A single content item inside a margin box rule's `content` property.

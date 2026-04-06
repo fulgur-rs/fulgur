@@ -35,7 +35,7 @@ impl PageSize {
 }
 
 /// Margin in points
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Margin {
     pub top: f32,
     pub right: f32,

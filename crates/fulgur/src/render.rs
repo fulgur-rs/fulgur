@@ -124,9 +124,9 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 }
 
 /// Cached max-content width and render Pageable for margin boxes.
-/// Measure cache: html → max-content width (measured once at content_width).
+/// Measure cache: (html, page_height as bits) → max-content width.
 /// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
-type MeasureCache = HashMap<String, f32>;
+type MeasureCache = HashMap<(String, u32), f32>;
 type RenderCache = HashMap<(String, u32, u32), Box<dyn Pageable>>;
 
 fn width_key(w: f32) -> u32 {
@@ -294,7 +294,8 @@ pub fn render_to_pdf_with_gcpm(
             if !pos.edge().is_some_and(|e| e.is_horizontal()) {
                 continue;
             }
-            if !measure_cache.contains_key(html) {
+            let measure_key = (html.clone(), width_key(page_size.height));
+            measure_cache.entry(measure_key).or_insert_with(|| {
                 let measure_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
                     margin_css, html
@@ -305,9 +306,8 @@ pub fn render_to_pdf_with_gcpm(
                     page_size.height,
                     font_data,
                 );
-                let max_content_width = get_body_child_dimension(&measure_doc, true);
-                measure_cache.insert(html.clone(), max_content_width);
-            }
+                get_body_child_dimension(&measure_doc, true)
+            });
         }
 
         // Stage 1b: Measure max-content height for left/right boxes.
@@ -343,7 +343,9 @@ pub fn render_to_pdf_with_gcpm(
                 None => continue, // corners
             };
             let size = if edge.is_horizontal() {
-                measure_cache.get(html).copied()
+                measure_cache
+                    .get(&(html.clone(), width_key(page_size.height)))
+                    .copied()
             } else {
                 let fixed_width = if edge == Edge::Left {
                     resolved_margin.left

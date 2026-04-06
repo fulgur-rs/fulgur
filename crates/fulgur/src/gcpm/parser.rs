@@ -5,10 +5,10 @@ use cssparser::{
 
 use super::margin_box::MarginBoxPosition;
 use super::{
-    ContentItem, CounterType, ElementPolicy, GcpmContext, MarginBoxRule, PageMarginDecl,
-    PageSettingsRule, PageSizeDecl, ParsedSelector, RunningMapping, StringPolicy, StringSetMapping,
-    StringSetValue,
+    ContentItem, CounterType, ElementPolicy, GcpmContext, MarginBoxRule, PageSettingsRule,
+    PageSizeDecl, ParsedSelector, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
 };
+use crate::config::Margin;
 
 // ---------------------------------------------------------------------------
 // Top-level result types
@@ -269,7 +269,7 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
 }
 
 /// Parse the value of an `@page { margin: ... }` declaration (CSS shorthand).
-fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PageMarginDecl> {
+fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<Margin> {
     let mut values = Vec::new();
     loop {
         let result = input.try_parse(|input| {
@@ -294,25 +294,25 @@ fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PageMarginDecl>
     }
 
     match values.len() {
-        1 => Some(PageMarginDecl {
+        1 => Some(Margin {
             top: values[0],
             right: values[0],
             bottom: values[0],
             left: values[0],
         }),
-        2 => Some(PageMarginDecl {
+        2 => Some(Margin {
             top: values[0],
             right: values[1],
             bottom: values[0],
             left: values[1],
         }),
-        3 => Some(PageMarginDecl {
+        3 => Some(Margin {
             top: values[0],
             right: values[1],
             bottom: values[2],
             left: values[1],
         }),
-        4 => Some(PageMarginDecl {
+        4 => Some(Margin {
             top: values[0],
             right: values[1],
             bottom: values[2],
@@ -331,7 +331,7 @@ fn parse_page_block(
     page_selector: &Option<String>,
     boxes: &mut Vec<MarginBoxRule>,
     size: &mut Option<PageSizeDecl>,
-    margin: &mut Option<PageMarginDecl>,
+    margin: &mut Option<Margin>,
 ) {
     let mut parser = PageRuleParser {
         page_selector,
@@ -349,7 +349,7 @@ struct PageRuleParser<'a> {
     page_selector: &'a Option<String>,
     boxes: &'a mut Vec<MarginBoxRule>,
     size: &'a mut Option<PageSizeDecl>,
-    margin: &'a mut Option<PageMarginDecl>,
+    margin: &'a mut Option<Margin>,
 }
 
 impl<'i, 'a> AtRuleParser<'i> for PageRuleParser<'a> {

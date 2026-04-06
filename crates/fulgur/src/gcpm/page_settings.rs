@@ -1,5 +1,5 @@
 use crate::config::{Config, Margin, PageSize};
-use crate::gcpm::{PageMarginDecl, PageSettingsRule, PageSizeDecl};
+use crate::gcpm::{PageSettingsRule, PageSizeDecl};
 
 /// Map a CSS page-size keyword (case-insensitive) to a [`PageSize`].
 /// Falls back to A4 for unrecognised keywords.
@@ -42,9 +42,9 @@ pub fn resolve_page_settings(
 ) -> (PageSize, Margin, bool) {
     // --- Collect CSS declarations, separating default from selector-matched ---
     let mut default_size: Option<&PageSizeDecl> = None;
-    let mut default_margin: Option<&PageMarginDecl> = None;
+    let mut default_margin: Option<&Margin> = None;
     let mut matched_size: Option<&PageSizeDecl> = None;
-    let mut matched_margin: Option<&PageMarginDecl> = None;
+    let mut matched_margin: Option<&Margin> = None;
 
     for rule in rules {
         match &rule.page_selector {
@@ -124,12 +124,7 @@ pub fn resolve_page_settings(
         config.margin
     } else {
         match css_margin {
-            Some(decl) => Margin {
-                top: decl.top,
-                right: decl.right,
-                bottom: decl.bottom,
-                left: decl.left,
-            },
+            Some(decl) => *decl,
             None => config.margin,
         }
     };
@@ -149,8 +144,8 @@ fn resolve_landscape_from_css(css_size: Option<&PageSizeDecl>, fallback: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, PageSize};
-    use crate::gcpm::{PageMarginDecl, PageSettingsRule, PageSizeDecl};
+    use crate::config::{Config, Margin, PageSize};
+    use crate::gcpm::{PageSettingsRule, PageSizeDecl};
 
     #[test]
     fn test_no_page_settings_uses_config() {
@@ -193,7 +188,7 @@ mod tests {
             PageSettingsRule {
                 page_selector: None,
                 size: None,
-                margin: Some(PageMarginDecl {
+                margin: Some(Margin {
                     top: 20.0,
                     right: 20.0,
                     bottom: 20.0,
@@ -203,7 +198,7 @@ mod tests {
             PageSettingsRule {
                 page_selector: Some(":first".into()),
                 size: None,
-                margin: Some(PageMarginDecl {
+                margin: Some(Margin {
                     top: 50.0,
                     right: 50.0,
                     bottom: 50.0,
@@ -224,7 +219,7 @@ mod tests {
             PageSettingsRule {
                 page_selector: Some(":left".into()),
                 size: None,
-                margin: Some(PageMarginDecl {
+                margin: Some(Margin {
                     top: 20.0,
                     right: 30.0,
                     bottom: 20.0,
@@ -234,7 +229,7 @@ mod tests {
             PageSettingsRule {
                 page_selector: Some(":right".into()),
                 size: None,
-                margin: Some(PageMarginDecl {
+                margin: Some(Margin {
                     top: 20.0,
                     right: 10.0,
                     bottom: 20.0,
