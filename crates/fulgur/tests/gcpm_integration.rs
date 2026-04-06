@@ -1,4 +1,5 @@
 use fulgur::asset::AssetBundle;
+use fulgur::config::PageSize;
 use fulgur::engine::Engine;
 
 #[test]
@@ -581,4 +582,72 @@ fn test_element_default_policy_still_works() {
         pdf.len()
     );
     assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn test_gcpm_page_size_from_css() {
+    let html = "<html><body><p>Hello World</p></body></html>";
+    let css = "@page { size: letter; margin: 1in; }";
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder().assets(assets).build();
+    let result = engine.render_html(html);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
+}
+
+#[test]
+fn test_gcpm_page_size_cli_overrides_css() {
+    let html = "<html><body><p>Hello World</p></body></html>";
+    let css = "@page { size: letter; }";
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder()
+        .page_size(PageSize::A3)
+        .assets(assets)
+        .build();
+    let result = engine.render_html(html);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
+}
+
+#[test]
+fn test_gcpm_page_margin_from_css() {
+    let html = "<html><body><p>Hello World</p></body></html>";
+    let css = "@page { margin: 10mm; }";
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder().assets(assets).build();
+    let result = engine.render_html(html);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
+}
+
+#[test]
+fn test_gcpm_page_size_custom_dimensions() {
+    let html = "<html><body><p>Hello World</p></body></html>";
+    let css = "@page { size: 100mm 200mm; margin: 10mm; }";
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder().assets(assets).build();
+    let result = engine.render_html(html);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
+}
+
+#[test]
+fn test_gcpm_page_size_with_margin_boxes() {
+    let html = r#"<html><body>
+        <div class="header">Header</div>
+        <p>Content</p>
+    </body></html>"#;
+    let css = r#"
+        .header { position: running(pageHeader); }
+        @page {
+            size: A4 landscape;
+            margin: 20mm;
+            @top-center { content: element(pageHeader); }
+        }
+    "#;
+    let mut assets = AssetBundle::new();
+    assets.add_css(css);
+    let engine = Engine::builder().assets(assets).build();
+    let result = engine.render_html(html);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
 }
