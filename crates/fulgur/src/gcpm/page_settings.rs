@@ -96,7 +96,12 @@ pub fn resolve_page_settings(
                 } else {
                     *is_landscape
                 };
-                (keyword_to_page_size(name), ls)
+                let size = if name == "auto" {
+                    config.page_size
+                } else {
+                    keyword_to_page_size(name)
+                };
+                (size, ls)
             }
             Some(PageSizeDecl::Custom(w, h)) => {
                 let ls = if config.overrides.landscape {
