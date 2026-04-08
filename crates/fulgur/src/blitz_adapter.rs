@@ -338,9 +338,9 @@ impl DomPass for LinkStylesheetPass {
     }
 }
 
-use crate::gcpm::counter::{CounterState, format_counter};
-use crate::gcpm::running::{RunningElementStore, serialize_node};
-use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
+use crate::gcpm::counter::{format_counter, CounterState};
+use crate::gcpm::running::{serialize_node, RunningElementStore};
+use crate::gcpm::string_set::{extract_text_content, StringSetEntry, StringSetStore};
 use crate::gcpm::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, ParsedSelector, PseudoElement,
     RunningMapping, StringSetMapping, StringSetValue,
@@ -613,10 +613,9 @@ impl CounterPass {
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
         // CSS spec: ::before is a first child, ::after is a last child, so
         // ::after must see counter state changes from descendants.
-        let (before_indices, after_indices): (Vec<usize>, Vec<usize>) =
-            matched_content_indices.into_iter().partition(|&idx| {
-                self.content_mappings[idx].pseudo == PseudoElement::Before
-            });
+        let (before_indices, after_indices): (Vec<usize>, Vec<usize>) = matched_content_indices
+            .into_iter()
+            .partition(|&idx| self.content_mappings[idx].pseudo == PseudoElement::Before);
 
         // Allocate a cid if any content mappings matched (needed for both phases)
         let attr_value = if !before_indices.is_empty() || !after_indices.is_empty() {

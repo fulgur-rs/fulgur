@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::gcpm::CounterOp;
 use crate::gcpm::counter::CounterState;
+use crate::gcpm::CounterOp;
 use crate::pageable::{
     BlockPageable, CounterOpMarkerPageable, CounterOpWrapperPageable, ListItemPageable, Pageable,
     Pt, RunningElementMarkerPageable, RunningElementWrapperPageable, StringSetPageable,
