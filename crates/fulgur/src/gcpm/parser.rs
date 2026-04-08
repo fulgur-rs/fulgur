@@ -1091,10 +1091,11 @@ mod tests {
     fn test_extract_running_name() {
         let css = ".header { position: running(pageHeader); font-size: 12px; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx
-            .running_mappings
-            .iter()
-            .any(|m| m.running_name == "pageHeader"));
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "pageHeader")
+        );
         assert!(ctx.cleaned_css.contains("display: none"));
         assert!(!ctx.cleaned_css.contains("running"));
         assert!(ctx.cleaned_css.contains("font-size: 12px"));
@@ -1201,10 +1202,11 @@ mod tests {
         // POSITION: Running(name) — プロパティ名の大文字小文字
         let css = ".header { POSITION: running(pageHeader); }";
         let ctx = parse_gcpm(css);
-        assert!(ctx
-            .running_mappings
-            .iter()
-            .any(|m| m.running_name == "pageHeader"));
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "pageHeader")
+        );
         assert!(ctx.cleaned_css.contains("display: none"));
     }
 

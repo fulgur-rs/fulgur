@@ -7,9 +7,9 @@ use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
     BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
-    ListItemPageable, Pageable,
-    PositionedChild, RunningElementMarkerPageable, RunningElementWrapperPageable, Size,
-    SpacerPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
+    ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
+    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
+    StringSetWrapperPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,

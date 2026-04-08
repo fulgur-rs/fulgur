@@ -1,6 +1,6 @@
 use super::{ContentItem, CounterStyle, StringPolicy};
-use crate::gcpm::running::RunningElementStore;
 use crate::gcpm::ElementPolicy;
+use crate::gcpm::running::RunningElementStore;
 use crate::paginate::{PageRunningState, StringSetPageState};
 use std::collections::BTreeMap;
 

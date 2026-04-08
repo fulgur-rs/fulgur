@@ -338,9 +338,9 @@ impl DomPass for LinkStylesheetPass {
     }
 }
 
-use crate::gcpm::counter::{format_counter, CounterState};
-use crate::gcpm::running::{serialize_node, RunningElementStore};
-use crate::gcpm::string_set::{extract_text_content, StringSetEntry, StringSetStore};
+use crate::gcpm::counter::{CounterState, format_counter};
+use crate::gcpm::running::{RunningElementStore, serialize_node};
+use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
 use crate::gcpm::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, ParsedSelector, PseudoElement,
     RunningMapping, StringSetMapping, StringSetValue,
