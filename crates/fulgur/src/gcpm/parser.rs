@@ -5,10 +5,10 @@ use cssparser::{
 
 use super::margin_box::MarginBoxPosition;
 use super::{
-    ContentItem, CounterType, ElementPolicy, GcpmContext, MarginBoxRule, PageSettingsRule,
-    PageSizeDecl, ParsedSelector, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
+    ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle, ElementPolicy,
+    GcpmContext, MarginBoxRule, ParsedSelector, PseudoElement, RunningMapping, StringPolicy,
+    StringSetMapping, StringSetValue,
 };
-use crate::config::Margin;
 
 // ---------------------------------------------------------------------------
 // Top-level result types
@@ -35,7 +35,8 @@ struct GcpmSheetParser<'a> {
     margin_boxes: &'a mut Vec<MarginBoxRule>,
     running_mappings: &'a mut Vec<RunningMapping>,
     string_set_mappings: &'a mut Vec<StringSetMapping>,
-    page_settings: &'a mut Vec<PageSettingsRule>,
+    counter_mappings: &'a mut Vec<CounterMapping>,
+    content_counter_mappings: &'a mut Vec<ContentCounterMapping>,
 }
 
 /// Describes a region in the original CSS to edit when building `cleaned_css`.
@@ -83,9 +84,7 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::AtRule, ParseError<'i, ()>> {
         let mut boxes = Vec::new();
-        let mut size = None;
-        let mut margin = None;
-        parse_page_block(input, &page_selector, &mut boxes, &mut size, &mut margin);
+        parse_page_block(input, &page_selector, &mut boxes);
 
         // Record the full @page rule span for removal.
         let start_offset = start.position().byte_index();
@@ -96,21 +95,17 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
         });
 
         self.margin_boxes.extend(boxes);
-
-        if size.is_some() || margin.is_some() {
-            self.page_settings.push(PageSettingsRule {
-                page_selector,
-                size,
-                margin,
-            });
-        }
-
         Ok(TopLevelItem::PageRule)
     }
 }
 
+struct QualifiedPrelude {
+    selector: ParsedSelector,
+    pseudo: Option<PseudoElement>,
+}
+
 impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
-    type Prelude = Option<ParsedSelector>;
+    type Prelude = Option<QualifiedPrelude>;
     type QualifiedRule = TopLevelItem;
     type Error = ();
 
@@ -138,6 +133,23 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                 return Ok(None);
             }
         };
+
+        // Try to detect ::before / ::after pseudo-element
+        let pseudo = input
+            .try_parse(|input| {
+                input.expect_colon()?;
+                input.expect_colon()?;
+                let ident = input.expect_ident()?.clone();
+                if ident.eq_ignore_ascii_case("before") {
+                    Ok(PseudoElement::Before)
+                } else if ident.eq_ignore_ascii_case("after") {
+                    Ok(PseudoElement::After)
+                } else {
+                    Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                }
+            })
+            .ok();
+
         // Reject compound/group selectors — only simple selectors are supported.
         // If any non-whitespace tokens remain, this is not a simple selector.
         while let Ok(tok) = input.next_including_whitespace() {
@@ -146,7 +158,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                 _ => return Ok(None),
             }
         }
-        Ok(Some(selector))
+        Ok(Some(QualifiedPrelude { selector, pseudo }))
     }
 
     fn parse_block<'t>(
@@ -155,21 +167,29 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         _start: &cssparser::ParserState,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
-        // Only scan for `position: running(...)` if the selector is supported.
+        // Only scan for GCPM declarations if the selector is supported.
         // Otherwise, skip the block to avoid replacing declarations with
         // `display: none` for elements that won't be registered as running.
-        let Some(selector) = prelude else {
+        let Some(qp) = prelude else {
             while input.next().is_ok() {}
             return Ok(TopLevelItem::StyleRule);
         };
 
+        let selector = qp.selector;
+        let pseudo = qp.pseudo;
+
         let mut running_name: Option<String> = None;
         let mut string_set: Option<(String, Vec<StringSetValue>)> = None;
+        let mut counter_ops: Vec<CounterOp> = Vec::new();
+        let mut content_items: Option<Vec<ContentItem>> = None;
 
         let mut parser = StyleRuleParser {
             edits: self.edits,
             running_name: &mut running_name,
             string_set: &mut string_set,
+            counter_ops: &mut counter_ops,
+            content_items: &mut content_items,
+            has_pseudo: pseudo.is_some(),
         };
         let iter = RuleBodyParser::new(input, &mut parser);
         for item in iter {
@@ -185,168 +205,30 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
 
         if let Some((name, values)) = string_set {
             self.string_set_mappings.push(StringSetMapping {
-                parsed: selector,
+                parsed: selector.clone(),
                 name,
                 values,
             });
         }
 
-        Ok(TopLevelItem::StyleRule)
-    }
-}
+        if !counter_ops.is_empty() {
+            self.counter_mappings.push(CounterMapping {
+                parsed: selector.clone(),
+                ops: counter_ops,
+            });
+        }
 
-// ---------------------------------------------------------------------------
-// CSS length unit → points converter
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// @page size/margin value parsers
-// ---------------------------------------------------------------------------
-
-/// Convert a CSS dimension value+unit to PDF points.
-fn css_unit_to_pt(value: f32, unit: &str) -> Option<f32> {
-    let factor = match () {
-        _ if unit.eq_ignore_ascii_case("mm") => 72.0 / 25.4,
-        _ if unit.eq_ignore_ascii_case("cm") => 72.0 / 2.54,
-        _ if unit.eq_ignore_ascii_case("in") => 72.0,
-        _ if unit.eq_ignore_ascii_case("pt") => 1.0,
-        _ if unit.eq_ignore_ascii_case("px") => 72.0 / 96.0,
-        _ => return None,
-    };
-    Some(value * factor)
-}
-
-/// Parse the value of an `@page { size: ... }` declaration.
-///
-/// Returns `None` if the value is invalid or has trailing tokens
-/// (CSS requires invalid declarations to be ignored entirely).
-fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
-    let token = input.next().ok()?.clone();
-    let result = match token {
-        Token::Ident(ref name) => {
-            if name.eq_ignore_ascii_case("auto") {
-                Some(PageSizeDecl::Auto)
-            } else if name.eq_ignore_ascii_case("landscape") {
-                Some(PageSizeDecl::KeywordWithOrientation(
-                    "auto".to_string(),
-                    true,
-                ))
-            } else if name.eq_ignore_ascii_case("portrait") {
-                Some(PageSizeDecl::KeywordWithOrientation(
-                    "auto".to_string(),
-                    false,
-                ))
-            } else {
-                let keyword = name.to_string();
-                // Try to read a second ident for orientation
-                let orientation = input.try_parse(|input| {
-                    let tok = input.next()?.clone();
-                    match tok {
-                        Token::Ident(ref orient) => {
-                            if orient.eq_ignore_ascii_case("landscape") {
-                                Ok(true)
-                            } else if orient.eq_ignore_ascii_case("portrait") {
-                                Ok(false)
-                            } else {
-                                Err(input
-                                    .new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
-                            }
-                        }
-                        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
-                    }
+        if let Some(items) = content_items {
+            if let Some(pseudo) = pseudo {
+                self.content_counter_mappings.push(ContentCounterMapping {
+                    parsed: selector.clone(),
+                    pseudo,
+                    content: items,
                 });
-                match orientation {
-                    Ok(landscape) => Some(PageSizeDecl::KeywordWithOrientation(keyword, landscape)),
-                    Err(_) => Some(PageSizeDecl::Keyword(keyword)),
-                }
             }
         }
-        Token::Dimension { value, unit, .. } => {
-            let w = css_unit_to_pt(value, &unit).filter(|v| *v > 0.0)?;
-            // Try to read a second dimension for height
-            let h = input
-                .try_parse(|input| {
-                    let tok = input.next()?.clone();
-                    match tok {
-                        Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
-                            .filter(|v| *v > 0.0)
-                            .ok_or_else(|| {
-                                input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
-                            }),
-                        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
-                    }
-                })
-                .unwrap_or(w);
-            Some(PageSizeDecl::Custom(w, h))
-        }
-        _ => None,
-    };
-    // Reject if trailing tokens remain (CSS: invalid declaration → ignore entirely)
-    if result.is_some() && input.next().is_ok() {
-        return None;
-    }
-    result
-}
 
-/// Parse the value of an `@page { margin: ... }` declaration (CSS shorthand).
-///
-/// Returns `None` if the value is invalid or has trailing tokens
-/// (CSS requires invalid declarations to be ignored entirely).
-fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<Margin> {
-    let mut values = Vec::new();
-    loop {
-        let result = input.try_parse(|input| {
-            let tok = input.next()?.clone();
-            match tok {
-                Token::Dimension { value, unit, .. } => {
-                    css_unit_to_pt(value, &unit).ok_or_else(|| {
-                        input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
-                    })
-                }
-                Token::Number { value: 0.0, .. } => Ok(0.0_f32),
-                _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
-            }
-        });
-        match result {
-            Ok(v) => values.push(v),
-            Err(_) => break,
-        }
-        if values.len() >= 4 {
-            break;
-        }
-    }
-
-    // Reject if trailing tokens remain (CSS: invalid declaration → ignore entirely)
-    if input.next().is_ok() {
-        return None;
-    }
-
-    match values.len() {
-        1 => Some(Margin {
-            top: values[0],
-            right: values[0],
-            bottom: values[0],
-            left: values[0],
-        }),
-        2 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[0],
-            left: values[1],
-        }),
-        3 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[2],
-            left: values[1],
-        }),
-        4 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[2],
-            left: values[3],
-        }),
-        _ => None,
+        Ok(TopLevelItem::StyleRule)
     }
 }
 
@@ -358,14 +240,10 @@ fn parse_page_block(
     input: &mut Parser<'_, '_>,
     page_selector: &Option<String>,
     boxes: &mut Vec<MarginBoxRule>,
-    size: &mut Option<PageSizeDecl>,
-    margin: &mut Option<Margin>,
 ) {
     let mut parser = PageRuleParser {
         page_selector,
         boxes,
-        size,
-        margin,
     };
     let iter = RuleBodyParser::new(input, &mut parser);
     for item in iter {
@@ -376,8 +254,6 @@ fn parse_page_block(
 struct PageRuleParser<'a> {
     page_selector: &'a Option<String>,
     boxes: &'a mut Vec<MarginBoxRule>,
-    size: &'a mut Option<PageSizeDecl>,
-    margin: &'a mut Option<Margin>,
 }
 
 impl<'i, 'a> AtRuleParser<'i> for PageRuleParser<'a> {
@@ -433,18 +309,9 @@ impl<'i, 'a> DeclarationParser<'i> for PageRuleParser<'a> {
         input: &mut Parser<'i, 't>,
         _start: &cssparser::ParserState,
     ) -> Result<(), ParseError<'i, ()>> {
-        if name.eq_ignore_ascii_case("size") {
-            if let Some(v) = parse_page_size_value(input) {
-                *self.size = Some(v);
-            }
-        } else if name.eq_ignore_ascii_case("margin") {
-            if let Some(v) = parse_page_margin_value(input) {
-                *self.margin = Some(v);
-            }
-        } else {
-            // Skip unknown declarations
-            while input.next().is_ok() {}
-        }
+        // Skip declarations directly inside @page (not inside margin boxes)
+        let _ = name;
+        while input.next().is_ok() {}
         Ok(())
     }
 }
@@ -530,6 +397,9 @@ struct StyleRuleParser<'a> {
     edits: &'a mut Vec<CssEdit>,
     running_name: &'a mut Option<String>,
     string_set: &'a mut Option<(String, Vec<StringSetValue>)>,
+    counter_ops: &'a mut Vec<CounterOp>,
+    content_items: &'a mut Option<Vec<ContentItem>>,
+    has_pseudo: bool,
 }
 
 impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
@@ -588,6 +458,42 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
             } else {
                 while input.next().is_ok() {}
             }
+        } else if name.eq_ignore_ascii_case("counter-reset")
+            || name.eq_ignore_ascii_case("counter-increment")
+            || name.eq_ignore_ascii_case("counter-set")
+        {
+            let ops = parse_counter_ops(input, &name);
+            if !ops.is_empty() {
+                self.counter_ops.extend(ops);
+                let start = decl_start.position().byte_index();
+                let end = input.position().byte_index();
+                self.edits.push(CssEdit::Replace {
+                    start,
+                    end,
+                    replacement: String::new(),
+                });
+            }
+        } else if name.eq_ignore_ascii_case("content") && self.has_pseudo {
+            let items = parse_content_value(input);
+            let has_counter = items
+                .iter()
+                .any(|item| matches!(item, ContentItem::Counter { .. }));
+            if has_counter {
+                *self.content_items = Some(items);
+            } else {
+                *self.content_items = None;
+            }
+            // Always strip `content` from cleaned CSS for ::before/::after rules
+            // we recognise — counter()/string()/element() are resolved by us, not
+            // by Blitz, so leaving the original declaration would cause Blitz to
+            // try (and fail) to render the unsupported function.
+            let start = decl_start.position().byte_index();
+            let end = input.position().byte_index();
+            self.edits.push(CssEdit::Replace {
+                start,
+                end,
+                replacement: String::new(),
+            });
         } else {
             // Skip other declarations
             while input.next().is_ok() {}
@@ -728,6 +634,27 @@ fn parse_string_policy<'i>(input: &mut Parser<'i, '_>) -> Result<StringPolicy, P
     })
 }
 
+/// Parse the style argument of `counter(name, <style>)`.
+fn parse_counter_style<'i>(input: &mut Parser<'i, '_>) -> Result<CounterStyle, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    // Handle hyphenated idents: cssparser may split "upper-roman" into
+    // "upper" + "-" + "roman".
+    let full = if input.try_parse(|input| input.expect_delim('-')).is_ok() {
+        let suffix = input.expect_ident()?.clone();
+        format!("{}-{}", &*ident, &*suffix)
+    } else {
+        ident.to_string()
+    };
+    match full.to_ascii_lowercase().as_str() {
+        "decimal" => Ok(CounterStyle::Decimal),
+        "upper-roman" => Ok(CounterStyle::UpperRoman),
+        "lower-roman" => Ok(CounterStyle::LowerRoman),
+        "upper-alpha" | "upper-latin" => Ok(CounterStyle::UpperAlpha),
+        "lower-alpha" | "lower-latin" => Ok(CounterStyle::LowerAlpha),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 /// Parse the policy argument of `element(name, <policy>)`.
 fn parse_element_policy<'i>(
     input: &mut Parser<'i, '_>,
@@ -739,6 +666,36 @@ fn parse_element_policy<'i>(
         "first-except" => Some(ElementPolicy::FirstExcept),
         _ => None,
     })
+}
+
+/// Parse counter operations from `counter-reset`, `counter-increment`, or `counter-set`.
+fn parse_counter_ops(input: &mut Parser<'_, '_>, prop: &str) -> Vec<CounterOp> {
+    let mut ops = Vec::new();
+    loop {
+        let name = match input.try_parse(|input| input.expect_ident().map(|s| s.to_string())) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if name.eq_ignore_ascii_case("none") {
+            break;
+        }
+        let value = input.try_parse(|input| input.expect_integer()).ok();
+        let default_value = if prop.eq_ignore_ascii_case("counter-increment") {
+            1
+        } else {
+            0
+        };
+        let value = value.unwrap_or(default_value);
+        let op = if prop.eq_ignore_ascii_case("counter-reset") {
+            CounterOp::Reset { name, value }
+        } else if prop.eq_ignore_ascii_case("counter-increment") {
+            CounterOp::Increment { name, value }
+        } else {
+            CounterOp::Set { name, value }
+        };
+        ops.push(op);
+    }
+    ops
 }
 
 /// Parse a `content` property value into a list of `ContentItem`s using cssparser.
@@ -781,11 +738,14 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 });
                             }
                         } else if fn_name.eq_ignore_ascii_case("counter") {
-                            match &*arg {
-                                "page" => items.push(ContentItem::Counter(CounterType::Page)),
-                                "pages" => items.push(ContentItem::Counter(CounterType::Pages)),
-                                _ => {} // unknown counter
-                            }
+                            let name = arg.to_string();
+                            let style = input
+                                .try_parse(|input| {
+                                    input.expect_comma()?;
+                                    parse_counter_style(input)
+                                })
+                                .unwrap_or(CounterStyle::Decimal);
+                            items.push(ContentItem::Counter { name, style });
                         } else if fn_name.eq_ignore_ascii_case("string") {
                             let name = arg.to_string();
                             let policy = input
@@ -831,7 +791,8 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut margin_boxes = Vec::new();
     let mut running_mappings = Vec::new();
     let mut string_set_mappings = Vec::new();
-    let mut page_settings = Vec::new();
+    let mut counter_mappings = Vec::new();
+    let mut content_counter_mappings = Vec::new();
     let mut edits: Vec<CssEdit> = Vec::new();
 
     // Run the cssparser-based parse to collect GCPM data and edit spans.
@@ -844,7 +805,8 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
             margin_boxes: &mut margin_boxes,
             running_mappings: &mut running_mappings,
             string_set_mappings: &mut string_set_mappings,
-            page_settings: &mut page_settings,
+            counter_mappings: &mut counter_mappings,
+            content_counter_mappings: &mut content_counter_mappings,
         };
 
         let iter = StyleSheetParser::new(&mut input, &mut parser);
@@ -860,7 +822,8 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         margin_boxes,
         running_mappings,
         string_set_mappings,
-        page_settings,
+        counter_mappings,
+        content_counter_mappings,
         cleaned_css,
     }
 }
@@ -983,9 +946,15 @@ mod tests {
             mb.content,
             vec![
                 ContentItem::String("Page ".to_string()),
-                ContentItem::Counter(CounterType::Page),
+                ContentItem::Counter {
+                    name: "page".into(),
+                    style: CounterStyle::Decimal,
+                },
                 ContentItem::String(" of ".to_string()),
-                ContentItem::Counter(CounterType::Pages),
+                ContentItem::Counter {
+                    name: "pages".into(),
+                    style: CounterStyle::Decimal,
+                },
             ]
         );
     }
@@ -1347,171 +1316,161 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // @page size/margin parsing tests
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_page_size_keyword() {
-        let css = "@page { size: A4; }";
+    fn test_parse_custom_counter() {
+        let css = r#"@page { @bottom-center { content: "Ch. " counter(chapter); } }"#;
         let ctx = parse_gcpm(css);
-        assert_eq!(ctx.page_settings.len(), 1);
-        assert_eq!(
-            ctx.page_settings[0].size,
-            Some(PageSizeDecl::Keyword("A4".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_page_size_keyword_landscape() {
-        let css = "@page { size: A4 landscape; }";
-        let ctx = parse_gcpm(css);
-        assert_eq!(
-            ctx.page_settings[0].size,
-            Some(PageSizeDecl::KeywordWithOrientation("A4".to_string(), true))
-        );
-    }
-
-    #[test]
-    fn test_page_size_custom_dimensions() {
-        let css = "@page { size: 210mm 297mm; }";
-        let ctx = parse_gcpm(css);
-        match &ctx.page_settings[0].size {
-            Some(PageSizeDecl::Custom(w, h)) => {
-                assert!((w - 595.28).abs() < 0.2);
-                assert!((h - 841.89).abs() < 0.2);
-            }
-            other => panic!("Expected Custom, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_page_size_auto() {
-        let css = "@page { size: auto; }";
-        let ctx = parse_gcpm(css);
-        assert_eq!(ctx.page_settings[0].size, Some(PageSizeDecl::Auto));
-    }
-
-    #[test]
-    fn test_page_margin_uniform() {
-        let css = "@page { margin: 20mm; }";
-        let ctx = parse_gcpm(css);
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        let expected = 20.0 * 72.0 / 25.4;
-        assert!((m.top - expected).abs() < 0.01);
-        assert!((m.right - expected).abs() < 0.01);
-        assert!((m.bottom - expected).abs() < 0.01);
-        assert!((m.left - expected).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_page_margin_shorthand_two() {
-        let css = "@page { margin: 10mm 20mm; }";
-        let ctx = parse_gcpm(css);
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        let v = 10.0 * 72.0 / 25.4;
-        let h = 20.0 * 72.0 / 25.4;
-        assert!((m.top - v).abs() < 0.01);
-        assert!((m.right - h).abs() < 0.01);
-        assert!((m.bottom - v).abs() < 0.01);
-        assert!((m.left - h).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_page_margin_shorthand_three() {
-        let css = "@page { margin: 10mm 20mm 30mm; }";
-        let ctx = parse_gcpm(css);
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        assert!((m.top - 10.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.right - 20.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.bottom - 30.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.left - 20.0 * 72.0 / 25.4).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_page_margin_shorthand_four() {
-        let css = "@page { margin: 10mm 20mm 30mm 40mm; }";
-        let ctx = parse_gcpm(css);
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        assert!((m.top - 10.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.right - 20.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.bottom - 30.0 * 72.0 / 25.4).abs() < 0.01);
-        assert!((m.left - 40.0 * 72.0 / 25.4).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_page_size_with_selector() {
-        let css = "@page :first { size: letter; margin: 1in; }";
-        let ctx = parse_gcpm(css);
-        assert_eq!(ctx.page_settings.len(), 1);
-        assert_eq!(
-            ctx.page_settings[0].page_selector,
-            Some(":first".to_string())
-        );
-        assert_eq!(
-            ctx.page_settings[0].size,
-            Some(PageSizeDecl::Keyword("letter".to_string()))
-        );
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        assert!((m.top - 72.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_page_size_and_margin_boxes_coexist() {
-        let css = r#"@page { size: A4; margin: 20mm; @top-center { content: counter(page); } }"#;
-        let ctx = parse_gcpm(css);
-        assert_eq!(ctx.page_settings.len(), 1);
         assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![
+                ContentItem::String("Ch. ".into()),
+                ContentItem::Counter {
+                    name: "chapter".into(),
+                    style: CounterStyle::Decimal,
+                },
+            ]
+        );
     }
 
     #[test]
-    fn test_page_margin_zero() {
-        let css = "@page { margin: 0; }";
+    fn test_parse_counter_with_style() {
+        let css = r#"@page { @bottom-center { content: counter(chapter, upper-roman); } }"#;
         let ctx = parse_gcpm(css);
-        let m = ctx.page_settings[0].margin.as_ref().unwrap();
-        assert!((m.top).abs() < 0.01);
-        assert!((m.right).abs() < 0.01);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::UpperRoman,
+            }]
+        );
     }
 
     #[test]
-    fn test_page_size_negative_rejected() {
-        let css = "@page { size: -10mm 297mm; }";
+    fn test_parse_counter_lower_alpha_style() {
+        let css = r#"@page { @bottom-center { content: counter(section, lower-alpha); } }"#;
         let ctx = parse_gcpm(css);
-        assert!(ctx.page_settings.is_empty() || ctx.page_settings[0].size.is_none());
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::LowerAlpha,
+            }]
+        );
     }
 
     #[test]
-    fn test_page_size_trailing_tokens_rejected() {
-        let css = "@page { size: A4 bogus; }";
+    fn test_parse_counter_reset() {
+        let css = "body { counter-reset: chapter 0; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.page_settings.is_empty() || ctx.page_settings[0].size.is_none());
+        assert_eq!(ctx.counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.counter_mappings[0].parsed,
+            ParsedSelector::Tag("body".into())
+        );
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Reset {
+                name: "chapter".into(),
+                value: 0,
+            }]
+        );
     }
 
     #[test]
-    fn test_page_margin_trailing_tokens_rejected() {
-        let css = "@page { margin: 10mm 20mm bad; }";
+    fn test_parse_counter_increment() {
+        let css = "h2 { counter-increment: chapter; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.page_settings.is_empty() || ctx.page_settings[0].margin.is_none());
+        assert_eq!(ctx.counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }]
+        );
     }
 
     #[test]
-    fn test_page_margin_five_values_rejected() {
-        let css = "@page { margin: 1mm 2mm 3mm 4mm 5mm; }";
+    fn test_parse_counter_set() {
+        let css = "h2 { counter-set: chapter 5; }";
         let ctx = parse_gcpm(css);
-        assert!(ctx.page_settings.is_empty() || ctx.page_settings[0].margin.is_none());
+        assert_eq!(ctx.counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Set {
+                name: "chapter".into(),
+                value: 5,
+            }]
+        );
     }
 
     #[test]
-    fn test_css_unit_case_insensitive() {
-        let css = "@page { size: 210MM 297MM; }";
+    fn test_parse_counter_multiple_names() {
+        let css = "h2 { counter-reset: chapter 0 section 0; }";
         let ctx = parse_gcpm(css);
-        let size = ctx.page_settings[0].size.as_ref().unwrap();
-        match size {
-            PageSizeDecl::Custom(w, h) => {
-                assert!((*w - 210.0 * 72.0 / 25.4).abs() < 0.01);
-                assert!((*h - 297.0 * 72.0 / 25.4).abs() < 0.01);
-            }
-            _ => panic!("expected Custom size"),
-        }
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![
+                CounterOp::Reset {
+                    name: "chapter".into(),
+                    value: 0,
+                },
+                CounterOp::Reset {
+                    name: "section".into(),
+                    value: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_counter_increment_default_value() {
+        let css = "h2 { counter-increment: section; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Increment {
+                name: "section".into(),
+                value: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_pseudo_element_content_with_counter() {
+        let css = r#"h2::before { content: counter(chapter) ". "; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.content_counter_mappings.len(), 1);
+        let m = &ctx.content_counter_mappings[0];
+        assert_eq!(m.parsed, ParsedSelector::Tag("h2".into()));
+        assert_eq!(m.pseudo, PseudoElement::Before);
+        assert_eq!(
+            m.content,
+            vec![
+                ContentItem::Counter {
+                    name: "chapter".into(),
+                    style: CounterStyle::Decimal,
+                },
+                ContentItem::String(". ".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_counter_declarations_stripped_from_cleaned_css() {
+        let css = "body { counter-reset: chapter; color: red; }";
+        let ctx = parse_gcpm(css);
+        assert!(!ctx.cleaned_css.contains("counter-reset"));
+        assert!(ctx.cleaned_css.contains("color: red"));
+    }
+
+    #[test]
+    fn test_parse_pseudo_content_stripped_from_cleaned_css() {
+        let css = r#"h2::before { content: counter(chapter) ". "; font-weight: bold; }"#;
+        let ctx = parse_gcpm(css);
+        assert!(!ctx.cleaned_css.contains("counter(chapter)"));
+        assert!(ctx.cleaned_css.contains("font-weight: bold"));
     }
 }

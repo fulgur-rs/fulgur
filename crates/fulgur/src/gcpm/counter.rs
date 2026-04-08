@@ -1,4 +1,4 @@
-use super::{ContentItem, CounterType, StringPolicy};
+use super::{ContentItem, CounterStyle, StringPolicy};
 use crate::gcpm::ElementPolicy;
 use crate::gcpm::running::RunningElementStore;
 use crate::paginate::{PageRunningState, StringSetPageState};
@@ -12,17 +12,21 @@ pub fn resolve_content_to_string(
     string_set_states: &BTreeMap<String, StringSetPageState>,
     page: usize,
     total_pages: usize,
+    custom_counters: &BTreeMap<String, i32>,
 ) -> String {
     let mut out = String::new();
     for item in items {
         match item {
             ContentItem::String(s) => out.push_str(s),
-            ContentItem::Counter(CounterType::Page) => {
-                out.push_str(&page.to_string());
-            }
-            ContentItem::Counter(CounterType::Pages) => {
-                out.push_str(&total_pages.to_string());
-            }
+            ContentItem::Counter { name, style } => match name.as_str() {
+                "page" => out.push_str(&format_counter(page as i32, *style)),
+                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
+                _ => {
+                    if let Some(&value) = custom_counters.get(name.as_str()) {
+                        out.push_str(&format_counter(value, *style));
+                    }
+                }
+            },
             ContentItem::Element { .. } => {}
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
@@ -42,6 +46,7 @@ pub fn resolve_content_to_string(
 /// `StringRef` values come from the DOM (via `string-set: content(text) |
 /// attr(...)`) and are HTML-escaped before concatenation so characters like
 /// `<` and `&` do not corrupt the margin box.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_content_to_html(
     items: &[ContentItem],
     store: &RunningElementStore,
@@ -50,17 +55,21 @@ pub fn resolve_content_to_html(
     page_num: usize,
     total_pages: usize,
     page_idx: usize,
+    custom_counters: &BTreeMap<String, i32>,
 ) -> String {
     let mut out = String::new();
     for item in items {
         match item {
             ContentItem::String(s) => push_escaped_html_text(&mut out, s),
-            ContentItem::Counter(CounterType::Page) => {
-                out.push_str(&page_num.to_string());
-            }
-            ContentItem::Counter(CounterType::Pages) => {
-                out.push_str(&total_pages.to_string());
-            }
+            ContentItem::Counter { name, style } => match name.as_str() {
+                "page" => out.push_str(&format_counter(page_num as i32, *style)),
+                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
+                _ => {
+                    if let Some(&value) = custom_counters.get(name.as_str()) {
+                        out.push_str(&format_counter(value, *style));
+                    }
+                }
+            },
             ContentItem::Element { name, policy } => {
                 if let Some(html) =
                     resolve_element_policy(name, *policy, page_idx, running_states, store)
@@ -169,6 +178,103 @@ pub fn resolve_element_policy<'a>(
     None
 }
 
+/// Format a counter value according to the given [`CounterStyle`].
+pub fn format_counter(value: i32, style: CounterStyle) -> String {
+    match style {
+        CounterStyle::Decimal => value.to_string(),
+        CounterStyle::UpperRoman => to_roman(value).unwrap_or_else(|| value.to_string()),
+        CounterStyle::LowerRoman => to_roman(value)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| value.to_string()),
+        CounterStyle::UpperAlpha => to_alpha(value, b'A').unwrap_or_else(|| value.to_string()),
+        CounterStyle::LowerAlpha => to_alpha(value, b'a').unwrap_or_else(|| value.to_string()),
+    }
+}
+
+/// Convert a positive integer (1..=3999) to an upper-case Roman numeral string.
+fn to_roman(value: i32) -> Option<String> {
+    if !(1..=3999).contains(&value) {
+        return None;
+    }
+    const TABLE: &[(i32, &str)] = &[
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    let mut rem = value;
+    for &(threshold, symbol) in TABLE {
+        while rem >= threshold {
+            out.push_str(symbol);
+            rem -= threshold;
+        }
+    }
+    Some(out)
+}
+
+/// Convert a positive integer to an alphabetic label (A=1 .. Z=26, AA=27 ..).
+fn to_alpha(value: i32, base: u8) -> Option<String> {
+    if value < 1 {
+        return None;
+    }
+    let mut n = value as u32;
+    let mut chars = Vec::new();
+    while n > 0 {
+        n -= 1;
+        chars.push((base + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    chars.reverse();
+    Some(chars.into_iter().collect())
+}
+
+/// Tracks CSS counter values during DOM traversal.
+///
+/// Simplified model (no `counters()` nesting): a flat map where
+/// `counter-reset` overwrites any existing value.
+#[derive(Debug, Clone, Default)]
+pub struct CounterState {
+    values: BTreeMap<String, i32>,
+}
+
+impl CounterState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self, name: &str, value: i32) {
+        self.values.insert(name.to_string(), value);
+    }
+
+    pub fn increment(&mut self, name: &str, value: i32) {
+        let entry = self.values.entry(name.to_string()).or_insert(0);
+        *entry += value;
+    }
+
+    pub fn set(&mut self, name: &str, value: i32) {
+        self.values.insert(name.to_string(), value);
+    }
+
+    pub fn get(&self, name: &str) -> i32 {
+        self.values.get(name).copied().unwrap_or(0)
+    }
+
+    /// Return a snapshot of all counter values.
+    pub fn snapshot(&self) -> BTreeMap<String, i32> {
+        self.values.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,12 +283,18 @@ mod tests {
     fn test_resolve_counters() {
         let items = vec![
             ContentItem::String("Page ".into()),
-            ContentItem::Counter(CounterType::Page),
+            ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
             ContentItem::String(" of ".into()),
-            ContentItem::Counter(CounterType::Pages),
+            ContentItem::Counter {
+                name: "pages".into(),
+                style: CounterStyle::Decimal,
+            },
         ];
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 3, 10),
+            resolve_content_to_string(&items, &BTreeMap::new(), 3, 10, &BTreeMap::new()),
             "Page 3 of 10"
         );
     }
@@ -214,7 +326,7 @@ mod tests {
             ContentItem::String("After".into()),
         ];
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 1, 5),
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 5, &BTreeMap::new()),
             "BeforeAfter"
         );
     }
@@ -227,7 +339,16 @@ mod tests {
         }];
         let (store, states) = single_page_store("hdr", "<b>Header</b>");
         assert_eq!(
-            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &store,
+                &states,
+                &BTreeMap::new(),
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "<b>Header</b>"
         );
     }
@@ -240,9 +361,15 @@ mod tests {
                 policy: ElementPolicy::First,
             },
             ContentItem::String(" - Page ".into()),
-            ContentItem::Counter(CounterType::Page),
+            ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
             ContentItem::String("/".into()),
-            ContentItem::Counter(CounterType::Pages),
+            ContentItem::Counter {
+                name: "pages".into(),
+                style: CounterStyle::Decimal,
+            },
         ];
 
         // Build 3 pages of state with distinct running-element instances per
@@ -262,7 +389,16 @@ mod tests {
 
         // page_num=2 (1-based), page_idx=1 (0-based) → must pick P2.
         assert_eq!(
-            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 2, 3, 1),
+            resolve_content_to_html(
+                &items,
+                &store,
+                &states,
+                &BTreeMap::new(),
+                2,
+                3,
+                1,
+                &BTreeMap::new()
+            ),
             "<span>P2</span> - Page 2/3"
         );
     }
@@ -277,7 +413,16 @@ mod tests {
         let store = RunningElementStore::new();
         let states: Vec<BTreeMap<String, PageRunningState>> = vec![BTreeMap::new()];
         assert_eq!(
-            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &store,
+                &states,
+                &BTreeMap::new(),
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "A &amp; B &lt;script&gt;"
         );
     }
@@ -298,7 +443,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "Current"
         );
     }
@@ -319,7 +473,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "Inherited"
         );
     }
@@ -340,7 +503,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "Start Value"
         );
     }
@@ -361,7 +533,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "Last"
         );
     }
@@ -382,7 +563,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             ""
         );
     }
@@ -403,7 +593,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "Inherited"
         );
     }
@@ -422,7 +621,8 @@ mod tests {
                 &BTreeMap::new(),
                 1,
                 1,
-                0
+                0,
+                &BTreeMap::new(),
             ),
             ""
         );
@@ -444,7 +644,16 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
+            resolve_content_to_html(
+                &items,
+                &RunningElementStore::new(),
+                &[],
+                &state,
+                1,
+                1,
+                0,
+                &BTreeMap::new()
+            ),
             "A &amp; B &lt;script&gt;"
         );
     }
@@ -570,5 +779,106 @@ mod tests {
             resolve_element_policy("missing", ElementPolicy::First, 0, &states, &store),
             None,
         );
+    }
+
+    #[test]
+    fn test_format_counter_decimal() {
+        assert_eq!(format_counter(1, CounterStyle::Decimal), "1");
+        assert_eq!(format_counter(42, CounterStyle::Decimal), "42");
+        assert_eq!(format_counter(0, CounterStyle::Decimal), "0");
+        assert_eq!(format_counter(-5, CounterStyle::Decimal), "-5");
+    }
+
+    #[test]
+    fn test_format_counter_upper_roman() {
+        assert_eq!(format_counter(1, CounterStyle::UpperRoman), "I");
+        assert_eq!(format_counter(4, CounterStyle::UpperRoman), "IV");
+        assert_eq!(format_counter(9, CounterStyle::UpperRoman), "IX");
+        assert_eq!(format_counter(14, CounterStyle::UpperRoman), "XIV");
+        assert_eq!(format_counter(3999, CounterStyle::UpperRoman), "MMMCMXCIX");
+        // Fallback to decimal for out-of-range values
+        assert_eq!(format_counter(0, CounterStyle::UpperRoman), "0");
+        assert_eq!(format_counter(4000, CounterStyle::UpperRoman), "4000");
+    }
+
+    #[test]
+    fn test_format_counter_lower_roman() {
+        assert_eq!(format_counter(1, CounterStyle::LowerRoman), "i");
+        assert_eq!(format_counter(14, CounterStyle::LowerRoman), "xiv");
+    }
+
+    #[test]
+    fn test_format_counter_upper_alpha() {
+        assert_eq!(format_counter(1, CounterStyle::UpperAlpha), "A");
+        assert_eq!(format_counter(26, CounterStyle::UpperAlpha), "Z");
+        assert_eq!(format_counter(27, CounterStyle::UpperAlpha), "AA");
+        // Fallback to decimal for 0
+        assert_eq!(format_counter(0, CounterStyle::UpperAlpha), "0");
+    }
+
+    #[test]
+    fn test_format_counter_lower_alpha() {
+        assert_eq!(format_counter(1, CounterStyle::LowerAlpha), "a");
+        assert_eq!(format_counter(26, CounterStyle::LowerAlpha), "z");
+    }
+
+    #[test]
+    fn test_resolve_custom_counter() {
+        let items = vec![
+            ContentItem::String("Chapter ".into()),
+            ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::UpperRoman,
+            },
+        ];
+        let mut custom_counters = BTreeMap::new();
+        custom_counters.insert("chapter".to_string(), 4);
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &custom_counters),
+            "Chapter IV"
+        );
+    }
+
+    #[test]
+    fn test_counter_state_reset_and_get() {
+        let mut state = CounterState::new();
+        state.reset("chapter", 0);
+        assert_eq!(state.get("chapter"), 0);
+    }
+
+    #[test]
+    fn test_counter_state_increment() {
+        let mut state = CounterState::new();
+        state.reset("chapter", 0);
+        state.increment("chapter", 1);
+        assert_eq!(state.get("chapter"), 1);
+        state.increment("chapter", 1);
+        assert_eq!(state.get("chapter"), 2);
+    }
+
+    #[test]
+    fn test_counter_state_set() {
+        let mut state = CounterState::new();
+        state.reset("chapter", 0);
+        state.set("chapter", 5);
+        assert_eq!(state.get("chapter"), 5);
+    }
+
+    #[test]
+    fn test_counter_state_implicit_zero() {
+        let mut state = CounterState::new();
+        state.increment("chapter", 1);
+        assert_eq!(state.get("chapter"), 1);
+    }
+
+    #[test]
+    fn test_counter_state_snapshot() {
+        let mut state = CounterState::new();
+        state.reset("chapter", 0);
+        state.increment("chapter", 1);
+        state.reset("section", 0);
+        let snap = state.snapshot();
+        assert_eq!(snap.get("chapter"), Some(&1));
+        assert_eq!(snap.get("section"), Some(&0));
     }
 }

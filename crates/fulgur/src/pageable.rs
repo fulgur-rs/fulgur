@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::gcpm::CounterOp;
 use crate::image::ImageFormat;
 
 /// Point unit (1/72 inch)
@@ -1228,6 +1229,121 @@ impl Pageable for RunningElementMarkerPageable {
 
     fn height(&self) -> Pt {
         0.0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── CounterOpMarkerPageable ──────────────────────────────
+
+/// Zero-size marker that carries counter operations through pagination.
+///
+/// Inserted into the Pageable tree so that `collect_counter_states` can replay
+/// counter-reset / counter-increment / counter-set in document order and build
+/// per-page counter snapshots.
+#[derive(Debug, Clone)]
+pub struct CounterOpMarkerPageable {
+    pub ops: Vec<CounterOp>,
+}
+
+impl CounterOpMarkerPageable {
+    pub fn new(ops: Vec<CounterOp>) -> Self {
+        Self { ops }
+    }
+}
+
+impl Pageable for CounterOpMarkerPageable {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn split(
+        &self,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        None
+    }
+
+    fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        0.0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── CounterOpWrapperPageable ─────────────────────────────
+
+/// Wraps a Pageable together with `CounterOp` operations that must stay
+/// attached to it during pagination.
+///
+/// Without this wrapper, a plain `BlockPageable` containing
+/// `[CounterOpMarkerPageable, child]` could split such that the marker is
+/// left on the previous page while the real child is moved to the next page
+/// (when the child is unsplittable and larger than the available space).
+/// `collect_counter_states` would then attribute the counter operation to
+/// the wrong page.
+///
+/// The wrapper delegates `split()` to the inner child: if the child splits,
+/// markers travel with the first fragment; if the child cannot split, the
+/// wrapper is atomic and the whole thing moves to the next page together.
+#[derive(Clone)]
+pub struct CounterOpWrapperPageable {
+    pub ops: Vec<CounterOp>,
+    pub child: Box<dyn Pageable>,
+}
+
+impl CounterOpWrapperPageable {
+    pub fn new(ops: Vec<CounterOp>, child: Box<dyn Pageable>) -> Self {
+        Self { ops, child }
+    }
+}
+
+impl Pageable for CounterOpWrapperPageable {
+    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
+        self.child.wrap(avail_width, avail_height)
+    }
+
+    fn split(
+        &self,
+        avail_width: Pt,
+        avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        let (first, second) = self.child.split(avail_width, avail_height)?;
+        let first_wrapped = CounterOpWrapperPageable {
+            ops: self.ops.clone(),
+            child: first,
+        };
+        Some((Box::new(first_wrapped), second))
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
+        self.child.draw(canvas, x, y, avail_width, avail_height);
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        self.child.height()
+    }
+
+    fn pagination(&self) -> Pagination {
+        self.child.pagination()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

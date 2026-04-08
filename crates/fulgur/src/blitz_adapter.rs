@@ -338,9 +338,13 @@ impl DomPass for LinkStylesheetPass {
     }
 }
 
+use crate::gcpm::counter::{CounterState, format_counter};
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
-use crate::gcpm::{ParsedSelector, RunningMapping, StringSetMapping, StringSetValue};
+use crate::gcpm::{
+    ContentCounterMapping, ContentItem, CounterMapping, CounterOp, ParsedSelector, PseudoElement,
+    RunningMapping, StringSetMapping, StringSetValue,
+};
 use std::cell::RefCell;
 
 /// Returns true for elements that should never be walked for GCPM detection
@@ -494,6 +498,209 @@ impl StringSetPass {
     }
 }
 
+/// Walks the DOM applying counter-reset/increment/set operations and resolves
+/// `content: counter()` in ::before/::after pseudo-elements by generating override CSS.
+pub struct CounterPass {
+    counter_mappings: Vec<CounterMapping>,
+    content_mappings: Vec<ContentCounterMapping>,
+    state: RefCell<CounterState>,
+    generated_css: RefCell<String>,
+    counter_id: RefCell<usize>,
+    /// Counter ops keyed by node_id, for later use in Pageable markers.
+    ops_by_node: RefCell<Vec<(usize, Vec<CounterOp>)>>,
+}
+
+impl CounterPass {
+    pub fn new(
+        counter_mappings: Vec<CounterMapping>,
+        content_mappings: Vec<ContentCounterMapping>,
+    ) -> Self {
+        Self {
+            counter_mappings,
+            content_mappings,
+            state: RefCell::new(CounterState::new()),
+            generated_css: RefCell::new(String::new()),
+            counter_id: RefCell::new(0),
+            ops_by_node: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn generated_css(&self) -> String {
+        self.generated_css.borrow().clone()
+    }
+
+    /// Consume self and return (ops_by_node for Pageable markers, generated CSS for body).
+    pub fn into_parts(self) -> (Vec<(usize, Vec<CounterOp>)>, String) {
+        (
+            self.ops_by_node.into_inner(),
+            self.generated_css.into_inner(),
+        )
+    }
+}
+
+impl DomPass for CounterPass {
+    fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
+        if self.counter_mappings.is_empty() && self.content_mappings.is_empty() {
+            return;
+        }
+        let root = doc.root_element();
+        let root_id = root.id;
+        self.walk_tree(doc, root_id);
+    }
+}
+
+impl CounterPass {
+    fn walk_tree(&self, doc: &mut HtmlDocument, node_id: usize) {
+        // Phase 1: Read element data immutably to collect matched operations
+        // and matched content mapping indices. We must drop the immutable borrow
+        // before calling doc.get_node_mut().
+        let phase1 = {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            let Some(elem) = node.element_data() else {
+                // Not an element — just recurse into children
+                let children: Vec<usize> = node.children.clone();
+                for child_id in children {
+                    self.walk_tree(doc, child_id);
+                }
+                return;
+            };
+
+            if is_non_visual_tag(elem.name.local.as_ref()) {
+                return;
+            }
+
+            // Collect counter operations
+            let mut matched_ops = Vec::new();
+            for mapping in &self.counter_mappings {
+                if selector_matches(&mapping.parsed, elem) {
+                    matched_ops.extend(mapping.ops.clone());
+                }
+            }
+
+            // Collect indices of matching content mappings (resolve values
+            // after counter state is updated in phase 2)
+            let mut matched_content_indices: Vec<usize> = Vec::new();
+            for (i, mapping) in self.content_mappings.iter().enumerate() {
+                if selector_matches(&mapping.parsed, elem) {
+                    matched_content_indices.push(i);
+                }
+            }
+
+            Some((matched_ops, matched_content_indices))
+        };
+        // immutable borrow of doc is now dropped
+
+        let Some((matched_ops, matched_content_indices)) = phase1 else {
+            return;
+        };
+
+        // Phase 2: Apply counter state changes (no doc borrow needed)
+        if !matched_ops.is_empty() {
+            let mut state = self.state.borrow_mut();
+            for op in &matched_ops {
+                match op {
+                    CounterOp::Reset { name, value } => state.reset(name, *value),
+                    CounterOp::Increment { name, value } => state.increment(name, *value),
+                    CounterOp::Set { name, value } => state.set(name, *value),
+                }
+            }
+            drop(state);
+            self.ops_by_node.borrow_mut().push((node_id, matched_ops));
+        }
+
+        // Phase 3: Resolve content (after counter state update) and set data
+        // attributes + generate CSS (needs mutable doc borrow).
+        // Collect all content resolutions first, then assign ONE cid and
+        // generate ALL CSS rules with that cid. This avoids the bug where
+        // ::before + ::after each overwrote data-fulgur-cid with different values.
+        let content_resolutions: Vec<(&str, String)> = matched_content_indices
+            .into_iter()
+            .map(|idx| {
+                let mapping = &self.content_mappings[idx];
+                let resolved = self.resolve_content(&mapping.content);
+                let pseudo_str = match mapping.pseudo {
+                    PseudoElement::Before => "before",
+                    PseudoElement::After => "after",
+                };
+                (pseudo_str, resolved)
+            })
+            .collect();
+
+        if !content_resolutions.is_empty() {
+            let mut id = self.counter_id.borrow_mut();
+            let attr_value = format!("{}", *id);
+            *id += 1;
+            drop(id);
+
+            // Set data attribute once
+            let qual = make_qual_name("data-fulgur-cid");
+            if let Some(node_mut) = doc.get_node_mut(node_id) {
+                if let Some(elem_mut) = node_mut.element_data_mut() {
+                    elem_mut.attrs.set(qual, &attr_value);
+                }
+            }
+
+            // Generate CSS for all pseudo-elements with the same cid
+            let mut css = self.generated_css.borrow_mut();
+            use std::fmt::Write;
+            for (pseudo_str, resolved) in content_resolutions {
+                let _ = write!(
+                    css,
+                    "[data-fulgur-cid=\"{}\"]::{}{{content:\"{}\"}}",
+                    attr_value,
+                    pseudo_str,
+                    css_escape_string(&resolved)
+                );
+            }
+        }
+
+        // Recurse into children (re-read children since we may have mutated doc)
+        let children: Vec<usize> = doc
+            .get_node(node_id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        for child_id in children {
+            self.walk_tree(doc, child_id);
+        }
+    }
+
+    fn resolve_content(&self, items: &[ContentItem]) -> String {
+        let state = self.state.borrow();
+        let mut out = String::new();
+        for item in items {
+            match item {
+                ContentItem::String(s) => out.push_str(s),
+                ContentItem::Counter { name, style } => {
+                    let value = state.get(name);
+                    out.push_str(&format_counter(value, *style));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+fn css_escape_string(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            '\0' => out.push_str("\\0 "),
+            c if c.is_control() => {
+                out.push_str(&format!("\\{:x} ", c as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn resolve_string_set_values(
     doc: &HtmlDocument,
     node_id: usize,
@@ -604,7 +811,8 @@ mod tests {
                 running_name: "pageHeader".to_string(),
             }],
             string_set_mappings: vec![],
-            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -645,7 +853,8 @@ mod tests {
                 running_name: "pageTitle".to_string(),
             }],
             string_set_mappings: vec![],
-            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -672,7 +881,8 @@ mod tests {
             margin_boxes: vec![],
             running_mappings: vec![],
             string_set_mappings: vec![],
-            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -702,7 +912,8 @@ mod tests {
                 running_name: "shouldNotMatch".to_string(),
             }],
             string_set_mappings: vec![],
-            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -922,6 +1133,75 @@ mod tests {
         assert!(
             find_element_by_tag(&doc, "style").is_none(),
             "Absolute path outside base_path should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_counter_pass_generates_css() {
+        use crate::gcpm::{
+            ContentCounterMapping, CounterMapping, CounterOp, CounterStyle, PseudoElement,
+        };
+
+        let html = r#"<html><body>
+            <h2>Chapter One</h2>
+            <h2>Chapter Two</h2>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+
+        let counter_mappings = vec![
+            CounterMapping {
+                parsed: crate::gcpm::ParsedSelector::Tag("body".into()),
+                ops: vec![CounterOp::Reset {
+                    name: "chapter".into(),
+                    value: 0,
+                }],
+            },
+            CounterMapping {
+                parsed: crate::gcpm::ParsedSelector::Tag("h2".into()),
+                ops: vec![CounterOp::Increment {
+                    name: "chapter".into(),
+                    value: 1,
+                }],
+            },
+        ];
+
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: crate::gcpm::ParsedSelector::Tag("h2".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![
+                crate::gcpm::ContentItem::Counter {
+                    name: "chapter".into(),
+                    style: CounterStyle::Decimal,
+                },
+                crate::gcpm::ContentItem::String(". ".into()),
+            ],
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        pass.apply(&mut doc, &ctx);
+
+        let css = pass.generated_css();
+        // Should contain resolved values "1. " and "2. "
+        assert!(
+            css.contains("1. "),
+            "CSS should contain resolved '1. ', got: {css}"
+        );
+        assert!(
+            css.contains("2. "),
+            "CSS should contain resolved '2. ', got: {css}"
+        );
+
+        let (ops_by_node, _) = pass.into_parts();
+        // Should have 3 ops: body reset + h2 increment + h2 increment
+        assert_eq!(
+            ops_by_node.len(),
+            3,
+            "Should have exactly 3 ops: body reset + 2 h2 increments"
         );
     }
 }

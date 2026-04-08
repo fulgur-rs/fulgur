@@ -124,9 +124,9 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 }
 
 /// Cached max-content width and render Pageable for margin boxes.
-/// Measure cache: (html, page_height as bits) → max-content width.
+/// Measure cache: html → max-content width (measured once at content_width).
 /// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
-type MeasureCache = HashMap<(String, u32), f32>;
+type MeasureCache = HashMap<String, f32>;
 type RenderCache = HashMap<(String, u32, u32), Box<dyn Pageable>>;
 
 fn width_key(w: f32) -> u32 {
@@ -192,6 +192,18 @@ pub fn render_to_pdf_with_gcpm(
     } else {
         crate::paginate::collect_running_element_states(&pages)
     };
+    let counter_states =
+        if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
+            vec![BTreeMap::new(); pages.len()]
+        } else {
+            crate::paginate::collect_counter_states(&pages)
+        };
+
+    let page_size = if config.landscape {
+        config.page_size.landscape()
+    } else {
+        config.page_size
+    };
 
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
@@ -208,20 +220,6 @@ pub fn render_to_pdf_with_gcpm(
     // Pass 2: render each page with margin boxes
     for (page_idx, page_content) in pages.iter().enumerate() {
         let page_num = page_idx + 1;
-
-        // Resolve per-page size, margin, and landscape from @page rules + CLI overrides
-        let (resolved_size, resolved_margin, resolved_landscape) =
-            crate::gcpm::page_settings::resolve_page_settings(
-                &gcpm.page_settings,
-                page_num,
-                total_pages,
-                config,
-            );
-        let page_size = if resolved_landscape {
-            resolved_size.landscape()
-        } else {
-            resolved_size
-        };
 
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
@@ -273,6 +271,7 @@ pub fn render_to_pdf_with_gcpm(
                 page_num,
                 total_pages,
                 page_idx,
+                &counter_states[page_idx],
             );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {
@@ -294,8 +293,7 @@ pub fn render_to_pdf_with_gcpm(
             if !pos.edge().is_some_and(|e| e.is_horizontal()) {
                 continue;
             }
-            let measure_key = (html.clone(), width_key(page_size.height));
-            measure_cache.entry(measure_key).or_insert_with(|| {
+            if !measure_cache.contains_key(html) {
                 let measure_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
                     margin_css, html
@@ -306,16 +304,17 @@ pub fn render_to_pdf_with_gcpm(
                     page_size.height,
                     font_data,
                 );
-                get_body_child_dimension(&measure_doc, true)
-            });
+                let max_content_width = get_body_child_dimension(&measure_doc, true);
+                measure_cache.insert(html.clone(), max_content_width);
+            }
         }
 
         // Stage 1b: Measure max-content height for left/right boxes.
         // Layout at fixed margin width, then read the resulting height.
         for (&pos, html) in &resolved_htmls {
             let fixed_width = match pos.edge() {
-                Some(Edge::Left) => resolved_margin.left,
-                Some(Edge::Right) => resolved_margin.right,
+                Some(Edge::Left) => config.margin.left,
+                Some(Edge::Right) => config.margin.right,
                 _ => continue,
             };
             let hc_key = (html.clone(), width_key(fixed_width));
@@ -343,14 +342,12 @@ pub fn render_to_pdf_with_gcpm(
                 None => continue, // corners
             };
             let size = if edge.is_horizontal() {
-                measure_cache
-                    .get(&(html.clone(), width_key(page_size.height)))
-                    .copied()
+                measure_cache.get(html).copied()
             } else {
                 let fixed_width = if edge == Edge::Left {
-                    resolved_margin.left
+                    config.margin.left
                 } else {
-                    resolved_margin.right
+                    config.margin.right
                 };
                 height_cache
                     .get(&(html.clone(), width_key(fixed_width)))
@@ -367,7 +364,7 @@ pub fn render_to_pdf_with_gcpm(
                 *edge,
                 defined,
                 page_size,
-                resolved_margin,
+                config.margin,
             ));
         }
 
@@ -377,7 +374,7 @@ pub fn render_to_pdf_with_gcpm(
             let rect = all_rects
                 .get(&pos)
                 .copied()
-                .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
+                .unwrap_or_else(|| pos.bounding_rect(page_size, config.margin));
 
             let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
             if !render_cache.contains_key(&cache_key) {
@@ -397,6 +394,7 @@ pub fn render_to_pdf_with_gcpm(
                     assets: None,
                     font_cache: HashMap::new(),
                     string_set_by_node: HashMap::new(),
+                    counter_ops_by_node: HashMap::new(),
                 };
                 let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);
@@ -407,15 +405,13 @@ pub fn render_to_pdf_with_gcpm(
             }
         }
 
-        // Draw body content with resolved per-page margin
-        let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
-        let page_content_height = page_size.height - resolved_margin.top - resolved_margin.bottom;
+        // Draw body content
         page_content.draw(
             &mut canvas,
-            resolved_margin.left,
-            resolved_margin.top,
-            page_content_width,
-            page_content_height,
+            config.margin.left,
+            config.margin.top,
+            content_width,
+            content_height,
         );
     }
 

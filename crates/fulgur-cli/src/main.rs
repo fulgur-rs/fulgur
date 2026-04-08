@@ -51,11 +51,11 @@ enum Commands {
         output: PathBuf,
 
         /// Page size (A4, Letter, A3)
-        #[arg(short, long)]
-        size: Option<String>,
+        #[arg(short, long, default_value = "A4")]
+        size: String,
 
         /// Landscape orientation
-        #[arg(short, long)]
+        #[arg(short, long, default_value_t = false)]
         landscape: bool,
 
         /// PDF title
@@ -144,11 +144,8 @@ fn parse_page_size(s: &str) -> PageSize {
         "A3" => PageSize::A3,
         "LETTER" => PageSize::LETTER,
         _ => {
-            eprintln!(
-                "Error: unknown page size '{}'. Supported: A4, A3, Letter",
-                s
-            );
-            std::process::exit(1);
+            eprintln!("Unknown page size '{}', defaulting to A4", s);
+            PageSize::A4
         }
     }
 }
@@ -282,13 +279,9 @@ fn main() {
                 None
             };
 
-            let mut builder = Engine::builder();
-            if let Some(ref s) = size {
-                builder = builder.page_size(parse_page_size(s));
-            }
-            if landscape {
-                builder = builder.landscape(landscape);
-            }
+            let mut builder = Engine::builder()
+                .page_size(parse_page_size(&size))
+                .landscape(landscape);
 
             if let Some(ref m) = margin {
                 builder = builder.margin(parse_margin(m));

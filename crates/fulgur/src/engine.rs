@@ -110,6 +110,25 @@ impl Engine {
             crate::gcpm::string_set::StringSetStore::new()
         };
 
+        // Extract counter operations and resolve body content
+        let (counter_ops_by_node_vec, counter_css) =
+            if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
+                let pass = crate::blitz_adapter::CounterPass::new(
+                    gcpm.counter_mappings.clone(),
+                    gcpm.content_counter_mappings.clone(),
+                );
+                pass.apply(&mut doc, &ctx);
+                pass.into_parts()
+            } else {
+                (Vec::new(), String::new())
+            };
+
+        // Inject counter-resolved CSS for ::before/::after
+        if !counter_css.is_empty() {
+            let inject_pass = crate::blitz_adapter::InjectCssPass { css: counter_css };
+            inject_pass.apply(&mut doc, &ctx);
+        }
+
         crate::blitz_adapter::resolve(&mut doc);
 
         // --- Convert DOM to Pageable and render ---
@@ -124,11 +143,21 @@ impl Engine {
             map
         };
 
+        // Build counter_ops_by_node map
+        let counter_ops_map: HashMap<usize, Vec<crate::gcpm::CounterOp>> = {
+            let mut map = HashMap::new();
+            for (node_id, ops) in counter_ops_by_node_vec {
+                map.insert(node_id, ops);
+            }
+            map
+        };
+
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
             assets: self.assets.as_ref(),
             font_cache: HashMap::new(),
             string_set_by_node,
+            counter_ops_by_node: counter_ops_map,
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
