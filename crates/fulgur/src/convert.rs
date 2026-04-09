@@ -346,6 +346,9 @@ fn collect_positioned_children(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
 ) -> Vec<PositionedChild> {
+    if depth >= MAX_DOM_DEPTH {
+        return Vec::new();
+    }
     let mut result = Vec::new();
     let mut pending_running_markers: Vec<RunningElementMarkerPageable> = Vec::new();
 

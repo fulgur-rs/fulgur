@@ -2,5 +2,5 @@
 /tmp
 .worktrees
 .beads/issues.jsonl
-.env
-.env.*
+**/.env
+**/.env.*
