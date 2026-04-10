@@ -54,7 +54,7 @@ fn text_decoration_styles_render() {
         );
         let pdf = engine
             .render_html(&html)
-            .expect(&format!("render with style={style} should succeed"));
+            .unwrap_or_else(|_| panic!("render with style={style} should succeed"));
         assert!(
             !pdf.is_empty(),
             "PDF with style={style} should not be empty"
