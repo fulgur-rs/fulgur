@@ -52,6 +52,13 @@ impl StdoutIsolator {
 
     /// Write the given bytes to the saved real stdout fd, bypassing the
     /// process-wide fd 1 (which is currently pointing at stderr).
+    ///
+    /// Retries on `EINTR` to match the semantics of
+    /// `std::io::Write::write_all`, which we are replacing at the syscall
+    /// level. Without this, a signal delivered mid-write (e.g. `SIGWINCH`
+    /// on terminal resize, `SIGCHLD` from a child process, or a timer
+    /// signal) would surface as a spurious `Interrupted system call`
+    /// failure.
     fn write_all(&self, mut data: &[u8]) -> std::io::Result<()> {
         while !data.is_empty() {
             let written = unsafe {
@@ -62,7 +69,11 @@ impl StdoutIsolator {
                 )
             };
             if written < 0 {
-                return Err(std::io::Error::last_os_error());
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
             }
             data = &data[written as usize..];
         }
