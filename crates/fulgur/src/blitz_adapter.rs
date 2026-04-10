@@ -22,6 +22,12 @@ use std::sync::{Arc, Mutex};
 /// with this constraint, so for batch throughput use process-level parallelism
 /// (gunicorn workers, puma workers, multiple `fulgur render` invocations).
 ///
+/// Every public function in this module that touches Blitz state is gated by
+/// this lock: `parse`, `apply_passes`, `apply_single_pass`, and `resolve`.
+/// `parse_and_layout` inherits the gating from the functions it composes.
+/// Callers that need to invoke a `DomPass` outside of `apply_passes` must go
+/// through `apply_single_pass` so the serialization guarantee is preserved.
+///
 /// See `docs/plans/2026-04-11-blitz-thread-safety-investigation.md` for the
 /// full investigation, evidence, and rationale.
 static BLITZ_LOCK: Mutex<()> = Mutex::new(());
@@ -140,6 +146,22 @@ pub fn apply_passes(doc: &mut HtmlDocument, passes: &[Box<dyn DomPass>], ctx: &P
     for pass in passes {
         pass.apply(doc, ctx);
     }
+}
+
+/// Apply a single `DomPass` to a document while holding `BLITZ_LOCK`.
+///
+/// Use this when a caller needs to invoke a typed pass directly (for example,
+/// to retain access to a pass-specific accessor like `into_running_store` after
+/// the pass runs). Calling `DomPass::apply` directly from outside this module
+/// bypasses the lock and breaks the serialization guarantee documented on
+/// `BLITZ_LOCK`.
+pub fn apply_single_pass<P: DomPass + ?Sized>(
+    pass: &P,
+    doc: &mut HtmlDocument,
+    ctx: &PassContext<'_>,
+) {
+    let _guard = BLITZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    pass.apply(doc, ctx);
 }
 
 /// Resolve styles (Stylo) and compute layout (Taffy).
