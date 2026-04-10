@@ -15,6 +15,8 @@ use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
     TextDecorationStyle,
 };
+use crate::svg::SvgPageable;
+use blitz_dom::node::ImageData;
 use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
 use std::collections::HashMap;
@@ -302,6 +304,12 @@ fn convert_node_inner(
             }
             // Fall through to generic handling below to preserve Taffy-computed dimensions
         }
+        if tag == "svg" {
+            if let Some(svg) = convert_svg(node, ctx.assets) {
+                return svg;
+            }
+            // Fall through — e.g., ImageData::None (parse failure upstream)
+        }
     }
 
     // Check if this is an inline root (contains text layout)
@@ -553,6 +561,54 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         img.opacity = opacity;
         img.visible = visible;
         Some(Box::new(img))
+    }
+}
+
+/// Convert an inline <svg> element into an SvgPageable, wrapped in BlockPageable if styled.
+///
+/// Blitz automatically parses inline <svg> elements into a usvg::Tree stored on
+/// `ElementData::image_data()` as `ImageData::Svg`. This function extracts that tree
+/// and wraps it in our Pageable type.
+fn convert_svg(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+    let elem = node.element_data()?;
+    let tree = match elem.image_data()? {
+        ImageData::Svg(tree) => Arc::new((**tree).clone()),
+        _ => return None,
+    };
+
+    let layout = node.final_layout;
+    let width = layout.size.width;
+    let height = layout.size.height;
+
+    let style = extract_block_style(node, assets);
+    let (opacity, visible) = extract_opacity_visible(node);
+    if style.has_visual_style() {
+        let (cx, cy) = style.content_inset();
+        let right_inset = style.border_widths[1] + style.padding[1];
+        let bottom_inset = style.border_widths[2] + style.padding[2];
+        let content_width = (width - cx - right_inset).max(0.0);
+        let content_height = (height - cy - bottom_inset).max(0.0);
+        // Propagate visibility to the inner svg — it's the node's own content,
+        // not a real CSS child. Do NOT set opacity — the wrapping block handles it.
+        let mut svg = SvgPageable::new(tree, content_width, content_height);
+        svg.visible = visible;
+        let child = PositionedChild {
+            child: Box::new(svg),
+            x: cx,
+            y: cy,
+        };
+        let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_style(style)
+            .with_opacity(opacity)
+            .with_visible(visible);
+        block.wrap(width, height);
+        block.layout_size = Some(Size { width, height });
+        Some(Box::new(block))
+    } else {
+        let mut svg = SvgPageable::new(tree, width, height);
+        svg.opacity = opacity;
+        svg.visible = visible;
+        Some(Box::new(svg))
     }
 }
 
