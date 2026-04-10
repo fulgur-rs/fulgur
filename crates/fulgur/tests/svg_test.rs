@@ -118,3 +118,51 @@ fn test_svg_does_not_split_across_pages() {
         "expected /Count 2 or /Count 3 in Pages tree, indicating the SVG moved to a new page"
     );
 }
+
+#[test]
+fn test_svg_with_parent_opacity() {
+    let engine = build_engine();
+    let html = r#"<html><body>
+        <div style="opacity: 0.5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" style="display:block">
+                <rect width="100" height="50" fill="red"/>
+            </svg>
+        </div>
+    </body></html>"#;
+
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    // Smoke test: opacity propagation should not panic and should emit a valid PDF.
+    // Byte-level opacity detection is fragile; the main goal here is to exercise
+    // the draw_with_opacity codepath via a parent CSS opacity.
+}
+
+#[test]
+fn test_svg_with_visibility_hidden_is_skipped() {
+    let engine = build_engine();
+    let visible_html = r#"<html><body>
+        <svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" style="display:block">
+            <rect width="100" height="50" fill="red"/>
+        </svg>
+    </body></html>"#;
+    let hidden_html = r#"<html><body>
+        <svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"
+             style="display:block; visibility: hidden">
+            <rect width="100" height="50" fill="red"/>
+        </svg>
+    </body></html>"#;
+
+    let visible_pdf = engine.render_html(visible_html).unwrap();
+    let hidden_pdf = engine.render_html(hidden_html).unwrap();
+    assert!(visible_pdf.starts_with(b"%PDF"));
+    assert!(hidden_pdf.starts_with(b"%PDF"));
+
+    // Hidden SVG should not emit path content, so the PDF should be
+    // at most the same size (typically smaller).
+    assert!(
+        hidden_pdf.len() <= visible_pdf.len(),
+        "hidden SVG PDF ({} bytes) must not be larger than visible SVG PDF ({} bytes)",
+        hidden_pdf.len(),
+        visible_pdf.len()
+    );
+}
