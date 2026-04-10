@@ -116,7 +116,7 @@ impl Engine {
                     gcpm.counter_mappings.clone(),
                     gcpm.content_counter_mappings.clone(),
                 );
-                pass.apply(&mut doc, &ctx);
+                crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
                 pass.into_parts()
             } else {
                 (Vec::new(), String::new())
@@ -125,7 +125,7 @@ impl Engine {
         // Inject counter-resolved CSS for ::before/::after
         if !counter_css.is_empty() {
             let inject_pass = crate::blitz_adapter::InjectCssPass { css: counter_css };
-            inject_pass.apply(&mut doc, &ctx);
+            crate::blitz_adapter::apply_single_pass(&inject_pass, &mut doc, &ctx);
         }
 
         crate::blitz_adapter::resolve(&mut doc);

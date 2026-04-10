@@ -91,6 +91,16 @@ impl StdoutIsolator {
 #[cfg(unix)]
 impl Drop for StdoutIsolator {
     fn drop(&mut self) {
+        // Flush any bytes still sitting in Rust's `io::Stdout` buffer while
+        // fd 1 is still pointing at stderr. `io::Stdout` is a LineWriter that
+        // flushes on newline, so the common case of `println!("ERROR: ...")`
+        // from dependencies is already flushed inline. This flush is
+        // defense-in-depth for writes without a trailing newline (e.g. a
+        // future dependency using `print!`, or blitz changing its error
+        // sink), and keeps the Drop symmetric with `install()` which also
+        // flushes before manipulating fd 1.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
         // Restore fd 1 to the real stdout so any final messages the process
         // prints (e.g. panic output on failure paths) land in the right place.
         unsafe {
