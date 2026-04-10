@@ -647,19 +647,18 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
         {
             let ops = parse_counter_ops(input, &name);
             // counter-reset / counter-increment / counter-set are independent
-            // CSS properties, so they must each contribute to counter_ops.
-            // Apply last-declaration-wins per property by removing prior ops
-            // of the SAME variant before extending with the new ones.
-            let prop = name.to_ascii_lowercase();
-            self.counter_ops.retain(|op| {
-                !matches!(
-                    (op, prop.as_str()),
-                    (CounterOp::Reset { .. }, "counter-reset")
-                        | (CounterOp::Increment { .. }, "counter-increment")
-                        | (CounterOp::Set { .. }, "counter-set")
-                )
-            });
-            self.counter_ops.extend(ops);
+            // CSS properties, so each must contribute to counter_ops. Apply
+            // last-declaration-wins per property by dropping prior ops of the
+            // same `CounterOp` variant before extending. `parse_counter_ops`
+            // produces ops of exactly one variant (matching the property
+            // name), so the discriminant of the first element identifies the
+            // property kind without re-inspecting the name.
+            if let Some(first) = ops.first() {
+                let kind = std::mem::discriminant(first);
+                self.counter_ops
+                    .retain(|op| std::mem::discriminant(op) != kind);
+                self.counter_ops.extend(ops);
+            }
             let start = decl_start.position().byte_index();
             let end = input.position().byte_index();
             self.edits.push(CssEdit::Replace {
