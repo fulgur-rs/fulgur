@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::gcpm::CounterOp;
+use crate::gcpm::counter::CounterState;
 use crate::pageable::{
-    BlockPageable, ListItemPageable, Pageable, Pt, RunningElementMarkerPageable,
-    RunningElementWrapperPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
+    BlockPageable, CounterOpMarkerPageable, CounterOpWrapperPageable, ListItemPageable, Pageable,
+    Pt, RunningElementMarkerPageable, RunningElementWrapperPageable, StringSetPageable,
+    StringSetWrapperPageable, TablePageable,
 };
 
 /// Per-page state for a named string.
@@ -93,6 +96,8 @@ fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>)
         collect_markers(wrapper.child.as_ref(), markers);
     } else if let Some(wrapper) = any.downcast_ref::<RunningElementWrapperPageable>() {
         collect_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(wrapper) = any.downcast_ref::<CounterOpWrapperPageable>() {
+        collect_markers(wrapper.child.as_ref(), markers);
     } else if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
         // Used by unit tests that construct markers directly.
         markers.push((marker.name.clone(), marker.value.clone()));
@@ -176,6 +181,8 @@ fn collect_running_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, u
         collect_running_markers(wrapper.child.as_ref(), markers);
     } else if let Some(wrapper) = any.downcast_ref::<StringSetWrapperPageable>() {
         collect_running_markers(wrapper.child.as_ref(), markers);
+    } else if let Some(wrapper) = any.downcast_ref::<CounterOpWrapperPageable>() {
+        collect_running_markers(wrapper.child.as_ref(), markers);
     } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
         for child in &block.children {
             collect_running_markers(child.child.as_ref(), markers);
@@ -189,6 +196,60 @@ fn collect_running_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, u
         }
     } else if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
         collect_running_markers(list_item.body.as_ref(), markers);
+    }
+}
+
+/// Walk paginated pages, replay counter operations in document order,
+/// and return the cumulative counter state at the end of each page.
+pub fn collect_counter_states(pages: &[Box<dyn Pageable>]) -> Vec<BTreeMap<String, i32>> {
+    let mut state = CounterState::new();
+    let mut result = Vec::with_capacity(pages.len());
+
+    for page in pages {
+        let mut ops = Vec::new();
+        collect_counter_markers(page.as_ref(), &mut ops);
+        for op in &ops {
+            match op {
+                CounterOp::Reset { name, value } => state.reset(name, *value),
+                CounterOp::Increment { name, value } => state.increment(name, *value),
+                CounterOp::Set { name, value } => state.set(name, *value),
+            }
+        }
+        result.push(state.snapshot());
+    }
+
+    result
+}
+
+/// Recursively find all counter-op markers in a Pageable tree.
+///
+/// Mirrors `collect_running_markers` but looks for `CounterOpMarkerPageable`
+/// instances. Descends into wrappers so markers inside wrapped children are
+/// still discovered.
+fn collect_counter_markers(pageable: &dyn Pageable, ops: &mut Vec<CounterOp>) {
+    let any = pageable.as_any();
+    if let Some(wrapper) = any.downcast_ref::<CounterOpWrapperPageable>() {
+        ops.extend(wrapper.ops.clone());
+        collect_counter_markers(wrapper.child.as_ref(), ops);
+    } else if let Some(marker) = any.downcast_ref::<CounterOpMarkerPageable>() {
+        ops.extend(marker.ops.clone());
+    } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        for child in &block.children {
+            collect_counter_markers(child.child.as_ref(), ops);
+        }
+    } else if let Some(wrapper) = any.downcast_ref::<StringSetWrapperPageable>() {
+        collect_counter_markers(wrapper.child.as_ref(), ops);
+    } else if let Some(wrapper) = any.downcast_ref::<RunningElementWrapperPageable>() {
+        collect_counter_markers(wrapper.child.as_ref(), ops);
+    } else if let Some(table) = any.downcast_ref::<TablePageable>() {
+        // Skip header_cells: they are cloned into every page fragment by
+        // TablePageable::split(), so walking them would replay counter ops
+        // on every page the table spans.  Only body_cells carry unique ops.
+        for child in &table.body_cells {
+            collect_counter_markers(child.child.as_ref(), ops);
+        }
+    } else if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        collect_counter_markers(list_item.body.as_ref(), ops);
     }
 }
 
@@ -440,7 +501,7 @@ mod tests {
         assert_eq!(states.len(), 2);
         assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![7]);
         assert!(
-            states[1].get("hdr").is_none(),
+            !states[1].contains_key("hdr"),
             "instance_id 7 must not be re-counted on the second page"
         );
     }
@@ -460,5 +521,82 @@ mod tests {
         let states = collect_running_element_states(&pages);
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].get("hdr").unwrap().instance_ids, vec![3]);
+    }
+
+    // ─── Counter state tests ──────────────────────────────
+
+    use crate::gcpm::CounterOp;
+    use crate::pageable::CounterOpMarkerPageable;
+
+    #[test]
+    fn test_collect_counter_states_single_page() {
+        let marker = CounterOpMarkerPageable::new(vec![
+            CounterOp::Reset {
+                name: "chapter".into(),
+                value: 0,
+            },
+            CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            },
+        ]);
+        let block = BlockPageable::with_positioned_children(vec![
+            pos(Box::new(marker)),
+            pos(make_spacer(50.0)),
+        ]);
+        let pages = paginate(Box::new(block), 100.0, 200.0);
+        let states = collect_counter_states(&pages);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].get("chapter"), Some(&1));
+    }
+
+    #[test]
+    fn test_collect_counter_states_across_pages() {
+        let m1 = CounterOpMarkerPageable::new(vec![
+            CounterOp::Reset {
+                name: "chapter".into(),
+                value: 0,
+            },
+            CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            },
+        ]);
+        let m2 = CounterOpMarkerPageable::new(vec![CounterOp::Increment {
+            name: "chapter".into(),
+            value: 1,
+        }]);
+        let block = BlockPageable::with_positioned_children(vec![
+            pos(Box::new(m1)),
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: Box::new(m2),
+                x: 0.0,
+                y: 120.0,
+            },
+            PositionedChild {
+                child: make_spacer(80.0),
+                x: 0.0,
+                y: 120.0,
+            },
+        ]);
+        let pages = paginate(Box::new(block), 200.0, 100.0);
+        let states = collect_counter_states(&pages);
+        assert!(states.len() >= 2);
+        assert_eq!(states[0].get("chapter"), Some(&1));
+        assert_eq!(states[1].get("chapter"), Some(&2));
+    }
+
+    #[test]
+    fn test_collect_counter_states_empty() {
+        let block = BlockPageable::with_positioned_children(vec![pos(make_spacer(50.0))]);
+        let pages = paginate(Box::new(block), 100.0, 200.0);
+        let states = collect_counter_states(&pages);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
     }
 }

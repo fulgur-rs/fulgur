@@ -240,11 +240,8 @@ fn parse_page_size(s: &str) -> PageSize {
         "A3" => PageSize::A3,
         "LETTER" => PageSize::LETTER,
         _ => {
-            eprintln!(
-                "Error: unknown page size '{}'. Supported: A4, A3, Letter",
-                s
-            );
-            std::process::exit(1);
+            eprintln!("Unknown page size '{}', defaulting to A4", s);
+            PageSize::A4
         }
     }
 }

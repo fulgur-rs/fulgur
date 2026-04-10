@@ -192,6 +192,12 @@ pub fn render_to_pdf_with_gcpm(
     } else {
         crate::paginate::collect_running_element_states(&pages)
     };
+    let counter_states =
+        if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
+            vec![BTreeMap::new(); pages.len()]
+        } else {
+            crate::paginate::collect_counter_states(&pages)
+        };
 
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
@@ -273,6 +279,7 @@ pub fn render_to_pdf_with_gcpm(
                 page_num,
                 total_pages,
                 page_idx,
+                &counter_states[page_idx],
             );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {
@@ -397,6 +404,7 @@ pub fn render_to_pdf_with_gcpm(
                     assets: None,
                     font_cache: HashMap::new(),
                     string_set_by_node: HashMap::new(),
+                    counter_ops_by_node: HashMap::new(),
                 };
                 let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);

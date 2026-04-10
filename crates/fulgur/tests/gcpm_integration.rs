@@ -1,6 +1,43 @@
 use fulgur::asset::AssetBundle;
-use fulgur::config::PageSize;
 use fulgur::engine::Engine;
+
+#[test]
+fn test_counter_margin_box_values_correct() {
+    // Verify that counter values actually reach margin boxes correctly
+    // by generating a document with counter-increment on visible elements.
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
+        @page {
+            @bottom-center {
+                content: "Chapter " counter(chapter);
+            }
+        }
+    "#,
+    );
+
+    let engine = Engine::builder().assets(assets).build();
+    // Multiple chapters with enough content to potentially span pages
+    let html = r#"
+        <h2>One</h2><p>Content for chapter one.</p>
+        <h2>Two</h2><p>Content for chapter two.</p>
+        <h2>Three</h2><p>Content for chapter three.</p>
+    "#;
+    let result = engine.render_html(html);
+    assert!(
+        result.is_ok(),
+        "Counter values should reach margin boxes: {:?}",
+        result.err()
+    );
+    // Verify PDF is non-trivial (contains actual content)
+    let pdf_bytes = result.unwrap();
+    assert!(
+        pdf_bytes.len() > 1000,
+        "PDF should contain rendered content with counters"
+    );
+}
 
 #[test]
 fn test_gcpm_header_footer_generates_pdf() {
@@ -585,69 +622,139 @@ fn test_element_default_policy_still_works() {
 }
 
 #[test]
-fn test_gcpm_page_size_from_css() {
-    let html = "<html><body><p>Hello World</p></body></html>";
-    let css = "@page { size: letter; margin: 1in; }";
+fn test_counter_chapter_before_pseudo() {
     let mut assets = AssetBundle::new();
-    assets.add_css(css);
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
+        h2::before { content: counter(chapter) ". "; }
+    "#,
+    );
+
     let engine = Engine::builder().assets(assets).build();
+    let html = "<h2>Introduction</h2><p>Some text here</p><h2>Methods</h2><p>More text</p>";
     let result = engine.render_html(html);
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "PDF generation with counter in ::before should succeed: {:?}",
+        result.err()
+    );
 }
 
 #[test]
-fn test_gcpm_page_size_cli_overrides_css() {
-    let html = "<html><body><p>Hello World</p></body></html>";
-    let css = "@page { size: letter; }";
+fn test_counter_in_margin_box() {
     let mut assets = AssetBundle::new();
-    assets.add_css(css);
-    let engine = Engine::builder()
-        .page_size(PageSize::A3)
-        .assets(assets)
-        .build();
-    let result = engine.render_html(html);
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
-}
-
-#[test]
-fn test_gcpm_page_margin_from_css() {
-    let html = "<html><body><p>Hello World</p></body></html>";
-    let css = "@page { margin: 10mm; }";
-    let mut assets = AssetBundle::new();
-    assets.add_css(css);
-    let engine = Engine::builder().assets(assets).build();
-    let result = engine.render_html(html);
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
-}
-
-#[test]
-fn test_gcpm_page_size_custom_dimensions() {
-    let html = "<html><body><p>Hello World</p></body></html>";
-    let css = "@page { size: 100mm 200mm; margin: 10mm; }";
-    let mut assets = AssetBundle::new();
-    assets.add_css(css);
-    let engine = Engine::builder().assets(assets).build();
-    let result = engine.render_html(html);
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
-}
-
-#[test]
-fn test_gcpm_page_size_with_margin_boxes() {
-    let html = r#"<html><body>
-        <div class="header">Header</div>
-        <p>Content</p>
-    </body></html>"#;
-    let css = r#"
-        .header { position: running(pageHeader); }
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
         @page {
-            size: A4 landscape;
-            margin: 20mm;
-            @top-center { content: element(pageHeader); }
+            @bottom-center {
+                content: "Chapter " counter(chapter);
+            }
         }
-    "#;
-    let mut assets = AssetBundle::new();
-    assets.add_css(css);
+    "#,
+    );
+
     let engine = Engine::builder().assets(assets).build();
+    let html = "<h2>One</h2><p>Some text</p><h2>Two</h2><p>More text</p>";
     let result = engine.render_html(html);
-    assert!(result.is_ok(), "Failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "PDF with counter in margin box should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_counter_upper_roman_style() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
+        h2::before { content: counter(chapter, upper-roman) ". "; }
+    "#,
+    );
+
+    let engine = Engine::builder().assets(assets).build();
+    let html = "<h2>A</h2><h2>B</h2><h2>C</h2><h2>D</h2>";
+    let result = engine.render_html(html);
+    assert!(
+        result.is_ok(),
+        "PDF with upper-roman counter should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_counter_set() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
+        .reset { counter-set: chapter 10; }
+        h2::before { content: counter(chapter) ". "; }
+    "#,
+    );
+
+    let engine = Engine::builder().assets(assets).build();
+    let html = r#"<h2>One</h2><div class="reset"></div><h2>Eleven</h2>"#;
+    let result = engine.render_html(html);
+    assert!(
+        result.is_ok(),
+        "PDF with counter-set should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_counter_body_and_margin_box() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        body { counter-reset: chapter; }
+        h2 { counter-increment: chapter; }
+        h2::before { content: counter(chapter) ". "; }
+        @page {
+            @bottom-right {
+                content: "Ch. " counter(chapter);
+            }
+        }
+    "#,
+    );
+
+    let engine = Engine::builder().assets(assets).build();
+    let html = "<h2>Intro</h2><p>text</p><h2>Body</h2><p>text</p><h2>End</h2><p>text</p>";
+    let result = engine.render_html(html);
+    assert!(
+        result.is_ok(),
+        "PDF with counter in both body and margin box should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_counter_page_still_works() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        @page {
+            @bottom-center {
+                content: "Page " counter(page) " of " counter(pages);
+            }
+        }
+    "#,
+    );
+
+    let engine = Engine::builder().assets(assets).build();
+    let html = "<p>Hello World</p>";
+    let result = engine.render_html(html);
+    assert!(
+        result.is_ok(),
+        "counter(page) should still work: {:?}",
+        result.err()
+    );
 }

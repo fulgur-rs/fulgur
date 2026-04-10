@@ -1,13 +1,15 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
 use crate::asset::AssetBundle;
+use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
-    BlockStyle, BorderStyleValue, ListItemPageable, Pageable, PositionedChild,
-    RunningElementMarkerPageable, RunningElementWrapperPageable, Size, SpacerPageable,
-    StringSetPageable, StringSetWrapperPageable, TablePageable,
+    BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
+    ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
+    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
+    StringSetWrapperPageable, TablePageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -29,6 +31,8 @@ pub struct ConvertContext<'a> {
     pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
     /// String-set entries from DOM walk, keyed by node_id for O(1) lookup.
     pub string_set_by_node: HashMap<usize, Vec<(String, String)>>,
+    /// Counter operations from CounterPass, keyed by node_id for O(1) lookup.
+    pub counter_ops_by_node: HashMap<usize, Vec<CounterOp>>,
 }
 
 impl ConvertContext<'_> {
@@ -98,7 +102,8 @@ fn convert_node(
         return Box::new(SpacerPageable::new(0.0));
     }
     let result = convert_node_inner(doc, node_id, ctx, depth);
-    maybe_prepend_string_set(node_id, result, ctx)
+    let result = maybe_prepend_string_set(node_id, result, ctx);
+    maybe_prepend_counter_ops(node_id, result, ctx)
 }
 
 /// If the given node has string-set entries, wrap the pageable in a
@@ -118,6 +123,22 @@ fn maybe_prepend_string_set(
                 .collect();
             Box::new(StringSetWrapperPageable::new(markers, child))
         }
+        _ => child,
+    }
+}
+
+/// If the given node has counter operations, wrap the pageable in a
+/// `CounterOpWrapperPageable` that keeps counter operations attached to the
+/// child during pagination. The wrapper is atomic when the child cannot split,
+/// preventing the operations from being stranded on the wrong page.
+fn maybe_prepend_counter_ops(
+    node_id: usize,
+    child: Box<dyn Pageable>,
+    ctx: &mut ConvertContext<'_>,
+) -> Box<dyn Pageable> {
+    let ops = ctx.counter_ops_by_node.remove(&node_id);
+    match ops {
+        Some(ops) if !ops.is_empty() => Box::new(CounterOpWrapperPageable::new(ops, child)),
         _ => child,
     }
 }
@@ -155,6 +176,26 @@ fn emit_orphan_string_set_markers(
                 y,
             });
         }
+    }
+}
+
+/// Emit counter-op markers for a node, similar to `emit_orphan_string_set_markers`.
+///
+/// If `counter_ops_by_node` contains entries for `node_id`, they are removed
+/// and pushed as a `CounterOpMarkerPageable` at `(x, y)`.
+fn emit_counter_op_markers(
+    node_id: usize,
+    x: f32,
+    y: f32,
+    ctx: &mut ConvertContext<'_>,
+    out: &mut Vec<PositionedChild>,
+) {
+    if let Some(ops) = ctx.counter_ops_by_node.remove(&node_id) {
+        out.push(PositionedChild {
+            child: Box::new(CounterOpMarkerPageable::new(ops)),
+            x,
+            y,
+        });
     }
 }
 
@@ -380,6 +421,13 @@ fn collect_positioned_children(
                 ctx,
                 &mut result,
             );
+            emit_counter_op_markers(
+                child_id,
+                child_layout.location.x,
+                child_layout.location.y,
+                ctx,
+                &mut result,
+            );
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
@@ -394,6 +442,13 @@ fn collect_positioned_children(
             && !child_node.children.is_empty()
         {
             emit_orphan_string_set_markers(
+                child_id,
+                child_layout.location.x,
+                child_layout.location.y,
+                ctx,
+                &mut result,
+            );
+            emit_counter_op_markers(
                 child_id,
                 child_layout.location.x,
                 child_layout.location.y,
@@ -579,6 +634,17 @@ fn collect_table_cells(
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
+
+    // Drain counter ops on the current section/row node itself so that
+    // counter-reset / counter-increment / counter-set declared on
+    // <thead>/<tbody>/<tr> reach `collect_counter_states()` for margin boxes.
+    // Without this, ops on these intermediate nodes stay in
+    // `ctx.counter_ops_by_node` forever and never propagate.
+    {
+        let layout = node.final_layout;
+        let out: &mut Vec<PositionedChild> = if is_header { header_cells } else { body_cells };
+        emit_counter_op_markers(node_id, layout.location.x, layout.location.y, ctx, out);
+    }
 
     for &child_id in &node.children {
         let Some(child_node) = doc.get_node(child_id) else {

@@ -187,9 +187,9 @@ mod tests {
     #[test]
     fn test_format_decimal_only() {
         let tmpl = r#"{{ n | numformat(".2f") }}"#;
-        let data = json!({"n": 3.14159});
+        let data = json!({"n": 1.23456});
         let result = render_template("test.html", tmpl, &data).unwrap();
-        assert_eq!(result, "3.14");
+        assert_eq!(result, "1.23");
     }
 
     #[test]

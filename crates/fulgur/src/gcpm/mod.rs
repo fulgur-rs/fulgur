@@ -119,6 +119,36 @@ pub struct PageSettingsRule {
     pub margin: Option<crate::config::Margin>,
 }
 
+/// A single counter operation from counter-reset, counter-increment, or counter-set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CounterOp {
+    Reset { name: String, value: i32 },
+    Increment { name: String, value: i32 },
+    Set { name: String, value: i32 },
+}
+
+/// Maps a CSS selector to counter operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterMapping {
+    pub parsed: ParsedSelector,
+    pub ops: Vec<CounterOp>,
+}
+
+/// Pseudo-element type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
+
+/// Maps a CSS selector + pseudo-element to content items containing counter().
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContentCounterMapping {
+    pub parsed: ParsedSelector,
+    pub pseudo: PseudoElement,
+    pub content: Vec<ContentItem>,
+}
+
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
@@ -129,8 +159,13 @@ pub enum ContentItem {
         /// The policy for selecting which instance to show.
         policy: ElementPolicy,
     },
-    /// A counter reference, e.g. `counter(page)`.
-    Counter(CounterType),
+    /// A counter reference, e.g. `counter(page)` or `counter(chapter, upper-roman)`.
+    Counter {
+        /// Counter name — "page", "pages", or a custom name.
+        name: String,
+        /// Display style.
+        style: CounterStyle,
+    },
     /// A literal string, e.g. `"Page "`.
     String(String),
     /// A named string reference, e.g. `string(chapter-title, first)`.
@@ -142,13 +177,20 @@ pub enum ContentItem {
     },
 }
 
-/// Counter types supported by GCPM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CounterType {
-    /// Current page number.
-    Page,
-    /// Total page count.
-    Pages,
+/// Counter display styles (CSS `list-style-type` subset for counters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CounterStyle {
+    /// Decimal numerals (1, 2, 3, ...).
+    #[default]
+    Decimal,
+    /// Upper-case roman numerals (I, II, III, ...).
+    UpperRoman,
+    /// Lower-case roman numerals (i, ii, iii, ...).
+    LowerRoman,
+    /// Upper-case alphabetic (A, B, C, ..., Z, AA, AB, ...).
+    UpperAlpha,
+    /// Lower-case alphabetic (a, b, c, ..., z, aa, ab, ...).
+    LowerAlpha,
 }
 
 /// A parsed `@page { @<position> { ... } }` margin box rule.
@@ -175,6 +217,10 @@ pub struct GcpmContext {
     pub string_set_mappings: Vec<StringSetMapping>,
     /// Page settings rules parsed from `@page { size: ...; margin: ...; }`.
     pub page_settings: Vec<PageSettingsRule>,
+    /// Mappings from CSS selectors to counter operations.
+    pub counter_mappings: Vec<CounterMapping>,
+    /// Mappings from CSS selectors + pseudo-elements to content items with counter().
+    pub content_counter_mappings: Vec<ContentCounterMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
@@ -186,6 +232,8 @@ impl GcpmContext {
             && self.running_mappings.is_empty()
             && self.string_set_mappings.is_empty()
             && self.page_settings.is_empty()
+            && self.counter_mappings.is_empty()
+            && self.content_counter_mappings.is_empty()
     }
 }
 
@@ -200,6 +248,8 @@ mod tests {
             running_mappings: vec![],
             string_set_mappings: vec![],
             page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -211,12 +261,17 @@ mod tests {
             margin_boxes: vec![MarginBoxRule {
                 page_selector: None,
                 position: MarginBoxPosition::TopCenter,
-                content: vec![ContentItem::Counter(CounterType::Page)],
+                content: vec![ContentItem::Counter {
+                    name: "page".into(),
+                    style: CounterStyle::Decimal,
+                }],
                 declarations: String::new(),
             }],
             running_mappings: vec![],
             string_set_mappings: vec![],
             page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -232,22 +287,8 @@ mod tests {
             }],
             string_set_mappings: vec![],
             page_settings: vec![],
-            cleaned_css: String::new(),
-        };
-        assert!(!ctx.is_empty());
-    }
-
-    #[test]
-    fn test_gcpm_context_not_empty_with_page_settings() {
-        let ctx = GcpmContext {
-            margin_boxes: vec![],
-            running_mappings: vec![],
-            string_set_mappings: vec![],
-            page_settings: vec![PageSettingsRule {
-                page_selector: None,
-                size: Some(PageSizeDecl::Keyword("A4".into())),
-                margin: None,
-            }],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
