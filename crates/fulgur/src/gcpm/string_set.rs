@@ -54,11 +54,16 @@ impl Default for StringSetStore {
 /// newlines and indentation.
 pub fn extract_text_content(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
     let mut raw = String::new();
-    collect_text(doc, node_id, &mut raw);
+    collect_text(doc, node_id, &mut raw, 0);
     normalize_whitespace(&raw)
 }
 
-fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String) {
+fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String, depth: usize) {
+    use crate::MAX_DOM_DEPTH;
+
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
@@ -77,7 +82,7 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String)
         blitz_dom::NodeData::Text(text_data) => out.push_str(&text_data.content),
         _ => {
             for &child_id in &node.children {
-                collect_text(doc, child_id, out);
+                collect_text(doc, child_id, out, depth + 1);
             }
         }
     }

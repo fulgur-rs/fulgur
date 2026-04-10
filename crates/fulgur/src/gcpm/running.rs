@@ -84,13 +84,17 @@ impl RunningElementStore {
 /// handles styling in the re-layout pass.
 pub fn serialize_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
     let mut output = String::new();
-    write_node(doc, node_id, &mut output);
+    write_node(doc, node_id, &mut output, 0);
     output
 }
 
-fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String) {
+fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String, depth: usize) {
+    use crate::MAX_DOM_DEPTH;
     use blitz_dom::NodeData;
 
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
@@ -119,7 +123,7 @@ fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String
             } else {
                 writer.push('>');
                 for &child_id in &node.children {
-                    write_node(doc, child_id, writer);
+                    write_node(doc, child_id, writer, depth + 1);
                 }
                 writer.push_str("</");
                 writer.push_str(tag);

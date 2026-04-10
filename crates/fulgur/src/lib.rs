@@ -1,3 +1,7 @@
+/// Maximum DOM tree depth before recursion is cut off. Prevents stack overflow
+/// from pathologically deep HTML input.
+pub(crate) const MAX_DOM_DEPTH: usize = 512;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;

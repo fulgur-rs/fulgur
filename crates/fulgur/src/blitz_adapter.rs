@@ -21,32 +21,36 @@ fn suppress_stdout<F: FnOnce() -> T, T>(f: F) -> T {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
+
+        /// Drop guard that restores stdout from a saved file descriptor.
+        struct StdoutGuard {
+            saved_fd: i32,
+        }
+
+        impl Drop for StdoutGuard {
+            fn drop(&mut self) {
+                let _ = std::io::stdout().flush();
+                unsafe { libc::dup2(self.saved_fd, 1) };
+                unsafe { libc::close(self.saved_fd) };
+            }
+        }
+
         let devnull = std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/null")
             .ok();
-        let saved_fd = devnull.as_ref().map(|_| {
-            // dup(1) to save original stdout
+
+        let guard = devnull.as_ref().and_then(|dn| {
             let saved = unsafe { libc::dup(1) };
             if saved < 0 {
-                return -1;
+                return None;
             }
-            // dup2(devnull_fd, 1) to redirect stdout
-            if let Some(ref dn) = devnull {
-                unsafe { libc::dup2(dn.as_raw_fd(), 1) };
-            }
-            saved
+            unsafe { libc::dup2(dn.as_raw_fd(), 1) };
+            Some(StdoutGuard { saved_fd: saved })
         });
 
         let result = f();
-
-        // Restore original stdout
-        if let Some(Some(saved)) = saved_fd.map(|fd| if fd >= 0 { Some(fd) } else { None }) {
-            let _ = std::io::stdout().flush();
-            unsafe { libc::dup2(saved, 1) };
-            unsafe { libc::close(saved) };
-        }
-
+        drop(guard);
         result
     }
 
@@ -122,14 +126,24 @@ pub fn resolve(doc: &mut HtmlDocument) {
     doc.resolve(0.0);
 }
 
+use crate::MAX_DOM_DEPTH;
+
 /// Walk the DOM tree to find the first element with the given tag name.
 /// Returns the node id if found.
 fn find_element_by_tag(doc: &HtmlDocument, tag: &str) -> Option<usize> {
     let root = doc.root_element();
-    find_element_by_tag_recursive(doc, root.id, tag)
+    find_element_by_tag_recursive(doc, root.id, tag, 0)
 }
 
-fn find_element_by_tag_recursive(doc: &HtmlDocument, node_id: usize, tag: &str) -> Option<usize> {
+fn find_element_by_tag_recursive(
+    doc: &HtmlDocument,
+    node_id: usize,
+    tag: &str,
+    depth: usize,
+) -> Option<usize> {
+    if depth >= MAX_DOM_DEPTH {
+        return None;
+    }
     let node = doc.get_node(node_id)?;
     if let Some(el) = node.element_data() {
         if el.name.local.as_ref() == tag {
@@ -137,7 +151,7 @@ fn find_element_by_tag_recursive(doc: &HtmlDocument, node_id: usize, tag: &str) 
         }
     }
     for &child_id in &node.children {
-        if let Some(found) = find_element_by_tag_recursive(doc, child_id, tag) {
+        if let Some(found) = find_element_by_tag_recursive(doc, child_id, tag, depth + 1) {
             return Some(found);
         }
     }
@@ -237,6 +251,11 @@ impl DomPass for LinkStylesheetPass {
 
         let mut css_entries: Vec<(usize, String)> = Vec::new(); // (link_node_id, css_content)
 
+        let canonical_base = match self.base_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
         let head_children: Vec<usize> = doc
             .get_node(head_id)
             .map(|n| n.children.clone())
@@ -271,15 +290,36 @@ impl DomPass for LinkStylesheetPass {
                 continue;
             }
 
-            // Resolve path
+            // Resolve path — restrict to base_path to prevent path traversal
             let path = if std::path::Path::new(&href).is_absolute() {
                 PathBuf::from(&href)
             } else {
                 self.base_path.join(&href)
             };
 
+            // Canonicalize both paths and verify the resolved path is within base_path.
+            // This prevents directory traversal attacks (e.g. href="../../etc/passwd").
+            let canonical_path = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: could not resolve stylesheet '{}' (resolved to '{}')",
+                        href,
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if !canonical_path.starts_with(&canonical_base) {
+                eprintln!(
+                    "Warning: stylesheet '{}' is outside base path, skipped",
+                    href
+                );
+                continue;
+            }
+
             // Read file (skip with warning if missing)
-            if let Ok(css) = std::fs::read_to_string(&path) {
+            if let Ok(css) = std::fs::read_to_string(&canonical_path) {
                 css_entries.push((child_id, css));
             } else {
                 eprintln!(
@@ -348,12 +388,15 @@ impl DomPass for RunningElementPass {
         }
         let root = doc.root_element();
         let root_id = root.id;
-        self.walk_tree(doc, root_id);
+        self.walk_tree(doc, root_id, 0);
     }
 }
 
 impl RunningElementPass {
-    fn walk_tree(&self, doc: &HtmlDocument, node_id: usize) {
+    fn walk_tree(&self, doc: &HtmlDocument, node_id: usize, depth: usize) {
+        if depth >= MAX_DOM_DEPTH {
+            return;
+        }
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
@@ -373,7 +416,7 @@ impl RunningElementPass {
         }
 
         for &child_id in &node.children {
-            self.walk_tree(doc, child_id);
+            self.walk_tree(doc, child_id, depth + 1);
         }
     }
 
@@ -411,12 +454,15 @@ impl DomPass for StringSetPass {
         }
         let root = doc.root_element();
         let root_id = root.id;
-        self.walk_tree(doc, root_id);
+        self.walk_tree(doc, root_id, 0);
     }
 }
 
 impl StringSetPass {
-    fn walk_tree(&self, doc: &HtmlDocument, node_id: usize) {
+    fn walk_tree(&self, doc: &HtmlDocument, node_id: usize, depth: usize) {
+        if depth >= MAX_DOM_DEPTH {
+            return;
+        }
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
@@ -437,7 +483,7 @@ impl StringSetPass {
 
         // string-set targets stay in document flow — always recurse into children.
         for &child_id in &node.children {
-            self.walk_tree(doc, child_id);
+            self.walk_tree(doc, child_id, depth + 1);
         }
     }
 
@@ -799,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn test_link_stylesheet_pass_absolute_path() {
+    fn test_link_stylesheet_pass_absolute_path_within_base() {
         let dir = tempfile::tempdir().unwrap();
         let css_path = dir.path().join("abs.css");
         std::fs::write(&css_path, "body { margin: 0; }").unwrap();
@@ -809,8 +855,9 @@ mod tests {
             css_path.display()
         );
         let mut doc = parse(&html, 400.0, &[]);
+        // base_path is the same dir, so absolute path is allowed
         let pass = LinkStylesheetPass {
-            base_path: PathBuf::from("/nonexistent"),
+            base_path: dir.path().to_path_buf(),
         };
         let ctx = PassContext {
             viewport_width: 400.0,
@@ -821,7 +868,60 @@ mod tests {
         resolve(&mut doc);
         assert!(
             find_element_by_tag(&doc, "style").is_some(),
-            "Expected a <style> element when using absolute path in href"
+            "Expected a <style> element when using absolute path within base_path"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // Create a file outside the sub directory
+        std::fs::write(dir.path().join("secret.css"), "body { color: red; }").unwrap();
+
+        let html = r#"<html><head><link rel="stylesheet" href="../secret.css"></head><body><p>Hello</p></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: sub.clone(),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_none(),
+            "Path traversal outside base_path should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_link_stylesheet_pass_rejects_absolute_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("evil.css"), "body { color: red; }").unwrap();
+
+        let html = format!(
+            r#"<html><head><link rel="stylesheet" href="{}"></head><body><p>Hello</p></body></html>"#,
+            other.path().join("evil.css").display()
+        );
+        let mut doc = parse(&html, 400.0, &[]);
+        let pass = LinkStylesheetPass {
+            base_path: dir.path().to_path_buf(),
+        };
+        let ctx = PassContext {
+            viewport_width: 400.0,
+            viewport_height: 10000.0,
+            font_data: &[],
+        };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+        resolve(&mut doc);
+        assert!(
+            find_element_by_tag(&doc, "style").is_none(),
+            "Absolute path outside base_path should be rejected"
         );
     }
 }

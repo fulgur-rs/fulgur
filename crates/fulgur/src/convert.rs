@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::MAX_DOM_DEPTH;
+
 /// Context for DOM-to-Pageable conversion, bundling all shared state.
 pub struct ConvertContext<'a> {
     pub running_store: &'a RunningElementStore,
@@ -53,10 +55,14 @@ pub fn dom_to_pageable(doc: &HtmlDocument, ctx: &mut ConvertContext<'_>) -> Box<
     if std::env::var("FULGUR_DEBUG").is_ok() {
         debug_print_tree(doc.deref(), root.id, 0);
     }
-    convert_node(doc.deref(), root.id, ctx)
+    convert_node(doc.deref(), root.id, ctx, 0)
 }
 
 fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) {
+    if depth >= MAX_DOM_DEPTH {
+        eprintln!("{}... (max depth reached)", "  ".repeat(depth));
+        return;
+    }
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
@@ -86,8 +92,12 @@ fn convert_node(
     doc: &blitz_dom::BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) -> Box<dyn Pageable> {
-    let result = convert_node_inner(doc, node_id, ctx);
+    if depth >= MAX_DOM_DEPTH {
+        return Box::new(SpacerPageable::new(0.0));
+    }
+    let result = convert_node_inner(doc, node_id, ctx, depth);
     maybe_prepend_string_set(node_id, result, ctx)
 }
 
@@ -174,6 +184,7 @@ fn convert_node_inner(
     doc: &blitz_dom::BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) -> Box<dyn Pageable> {
     let node = doc.get_node(node_id).unwrap();
     let layout = node.final_layout;
@@ -217,7 +228,7 @@ fn convert_node_inner(
             }
         } else {
             let children: &[usize] = &node.children;
-            let positioned_children = collect_positioned_children(doc, children, ctx);
+            let positioned_children = collect_positioned_children(doc, children, ctx, depth);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_visible(visible);
@@ -242,7 +253,7 @@ fn convert_node_inner(
     if let Some(elem_data) = node.element_data() {
         let tag = elem_data.name.local.as_ref();
         if tag == "table" {
-            return convert_table(doc, node, ctx);
+            return convert_table(doc, node, ctx, depth);
         }
         if tag == "img" {
             if let Some(img) = convert_image(node, ctx.assets) {
@@ -306,7 +317,7 @@ fn convert_node_inner(
     }
 
     // Container node — collect children with Taffy-computed positions
-    let positioned_children = collect_positioned_children(doc, children, ctx);
+    let positioned_children = collect_positioned_children(doc, children, ctx, depth);
 
     let style = extract_block_style(node, ctx.assets);
     let has_style = style.has_visual_style() || style.has_radius();
@@ -333,7 +344,11 @@ fn collect_positioned_children(
     doc: &blitz_dom::BaseDocument,
     child_ids: &[usize],
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) -> Vec<PositionedChild> {
+    if depth >= MAX_DOM_DEPTH {
+        return Vec::new();
+    }
     let mut result = Vec::new();
     let mut pending_running_markers: Vec<RunningElementMarkerPageable> = Vec::new();
 
@@ -388,7 +403,7 @@ fn collect_positioned_children(
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
-            let mut nested = collect_positioned_children(doc, &child_node.children, ctx);
+            let mut nested = collect_positioned_children(doc, &child_node.children, ctx, depth + 1);
             // Flush pending running markers to the first real nested child so
             // they travel with the flattened content on page break. Without
             // this, the markers would skip over the container's children and
@@ -410,7 +425,7 @@ fn collect_positioned_children(
             continue;
         }
 
-        let mut child_pageable = convert_node(doc, child_id, ctx);
+        let mut child_pageable = convert_node(doc, child_id, ctx, depth + 1);
         if !pending_running_markers.is_empty() {
             child_pageable = Box::new(RunningElementWrapperPageable::new(
                 std::mem::take(&mut pending_running_markers),
@@ -491,6 +506,7 @@ fn convert_table(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) -> Box<dyn Pageable> {
     let layout = node.final_layout;
     let width = layout.size.width;
@@ -514,6 +530,7 @@ fn convert_table(
             &mut header_cells,
             &mut body_cells,
             ctx,
+            depth,
         );
     }
 
@@ -554,7 +571,11 @@ fn collect_table_cells(
     header_cells: &mut Vec<PositionedChild>,
     body_cells: &mut Vec<PositionedChild>,
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
@@ -585,6 +606,7 @@ fn collect_table_cells(
                 header_cells,
                 body_cells,
                 ctx,
+                depth + 1,
             );
             continue;
         }
@@ -595,7 +617,7 @@ fn collect_table_cells(
         }
 
         // Actual cell (td/th) — convert and add to appropriate group
-        let cell_pageable = convert_node(doc, child_id, ctx);
+        let cell_pageable = convert_node(doc, child_id, ctx, depth + 1);
         let positioned = PositionedChild {
             child: cell_pageable,
             x: child_layout.location.x,
