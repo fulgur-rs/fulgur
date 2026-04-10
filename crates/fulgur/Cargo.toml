@@ -11,9 +11,6 @@ readme = "../../README.md"
 keywords = ["pdf", "html", "css", "converter"]
 categories = ["text-processing", "command-line-utilities"]
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dependencies]
 cssparser = "0.35"
 krilla = "0.6.0"

@@ -4,7 +4,9 @@
 - **対象バージョン**: `blitz-dom 0.2.4` / `blitz-html 0.2.0` / `blitz-traits 0.2.0`
 - **動機**: fulgur のスクリプト言語バインディング設計（`fulgur-d3r`, `fulgur-i5c`, `fulgur-0x0`）にあたり、Blitz の thread-safety を正しく把握する
 - **きっかけ**: `CLAUDE.md` の Gotchas に「Blitz not thread-safe / integration tests require `--test-threads=1`」と書かれているが、根拠が明確でなかった
-- **結論**: CLAUDE.md の **結論は正しい**（Blitz は同一プロセス内の並列実行で silent に死ぬ）。ただし **理由は当初の仮説と全く違う**
+- **結論（訂正版）**: **Blitz は実は thread-safe だった**。silent exit の原因は fulgur 自身の `blitz_adapter::suppress_stdout` が fd 1 をプロセス全体で dup2 する設計で、並列実行で race していた。PR #61 で入れた `BLITZ_LOCK` は症状を偶然塞ぐだけの誤った修正だった
+
+> **重要**: 本レポートの本文は初期調査時の内容で、**前半の結論は誤り**だった。末尾の「訂正 addendum (2026-04-11)」を優先して読むこと。前半を残しているのは、同じ誤診を繰り返さないための戒めとして。
 
 ## TL;DR
 
@@ -270,15 +272,112 @@ silent exit (panic message なし、EXIT=0) なのが厄介。デバッグが極
 
 ## アクションアイテム
 
-> ステータスは PR #61 マージ時点での状況。未着手は E のみ。
+> ステータスは PR #61 マージ時点での状況。末尾の訂正 addendum により PR #61 の方針自体が再評価された。
 
 | 順 | 内容 | ステータス |
 |---|---|---|
-| A | `blitz_adapter` に `static BLITZ_LOCK: Mutex<()>` を入れて `--test-threads=4` で動くか検証 | 完了 (PR #61) |
-| B | CLAUDE.md の Gotcha を実情に合わせて書き直す | 完了 (PR #61) |
-| C | `fulgur-d3r` の description を本レポートの内容で書き換え | 完了 (beads: closed) |
-| D | `project memory` に Blitz thread-safety の真相を保存（再調査回避） | 完了 (`project_blitz_thread_safety.md`) |
-| E | DioxusLabs/blitz に upstream issue 提出（silent exit on parallel `BaseDocument::new()`）| 未着手（余裕があれば） |
+| A | `blitz_adapter` に `static BLITZ_LOCK: Mutex<()>` を入れて `--test-threads=4` で動くか検証 | **取り消し** — 誤った修正だった |
+| B | CLAUDE.md の Gotcha を実情に合わせて書き直す | 完了 (PR #61) → 後続 PR で再訂正 |
+| C | `fulgur-d3r` の description を本レポートの内容で書き換え | 完了 → 再オープンが必要 |
+| D | `project memory` に Blitz thread-safety の真相を保存（再調査回避） | 完了 → 後続で訂正 |
+| E | DioxusLabs/blitz に upstream issue 提出（silent exit on parallel `BaseDocument::new()`）| **取り下げ** — blitz にバグはなかった |
+
+---
+
+## 訂正 addendum (2026-04-11 later)
+
+### 背景
+
+PR #61 マージ後、upstream blitz に issue を提出する準備として **クリーンな最小再現コード**を作ろうとしたところ、pure blitz API (`HtmlDocument::from_html` + `doc.resolve`) では race を再現できないことが判明した。fulgur の full engine pipeline を経由してはじめて silent exit が出る。そこで切り分けを続けた結果、**root cause は fulgur 自身のコードだった**。
+
+### 再現層別実験
+
+lib unit test として `#[cfg(test)] mod race_repro` を追加し、以下の 6 層を生成、各 10 試行、`--test-threads=8`、`BLITZ_LOCK` 無効化 (sed で lock guard 削除):
+
+| Layer | 内容 | 結果 |
+|---|---|---|
+| L0a | `HtmlDocument::from_html(HTML, DocumentConfig::default())` | **10/10 pass** |
+| L0b | `HtmlDocument::from_html(HTML, viewport+base_url)` | **10/10 pass** |
+| L1 | `blitz_adapter::parse(HTML, 600, &[])` (fulgur wrapper) | **1/10 pass** |
+| L2 | L1 + `resolve()` | 2/10 pass |
+| L3 | L2 + `convert::dom_to_pageable` | 0/10 pass |
+| L4 | L3 + `render_to_pdf` (krilla) | 2/10 pass |
+
+**L0a/L0b と L1 の唯一の差**は、L1 が `blitz_adapter::parse` を経由しているかどうか。L0b は L1 と同じ config (`viewport + base_url`) を使っているが、`HtmlDocument::from_html` を直接呼んでいる。つまり fulgur の `blitz_adapter::parse` のラッパーの中に race 源がある。
+
+### 真の root cause: `suppress_stdout`
+
+`crates/fulgur/src/blitz_adapter.rs:38-85` に定義されていた `suppress_stdout` 関数は、`parse()` の内側で blitz-html の `println!("ERROR: {e}")` を消すため、**fd 1 (プロセス全体の stdout) を `dup2(devnull, 1)` で /dev/null に差し替え** ていた：
+
+```rust
+fn suppress_stdout<F: FnOnce() -> T, T>(f: F) -> T {
+    let saved = unsafe { libc::dup(1) };                 // 真の stdout を保存
+    unsafe { libc::dup2(dn.as_raw_fd(), 1) };            // fd 1 = devnull
+    let result = f();                                     // Blitz 呼び出し
+    drop(guard);                                          // Drop で dup2(saved, 1)
+    result
+}
+```
+
+**race の構造**:
+
+1. Thread A: `saved_A = dup(1)` → 真の stdout を保存、`dup2(devnull, 1)` → fd1=devnull
+2. Thread B: **このタイミングで suppress_stdout に入る** → `saved_B = dup(1)` → **devnull を保存**（A が既に fd 1 を差し替えているため、「現在の fd 1」= devnull）
+3. Thread B: `dup2(devnull, 1)` → 変化なし
+4. Thread A: guard drop → `dup2(saved_A, 1)` → fd1=真の stdout
+5. Thread B: guard drop → `dup2(saved_B=devnull, 1)` → **fd1=devnull のまま戻らない**
+
+または単純に、Thread A が suppression 中に Thread B (libtest の summary 出力スレッドなど) が stdout に書き込むと、その write は devnull に消える。
+
+結果、libtest の `test result: ok. N passed` 行が失われ、**silent exit に見える**。実際にはテストは走って pass していた。
+
+### 検証: `suppress_stdout` を削除すると…
+
+`parse()` から `suppress_stdout` の wrap を外しただけで（`BLITZ_LOCK` は disabled のまま）:
+
+| Layer | 結果（suppress_stdout 有） | 結果（suppress_stdout 無） |
+|---|---|---|
+| L0a | 10/10 | 10/10 |
+| L0b | 10/10 | 10/10 |
+| L1 | 1/10 | **10/10** |
+| L2 | 2/10 | **10/10** |
+| L3 | 0/10 | **10/10** |
+| L4 | 2/10 | **10/10** |
+
+さらに全テストスイート 283/283 pass、gcpm_integration は 0.59s → **0.18s** (3 倍高速化、`BLITZ_LOCK` の直列化オーバーヘッドが消えたため)。
+
+### 訂正された結論
+
+| 以前の主張 | 実情 |
+|---|---|
+| Blitz に thread-safety のバグがある | **誤り**。Blitz は thread-safe |
+| `BaseDocument::new()` に global state race がある | **誤り** |
+| stylo が non-atomic な global init をしている | **誤り** |
+| `--test-threads=1` が必要 | **fulgur の `suppress_stdout` が原因**、blitz ではない |
+| PR #61 の `BLITZ_LOCK` が修正 | **症状を塞いだだけの誤った修正**。真の fix は `suppress_stdout` を削除すること |
+| silent exit = test が crash している | **誤り**。test は実行・pass しており、stdout redirect で出力が devnull に消えていた |
+
+### 採用した正しい修正
+
+1. **`blitz_adapter::suppress_stdout` を完全削除**（library は stdout に一切触らない）
+2. **`BLITZ_LOCK` / `apply_single_pass` を削除**（不要、PR #61 の revert）
+3. **`fulgur-cli/src/main.rs` に `StdoutIsolator` を追加**: render コマンドの実行中のみ fd 1 を fd 2 (stderr) にリダイレクトし、PDF 出力 (`-o -`) は保存した真の fd に `libc::write` で直接書く。CLI は single-threaded なので fd 操作は race しない
+4. **`libc` 依存を fulgur lib から fulgur-cli に移動**
+
+この形だと：
+
+- library は完全に pure で thread-safe、bindings (PyO3/Magnus) もそのまま安全
+- CLI の `-o -` で malformed HTML を食わせても PDF は corrupted にならない（エラーは stderr に出る）
+- CLI の `-o file.pdf` でも blitz noise は stderr に行き、stdout/端末がクリーン
+- `--test-threads=1` 制約も不要
+- lock overhead もゼロ、gcpm_integration は 3 倍速
+
+### 教訓
+
+- **silent exit を「crash」と決めつけるな**。stdout が redirect されているだけの可能性を疑え
+- **symptom だけを見て fix するな**。`BLITZ_LOCK` は race の症状を偶然塞いだだけで、原因を取り違えていた
+- **dependency のせいにする前に自前コードを疑え**。`suppress_stdout` は 2026-03 ごろに追加された fulgur のコードで、CLAUDE.md が書かれたのとほぼ同時期。`--test-threads=1` 制約が生まれた原因は自前コードだった可能性が高い
+- **クリーンな最小再現を作らずに upstream に投げるな**。upstream issue を作ろうとした瞬間に反証が出て救われた
 
 ## 参考リンク
 
