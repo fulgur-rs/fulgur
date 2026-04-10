@@ -1722,7 +1722,8 @@ mod tests {
         // Two counter-increment declarations in the same rule: the later one
         // wins (CSS last-declaration-wins). Counter-reset, declared between
         // them, must still survive because it's a different property.
-        let css = "h2 { counter-increment: chapter; counter-reset: section; counter-increment: page; }";
+        let css =
+            "h2 { counter-increment: chapter; counter-reset: section; counter-increment: page; }";
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.counter_mappings.len(), 1);
         let mapping = &ctx.counter_mappings[0];
