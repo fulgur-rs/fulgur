@@ -690,7 +690,6 @@ dependencies = [
  "blitz-traits",
  "cssparser",
  "krilla",
- "libc",
  "minijinja",
  "parley",
  "serde_json",
@@ -706,6 +705,7 @@ version = "0.4.3"
 dependencies = [
  "clap",
  "fulgur",
+ "libc",
  "serde_json",
 ]
 

@@ -63,14 +63,20 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 
 ### Gotchas
 
-- Blitz (`blitz-dom 0.2.4`) has a runtime data race in `BaseDocument::new()` /
-  stylo global state init that causes silent exit (EXIT=0, no panic, no test
-  output) when called concurrently from the same process.
-  `blitz_adapter::*` is gated by a `static BLITZ_LOCK: Mutex<()>` so that
-  `Engine` is safe to share across threads — calls are serialized internally.
-  True parallelism is impossible; for batch throughput use process-level
-  parallelism (gunicorn/puma workers, multiple `fulgur render` invocations).
-  Background and rationale: `docs/plans/2026-04-11-blitz-thread-safety-investigation.md`.
+- **Blitz is thread-safe** (contrary to earlier belief). Multiple threads can
+  call `blitz_adapter::parse` / `resolve` / `apply_passes` concurrently on
+  independent documents. The previous "Blitz not thread-safe" note was based
+  on a misdiagnosis — the real race was in fulgur's own `suppress_stdout`
+  helper, which has been removed. See
+  `docs/plans/2026-04-11-blitz-thread-safety-investigation.md` for the full
+  root-cause analysis.
+- **Blitz prints html5ever parse errors via `println!` to stdout** during
+  `TreeSink::finish`. This is noise from dependencies, not fulgur. Library
+  callers that need clean stdout must redirect fd 1 at their own call site —
+  `fulgur-cli` does this via `StdoutIsolator` for the render command so the
+  `-o -` mode does not corrupt PDF output. Multi-threaded callers must not
+  manipulate fd 1 process-wide; there is no thread-safe way to suppress
+  blitz's output in-process short of an upstream patch.
 - Use `BTreeMap` (not `HashMap`) for iteration that affects PDF output (determinism)
 - Blitz: `!important` unreliable, `padding-top` on inline roots ignored (use `margin-top`)
 - `cargo fmt --check` enforced by CI

@@ -1,88 +1,31 @@
 //! Thin adapter over Blitz APIs. All Blitz-specific code is isolated here
 //! so that upstream API changes only require changes in this module.
+//!
+//! # Thread safety
+//!
+//! Blitz (as of `blitz-dom 0.2.4` / `blitz-html 0.2.0`) is thread-safe for the
+//! operations fulgur uses: multiple threads may call `parse`, `resolve`, and
+//! pass application concurrently on independent documents. The adapter does
+//! not take any process-wide lock.
+//!
+//! # Stdout hygiene
+//!
+//! `blitz-html` prints `println!("ERROR: {error}")` in its `TreeSink::finish`
+//! implementation for every non-fatal html5ever parse error (unclosed tags,
+//! unexpected tokens, etc.). fulgur does *not* suppress these at the library
+//! level because doing so required manipulating process-wide fd 1, which is
+//! fundamentally racy in multi-threaded contexts. Callers that need clean
+//! stdout (notably `fulgur-cli` when rendering to stdout with `-o -`) must
+//! redirect fd 1 at their own call site where single-threaded execution is
+//! guaranteed. See `docs/plans/2026-04-11-blitz-thread-safety-investigation.md`
+//! for the full investigation and rationale.
 
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
-/// Process-wide lock that serializes every Blitz API call.
-///
-/// Blitz (`blitz-dom 0.2.4`) has a runtime data race in `BaseDocument::new()` /
-/// stylo global state initialization that causes a silent exit (EXIT=0, no
-/// panic, no test output) when called concurrently from multiple threads in the
-/// same process. The race is `timing-dependent` — under `strace` slowdown the
-/// tests pass; without it they silently fail.
-///
-/// We serialize all Blitz-touching code through this lock so that fulgur's
-/// `Engine` can be safely shared across threads (web servers, test runners,
-/// Python/Ruby bindings under thread pools). True parallelism is impossible
-/// with this constraint, so for batch throughput use process-level parallelism
-/// (gunicorn workers, puma workers, multiple `fulgur render` invocations).
-///
-/// Every public function in this module that touches Blitz state is gated by
-/// this lock: `parse`, `apply_passes`, `apply_single_pass`, and `resolve`.
-/// `parse_and_layout` inherits the gating from the functions it composes.
-/// Callers that need to invoke a `DomPass` outside of `apply_passes` must go
-/// through `apply_single_pass` so the serialization guarantee is preserved.
-///
-/// See `docs/plans/2026-04-11-blitz-thread-safety-investigation.md` for the
-/// full investigation, evidence, and rationale.
-static BLITZ_LOCK: Mutex<()> = Mutex::new(());
-
-/// Suppress stdout during a closure. Blitz's HTML parser unconditionally prints
-/// `println!("ERROR: {error}")` for non-fatal parse errors (e.g., "Unexpected token").
-/// These are html5ever's error-recovery messages and do not indicate real failures.
-fn suppress_stdout<F: FnOnce() -> T, T>(f: F) -> T {
-    use std::io::Write;
-
-    // Flush any pending stdout first
-    let _ = std::io::stdout().flush();
-
-    // On Unix, redirect fd 1 to /dev/null temporarily
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-
-        /// Drop guard that restores stdout from a saved file descriptor.
-        struct StdoutGuard {
-            saved_fd: i32,
-        }
-
-        impl Drop for StdoutGuard {
-            fn drop(&mut self) {
-                let _ = std::io::stdout().flush();
-                unsafe { libc::dup2(self.saved_fd, 1) };
-                unsafe { libc::close(self.saved_fd) };
-            }
-        }
-
-        let devnull = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-            .ok();
-
-        let guard = devnull.as_ref().and_then(|dn| {
-            let saved = unsafe { libc::dup(1) };
-            if saved < 0 {
-                return None;
-            }
-            unsafe { libc::dup2(dn.as_raw_fd(), 1) };
-            Some(StdoutGuard { saved_fd: saved })
-        });
-
-        let result = f();
-        drop(guard);
-        result
-    }
-
-    #[cfg(not(unix))]
-    {
-        f()
-    }
-}
+use std::sync::Arc;
 
 /// Parse HTML and return a fully resolved document (styles + layout computed).
 ///
@@ -115,8 +58,6 @@ pub trait DomPass {
 
 /// Parse HTML into a document without resolving styles or layout.
 pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
-    let _guard = BLITZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
     let viewport = Viewport::new(viewport_width as u32, 10000, 1.0, ColorScheme::Light);
 
     let font_ctx = if font_data.is_empty() {
@@ -137,36 +78,34 @@ pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> Htm
         ..DocumentConfig::default()
     };
 
-    suppress_stdout(|| HtmlDocument::from_html(html, config))
+    HtmlDocument::from_html(html, config)
 }
 
 /// Apply a sequence of DOM passes to a parsed document.
 pub fn apply_passes(doc: &mut HtmlDocument, passes: &[Box<dyn DomPass>], ctx: &PassContext<'_>) {
-    let _guard = BLITZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     for pass in passes {
         pass.apply(doc, ctx);
     }
 }
 
-/// Apply a single `DomPass` to a document while holding `BLITZ_LOCK`.
+/// Apply a single `DomPass` to a document.
 ///
-/// Use this when a caller needs to invoke a typed pass directly (for example,
-/// to retain access to a pass-specific accessor like `into_running_store` after
-/// the pass runs). Calling `DomPass::apply` directly from outside this module
-/// bypasses the lock and breaks the serialization guarantee documented on
-/// `BLITZ_LOCK`.
+/// Thin adapter that lets callers invoke a typed pass directly while still
+/// going through `blitz_adapter`, preserving the module's role as the single
+/// Blitz API surface (see `CLAUDE.md`: "Adapter isolation: Blitz API surface
+/// is contained in `blitz_adapter.rs`"). Callers can retain access to
+/// pass-specific accessors (for example `RunningElementPass::into_running_store`)
+/// by borrowing the pass here rather than consuming it via `apply_passes`.
 pub fn apply_single_pass<P: DomPass + ?Sized>(
     pass: &P,
     doc: &mut HtmlDocument,
     ctx: &PassContext<'_>,
 ) {
-    let _guard = BLITZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     pass.apply(doc, ctx);
 }
 
 /// Resolve styles (Stylo) and compute layout (Taffy).
 pub fn resolve(doc: &mut HtmlDocument) {
-    let _guard = BLITZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     doc.resolve(0.0);
 }
 

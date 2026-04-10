@@ -4,6 +4,102 @@ use fulgur::config::{Margin, PageSize};
 use fulgur::engine::Engine;
 use std::path::PathBuf;
 
+/// Isolate the real stdout from noise emitted by the render pipeline so that
+/// PDF bytes written to stdout (`-o -`) cannot be corrupted by incidental
+/// output from dependencies.
+///
+/// `blitz-html` prints `println!("ERROR: {msg}")` for every non-fatal
+/// html5ever parse error in its `TreeSink::finish` implementation. When fulgur
+/// renders to stdout, those messages would be written before the PDF bytes,
+/// producing a file that does not start with `%PDF-` and is therefore invalid.
+///
+/// The isolator duplicates fd 1 (real stdout), remaps fd 1 to fd 2 (stderr)
+/// so any stray `println!` goes to stderr where the user can see it, and
+/// writes PDF bytes directly to the saved fd via `libc::write`. On Drop the
+/// real stdout is restored.
+///
+/// This is safe because the CLI is strictly single-threaded during the render
+/// phase — unlike the previous `suppress_stdout` helper inside `blitz_adapter`
+/// which was shared by multi-threaded library callers and had a race in its
+/// `dup2` manipulation (see
+/// `docs/plans/2026-04-11-blitz-thread-safety-investigation.md`).
+#[cfg(unix)]
+struct StdoutIsolator {
+    saved_fd: libc::c_int,
+}
+
+#[cfg(unix)]
+impl StdoutIsolator {
+    /// Install the isolator. Returns `None` if either `dup(1)` or `dup2(2, 1)`
+    /// fails, in which case the caller should fall back to an unisolated
+    /// write.
+    fn install() -> Option<Self> {
+        use std::io::Write;
+        // Flush any pending stdout buffers before redirecting so nothing is
+        // left in std's userland buffer pointing at the old fd.
+        let _ = std::io::stdout().flush();
+
+        let saved = unsafe { libc::dup(1) };
+        if saved < 0 {
+            return None;
+        }
+        if unsafe { libc::dup2(2, 1) } < 0 {
+            unsafe { libc::close(saved) };
+            return None;
+        }
+        Some(Self { saved_fd: saved })
+    }
+
+    /// Write the given bytes to the saved real stdout fd, bypassing the
+    /// process-wide fd 1 (which is currently pointing at stderr).
+    ///
+    /// Retries on `EINTR` to match the semantics of
+    /// `std::io::Write::write_all`, which we are replacing at the syscall
+    /// level. Without this, a signal delivered mid-write (e.g. `SIGWINCH`
+    /// on terminal resize, `SIGCHLD` from a child process, or a timer
+    /// signal) would surface as a spurious `Interrupted system call`
+    /// failure. A `0`-byte return on a non-empty buffer is treated as
+    /// `WriteZero` to prevent an infinite loop.
+    fn write_all(&self, mut data: &[u8]) -> std::io::Result<()> {
+        while !data.is_empty() {
+            let written = unsafe {
+                libc::write(
+                    self.saved_fd,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                )
+            };
+            if written < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            if written == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "libc::write returned 0 bytes for a non-empty buffer",
+                ));
+            }
+            data = &data[written as usize..];
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StdoutIsolator {
+    fn drop(&mut self) {
+        // Restore fd 1 to the real stdout so any final messages the process
+        // prints (e.g. panic output on failure paths) land in the right place.
+        unsafe {
+            libc::dup2(self.saved_fd, 1);
+            libc::close(self.saved_fd);
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "fulgur", version, about = "HTML to PDF converter")]
 struct Cli {
@@ -354,6 +450,38 @@ fn main() {
 
             let engine = builder.build();
 
+            // Isolate stdout BEFORE rendering for both output modes: blitz-html
+            // prints `println!("ERROR: {e}")` for every non-fatal html5ever
+            // parse-error recovery, and we want those on stderr where they
+            // belong (a) so they don't corrupt the PDF stream in `-o -` mode,
+            // and (b) so they don't pollute the user's terminal stdout in
+            // file-output mode. The isolator redirects fd 1 -> fd 2 for the
+            // duration of the render.
+            //
+            // Install failure handling depends on the output mode:
+            // * `-o -` (writing PDF to stdout) MUST have the isolator — a
+            //   failure would leave dependency noise free to corrupt the PDF
+            //   bytes. Abort with a clear error so the user can investigate.
+            // * File output can tolerate an install failure: the worst case
+            //   is blitz parse-error lines leaking to the user's terminal,
+            //   which is UX noise but not a correctness bug.
+            let to_stdout = output.as_os_str() == "-";
+            #[cfg(unix)]
+            let stdout_isolator = {
+                let iso = StdoutIsolator::install();
+                if to_stdout && iso.is_none() {
+                    eprintln!(
+                        "Error: failed to isolate stdout for `-o -` output. \
+                         Refusing to write PDF bytes without protection — \
+                         dependency output could corrupt the stream. \
+                         Retry with `-o <file>` or investigate the environment \
+                         (fd 1 closed? per-process fd limit reached?)."
+                    );
+                    std::process::exit(1);
+                }
+                iso
+            };
+
             let pdf = if data.is_some() {
                 engine.render()
             } else {
@@ -364,12 +492,30 @@ fn main() {
                 std::process::exit(1);
             });
 
-            if output.as_os_str() == "-" {
-                use std::io::Write;
-                std::io::stdout().write_all(&pdf).unwrap_or_else(|e| {
-                    eprintln!("Error writing to stdout: {e}");
-                    std::process::exit(1);
-                });
+            if to_stdout {
+                #[cfg(unix)]
+                {
+                    // Install is verified above for `-o -` mode, so the
+                    // isolator is guaranteed to be Some here.
+                    let iso = stdout_isolator
+                        .as_ref()
+                        .expect("isolator install verified non-None for -o -");
+                    iso.write_all(&pdf).unwrap_or_else(|e| {
+                        eprintln!("Error writing to stdout: {e}");
+                        std::process::exit(1);
+                    });
+                }
+                #[cfg(not(unix))]
+                {
+                    // Non-unix build: no StdoutIsolator available. Dependency
+                    // output may interleave with the PDF bytes; the Unix path
+                    // is the supported configuration for `-o -`.
+                    use std::io::Write;
+                    std::io::stdout().write_all(&pdf).unwrap_or_else(|e| {
+                        eprintln!("Error writing to stdout: {e}");
+                        std::process::exit(1);
+                    });
+                }
             } else {
                 std::fs::write(&output, &pdf).unwrap_or_else(|e| {
                     eprintln!("Error writing to {}: {e}", output.display());
