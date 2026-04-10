@@ -1,5 +1,4 @@
 use crate::asset::AssetBundle;
-use crate::blitz_adapter::DomPass;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
@@ -95,7 +94,7 @@ impl Engine {
         // Extract running elements via DomPass (before resolve)
         let running_store = if !gcpm.running_mappings.is_empty() {
             let pass = crate::blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
-            pass.apply(&mut doc, &ctx);
+            crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
             pass.into_running_store()
         } else {
             crate::gcpm::running::RunningElementStore::new()
@@ -104,7 +103,7 @@ impl Engine {
         // Extract string-set values via DomPass
         let string_set_store = if !gcpm.string_set_mappings.is_empty() {
             let pass = crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
-            pass.apply(&mut doc, &ctx);
+            crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
             pass.into_store()
         } else {
             crate::gcpm::string_set::StringSetStore::new()

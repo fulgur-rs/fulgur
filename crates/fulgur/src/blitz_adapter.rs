@@ -88,6 +88,22 @@ pub fn apply_passes(doc: &mut HtmlDocument, passes: &[Box<dyn DomPass>], ctx: &P
     }
 }
 
+/// Apply a single `DomPass` to a document.
+///
+/// Thin adapter that lets callers invoke a typed pass directly while still
+/// going through `blitz_adapter`, preserving the module's role as the single
+/// Blitz API surface (see `CLAUDE.md`: "Adapter isolation: Blitz API surface
+/// is contained in `blitz_adapter.rs`"). Callers can retain access to
+/// pass-specific accessors (for example `RunningElementPass::into_running_store`)
+/// by borrowing the pass here rather than consuming it via `apply_passes`.
+pub fn apply_single_pass<P: DomPass + ?Sized>(
+    pass: &P,
+    doc: &mut HtmlDocument,
+    ctx: &PassContext<'_>,
+) {
+    pass.apply(doc, ctx);
+}
+
 /// Resolve styles (Stylo) and compute layout (Taffy).
 pub fn resolve(doc: &mut HtmlDocument) {
     doc.resolve(0.0);

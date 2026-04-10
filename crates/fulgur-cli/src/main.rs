@@ -58,7 +58,8 @@ impl StdoutIsolator {
     /// level. Without this, a signal delivered mid-write (e.g. `SIGWINCH`
     /// on terminal resize, `SIGCHLD` from a child process, or a timer
     /// signal) would surface as a spurious `Interrupted system call`
-    /// failure.
+    /// failure. A `0`-byte return on a non-empty buffer is treated as
+    /// `WriteZero` to prevent an infinite loop.
     fn write_all(&self, mut data: &[u8]) -> std::io::Result<()> {
         while !data.is_empty() {
             let written = unsafe {
@@ -74,6 +75,12 @@ impl StdoutIsolator {
                     continue;
                 }
                 return Err(err);
+            }
+            if written == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "libc::write returned 0 bytes for a non-empty buffer",
+                ));
             }
             data = &data[written as usize..];
         }
@@ -450,9 +457,30 @@ fn main() {
             // and (b) so they don't pollute the user's terminal stdout in
             // file-output mode. The isolator redirects fd 1 -> fd 2 for the
             // duration of the render.
+            //
+            // Install failure handling depends on the output mode:
+            // * `-o -` (writing PDF to stdout) MUST have the isolator — a
+            //   failure would leave dependency noise free to corrupt the PDF
+            //   bytes. Abort with a clear error so the user can investigate.
+            // * File output can tolerate an install failure: the worst case
+            //   is blitz parse-error lines leaking to the user's terminal,
+            //   which is UX noise but not a correctness bug.
             let to_stdout = output.as_os_str() == "-";
             #[cfg(unix)]
-            let stdout_isolator = StdoutIsolator::install();
+            let stdout_isolator = {
+                let iso = StdoutIsolator::install();
+                if to_stdout && iso.is_none() {
+                    eprintln!(
+                        "Error: failed to isolate stdout for `-o -` output. \
+                         Refusing to write PDF bytes without protection — \
+                         dependency output could corrupt the stream. \
+                         Retry with `-o <file>` or investigate the environment \
+                         (fd 1 closed? per-process fd limit reached?)."
+                    );
+                    std::process::exit(1);
+                }
+                iso
+            };
 
             let pdf = if data.is_some() {
                 engine.render()
@@ -466,21 +494,28 @@ fn main() {
 
             if to_stdout {
                 #[cfg(unix)]
-                if let Some(ref iso) = stdout_isolator {
+                {
+                    // Install is verified above for `-o -` mode, so the
+                    // isolator is guaranteed to be Some here.
+                    let iso = stdout_isolator
+                        .as_ref()
+                        .expect("isolator install verified non-None for -o -");
                     iso.write_all(&pdf).unwrap_or_else(|e| {
                         eprintln!("Error writing to stdout: {e}");
                         std::process::exit(1);
                     });
-                    return;
                 }
-                // Non-unix fallback, or isolator install failed: write through
-                // std::io::stdout() without protection. Any noise from the
-                // render pipeline will be interleaved with the PDF bytes.
-                use std::io::Write;
-                std::io::stdout().write_all(&pdf).unwrap_or_else(|e| {
-                    eprintln!("Error writing to stdout: {e}");
-                    std::process::exit(1);
-                });
+                #[cfg(not(unix))]
+                {
+                    // Non-unix build: no StdoutIsolator available. Dependency
+                    // output may interleave with the PDF bytes; the Unix path
+                    // is the supported configuration for `-o -`.
+                    use std::io::Write;
+                    std::io::stdout().write_all(&pdf).unwrap_or_else(|e| {
+                        eprintln!("Error writing to stdout: {e}");
+                        std::process::exit(1);
+                    });
+                }
             } else {
                 std::fs::write(&output, &pdf).unwrap_or_else(|e| {
                     eprintln!("Error writing to {}: {e}", output.display());
