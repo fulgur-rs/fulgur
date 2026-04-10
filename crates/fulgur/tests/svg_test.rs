@@ -66,3 +66,33 @@ fn test_svg_with_border_and_padding_renders() {
         plain_pdf.len()
     );
 }
+
+#[test]
+fn test_multiple_svgs_on_same_page() {
+    let engine = build_engine();
+    let html = r#"<html><body>
+        <svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" style="display:block">
+            <circle cx="25" cy="25" r="20" fill="red"/>
+        </svg>
+        <svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" style="display:block">
+            <circle cx="25" cy="25" r="20" fill="blue"/>
+        </svg>
+    </body></html>"#;
+
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+
+    // Two SVGs should produce a larger PDF than one
+    let single_html = r#"<html><body>
+        <svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" style="display:block">
+            <circle cx="25" cy="25" r="20" fill="red"/>
+        </svg>
+    </body></html>"#;
+    let single_pdf = engine.render_html(single_html).unwrap();
+    assert!(
+        pdf.len() > single_pdf.len(),
+        "PDF with 2 SVGs ({} bytes) should exceed PDF with 1 SVG ({} bytes)",
+        pdf.len(),
+        single_pdf.len()
+    );
+}
