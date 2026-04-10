@@ -96,3 +96,25 @@ fn test_multiple_svgs_on_same_page() {
         single_pdf.len()
     );
 }
+
+#[test]
+fn test_svg_does_not_split_across_pages() {
+    let engine = build_engine();
+    // A4 minus uniform 72pt margin ≈ 698pt content height.
+    // Place a filler consuming ~500pt, then a 300pt-tall SVG that
+    // cannot fit in the remaining ~198pt — must move to page 2.
+    let html = r#"<html><body>
+        <div style="height: 500pt"></div>
+        <svg xmlns="http://www.w3.org/2000/svg" width="200" height="300" style="display:block">
+            <rect width="200" height="300" fill="green"/>
+        </svg>
+    </body></html>"#;
+
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    // PDF should contain at least 2 pages.
+    assert!(
+        pdf.windows(8).any(|w| w == b"/Count 2") || pdf.windows(8).any(|w| w == b"/Count 3"),
+        "expected /Count 2 or /Count 3 in Pages tree, indicating the SVG moved to a new page"
+    );
+}
