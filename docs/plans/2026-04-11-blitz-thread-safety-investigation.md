@@ -270,13 +270,15 @@ silent exit (panic message なし、EXIT=0) なのが厄介。デバッグが極
 
 ## アクションアイテム
 
+> ステータスは PR #61 マージ時点での状況。未着手は E のみ。
+
 | 順 | 内容 | ステータス |
 |---|---|---|
-| A | `blitz_adapter` に `static BLITZ_LOCK: Mutex<()>` を入れて `--test-threads=4` で動くか検証 | 次に実施 |
-| B | CLAUDE.md の Gotcha を実情に合わせて書き直す | A の結果次第 |
-| C | `fulgur-d3r` の description を本レポートの内容で書き換え | A の結果次第 |
-| D | `project memory` に Blitz thread-safety の真相を保存（再調査回避） | 推奨 |
-| E | DioxusLabs/blitz に upstream issue 提出（silent exit on parallel `BaseDocument::new()`）| 余裕があれば |
+| A | `blitz_adapter` に `static BLITZ_LOCK: Mutex<()>` を入れて `--test-threads=4` で動くか検証 | 完了 (PR #61) |
+| B | CLAUDE.md の Gotcha を実情に合わせて書き直す | 完了 (PR #61) |
+| C | `fulgur-d3r` の description を本レポートの内容で書き換え | 完了 (beads: closed) |
+| D | `project memory` に Blitz thread-safety の真相を保存（再調査回避） | 完了 (`project_blitz_thread_safety.md`) |
+| E | DioxusLabs/blitz に upstream issue 提出（silent exit on parallel `BaseDocument::new()`）| 未着手（余裕があれば） |
 
 ## 参考リンク
 
