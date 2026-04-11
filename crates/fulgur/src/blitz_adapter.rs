@@ -237,6 +237,64 @@ pub fn extract_inline_svg_tree(
     }
 }
 
+/// Inspect a pseudo-element node's computed `content` property and return the
+/// first `Image` variant's URL as an owned `String` if the content is a single
+/// `url(...)` / `image-set(url(...))` item.
+///
+/// This exists because `blitz-dom` 0.2.4 does not materialize `content: url(...)`
+/// into a child image node — the match arm in
+/// `blitz-dom/src/layout/construct.rs` for non-`String` ContentItem variants is
+/// a TODO. fulgur bypasses that by reading the stylo computed value directly
+/// and constructing an `ImagePageable` itself (see `convert::build_pseudo_image`).
+///
+/// Scope: only single-item content is matched (per the fulgur-ai3 design scope
+/// — multi-item content that mixes text + image is out-of-scope). The URL is
+/// returned owned because `primary_styles()` yields a short-lived borrow guard
+/// that cannot outlive this function; callers normalize it (e.g. via
+/// `convert::extract_asset_name`) before querying `AssetBundle`.
+pub fn extract_pseudo_image_url(node: &blitz_dom::Node) -> Option<String> {
+    use style::values::generics::counters::{Content, ContentItem};
+    let styles = node.primary_styles()?;
+    let content = &styles.get_counters().content;
+    let item_data = match content {
+        Content::Items(item_data) => item_data,
+        _ => return None,
+    };
+    // Only inspect the "main" items (before `alt_start`). Content after
+    // `alt_start` is alt-text in CSS Level 3 Content.
+    let main = &item_data.items[..item_data.alt_start];
+    if main.len() != 1 {
+        return None;
+    }
+    match &main[0] {
+        ContentItem::Image(img) => extract_url_from_stylo_image(img).map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
+/// Unwrap a `style::values::computed::image::Image` into a URL string when it
+/// is an `Image::Url(ComputedUrl)` — or `image-set(...)` that selects one.
+///
+/// `image-set(...)` note: stylo tracks `selected_index` on `GenericImageSet`,
+/// picking a specific candidate at computed-value time based on device pixel
+/// ratio. We follow that index and then recurse once into the selected item's
+/// own `Image`. Stylo does not produce nested image-sets in practice, so a
+/// shallow recursion is sufficient.
+fn extract_url_from_stylo_image(image: &style::values::computed::image::Image) -> Option<&str> {
+    use style::servo::url::ComputedUrl;
+    use style::values::generics::image::Image as StyloImage;
+    match image {
+        StyloImage::Url(ComputedUrl::Valid(url)) => Some(url.as_str()),
+        StyloImage::Url(ComputedUrl::Invalid(s)) => Some(s.as_str()),
+        StyloImage::ImageSet(image_set) => {
+            let idx = image_set.selected_index;
+            let item = image_set.items.get(idx)?;
+            extract_url_from_stylo_image(&item.image)
+        }
+        _ => None,
+    }
+}
+
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
     blitz_dom::QualName::new(
         None,
@@ -1034,6 +1092,88 @@ mod tests {
             ops_by_node.len(),
             3,
             "Should have exactly 3 ops: body reset + 2 h2 increments"
+        );
+    }
+
+    /// Walk the DOM tree to find the first element with the given local name.
+    /// Used by pseudo-content tests below.
+    fn find_element_by_local_name(doc: &HtmlDocument, name: &str) -> Option<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if let Some(ed) = node.element_data() {
+                if ed.name.local.as_ref() == name {
+                    return Some(id);
+                }
+            }
+            for &c in &node.children {
+                if let Some(v) = walk(doc, c, name) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        use std::ops::Deref;
+        walk(doc.deref(), doc.root_element().id, name)
+    }
+
+    #[test]
+    fn test_extract_pseudo_image_url_simple() {
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("logo.png"); }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = parse(html, 800.0, &[]);
+        resolve(&mut doc);
+        let h1_id = find_element_by_local_name(&doc, "h1").expect("h1");
+        let before_id = doc
+            .get_node(h1_id)
+            .unwrap()
+            .before
+            .expect("::before pseudo");
+        let url = extract_pseudo_image_url(doc.get_node(before_id).unwrap());
+        assert!(url.is_some(), "expected Some(url), got None");
+        let url = url.unwrap();
+        assert!(url.ends_with("logo.png"), "unexpected url: {url}");
+    }
+
+    #[test]
+    fn test_extract_pseudo_image_url_returns_none_for_string_content() {
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: "prefix "; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = parse(html, 800.0, &[]);
+        resolve(&mut doc);
+        let h1_id = find_element_by_local_name(&doc, "h1").expect("h1");
+        let before_id = doc
+            .get_node(h1_id)
+            .unwrap()
+            .before
+            .expect("::before pseudo");
+        assert!(
+            extract_pseudo_image_url(doc.get_node(before_id).unwrap()).is_none(),
+            "string content should not return a url"
+        );
+    }
+
+    #[test]
+    fn test_extract_pseudo_image_url_image_set() {
+        // image-set(url(...) 1x) should resolve to the same URL after stylo
+        // picks the selected candidate.
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: image-set(url("hi.png") 1x); }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = parse(html, 800.0, &[]);
+        resolve(&mut doc);
+        let h1_id = find_element_by_local_name(&doc, "h1").expect("h1");
+        let before_id = doc
+            .get_node(h1_id)
+            .unwrap()
+            .before
+            .expect("::before pseudo");
+        let url = extract_pseudo_image_url(doc.get_node(before_id).unwrap());
+        assert!(url.is_some(), "expected Some from image-set, got None");
+        assert!(
+            url.unwrap().ends_with("hi.png"),
+            "image-set should resolve to the selected url"
         );
     }
 }

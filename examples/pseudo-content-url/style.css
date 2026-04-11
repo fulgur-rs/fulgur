@@ -1,0 +1,63 @@
+body {
+  font-family: sans-serif;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #333;
+}
+
+h1 {
+  font-size: 20px;
+  margin-bottom: 16px;
+  color: #111;
+}
+
+/* fulgur-ai3 Phase 1: ::before { content: url() } only fires on block-display
+   pseudos, and the pseudo does not push subsequent content down (Blitz
+   zero-sizes text-less pseudos in layout). Authors reserve space manually
+   via margin-top on the following content until the Taffy round-trip
+   follow-up lands. */
+.chapter h2::before {
+  content: url("icon.png");
+  display: block;
+  width: 32px;
+  height: 32px;
+}
+
+.chapter h2 {
+  font-size: 16px;
+  margin-top: 40px;
+  margin-bottom: 8px;
+  color: #1a6faa;
+}
+
+.chapter p {
+  margin: 0 0 12px 0;
+}
+
+/* ::after pseudo variant */
+.after h2::after {
+  content: url("icon.png");
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.after h2 {
+  font-size: 16px;
+  margin-top: 32px;
+  margin-bottom: 8px;
+  color: #555;
+  /* Reserve room below for the ::after image. */
+  padding-bottom: 36px;
+}
+
+.after p {
+  margin: 0 0 12px 0;
+}
+
+code {
+  font-family: monospace;
+  background: #f0f0f0;
+  padding: 1px 4px;
+  border-radius: 3px;
+}

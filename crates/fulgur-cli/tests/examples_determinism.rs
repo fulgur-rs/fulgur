@@ -194,6 +194,15 @@ fn text_decoration_example_is_deterministic() {
     assert_example_deterministic("text-decoration");
 }
 
+#[test]
+fn pseudo_content_url_example_is_deterministic() {
+    // Phase 1 scope (fulgur-ai3): ::before / ::after pseudo elements
+    // with `content: url("icon.png"); display: block;`. The icon file
+    // must be registered as an asset via `--image`, which the harness
+    // does automatically by walking the example directory.
+    assert_example_deterministic("pseudo-content-url");
+}
+
 /// Cross-check: the committed `examples/<name>/index.pdf` should match
 /// what `fulgur render` produces *right now* under the pinned fontconfig.
 /// If these drift, either the fonts changed or the code changed and
