@@ -67,3 +67,36 @@ fn test_list_style_image_unresolved_url_falls_back_to_text() {
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+const MINIMAL_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+
+#[test]
+fn test_list_style_image_svg_renders() {
+    let mut assets = AssetBundle::new();
+    assets.add_image("bullet.svg", MINIMAL_SVG.to_vec());
+    let engine = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .assets(assets)
+        .build();
+    let html = r#"<html><body>
+        <ul style="list-style: disc url(bullet.svg)">
+            <li>SVG bullet item</li>
+        </ul>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+
+    let text_only = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .build()
+        .render_html(r#"<html><body><ul><li>SVG bullet item</li></ul></body></html>"#)
+        .unwrap();
+    // The SVG marker replaces the text bullet glyph with a vector path draw,
+    // so the rendered PDF must differ from the text-only control.
+    assert_ne!(
+        pdf, text_only,
+        "PDF with SVG marker should differ from text-only output"
+    );
+}

@@ -1152,8 +1152,20 @@ fn resolve_list_marker(
                 height,
             })
         }
-        // SVG branch implemented in Task 6
-        AssetKind::Svg => None,
+        AssetKind::Svg => {
+            let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
+            let size = tree.size();
+            let intrinsic_w = size.width();
+            let intrinsic_h = size.height();
+            let (width, height) =
+                crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+            let svg = SvgPageable::new(Arc::new(tree), width, height);
+            Some(ListItemMarker::Image {
+                marker: ImageMarker::Svg(svg),
+                width,
+                height,
+            })
+        }
         AssetKind::Unknown => None,
     }
 }
