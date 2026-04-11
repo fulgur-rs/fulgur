@@ -1,10 +1,4 @@
 use crate::manifest::Tolerance;
-// NOTE: `GenericImageView` is imported because some `image` versions expose
-// `get_pixel_checked` through this trait. In image 0.25 it is an inherent
-// method on `ImageBuffer`, so the import can appear unused — keep it guarded
-// with `#[allow]` to remain compatible across image versions.
-#[allow(unused_imports)]
-use image::GenericImageView;
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::path::Path;
 
