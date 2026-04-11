@@ -169,3 +169,35 @@ cargo test
 # Run CLI directly
 cargo run -p fulgur-cli -- render -o output.pdf input.html
 ```
+
+## Determinism and fonts
+
+Fulgur aims for byte-identical PDF output from identical input. The core pipeline
+(Blitz → Taffy → Parley → Krilla) is deterministic, but there is **one known
+environment dependency** you should be aware of:
+
+- [Blitz `blitz-dom` 0.2.4](https://docs.rs/blitz-dom) uses a process-global
+  `fontdb::Database::load_system_fonts()` call for parsing inline `<svg>`
+  elements. Fulgur cannot currently override it, so the font chosen for
+  `<text>` elements inside SVG — and the default fallback for HTML text when
+  no bundled fonts are supplied — depends on which `.ttf`/`.otf` files are
+  installed on the host. The same HTML can therefore produce *different*
+  PDFs on two machines if their system font sets differ.
+
+To get reproducible output today, pin the font environment via `fontconfig`:
+
+```bash
+# Point fontconfig at a controlled set of font files.
+export FONTCONFIG_FILE="$PWD/my-fonts.conf"
+fulgur render -o output.pdf input.html
+```
+
+The repository ships a pinned Noto Sans bundle under `examples/.fonts/`
+together with a matching `examples/.fontconfig/fonts.conf`, which is what
+`mise run update-examples` and the GitHub Actions regen workflows use to
+keep `examples/*/index.pdf` byte-identical across environments. See
+`examples/.fonts/README.md` for the exact font list and re-fetch
+instructions. Making this configurable at the library API level (so
+`fulgur::Engine` callers get determinism without touching fontconfig) is
+tracked as a follow-up — once landed, library callers will be able to
+supply their own font database directly.

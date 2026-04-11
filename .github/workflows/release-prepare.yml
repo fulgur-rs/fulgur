@@ -73,10 +73,15 @@ jobs:
         run: |
           set -e
           cargo build --bin fulgur --release
+          mkdir -p target/fontconfig-cache
+          rm -rf target/fontconfig-cache/*
+          export FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf"
           for dir in examples/*/; do
             html="${dir}index.html"
             pdf="${dir}index.pdf"
             [ -f "$html" ] || continue
+            # Skip hidden directories (.fonts, .fontconfig).
+            [ "${dir#examples/.}" = "$dir" ] || continue
             args=()
             for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif; do
               [ -f "$img" ] || continue

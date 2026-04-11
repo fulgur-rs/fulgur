@@ -57,9 +57,24 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 ### Design Principles
 
 - **Offline-first**: No network access; all assets must be explicitly bundled
-- **Deterministic**: Same input always produces same output
+- **Deterministic**: Same input always produces same output — see the font caveat below
 - **Hybrid layout**: Taffy pre-computes sizes, Pageable reuses them during pagination (no re-layout after splitting)
 - **Adapter isolation**: Blitz API surface is contained in `blitz_adapter.rs`
+
+**Font determinism caveat**: `blitz-dom` 0.2.4 hardcodes
+`fontdb::Database::load_system_fonts()` for inline `<svg>` parsing (see
+`blitz-dom-0.2.4/src/util.rs`), and fulgur currently inherits Parley's
+system font fallback for HTML text whenever no bundled fonts are supplied.
+This means the same HTML can produce different PDFs on two hosts if their
+installed `.ttf`/`.otf` set differs — the usual bite is `<text>` inside
+SVG picking a fallback that happens to ship on one machine but not the
+other. The regeneration scripts under `mise.toml` and
+`.github/workflows/update-examples.yml` pin this via
+`FONTCONFIG_FILE=examples/.fontconfig/fonts.conf`, which redirects
+fontconfig to the bundled Noto Sans set in `examples/.fonts/`. When
+editing fonts, CLI defaults, or the SVG pipeline, remember that library
+callers don't get this guarantee by default — see the tracking issue
+`fulgur-a8s` and the README's *Determinism and fonts* section.
 
 ### Gotchas
 
