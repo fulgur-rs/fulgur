@@ -9,7 +9,7 @@ project README's *Determinism and fonts* section for the rationale. The
 short version: `blitz-dom` loads system fonts via `fontdb::Database::load_system_fonts`
 with no hook for callers to override, so SVG `<text>` elements — and to
 a lesser extent HTML text — will pick different fonts depending on which
-`*.ttf`/`.otf` files happen to be installed on the host. Shipping a
+`*.ttf`/`*.otf` files happen to be installed on the host. Shipping a
 fixed font set + a pinned `fontconfig` config (`../.fontconfig/fonts.conf`)
 sidesteps the issue for examples without patching upstream Blitz.
 

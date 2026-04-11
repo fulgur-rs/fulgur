@@ -23,10 +23,17 @@ fn repo_root() -> PathBuf {
 }
 
 /// Render a single example via the fulgur CLI into `out_path`, with
-/// `FONTCONFIG_FILE` pointing at the pinned config. The fontconfig
-/// cache directory is forced under `target/fontconfig-cache/<tag>/`
-/// so parallel `cargo test` invocations don't race each other.
-fn render_example(example_dir: &Path, out_path: &Path, cache_tag: &str) {
+/// `FONTCONFIG_FILE` pointing at the pinned config.
+///
+/// Parallel `cargo test` invocations share a single
+/// `target/fontconfig-cache` directory — that's intentional.
+/// Fontconfig uses atomic rename for its cache writes, so concurrent
+/// writers don't corrupt each other. Earlier revisions of this helper
+/// tried to scope a per-invocation cache subdirectory, but fontconfig
+/// reads the cache location *only* from the `<cachedir>` element in
+/// `fonts.conf` (there is no `FC_CACHEDIR` env var), so the per-tag
+/// directories were dead code that gave a false sense of isolation.
+fn render_example(example_dir: &Path, out_path: &Path) {
     let root = repo_root();
     let html = example_dir.join("index.html");
     assert!(html.exists(), "missing HTML: {}", html.display());
@@ -38,9 +45,6 @@ fn render_example(example_dir: &Path, out_path: &Path, cache_tag: &str) {
         fontconfig.display()
     );
 
-    let cache_dir = root.join("target/fontconfig-cache").join(cache_tag);
-    std::fs::create_dir_all(&cache_dir).expect("mkdir cache");
-
     // Reuse the CLI binary that cargo built for this integration test.
     let fulgur_bin = PathBuf::from(env!("CARGO_BIN_EXE_fulgur"));
 
@@ -51,19 +55,18 @@ fn render_example(example_dir: &Path, out_path: &Path, cache_tag: &str) {
         .arg(&html);
 
     // Match mise/update-examples.yml behavior for images: register
-    // every local image as an asset keyed by its filename.
+    // every local image as an asset keyed by its filename. Keep the
+    // extension set in sync with the shell scripts in mise.toml,
+    // update-examples.yml, and release-prepare.yml — drift here would
+    // cause the committed-PDF match check to fail spuriously when a
+    // new image format is introduced in one place but not the other.
     for entry in std::fs::read_dir(example_dir).expect("readdir example") {
         let entry = entry.expect("entry");
         let path = entry.path();
         let ext_ok = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| {
-                matches!(
-                    e.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "gif"
-                )
-            })
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "gif"))
             .unwrap_or(false);
         if !ext_ok {
             continue;
@@ -94,8 +97,8 @@ fn assert_example_deterministic(example_name: &str) {
     let out_a = tmp.join(format!("{example_name}-a.pdf"));
     let out_b = tmp.join(format!("{example_name}-b.pdf"));
 
-    render_example(&example_dir, &out_a, &format!("{example_name}-a"));
-    render_example(&example_dir, &out_b, &format!("{example_name}-b"));
+    render_example(&example_dir, &out_a);
+    render_example(&example_dir, &out_b);
 
     let a = std::fs::read(&out_a).expect("read a");
     let b = std::fs::read(&out_b).expect("read b");
@@ -206,7 +209,7 @@ fn committed_svg_matches_rendered() {
 
     let tmp = tempdir();
     let out = tmp.join("svg-rendered.pdf");
-    render_example(&root.join("examples/svg"), &out, "svg-committed-check");
+    render_example(&root.join("examples/svg"), &out);
 
     let rendered = std::fs::read(&out).expect("read rendered");
     let on_disk = std::fs::read(&committed).expect("read committed");

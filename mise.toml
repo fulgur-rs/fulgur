@@ -5,8 +5,8 @@ rust = "latest"
 description = "Regenerate all example PDFs"
 run = """
 #!/usr/bin/env bash
-set -e
-cargo build --bin fulgur --release 2>&1 | tail -1
+set -euo pipefail
+cargo build --bin fulgur --release
 mkdir -p target/fontconfig-cache
 rm -rf target/fontconfig-cache/*
 export FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf"
