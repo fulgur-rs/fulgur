@@ -56,31 +56,43 @@ impl Engine {
             .map(|a| a.combined_css())
             .unwrap_or_default();
 
-        let gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
-        let css_to_inject = &gcpm.cleaned_css;
+        let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
+        let css_to_inject = gcpm.cleaned_css.clone();
 
-        // --- Pipeline: parse → DomPass → resolve ---
         let fonts = self
             .assets
             .as_ref()
             .map(|a| a.fonts.as_slice())
             .unwrap_or(&[]);
 
-        let mut doc = crate::blitz_adapter::parse(html, self.config.content_width(), fonts);
+        // Parse the HTML and resolve every <link rel="stylesheet"> /
+        // @import file inside `base_path` in one shot. The returned
+        // `link_gcpm` carries the GCPM constructs extracted from those
+        // stylesheets, which we fold into the AssetBundle-derived
+        // context below.
+        //
+        // `cleaned_css` is folded too: it is consumed by `render.rs` as
+        // the sole stylesheet for the margin-box mini-documents (see
+        // `render_to_pdf_with_gcpm` and `strip_display_none`). Without
+        // it, declarations like `.pageHeader { font-size: 8px; }`
+        // defined in a `<link>`-loaded stylesheet would never reach
+        // the margin-box renderer, so headers/footers would appear in
+        // default browser styles even though their content resolved
+        // correctly.
+        let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
+            html,
+            self.config.content_width(),
+            fonts,
+            self.base_path.as_deref(),
+        );
+        gcpm.extend_from(link_gcpm);
 
         // Build and apply DOM passes
         let mut passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
 
-        // Resolve <link rel="stylesheet"> before CSS injection
-        if let Some(ref base_path) = self.base_path {
-            passes.push(Box::new(crate::blitz_adapter::LinkStylesheetPass {
-                base_path: base_path.clone(),
-            }));
-        }
-
         if !css_to_inject.is_empty() {
             passes.push(Box::new(crate::blitz_adapter::InjectCssPass {
-                css: css_to_inject.clone(),
+                css: css_to_inject,
             }));
         }
 
@@ -356,5 +368,97 @@ mod tests {
         let engine = Engine::builder().base_path(dir.path()).build();
         let result = engine.render_html(html);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_html_link_stylesheet_with_gcpm() {
+        // <link>-loaded CSS that contains @page / running / counter rules
+        // must produce a PDF identical in structure to the same CSS passed
+        // via --css. Specifically the running header div should NOT appear
+        // as body content.
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("style.css");
+        std::fs::write(
+            &css_path,
+            r#"
+            .pageHeader { position: running(pageHeader); }
+            @page { @top-center { content: element(pageHeader); } }
+            body { font-family: sans-serif; }
+            "#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="pageHeader">RUNNING HEADER TEXT</div>
+<h1>Body Heading</h1>
+<p>Body paragraph.</p>
+</body></html>"#;
+
+        let engine = Engine::builder().base_path(dir.path()).build();
+        let pdf = engine.render_html(html).expect("render");
+
+        // Crude check: the PDF should have at least one page and not be
+        // empty. A more thorough comparison would require pdf parsing in
+        // tests, which we skip; the PR's verification step renders the
+        // header-footer example and visually compares against the
+        // --css output.
+        assert!(!pdf.is_empty());
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_render_html_link_stylesheet_with_import() {
+        // @import within a <link>-loaded stylesheet should also be
+        // resolved by FulgurNetProvider via Blitz/stylo's StylesheetLoader.
+        // The imported file is also fed through the GCPM parser, so
+        // running elements declared inside an @import target are honoured.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("base.css"),
+            r#"@import "header.css"; body { font-family: serif; }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("header.css"),
+            r#"
+            .pageHeader { position: running(pageHeader); }
+            @page { @top-center { content: element(pageHeader); } }
+            "#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="base.css"></head>
+<body>
+<div class="pageHeader">FROM IMPORT</div>
+<p>Body.</p>
+</body></html>"#;
+
+        let engine = Engine::builder().base_path(dir.path()).build();
+        let pdf = engine.render_html(html).expect("render");
+        assert!(!pdf.is_empty());
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_render_html_link_stylesheet_rejects_path_traversal() {
+        // A <link href="../secret.css"> outside the base_path must be
+        // ignored even if the file exists on disk. We can't easily verify
+        // "no styles applied" without parsing the PDF, but we can verify
+        // the engine doesn't error out and produces output.
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("base");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(parent.path().join("secret.css"), "body { color: red; }").unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="../secret.css"></head>
+<body><p>Hi</p></body></html>"#;
+
+        let engine = Engine::builder().base_path(&base).build();
+        let pdf = engine.render_html(html).expect("render");
+        assert!(!pdf.is_empty());
     }
 }

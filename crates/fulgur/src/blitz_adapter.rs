@@ -21,10 +21,12 @@
 //! for the full investigation and rationale.
 
 use blitz_dom::DocumentConfig;
+use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
+use blitz_traits::net::{NetProvider, Url};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Parse HTML and return a fully resolved document (styles + layout computed).
@@ -57,7 +59,71 @@ pub trait DomPass {
 }
 
 /// Parse HTML into a document without resolving styles or layout.
+///
+/// Uses Blitz's built-in `DummyNetProvider`, so `<link rel="stylesheet">`
+/// and `@import` are silently ignored. For real-world rendering call
+/// [`parse_html_with_local_resources`] instead, which wires fulgur's
+/// own [`crate::net::FulgurNetProvider`] into Blitz.
 pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
+    parse_inner(html, viewport_width, font_data, None, None)
+}
+
+/// Parse HTML and load any `<link rel="stylesheet">` / `@import` files
+/// found inside the configured `base_path`.
+///
+/// Returns the parsed document plus a [`crate::gcpm::GcpmContext`]
+/// containing every GCPM construct extracted from the loaded
+/// stylesheets. The caller is expected to merge that context into its
+/// own engine-level context (typically the one derived from `--css`).
+///
+/// This is the **only** entry point engine code should use for
+/// production rendering: it owns construction of
+/// [`crate::net::FulgurNetProvider`], the trait-object cast,
+/// `base_path → file://` URL derivation, and resource draining,
+/// keeping the Blitz API surface fully encapsulated in
+/// `blitz_adapter.rs` (CLAUDE.md adapter-isolation rule).
+pub fn parse_html_with_local_resources(
+    html: &str,
+    viewport_width: f32,
+    font_data: &[Arc<Vec<u8>>],
+    base_path: Option<&Path>,
+) -> (HtmlDocument, crate::gcpm::GcpmContext) {
+    let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
+        base_path.map(|p| p.to_path_buf()),
+    ));
+    let provider: Arc<dyn NetProvider<Resource>> = net_provider.clone();
+    let base_url = base_path
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| Url::from_directory_path(&p).ok())
+        .map(|u| u.to_string());
+
+    let mut doc = parse_inner(html, viewport_width, font_data, Some(provider), base_url);
+
+    // Replay every Resource (= parsed stylesheet) that the provider
+    // captured during HTML parsing into the document so the stylist
+    // sees them before `resolve()`.
+    for resource in net_provider.drain_pending_resources() {
+        doc.load_resource(resource);
+    }
+
+    // Fold the per-stylesheet GCPM contexts into one. The caller still
+    // has to merge this with its own AssetBundle-derived context.
+    let mut gcpm = crate::gcpm::GcpmContext::default();
+    for ctx in net_provider.drain_gcpm_contexts() {
+        gcpm.extend_from(ctx);
+    }
+    (doc, gcpm)
+}
+
+/// The single primitive that actually constructs an `HtmlDocument`.
+/// All other `parse*` functions in this module funnel through here.
+fn parse_inner(
+    html: &str,
+    viewport_width: f32,
+    font_data: &[Arc<Vec<u8>>],
+    net_provider: Option<Arc<dyn NetProvider<Resource>>>,
+    base_url: Option<String>,
+) -> HtmlDocument {
     let viewport = Viewport::new(viewport_width as u32, 10000, 1.0, ColorScheme::Light);
 
     let font_ctx = if font_data.is_empty() {
@@ -74,7 +140,8 @@ pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> Htm
     let config = DocumentConfig {
         viewport: Some(viewport),
         font_ctx,
-        base_url: Some("file:///".to_string()),
+        base_url: Some(base_url.unwrap_or_else(|| "file:///".to_string())),
+        net_provider,
         ..DocumentConfig::default()
     };
 
@@ -236,109 +303,6 @@ impl DomPass for InjectCssPass {
         };
 
         inject_style_node(doc, head_id, &self.css, None);
-    }
-}
-
-/// Resolves `<link rel="stylesheet" href="...">` tags by reading local CSS files
-/// and injecting them as `<style>` elements.
-pub struct LinkStylesheetPass {
-    pub base_path: PathBuf,
-}
-
-impl DomPass for LinkStylesheetPass {
-    fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
-        // Phase 1: Collect link elements and their CSS content
-        let head_id = match find_element_by_tag(doc, "head") {
-            Some(id) => id,
-            None => return,
-        };
-
-        let mut css_entries: Vec<(usize, String)> = Vec::new(); // (link_node_id, css_content)
-
-        let canonical_base = match self.base_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let head_children: Vec<usize> = doc
-            .get_node(head_id)
-            .map(|n| n.children.clone())
-            .unwrap_or_default();
-
-        for &child_id in &head_children {
-            let Some(node) = doc.get_node(child_id) else {
-                continue;
-            };
-            let Some(elem) = node.element_data() else {
-                continue;
-            };
-            if elem.name.local.as_ref() != "link" {
-                continue;
-            }
-
-            let is_stylesheet = get_attr(elem, "rel").is_some_and(|rel| {
-                rel.split_ascii_whitespace()
-                    .any(|t| t.eq_ignore_ascii_case("stylesheet"))
-            });
-            if !is_stylesheet {
-                continue;
-            }
-
-            let Some(href) = get_attr(elem, "href") else {
-                continue;
-            };
-            let href = href.to_string();
-
-            // Skip http/https URLs (offline-first design)
-            if href.starts_with("http://") || href.starts_with("https://") {
-                continue;
-            }
-
-            // Resolve path — restrict to base_path to prevent path traversal
-            let path = if std::path::Path::new(&href).is_absolute() {
-                PathBuf::from(&href)
-            } else {
-                self.base_path.join(&href)
-            };
-
-            // Canonicalize both paths and verify the resolved path is within base_path.
-            // This prevents directory traversal attacks (e.g. href="../../etc/passwd").
-            let canonical_path = match path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!(
-                        "Warning: could not resolve stylesheet '{}' (resolved to '{}')",
-                        href,
-                        path.display()
-                    );
-                    continue;
-                }
-            };
-            if !canonical_path.starts_with(&canonical_base) {
-                eprintln!(
-                    "Warning: stylesheet '{}' is outside base path, skipped",
-                    href
-                );
-                continue;
-            }
-
-            // Read file (skip with warning if missing)
-            if let Ok(css) = std::fs::read_to_string(&canonical_path) {
-                css_entries.push((child_id, css));
-            } else {
-                eprintln!(
-                    "Warning: could not read stylesheet '{}' (resolved to '{}')",
-                    href,
-                    path.display()
-                );
-            }
-        }
-
-        // Phase 2: Replace each <link> with a <style> element
-        for (link_id, css) in css_entries {
-            inject_style_node(doc, head_id, &css, Some(link_id));
-            doc.mutate().remove_node(link_id);
-        }
     }
 }
 
@@ -749,6 +713,48 @@ fn resolve_string_set_values(
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_html_with_local_resources_orders_imports_before_parent() {
+        // CSS cascade: `@import "child.css"` in parent.css must be
+        // treated as if child.css were inlined at the top of parent.css,
+        // so the parent's *own* rules override the imported ones when
+        // they have the same specificity. The merged `cleaned_css` that
+        // comes back from `parse_html_with_local_resources` feeds the
+        // Pass-2 margin-box renderer, so the ordering there must match:
+        // child rules first, parent rules last (so that later rules win).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("parent.css"),
+            r#"@import "child.css"; .parent-rule { color: red; }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.css"),
+            r#".child-rule { color: blue; }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="parent.css"></head>
+<body><p class="parent-rule child-rule">x</p></body></html>"#;
+
+        let (_doc, gcpm) = parse_html_with_local_resources(html, 400.0, &[], Some(dir.path()));
+
+        let cleaned = &gcpm.cleaned_css;
+        let child_pos = cleaned
+            .find(".child-rule")
+            .expect("child.css content should be in cleaned_css");
+        let parent_pos = cleaned
+            .find(".parent-rule")
+            .expect("parent.css content should be in cleaned_css");
+        assert!(
+            child_pos < parent_pos,
+            "child @import rules must come before parent's own rules in cleaned_css \
+             to preserve CSS cascade. child at {child_pos}, parent at {parent_pos}.\n\
+             cleaned_css:\n{cleaned}"
+        );
+    }
+
     struct NoOpPass;
     impl DomPass for NoOpPass {
         fn apply(&self, _doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {}
@@ -956,208 +962,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_link_stylesheet_pass_resolves_local_css() {
-        let dir = tempfile::tempdir().unwrap();
-        let css_path = dir.path().join("style.css");
-        std::fs::write(&css_path, "p { color: red; }").unwrap();
-
-        let html = r#"<html><head><link rel="stylesheet" href="style.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: dir.path().to_path_buf(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_some(),
-            "Expected a <style> element to be injected from <link> stylesheet"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_ignores_https() {
-        let html = r#"<html><head><link rel="stylesheet" href="https://example.com/style.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: PathBuf::from("/tmp"),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_none(),
-            "Expected no <style> element for https:// link"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_ignores_http() {
-        let html = r#"<html><head><link rel="stylesheet" href="http://example.com/style.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: PathBuf::from("/tmp"),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_none(),
-            "Expected no <style> element for http:// link"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_ignores_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let html = r#"<html><head><link rel="stylesheet" href="nonexistent.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: dir.path().to_path_buf(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_none(),
-            "Expected no <style> element for missing file"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_multiple_links() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.css"), "p { color: red; }").unwrap();
-        std::fs::write(dir.path().join("b.css"), "h1 { font-size: 2em; }").unwrap();
-
-        let html = r#"<html><head><link rel="stylesheet" href="a.css"><link rel="stylesheet" href="b.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: dir.path().to_path_buf(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-
-        // Count <style> elements by walking head children
-        let head_id = find_element_by_tag(&doc, "head").unwrap();
-        let head_node = doc.get_node(head_id).unwrap();
-        let style_count = head_node
-            .children
-            .iter()
-            .filter(|&&cid| {
-                doc.get_node(cid)
-                    .and_then(|n| n.element_data())
-                    .is_some_and(|e| e.name.local.as_ref() == "style")
-            })
-            .count();
-        assert_eq!(
-            style_count, 2,
-            "Expected 2 <style> elements for 2 CSS files"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_absolute_path_within_base() {
-        let dir = tempfile::tempdir().unwrap();
-        let css_path = dir.path().join("abs.css");
-        std::fs::write(&css_path, "body { margin: 0; }").unwrap();
-
-        let html = format!(
-            r#"<html><head><link rel="stylesheet" href="{}"></head><body><p>Hello</p></body></html>"#,
-            css_path.display()
-        );
-        let mut doc = parse(&html, 400.0, &[]);
-        // base_path is the same dir, so absolute path is allowed
-        let pass = LinkStylesheetPass {
-            base_path: dir.path().to_path_buf(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_some(),
-            "Expected a <style> element when using absolute path within base_path"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_rejects_path_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        // Create a file outside the sub directory
-        std::fs::write(dir.path().join("secret.css"), "body { color: red; }").unwrap();
-
-        let html = r#"<html><head><link rel="stylesheet" href="../secret.css"></head><body><p>Hello</p></body></html>"#;
-        let mut doc = parse(html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: sub.clone(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_none(),
-            "Path traversal outside base_path should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_link_stylesheet_pass_rejects_absolute_outside_base() {
-        let dir = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        std::fs::write(other.path().join("evil.css"), "body { color: red; }").unwrap();
-
-        let html = format!(
-            r#"<html><head><link rel="stylesheet" href="{}"></head><body><p>Hello</p></body></html>"#,
-            other.path().join("evil.css").display()
-        );
-        let mut doc = parse(&html, 400.0, &[]);
-        let pass = LinkStylesheetPass {
-            base_path: dir.path().to_path_buf(),
-        };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
-        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
-        resolve(&mut doc);
-        assert!(
-            find_element_by_tag(&doc, "style").is_none(),
-            "Absolute path outside base_path should be rejected"
-        );
-    }
+    // NOTE: The previous LinkStylesheetPass tests have been removed.
+    // <link rel="stylesheet"> resolution now happens via Blitz's own
+    // loader, driven by `crate::net::FulgurNetProvider`. Path-traversal,
+    // http(s) rejection and missing-file behaviour are tested in
+    // `crates/fulgur/src/net.rs`.
 
     #[test]
     fn test_counter_pass_generates_css() {

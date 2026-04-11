@@ -207,7 +207,7 @@ pub struct MarginBoxRule {
 }
 
 /// Aggregated GCPM context extracted from a stylesheet.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GcpmContext {
     /// All margin box rules found in `@page` rules.
     pub margin_boxes: Vec<MarginBoxRule>,
@@ -234,6 +234,30 @@ impl GcpmContext {
             && self.page_settings.is_empty()
             && self.counter_mappings.is_empty()
             && self.content_counter_mappings.is_empty()
+    }
+
+    /// Append every GCPM mapping from `other` into `self`, and concatenate
+    /// the cleaned CSS bodies with a newline separator.
+    ///
+    /// Used by the engine to fold per-stylesheet contexts (one per
+    /// `<link>` / `@import` target) into a single context that drives
+    /// margin-box rendering. Keeping the merge in one place means
+    /// adding a new field to `GcpmContext` only requires touching this
+    /// method (and `is_empty`) — call sites stay unchanged.
+    pub fn extend_from(&mut self, other: GcpmContext) {
+        self.margin_boxes.extend(other.margin_boxes);
+        self.running_mappings.extend(other.running_mappings);
+        self.string_set_mappings.extend(other.string_set_mappings);
+        self.page_settings.extend(other.page_settings);
+        self.counter_mappings.extend(other.counter_mappings);
+        self.content_counter_mappings
+            .extend(other.content_counter_mappings);
+        if !other.cleaned_css.is_empty() {
+            if !self.cleaned_css.is_empty() {
+                self.cleaned_css.push('\n');
+            }
+            self.cleaned_css.push_str(&other.cleaned_css);
+        }
     }
 }
 
@@ -292,5 +316,71 @@ mod tests {
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn test_gcpm_context_extend_from_merges_all_fields() {
+        let mut a = GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![RunningMapping {
+                parsed: ParsedSelector::Class("a-header".to_string()),
+                running_name: "a".to_string(),
+            }],
+            string_set_mappings: vec![],
+            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
+            cleaned_css: "body { color: red; }".to_string(),
+        };
+        let b = GcpmContext {
+            margin_boxes: vec![MarginBoxRule {
+                page_selector: None,
+                position: MarginBoxPosition::TopCenter,
+                content: vec![],
+                declarations: String::new(),
+            }],
+            running_mappings: vec![RunningMapping {
+                parsed: ParsedSelector::Class("b-header".to_string()),
+                running_name: "b".to_string(),
+            }],
+            string_set_mappings: vec![],
+            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
+            cleaned_css: "p { margin: 0; }".to_string(),
+        };
+
+        a.extend_from(b);
+
+        assert_eq!(a.running_mappings.len(), 2);
+        assert_eq!(a.margin_boxes.len(), 1);
+        assert_eq!(a.cleaned_css, "body { color: red; }\np { margin: 0; }");
+    }
+
+    #[test]
+    fn test_gcpm_context_extend_from_handles_empty_cleaned_css() {
+        let mut a = GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![],
+            string_set_mappings: vec![],
+            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
+            cleaned_css: String::new(),
+        };
+        let b = GcpmContext {
+            margin_boxes: vec![],
+            running_mappings: vec![],
+            string_set_mappings: vec![],
+            page_settings: vec![],
+            counter_mappings: vec![],
+            content_counter_mappings: vec![],
+            cleaned_css: "body { color: blue; }".to_string(),
+        };
+
+        a.extend_from(b);
+
+        // No leading newline when target was empty.
+        assert_eq!(a.cleaned_css, "body { color: blue; }");
     }
 }
