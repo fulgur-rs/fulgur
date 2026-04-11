@@ -149,6 +149,27 @@ pub fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Optio
         .map(|a| a.value.as_ref())
 }
 
+/// Extract the parsed `usvg::Tree` from an inline `<svg>` element, if present.
+///
+/// Blitz parses inline `<svg>` elements during DOM construction (default `svg`
+/// feature on `blitz-dom`) and stores the result on `ElementData::image_data()`
+/// as `ImageData::Svg(Box<usvg::Tree>)`. This helper hides the `ImageData`
+/// enum and the deref-and-clone dance so callers in `convert.rs` don't need
+/// to import blitz internals — preserving the adapter isolation rule.
+///
+/// The clone is required because Blitz only exposes `&Box<Tree>` via `&Node`;
+/// it is shallow in practice because `usvg::Tree`'s heavy collections (paths,
+/// gradients, fontdb) are `Arc`-shared internally.
+pub fn extract_inline_svg_tree(
+    elem: &blitz_dom::node::ElementData,
+) -> Option<std::sync::Arc<usvg::Tree>> {
+    use blitz_dom::node::ImageData;
+    match elem.image_data()? {
+        ImageData::Svg(tree) => Some(std::sync::Arc::new((**tree).clone())),
+        _ => None,
+    }
+}
+
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
     blitz_dom::QualName::new(
         None,

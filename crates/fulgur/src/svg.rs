@@ -12,9 +12,11 @@ use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 pub struct SvgPageable {
     /// Parsed SVG tree, shared via Arc for cheap cloning during pagination.
     pub tree: Arc<Tree>,
-    /// Computed layout width from blitz/taffy (Pt).
+    /// Display width in PDF points — CSS-resolved by Blitz/Taffy, NOT the
+    /// SVG's intrinsic `viewBox` size. krilla-svg scales the tree to this
+    /// box on draw, so callers must pass the layout box, not `tree.size()`.
     pub width: f32,
-    /// Computed layout height from blitz/taffy (Pt).
+    /// Display height in PDF points — see `width`.
     pub height: f32,
     pub opacity: f32,
     pub visible: bool,

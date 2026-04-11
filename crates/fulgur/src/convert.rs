@@ -16,7 +16,6 @@ use crate::paragraph::{
     TextDecorationStyle,
 };
 use crate::svg::SvgPageable;
-use blitz_dom::node::ImageData;
 use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
 use std::collections::HashMap;
@@ -516,23 +515,31 @@ fn collect_positioned_children(
     result
 }
 
-use crate::blitz_adapter::get_attr;
+use crate::blitz_adapter::{extract_inline_svg_tree, get_attr};
 
-/// Convert an <img> element into an ImagePageable, wrapped in BlockPageable if styled.
-fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
-    let elem = node.element_data()?;
-    let src = get_attr(elem, "src")?;
-
-    let assets = assets?;
-    let data = assets.get_image(src)?;
-    let format = ImagePageable::detect_format(data)?;
-
+/// Wrap an atomic replaced element (image, svg) in a styled `BlockPageable`
+/// when the node has visual styling, or return the inner Pageable directly.
+///
+/// `build_inner` is invoked once with the dimensions and the opacity/visibility
+/// values that should be applied to the inner element. In the styled branch
+/// the inner receives `opacity = 1.0` (the wrapping block handles opacity)
+/// and the dimensions are the content-box, not the border-box. In the unstyled
+/// branch the inner receives the node's own opacity/visibility and full size.
+fn wrap_replaced_in_block_style<F>(
+    node: &Node,
+    assets: Option<&AssetBundle>,
+    build_inner: F,
+) -> Box<dyn Pageable>
+where
+    F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
+{
     let layout = node.final_layout;
     let width = layout.size.width;
     let height = layout.size.height;
 
-    let style = extract_block_style(node, Some(assets));
+    let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
+
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
         // content_inset returns (left, top); compute right/bottom insets for content-box
@@ -540,12 +547,12 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
         let bottom_inset = style.border_widths[2] + style.padding[2];
         let content_width = (width - cx - right_inset).max(0.0);
         let content_height = (height - cy - bottom_inset).max(0.0);
-        // Propagate visibility to the inner image — it's the node's own content,
-        // not a real CSS child. Do NOT set opacity — the wrapping block handles it.
-        let mut img = ImagePageable::new(Arc::clone(data), format, content_width, content_height);
-        img.visible = visible;
+        // Inner element receives visibility (it IS the node's own content) but
+        // NOT opacity — the wrapping block handles opacity once for the whole
+        // border-box, otherwise the border would also be faded.
+        let inner = build_inner(content_width, content_height, 1.0, visible);
         let child = PositionedChild {
-            child: Box::new(img),
+            child: inner,
             x: cx,
             y: cy,
         };
@@ -555,61 +562,51 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
             .with_visible(visible);
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
-        Some(Box::new(block))
+        Box::new(block)
     } else {
-        let mut img = ImagePageable::new(Arc::clone(data), format, width, height);
-        img.opacity = opacity;
-        img.visible = visible;
-        Some(Box::new(img))
+        build_inner(width, height, opacity, visible)
     }
 }
 
-/// Convert an inline <svg> element into an SvgPageable, wrapped in BlockPageable if styled.
+/// Convert an `<img>` element into an `ImagePageable`, wrapped in `BlockPageable` if styled.
+fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+    let elem = node.element_data()?;
+    let src = get_attr(elem, "src")?;
+    let bundle = assets?;
+    let data = Arc::clone(bundle.get_image(src)?);
+    let format = ImagePageable::detect_format(&data)?;
+
+    Some(wrap_replaced_in_block_style(
+        node,
+        assets,
+        move |w, h, opacity, visible| {
+            let mut img = ImagePageable::new(data, format, w, h);
+            img.opacity = opacity;
+            img.visible = visible;
+            Box::new(img)
+        },
+    ))
+}
+
+/// Convert an inline `<svg>` element into an `SvgPageable`, wrapped in `BlockPageable` if styled.
 ///
-/// Blitz automatically parses inline <svg> elements into a usvg::Tree stored on
-/// `ElementData::image_data()` as `ImageData::Svg`. This function extracts that tree
-/// and wraps it in our Pageable type.
+/// Blitz parses the inline SVG into a `usvg::Tree` during DOM construction;
+/// `blitz_adapter::extract_inline_svg_tree` retrieves it without exposing
+/// blitz-internal types here.
 fn convert_svg(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
-    let tree = match elem.image_data()? {
-        ImageData::Svg(tree) => Arc::new((**tree).clone()),
-        _ => return None,
-    };
+    let tree = extract_inline_svg_tree(elem)?;
 
-    let layout = node.final_layout;
-    let width = layout.size.width;
-    let height = layout.size.height;
-
-    let style = extract_block_style(node, assets);
-    let (opacity, visible) = extract_opacity_visible(node);
-    if style.has_visual_style() {
-        let (cx, cy) = style.content_inset();
-        let right_inset = style.border_widths[1] + style.padding[1];
-        let bottom_inset = style.border_widths[2] + style.padding[2];
-        let content_width = (width - cx - right_inset).max(0.0);
-        let content_height = (height - cy - bottom_inset).max(0.0);
-        // Propagate visibility to the inner svg — it's the node's own content,
-        // not a real CSS child. Do NOT set opacity — the wrapping block handles it.
-        let mut svg = SvgPageable::new(tree, content_width, content_height);
-        svg.visible = visible;
-        let child = PositionedChild {
-            child: Box::new(svg),
-            x: cx,
-            y: cy,
-        };
-        let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_style(style)
-            .with_opacity(opacity)
-            .with_visible(visible);
-        block.wrap(width, height);
-        block.layout_size = Some(Size { width, height });
-        Some(Box::new(block))
-    } else {
-        let mut svg = SvgPageable::new(tree, width, height);
-        svg.opacity = opacity;
-        svg.visible = visible;
-        Some(Box::new(svg))
-    }
+    Some(wrap_replaced_in_block_style(
+        node,
+        assets,
+        move |w, h, opacity, visible| {
+            let mut svg = SvgPageable::new(tree, w, h);
+            svg.opacity = opacity;
+            svg.visible = visible;
+            Box::new(svg)
+        },
+    ))
 }
 
 /// Convert a table element into a TablePageable with header/body cell groups.
