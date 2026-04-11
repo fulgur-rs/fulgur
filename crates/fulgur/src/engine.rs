@@ -202,6 +202,49 @@ impl Engine {
         self.render_html(&html)
     }
 
+    /// Build a Pageable tree from HTML for integration tests.
+    ///
+    /// Runs the HTML → Blitz → convert pipeline without pagination or PDF
+    /// emission so tests can inspect the tree shape and the values inside
+    /// wrapper pageables (e.g. `TransformWrapperPageable`). GCPM constructs
+    /// are intentionally not resolved: this helper exists for geometry /
+    /// structural assertions, not end-to-end rendering.
+    #[doc(hidden)]
+    pub fn build_pageable_for_testing(&self, html: &str) -> Box<dyn Pageable> {
+        let fonts = self
+            .assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
+
+        let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
+            html,
+            self.config.content_width(),
+            fonts,
+            self.base_path.as_deref(),
+        );
+
+        let ctx = crate::blitz_adapter::PassContext {
+            viewport_width: self.config.content_width(),
+            viewport_height: self.config.content_height(),
+            font_data: fonts,
+        };
+        let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
+        crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut convert_ctx = ConvertContext {
+            running_store: &running_store,
+            assets: self.assets.as_ref(),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
+    }
+
     /// Render a Pageable tree to a PDF file.
     pub fn render_pageable_to_file(
         &self,
