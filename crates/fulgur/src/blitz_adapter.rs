@@ -769,7 +769,7 @@ fn resolve_string_set_values(
 
 // ─── transform support ────────────────────────────────────
 
-use crate::pageable::Affine2D;
+use crate::pageable::{Affine2D, Point2};
 
 /// Read the computed `transform` and `transform-origin` from `styles` and
 /// fold the `TransformOperation` list into a single pre-resolved affine
@@ -791,21 +791,29 @@ pub(crate) fn compute_transform(
     styles: &style::properties::ComputedValues,
     border_box_width: f32,
     border_box_height: f32,
-) -> Option<(Affine2D, f32, f32)> {
+) -> Option<(Affine2D, Point2)> {
     use style::values::computed::Length;
 
-    let transform = styles.clone_transform();
-    if transform.0.is_empty() {
+    // Fast path: most DOM nodes have no transform. Reading the
+    // `OwnedSlice` through `get_box()` avoids cloning it for the empty
+    // case, and lets the non-empty path borrow instead of clone.
+    let transform = &styles.get_box().transform.0;
+    if transform.is_empty() {
         return None;
     }
 
     let mut m = Affine2D::IDENTITY;
-    for op in transform.0.iter() {
-        let step = op_to_matrix(op, border_box_width, border_box_height);
-        m = m.mul(&step);
+    for op in transform.iter() {
+        m = m * op_to_matrix(op, border_box_width, border_box_height);
     }
 
-    if has_nan_or_inf(&m) {
+    if !m.a.is_finite()
+        || !m.b.is_finite()
+        || !m.c.is_finite()
+        || !m.d.is_finite()
+        || !m.e.is_finite()
+        || !m.f.is_finite()
+    {
         log::warn!("transform produced non-finite matrix; falling back to identity");
         return None;
     }
@@ -820,7 +828,7 @@ pub(crate) fn compute_transform(
         .px();
     let origin_y = origin.vertical.resolve(Length::new(border_box_height)).px();
 
-    Some((m, origin_x, origin_y))
+    Some((m, Point2::new(origin_x, origin_y)))
 }
 
 fn op_to_matrix(
@@ -869,12 +877,6 @@ fn op_to_matrix(
             Affine2D::IDENTITY
         }
     }
-}
-
-fn has_nan_or_inf(m: &Affine2D) -> bool {
-    [m.a, m.b, m.c, m.d, m.e, m.f]
-        .iter()
-        .any(|v| !v.is_finite())
 }
 
 #[cfg(test)]
@@ -1291,17 +1293,11 @@ mod tests {
 #[cfg(test)]
 mod transform_tests {
     use super::*;
-    use crate::pageable::Affine2D;
-
-    const EPS: f32 = 1e-5;
-
-    fn approx(a: f32, b: f32) -> bool {
-        (a - b).abs() < EPS
-    }
+    use crate::pageable::{Affine2D, Point2, matrix_test_util::approx};
 
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.
-    fn compute_for_div(html: &str, box_w: f32, box_h: f32) -> Option<(Affine2D, f32, f32)> {
+    fn compute_for_div(html: &str, box_w: f32, box_h: f32) -> Option<(Affine2D, Point2)> {
         let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
         let div_id = find_element_by_tag(&doc, "div")?;
         let node = doc.get_node(div_id)?;
@@ -1320,7 +1316,7 @@ mod transform_tests {
         let html = r#"<!DOCTYPE html><html><body>
             <div style="transform: translate(10px, 20px)">hi</div>
         </body></html>"#;
-        let (m, _, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
         assert!(approx(m.e, 10.0));
         assert!(approx(m.f, 20.0));
         assert!(approx(m.a, 1.0));
@@ -1332,7 +1328,7 @@ mod transform_tests {
         let html = r#"<!DOCTYPE html><html><body>
             <div style="transform: translate(50%, 25%)">hi</div>
         </body></html>"#;
-        let (m, _, _) = compute_for_div(html, 200.0, 80.0).expect("should have transform");
+        let (m, _) = compute_for_div(html, 200.0, 80.0).expect("should have transform");
         assert!(approx(m.e, 100.0), "expected 100 (50% of 200), got {}", m.e);
         assert!(approx(m.f, 20.0), "expected 20 (25% of 80), got {}", m.f);
     }
@@ -1342,7 +1338,7 @@ mod transform_tests {
         let html = r#"<!DOCTYPE html><html><body>
             <div style="transform: matrix(1, 2, 3, 4, 5, 6)">hi</div>
         </body></html>"#;
-        let (m, _, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
         assert!(approx(m.a, 1.0));
         assert!(approx(m.b, 2.0));
         assert!(approx(m.c, 3.0));
@@ -1356,14 +1352,16 @@ mod transform_tests {
         let html = r#"<!DOCTYPE html><html><body>
             <div style="transform: rotate(45deg)">hi</div>
         </body></html>"#;
-        let (_, ox, oy) = compute_for_div(html, 100.0, 60.0).expect("should have transform");
+        let (_, origin) = compute_for_div(html, 100.0, 60.0).expect("should have transform");
         assert!(
-            approx(ox, 50.0),
-            "default origin x should be 50% of 100, got {ox}"
+            approx(origin.x, 50.0),
+            "default origin x should be 50% of 100, got {}",
+            origin.x
         );
         assert!(
-            approx(oy, 30.0),
-            "default origin y should be 50% of 60, got {oy}"
+            approx(origin.y, 30.0),
+            "default origin y should be 50% of 60, got {}",
+            origin.y
         );
     }
 

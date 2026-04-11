@@ -162,9 +162,7 @@ fn maybe_wrap_transform(
     };
     let layout = node.final_layout;
     match crate::blitz_adapter::compute_transform(&styles, layout.size.width, layout.size.height) {
-        Some((matrix, origin_x, origin_y)) => Box::new(TransformWrapperPageable::new(
-            child, matrix, origin_x, origin_y,
-        )),
+        Some((matrix, origin)) => Box::new(TransformWrapperPageable::new(child, matrix, origin)),
         None => child,
     }
 }

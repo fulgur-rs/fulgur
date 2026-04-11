@@ -101,9 +101,17 @@ impl Affine2D {
         }
     }
 
-    /// Matrix product `self * rhs`. Applied to a point `p`, this yields
-    /// `(self * rhs) * p = self * (rhs * p)`, i.e. `rhs` acts first.
-    pub fn mul(&self, rhs: &Self) -> Self {
+    pub fn to_krilla(&self) -> krilla::geom::Transform {
+        krilla::geom::Transform::from_row(self.a, self.b, self.c, self.d, self.e, self.f)
+    }
+}
+
+/// Matrix product `self * rhs`. Applied to a point `p`, this yields
+/// `(self * rhs) * p = self * (rhs * p)`, i.e. `rhs` acts first.
+impl std::ops::Mul for Affine2D {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
         Self {
             a: self.a * rhs.a + self.c * rhs.b,
             b: self.b * rhs.a + self.d * rhs.b,
@@ -113,9 +121,18 @@ impl Affine2D {
             f: self.b * rhs.e + self.d * rhs.f + self.f,
         }
     }
+}
 
-    pub fn to_krilla(&self) -> krilla::geom::Transform {
-        krilla::geom::Transform::from_row(self.a, self.b, self.c, self.d, self.e, self.f)
+/// A 2D point in canvas (PDF) coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Point2 {
+    pub x: Pt,
+    pub y: Pt,
+}
+
+impl Point2 {
+    pub const fn new(x: Pt, y: Pt) -> Self {
+        Self { x, y }
     }
 }
 
@@ -1611,49 +1628,43 @@ impl Pageable for CounterOpWrapperPageable {
 /// rotated title on each page), so we follow PrinceXML / WeasyPrint
 /// behavior and never split through a transform.
 ///
-/// `origin_x` / `origin_y` are the `transform-origin` resolved to px,
-/// measured from the element's border-box top-left corner.
+/// `origin` is the `transform-origin` resolved to px, measured from the
+/// element's border-box top-left corner.
 #[derive(Clone)]
 pub struct TransformWrapperPageable {
     pub inner: Box<dyn Pageable>,
     pub matrix: Affine2D,
-    pub origin_x: f32,
-    pub origin_y: f32,
+    pub origin: Point2,
 }
 
 impl TransformWrapperPageable {
-    pub fn new(inner: Box<dyn Pageable>, matrix: Affine2D, origin_x: f32, origin_y: f32) -> Self {
+    pub fn new(inner: Box<dyn Pageable>, matrix: Affine2D, origin: Point2) -> Self {
         Self {
             inner,
             matrix,
-            origin_x,
-            origin_y,
+            origin,
         }
     }
 
     /// Compute the full matrix that will be pushed onto the Krilla surface
     /// when this wrapper is drawn at `(draw_x, draw_y)`.
     ///
-    /// The transform-origin is translated into the draw coordinate system
-    /// (`draw_x + origin_x`, `draw_y + origin_y`), then the composition
-    /// `T(ox, oy) · M · T(-ox, -oy)` is built so that rotation/scale
-    /// happen around the chosen origin point.
+    /// The transform-origin is translated into the draw coordinate system,
+    /// then the composition `T(ox, oy) · M · T(-ox, -oy)` is built so that
+    /// rotation/scale happen around the chosen origin point.
     ///
     /// Exposed (hidden from docs) so integration tests can verify
     /// geometric correctness without constructing a Krilla surface.
     #[doc(hidden)]
     pub fn effective_matrix(&self, draw_x: Pt, draw_y: Pt) -> Affine2D {
-        let ox = draw_x + self.origin_x;
-        let oy = draw_y + self.origin_y;
-        Affine2D::translation(ox, oy)
-            .mul(&self.matrix)
-            .mul(&Affine2D::translation(-ox, -oy))
+        let ox = draw_x + self.origin.x;
+        let oy = draw_y + self.origin.y;
+        Affine2D::translation(ox, oy) * self.matrix * Affine2D::translation(-ox, -oy)
     }
 }
 
 impl Pageable for TransformWrapperPageable {
     fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        // transform does not affect layout; reuse the inner measurement.
         self.inner.wrap(avail_width, avail_height)
     }
 
@@ -1662,7 +1673,6 @@ impl Pageable for TransformWrapperPageable {
         _avail_width: Pt,
         _avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Atomic: never split through a transform.
         None
     }
 
@@ -2646,18 +2656,22 @@ mod overflow_tests {
     }
 }
 
+/// Float-tolerance helpers shared across the transform test modules.
+///
+/// Exposed as `pub(crate)` so both in-crate `#[cfg(test)]` modules and the
+/// external `transform_integration.rs` test file can reuse a single
+/// definition.
 #[cfg(test)]
-mod affine_tests {
-    use super::*;
-    use std::f32::consts::FRAC_PI_2;
+pub(crate) mod matrix_test_util {
+    use super::Affine2D;
 
-    const EPS: f32 = 1e-5;
+    pub(crate) const EPS: f32 = 1e-5;
 
-    fn approx(a: f32, b: f32) -> bool {
+    pub(crate) fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < EPS
     }
 
-    fn matrix_approx(a: &Affine2D, b: &Affine2D) -> bool {
+    pub(crate) fn matrix_approx(a: &Affine2D, b: &Affine2D) -> bool {
         approx(a.a, b.a)
             && approx(a.b, b.b)
             && approx(a.c, b.c)
@@ -2665,19 +2679,25 @@ mod affine_tests {
             && approx(a.e, b.e)
             && approx(a.f, b.f)
     }
+}
+
+#[cfg(test)]
+mod affine_tests {
+    use super::matrix_test_util::{approx, matrix_approx};
+    use super::*;
+    use std::f32::consts::FRAC_PI_2;
 
     #[test]
     fn identity_is_identity() {
         assert!(Affine2D::IDENTITY.is_identity());
         let m = Affine2D::translation(3.0, 4.0);
-        assert!(matrix_approx(&m.mul(&Affine2D::IDENTITY), &m));
-        assert!(matrix_approx(&Affine2D::IDENTITY.mul(&m), &m));
+        assert!(matrix_approx(&(m * Affine2D::IDENTITY), &m));
+        assert!(matrix_approx(&(Affine2D::IDENTITY * m), &m));
     }
 
     #[test]
     fn rotation_90_maps_unit_vector() {
         let r = Affine2D::rotation(FRAC_PI_2);
-        // Point (1, 0) transformed by pure rotation should land at (0, 1).
         let x = r.a * 1.0 + r.c * 0.0 + r.e;
         let y = r.b * 1.0 + r.d * 0.0 + r.f;
         assert!(approx(x, 0.0), "x expected 0.0, got {x}");
@@ -2688,9 +2708,10 @@ mod affine_tests {
     fn translation_times_rotation_is_non_commutative() {
         let t = Affine2D::translation(10.0, 0.0);
         let r = Affine2D::rotation(FRAC_PI_2);
-        let tr = t.mul(&r);
-        let rt = r.mul(&t);
-        assert!(!matrix_approx(&tr, &rt), "expected non-commutative result");
+        assert!(
+            !matrix_approx(&(t * r), &(r * t)),
+            "expected non-commutative result"
+        );
     }
 
     #[test]
@@ -2720,16 +2741,10 @@ mod affine_tests {
 
 #[cfg(test)]
 mod transform_wrapper_tests {
+    use super::matrix_test_util::approx;
     use super::*;
     use std::f32::consts::FRAC_PI_2;
 
-    const EPS: f32 = 1e-5;
-
-    fn approx(a: f32, b: f32) -> bool {
-        (a - b).abs() < EPS
-    }
-
-    // A minimal no-op Pageable for wrapping in tests.
     #[derive(Clone)]
     struct StubPageable {
         w: Pt,
@@ -2758,18 +2773,17 @@ mod transform_wrapper_tests {
         }
     }
 
-    fn wrap(matrix: Affine2D, origin_x: Pt, origin_y: Pt) -> TransformWrapperPageable {
-        TransformWrapperPageable {
-            inner: Box::new(StubPageable { w: 100.0, h: 100.0 }),
+    fn wrap(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
+        TransformWrapperPageable::new(
+            Box::new(StubPageable { w: 100.0, h: 100.0 }),
             matrix,
-            origin_x,
-            origin_y,
-        }
+            origin,
+        )
     }
 
     #[test]
     fn translate_only_matrix() {
-        let w = wrap(Affine2D::translation(10.0, 20.0), 0.0, 0.0);
+        let w = wrap(Affine2D::translation(10.0, 20.0), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         assert!(approx(m.e, 10.0));
         assert!(approx(m.f, 20.0));
@@ -2779,7 +2793,7 @@ mod transform_wrapper_tests {
 
     #[test]
     fn rotate_90_maps_unit_vector_at_origin_zero() {
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), 0.0, 0.0);
+        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 1.0 + m.c * 0.0 + m.e;
         let y = m.b * 1.0 + m.d * 0.0 + m.f;
@@ -2789,9 +2803,10 @@ mod transform_wrapper_tests {
 
     #[test]
     fn rotate_with_center_origin_fixes_center() {
-        // 100×100 box with transform-origin at center (50, 50).
-        // After 90° rotation, the origin point must map to itself.
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), 50.0, 50.0);
+        // A 100×100 box rotated 90° around its center must leave the center
+        // point fixed — verified through the composed matrix rather than
+        // any intermediate step.
+        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 50.0 + m.c * 50.0 + m.e;
         let y = m.b * 50.0 + m.d * 50.0 + m.f;
@@ -2801,13 +2816,13 @@ mod transform_wrapper_tests {
 
     #[test]
     fn split_is_always_none() {
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), 0.0, 0.0);
+        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
         assert!(w.split(1000.0, 1000.0).is_none());
     }
 
     #[test]
     fn wrap_delegates_to_inner_size() {
-        let mut w = wrap(Affine2D::rotation(FRAC_PI_2), 0.0, 0.0);
+        let mut w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
         let size = w.wrap(1000.0, 1000.0);
         assert!(approx(size.width, 100.0));
         assert!(approx(size.height, 100.0));
