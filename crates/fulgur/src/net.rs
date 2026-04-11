@@ -37,11 +37,15 @@ use std::sync::{Arc, Mutex};
 
 /// fulgur's [`NetProvider`] for Blitz.
 ///
-/// Construct one per [`crate::engine::Engine::render_html`] invocation,
-/// pass it to `blitz_adapter::parse`, then call
-/// [`drain_pending_resources`](Self::drain_pending_resources) and
-/// [`drain_gcpm_contexts`](Self::drain_gcpm_contexts) once parsing
-/// finishes to apply loaded resources and merge GCPM data.
+/// This type is an implementation detail of
+/// [`crate::blitz_adapter::parse_html_with_local_resources`], which is
+/// the only supported entry point for loading HTML with local
+/// `<link rel="stylesheet">` / `@import` resolution. That function
+/// owns the provider lifecycle — construction, Blitz configuration,
+/// draining of pending resources, and folding of GCPM contexts — so
+/// the rest of fulgur never needs to touch Blitz types directly
+/// (CLAUDE.md adapter-isolation rule). The `drain_*` methods below
+/// exist for that internal use only.
 pub struct FulgurNetProvider {
     canonical_base: Option<PathBuf>,
     inner: Arc<Mutex<Inner>>,
@@ -342,5 +346,9 @@ mod tests {
             "handler must not receive bytes for files outside the base path"
         );
         assert!(provider.drain_gcpm_contexts().is_empty());
+        assert!(
+            provider.drain_pending_resources().is_empty(),
+            "rejected fetches must not register a pending resource"
+        );
     }
 }
