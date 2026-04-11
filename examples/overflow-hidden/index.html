@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>overflow: hidden / clip Examples</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<h1>overflow: hidden / clip Examples</h1>
+
+<h2>1. Basic hidden — large child clipped to small parent</h2>
+<div class="container hidden">
+  <div class="big-child"></div>
+</div>
+
+<h2>2. overflow: clip keyword</h2>
+<div class="container clip-kw">
+  <div class="big-child"></div>
+</div>
+
+<h2>3. overflow: hidden with border-radius</h2>
+<div class="container hidden rounded">
+  <div class="big-child"></div>
+</div>
+
+<h2>4. overflow-x: hidden, overflow-y: visible (axis-independent)</h2>
+<div class="container x-only">
+  <div class="wide-child"></div>
+</div>
+
+<h2>5. overflow: visible (reference, no clip)</h2>
+<div class="container visible">
+  <div class="big-child"></div>
+</div>
+
+</body>
+</html>

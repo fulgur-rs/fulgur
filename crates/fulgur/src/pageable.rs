@@ -151,6 +151,10 @@ pub struct BlockStyle {
     pub border_radii: [[f32; 2]; 4],
     /// Border styles: top, right, bottom, left
     pub border_styles: [BorderStyleValue; 4],
+    /// `overflow-x` value
+    pub overflow_x: Overflow,
+    /// `overflow-y` value
+    pub overflow_y: Overflow,
 }
 
 /// CSS border-style values supported by fulgur.
@@ -175,6 +179,19 @@ pub enum BorderStyleValue {
     Inset,
     /// 3D outset effect
     Outset,
+}
+
+/// CSS `overflow-x` / `overflow-y` value.
+///
+/// PDF は静的メディアなので、CSS の `hidden`/`clip`/`scroll`/`auto` はすべて
+/// 「padding-box でクリップ」という同一の動作に統合する。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overflow {
+    /// `visible` — クリップしない (デフォルト)
+    #[default]
+    Visible,
+    /// `hidden` / `clip` / `scroll` / `auto` — padding-box でクリップする
+    Clip,
 }
 
 // ─── Background types ────────────────────────────────────
@@ -263,6 +280,22 @@ impl BlockStyle {
             self.border_widths[3] + self.padding[3],
             self.border_widths[0] + self.padding[0],
         )
+    }
+
+    /// Whether any axis has overflow clipping enabled.
+    pub fn has_overflow_clip(&self) -> bool {
+        self.overflow_x == Overflow::Clip || self.overflow_y == Overflow::Clip
+    }
+
+    /// Whether a node with this style must be wrapped in a `BlockPageable`.
+    ///
+    /// Wrapping is required when the node has any visual effect that must be
+    /// rendered on its own surface — backgrounds/borders/padding
+    /// (`has_visual_style`), a non-zero `border-radius` (`has_radius`), or
+    /// overflow clipping (`has_overflow_clip`, which uses the node's box as
+    /// the clip region).
+    pub fn needs_block_wrapper(&self) -> bool {
+        self.has_visual_style() || self.has_radius() || self.has_overflow_clip()
     }
 }
 
@@ -507,6 +540,97 @@ pub fn build_rounded_rect_path(
 
     pb.close();
     pb.finish()
+}
+
+/// Build a clip path for `overflow` based on the padding box.
+///
+/// - Returns `None` when both axes are `visible`, or when the padding box
+///   collapses to zero/negative size.
+/// - Axis-independent: a non-clipped axis uses a virtually unlimited range
+///   (`±1e6`) so only the clipped axis is effectively bounded.
+/// - `border-radius` is honored **only** when both axes are clipped. With
+///   single-axis clipping, a plain rectangle is used (simplification).
+pub fn compute_overflow_clip_path(
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<krilla::geom::Path> {
+    if style.overflow_x == Overflow::Visible && style.overflow_y == Overflow::Visible {
+        return None;
+    }
+
+    // padding-box = border-box inset by border widths (top, right, bottom, left)
+    let bw = &style.border_widths;
+    let pb_x = x + bw[3];
+    let pb_y = y + bw[0];
+    let pb_w = w - bw[1] - bw[3];
+    let pb_h = h - bw[0] - bw[2];
+
+    // Non-clipped axes extend to effectively unlimited range so only the
+    // clipped axis is actually bounded. We intentionally do NOT bail out on
+    // `pb_w <= 0 || pb_h <= 0` here: a collapsed non-clipped axis is fine
+    // because it will be expanded to `±INFINITE` below. Only if a *clipped*
+    // axis has zero/negative size should we skip the clip (the final
+    // `cw <= 0 || ch <= 0` check below handles that).
+    const INFINITE: f32 = 1.0e6;
+    let (cx, cw) = if style.overflow_x == Overflow::Clip {
+        (pb_x, pb_w)
+    } else {
+        (pb_x - INFINITE, pb_w + 2.0 * INFINITE)
+    };
+    let (cy, ch) = if style.overflow_y == Overflow::Clip {
+        (pb_y, pb_h)
+    } else {
+        (pb_y - INFINITE, pb_h + 2.0 * INFINITE)
+    };
+
+    if cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+
+    let both_axes = style.overflow_x == Overflow::Clip && style.overflow_y == Overflow::Clip;
+    let has_radius = style.has_radius();
+
+    if both_axes && has_radius {
+        let inner_radii = compute_padding_box_inner_radii(&style.border_radii, bw);
+        build_rounded_rect_path(cx, cy, cw, ch, &inner_radii)
+    } else {
+        build_overflow_rect_path(cx, cy, cw, ch)
+    }
+}
+
+/// Axis-aligned rectangle path for overflow clipping.
+///
+/// `background.rs` has a private equivalent (`build_rect_path`); we keep a
+/// local copy here rather than making that one `pub(crate)` because overflow
+/// clipping is conceptually independent of background drawing.
+fn build_overflow_rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.move_to(x, y);
+    pb.line_to(x + w, y);
+    pb.line_to(x + w, y + h);
+    pb.line_to(x, y + h);
+    pb.close();
+    pb.finish()
+}
+
+/// Convert border-box (outer) radii to padding-box (inner) radii.
+///
+/// CSS spec (`border-radius` interaction with `overflow`):
+/// `inner_r = max(0, outer_r - border_width_on_that_side)`.
+///
+/// * `outer` layout: `[top-left, top-right, bottom-right, bottom-left] × [rx, ry]`
+/// * `borders` layout: `[top, right, bottom, left]`
+fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) -> [[f32; 2]; 4] {
+    let [bt, br, bb, bl] = *borders;
+    [
+        [(outer[0][0] - bl).max(0.0), (outer[0][1] - bt).max(0.0)], // top-left
+        [(outer[1][0] - br).max(0.0), (outer[1][1] - bt).max(0.0)], // top-right
+        [(outer[2][0] - br).max(0.0), (outer[2][1] - bb).max(0.0)], // bottom-right
+        [(outer[3][0] - bl).max(0.0), (outer[3][1] - bb).max(0.0)], // bottom-left
+    ]
 }
 
 /// Clone a slice of PositionedChild, optionally shifting y coordinates.
@@ -1054,9 +1178,27 @@ impl Pageable for BlockPageable {
                 draw_block_border(canvas, &self.style, x, y, total_width, total_height);
             }
 
+            // overflow clipping: clip children to the padding box.
+            // Background and borders are intentionally drawn outside the clip
+            // so borders render correctly at the block's edge.
+            let clip_pushed = if let Some(clip_path) =
+                compute_overflow_clip_path(&self.style, x, y, total_width, total_height)
+            {
+                canvas
+                    .surface
+                    .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+                true
+            } else {
+                false
+            };
+
             for pc in &self.children {
                 pc.child
                     .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+            }
+
+            if clip_pushed {
+                canvas.surface.pop();
             }
         });
     }
@@ -1804,9 +1946,27 @@ impl Pageable for TablePageable {
                 draw_block_border(canvas, &self.style, x, y, total_width, total_height);
             }
 
+            // overflow clipping: clip header + body cells to the padding box.
+            // Background and borders are drawn outside the clip so the
+            // table's border renders at its full border-box edge.
+            let clip_pushed = if let Some(clip_path) =
+                compute_overflow_clip_path(&self.style, x, y, total_width, total_height)
+            {
+                canvas
+                    .surface
+                    .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+                true
+            } else {
+                false
+            };
+
             for pc in self.header_cells.iter().chain(self.body_cells.iter()) {
                 pc.child
                     .draw(canvas, x + pc.x, y + pc.y, total_width, pc.child.height());
+            }
+
+            if clip_pushed {
+                canvas.surface.pop();
             }
         });
     }
@@ -2088,5 +2248,203 @@ mod background_tests {
             clip: BgClip::BorderBox,
         });
         assert!(style.has_visual_style());
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn test_overflow_default_is_visible() {
+        let style = BlockStyle::default();
+        assert_eq!(style.overflow_x, Overflow::Visible);
+        assert_eq!(style.overflow_y, Overflow::Visible);
+    }
+
+    #[test]
+    fn test_overflow_clip_flag() {
+        let mut style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            ..Default::default()
+        };
+        assert!(style.has_overflow_clip());
+        style.overflow_x = Overflow::Visible;
+        style.overflow_y = Overflow::Clip;
+        assert!(style.has_overflow_clip());
+        style.overflow_y = Overflow::Visible;
+        assert!(!style.has_overflow_clip());
+    }
+
+    #[test]
+    fn test_clip_path_visible_returns_none() {
+        let style = BlockStyle::default();
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn test_clip_path_both_axes_rect() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(path.is_some(), "both-axes clip should produce a path");
+    }
+
+    #[test]
+    fn test_clip_path_axis_x_only() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            // overflow_y stays Visible
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 10.0, 20.0, 100.0, 50.0);
+        assert!(path.is_some(), "x-only clip should produce a path");
+        // NOTE: krilla::geom::Path does not expose a bounds() accessor in
+        // 0.7, so we cannot assert on the rect dimensions directly. The
+        // axis-independent widening is covered indirectly via the
+        // implementation's branching on `Overflow::Clip`.
+    }
+
+    #[test]
+    fn test_clip_path_axis_y_only() {
+        let style = BlockStyle {
+            overflow_y: Overflow::Clip,
+            // overflow_x stays Visible
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 10.0, 20.0, 100.0, 50.0);
+        assert!(path.is_some(), "y-only clip should produce a path");
+    }
+
+    #[test]
+    fn test_clip_path_with_border_inset() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_widths: [2.0, 3.0, 4.0, 5.0], // top, right, bottom, left
+            ..Default::default()
+        };
+        // border-box 100x100 at origin 0,0 → padding-box is (5, 2) to (97, 96)
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(path.is_some(), "should produce a clip path");
+    }
+
+    #[test]
+    fn test_clip_path_rounded_both_axes() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_radii: [[10.0, 10.0]; 4],
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(path.is_some(), "rounded clip should produce a path");
+    }
+
+    #[test]
+    fn test_clip_path_zero_padding_box_returns_none() {
+        // If border eats the entire box, padding-box has zero or negative size
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_widths: [50.0, 50.0, 50.0, 50.0], // 100 total on each axis
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(path.is_none(), "zero padding-box should return None");
+    }
+
+    #[test]
+    fn test_clip_path_axis_x_only_survives_zero_height() {
+        // `overflow-x: hidden; overflow-y: visible` with a collapsed height
+        // (e.g. borders eating all the vertical space) must still produce a
+        // clip path: the non-clipped axis is expanded to ±INFINITE so zero
+        // `pb_h` is harmless.
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            // overflow_y stays Visible
+            border_widths: [50.0, 0.0, 50.0, 0.0], // top+bottom = 100, same as h
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(
+            path.is_some(),
+            "x-only clip should survive a collapsed padding-box height"
+        );
+    }
+
+    #[test]
+    fn test_clip_path_axis_y_only_survives_zero_width() {
+        // Symmetric: `overflow-y: hidden; overflow-x: visible` with collapsed
+        // width must still produce a clip path.
+        let style = BlockStyle {
+            overflow_y: Overflow::Clip,
+            // overflow_x stays Visible
+            border_widths: [0.0, 50.0, 0.0, 50.0], // left+right = 100, same as w
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(
+            path.is_some(),
+            "y-only clip should survive a collapsed padding-box width"
+        );
+    }
+
+    #[test]
+    fn test_clip_path_axis_x_only_returns_none_on_zero_clipped_axis() {
+        // If the *clipped* axis has zero size, no meaningful clip is
+        // possible and the helper should return None.
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            // overflow_y stays Visible
+            border_widths: [0.0, 50.0, 0.0, 50.0], // width collapses to 0
+            ..Default::default()
+        };
+        let path = compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0);
+        assert!(
+            path.is_none(),
+            "x-only clip with zero pb_w should return None"
+        );
+    }
+
+    #[test]
+    fn test_block_draw_has_no_clip_by_default() {
+        // Default BlockStyle has both axes Visible, so has_overflow_clip is false.
+        let style = BlockStyle::default();
+        assert!(!style.has_overflow_clip());
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn test_block_draw_has_clip_when_configured() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            ..Default::default()
+        };
+        assert!(style.has_overflow_clip());
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
+
+    #[test]
+    fn test_needs_block_wrapper_for_overflow_only() {
+        // A bare overflow:hidden style (no background, border, padding,
+        // radius) must still require a BlockPageable wrapper.
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            ..Default::default()
+        };
+        assert!(!style.has_visual_style());
+        assert!(!style.has_radius());
+        assert!(style.has_overflow_clip());
+        assert!(style.needs_block_wrapper());
+    }
+
+    #[test]
+    fn test_needs_block_wrapper_default_is_false() {
+        let style = BlockStyle::default();
+        assert!(!style.needs_block_wrapper());
     }
 }

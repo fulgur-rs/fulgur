@@ -1,0 +1,30 @@
+body {
+  font-family: sans-serif;
+  margin: 20px;
+}
+h1 { font-size: 20px; }
+h2 { font-size: 14px; margin-top: 30px; }
+
+.container {
+  width: 120px;
+  height: 80px;
+  border: 2px solid #333;
+  background: #eef;
+  margin-bottom: 40px;
+}
+.container.hidden { overflow: hidden; }
+.container.clip-kw { overflow: clip; }
+.container.visible { overflow: visible; }
+.container.x-only { overflow-x: hidden; overflow-y: visible; }
+.container.rounded { border-radius: 20px; }
+
+.big-child {
+  width: 200px;
+  height: 200px;
+  background: linear-gradient(45deg, #e33, #3e3);
+}
+.wide-child {
+  width: 300px;
+  height: 40px;
+  background: #38f;
+}

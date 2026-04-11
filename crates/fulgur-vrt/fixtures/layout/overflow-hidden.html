@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>VRT fixture: layout/overflow-hidden</title>
+<style>
+  html,body{margin:0;padding:0}
+  .row{display:flex;gap:20px;padding:40px}
+  .container{width:120px;height:80px;border:2px solid #333;background:#eef;overflow:hidden}
+  .container.clip{overflow:clip}
+  .big{width:200px;height:200px;background:#e33}
+</style>
+</head><body><div class="row">
+<div class="container"><div class="big"></div></div>
+<div class="container clip"><div class="big"></div></div>
+</div></body></html>

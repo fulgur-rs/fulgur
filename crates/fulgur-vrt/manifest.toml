@@ -23,6 +23,12 @@ path = "layout/grid-simple.html"
 path = "layout/multicol-2.html"
 
 [[fixture]]
+path = "layout/overflow-hidden.html"
+
+[[fixture]]
+path = "layout/overflow-hidden-rounded.html"
+
+[[fixture]]
 path = "paint/background-gradient.html"
 
 [[fixture]]

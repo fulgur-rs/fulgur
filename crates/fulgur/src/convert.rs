@@ -252,7 +252,7 @@ fn convert_node_inner(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.has_visual_style() || has_pseudo {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
                 p.visible = visible;
@@ -339,7 +339,7 @@ fn convert_node_inner(
         let (before_pseudo, after_pseudo) =
             build_block_pseudo_images(doc, node, content_box, ctx.assets);
         let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.has_visual_style() || has_pseudo {
+        if style.needs_block_wrapper() || has_pseudo {
             let (child_x, child_y) = style.content_inset();
             // Propagate visibility to the inner paragraph — it's not a real CSS child
             // but the node's own text content, so it must respect the node's visibility.
@@ -383,7 +383,7 @@ fn convert_node_inner(
         let (before_pseudo, after_pseudo) =
             build_block_pseudo_images(doc, node, content_box, ctx.assets);
         let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.has_visual_style() || style.has_radius() || has_pseudo {
+        if style.needs_block_wrapper() || has_pseudo {
             let (opacity, visible) = extract_opacity_visible(node);
             let positioned_children =
                 wrap_with_block_pseudo_images(before_pseudo, after_pseudo, content_box, Vec::new());
@@ -414,7 +414,7 @@ fn convert_node_inner(
         positioned_children,
     );
 
-    let has_style = style.has_visual_style() || style.has_radius();
+    let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
         .with_style(style)
@@ -1228,6 +1228,18 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
             convert_border_style(styles.clone_border_bottom_style()),
             convert_border_style(styles.clone_border_left_style()),
         ];
+
+        // Overflow (CSS3 axis-independent interpretation)
+        // PDF has no scroll concept: hidden/clip/scroll/auto all collapse to Clip.
+        let map_overflow = |o: style::values::computed::Overflow| -> crate::pageable::Overflow {
+            use style::values::computed::Overflow as S;
+            match o {
+                S::Visible => crate::pageable::Overflow::Visible,
+                S::Hidden | S::Clip | S::Scroll | S::Auto => crate::pageable::Overflow::Clip,
+            }
+        };
+        style.overflow_x = map_overflow(styles.clone_overflow_x());
+        style.overflow_y = map_overflow(styles.clone_overflow_y());
 
         // Background image layers
         if let Some(assets) = assets {
