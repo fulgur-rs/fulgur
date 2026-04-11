@@ -8,11 +8,9 @@ run = """
 cargo build --bin fulgur --release 2>&1 | tail -1
 for dir in examples/*/; do
   html="$dir/index.html"
-  css="$dir/style.css"
   pdf="$dir/index.pdf"
   [ -f "$html" ] || continue
   args=()
-  [ -f "$css" ] && args+=(--css "$css")
   for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif; do
     [ -f "$img" ] || continue
     args+=(--image "$(basename "$img")=$img")
