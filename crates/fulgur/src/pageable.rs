@@ -1487,6 +1487,28 @@ impl Pageable for RunningElementWrapperPageable {
 
 use crate::paragraph::ShapedLine;
 
+/// Clamp an intrinsic image size to a line-height limit while preserving
+/// the aspect ratio. Used to size list-style-image markers so they match
+/// the surrounding text's line-height.
+///
+/// Returns `(width, height)` in pt. If the intrinsic height is zero, both
+/// return values are zero (avoids division by zero for malformed images).
+pub(crate) fn clamp_marker_size(
+    intrinsic_width: Pt,
+    intrinsic_height: Pt,
+    line_height: Pt,
+) -> (Pt, Pt) {
+    if intrinsic_height <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if intrinsic_height <= line_height {
+        (intrinsic_width, intrinsic_height)
+    } else {
+        let scale = line_height / intrinsic_height;
+        (intrinsic_width * scale, line_height)
+    }
+}
+
 /// A list item with an outside-positioned marker.
 #[derive(Clone)]
 pub struct ListItemPageable {
@@ -1944,6 +1966,36 @@ mod tests {
         // Second part has no marker
         let second_item = second.as_any().downcast_ref::<ListItemPageable>().unwrap();
         assert!((second_item.marker_width - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clamp_marker_size_below_line_height() {
+        // 16x16 px image (= 12x12 pt) with line-height 24 pt → stays intrinsic
+        let (w, h) = clamp_marker_size(12.0, 12.0, 24.0);
+        assert!((w - 12.0).abs() < 0.01);
+        assert!((h - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clamp_marker_size_equal_line_height() {
+        let (w, h) = clamp_marker_size(24.0, 24.0, 24.0);
+        assert!((w - 24.0).abs() < 0.01);
+        assert!((h - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clamp_marker_size_above_line_height_preserves_aspect() {
+        // 64x48 pt with line-height 12 pt: scale = 12/48 = 0.25 → (16, 12)
+        let (w, h) = clamp_marker_size(64.0, 48.0, 12.0);
+        assert!((w - 16.0).abs() < 0.01);
+        assert!((h - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clamp_marker_size_zero_intrinsic_height_returns_zero() {
+        let (w, h) = clamp_marker_size(10.0, 0.0, 12.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
     }
 
     #[test]
