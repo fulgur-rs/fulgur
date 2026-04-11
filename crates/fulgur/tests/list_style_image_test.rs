@@ -93,10 +93,21 @@ fn test_list_style_image_svg_renders() {
         .build()
         .render_html(r#"<html><body><ul><li>SVG bullet item</li></ul></body></html>"#)
         .unwrap();
-    // The SVG marker replaces the text bullet glyph with a vector path draw,
-    // so the rendered PDF must differ from the text-only control.
-    assert_ne!(
-        pdf, text_only,
-        "PDF with SVG marker should differ from text-only output"
+    // When the SVG branch of resolve_list_marker actually fires, the bullet
+    // glyph (U+2022) is replaced by a vector draw and the font subset for the
+    // list-item run no longer needs to carry that glyph. Empirically this
+    // makes the SVG PDF substantially smaller than the text-only baseline
+    // (~2 KB on the observed run). If the SVG path regressed and silently
+    // fell back to text, both PDFs would carry the same font subset and the
+    // sizes would match — so the strict inequality is a real signal that the
+    // SVG path was exercised, not a spurious byte-level diff from CSS parse
+    // side-effects.
+    assert!(
+        pdf.len() + 512 < text_only.len(),
+        "PDF with SVG marker ({} bytes) should be meaningfully smaller than \
+         text-only baseline ({} bytes); a near-equal size would suggest the \
+         SVG branch silently fell back to text",
+        pdf.len(),
+        text_only.len()
     );
 }
