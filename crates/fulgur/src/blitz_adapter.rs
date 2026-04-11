@@ -23,9 +23,10 @@
 use blitz_dom::DocumentConfig;
 use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
-use blitz_traits::net::NetProvider;
+use blitz_traits::net::{NetProvider, Url};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Parse HTML and return a fully resolved document (styles + layout computed).
@@ -59,28 +60,64 @@ pub trait DomPass {
 
 /// Parse HTML into a document without resolving styles or layout.
 ///
-/// Convenience wrapper around [`parse_with_provider`] that uses the
-/// default net provider (none) and base URL (`file:///`). Most
-/// production code should call [`parse_with_provider`] directly so
-/// that `<link rel="stylesheet">` and `@import` resolution work.
+/// Uses Blitz's built-in `DummyNetProvider`, so `<link rel="stylesheet">`
+/// and `@import` are silently ignored. For real-world rendering call
+/// [`parse_html_with_local_resources`] instead, which wires fulgur's
+/// own [`crate::net::FulgurNetProvider`] into Blitz.
 pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
-    parse_with_provider(html, viewport_width, font_data, None, None)
+    parse_inner(html, viewport_width, font_data, None, None)
 }
 
-/// Parse HTML into a document, configuring Blitz with a custom net
-/// provider and base URL.
+/// Parse HTML and load any `<link rel="stylesheet">` / `@import` files
+/// found inside the configured `base_path`.
 ///
-/// `net_provider` is the [`NetProvider`] used by Blitz to load
-/// `<link rel="stylesheet">` files (and any `@import` URLs they
-/// reference). When `None`, Blitz falls back to its built-in
-/// `DummyNetProvider`, which means external stylesheets are silently
-/// ignored. fulgur normally supplies a [`crate::net::FulgurNetProvider`]
-/// configured against the document's base directory.
+/// Returns the parsed document plus a [`crate::gcpm::GcpmContext`]
+/// containing every GCPM construct extracted from the loaded
+/// stylesheets. The caller is expected to merge that context into its
+/// own engine-level context (typically the one derived from `--css`).
 ///
-/// `base_url` is forwarded to Blitz so that `<link href="...">` and
-/// `@import url(...)` are resolved against the right directory. When
-/// `None`, fulgur falls back to `file:///`.
-pub fn parse_with_provider(
+/// This is the **only** entry point engine code should use for
+/// production rendering: it owns construction of
+/// [`crate::net::FulgurNetProvider`], the trait-object cast,
+/// `base_path → file://` URL derivation, and resource draining,
+/// keeping the Blitz API surface fully encapsulated in
+/// `blitz_adapter.rs` (CLAUDE.md adapter-isolation rule).
+pub fn parse_html_with_local_resources(
+    html: &str,
+    viewport_width: f32,
+    font_data: &[Arc<Vec<u8>>],
+    base_path: Option<&Path>,
+) -> (HtmlDocument, crate::gcpm::GcpmContext) {
+    let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
+        base_path.map(|p| p.to_path_buf()),
+    ));
+    let provider: Arc<dyn NetProvider<Resource>> = net_provider.clone();
+    let base_url = base_path
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| Url::from_directory_path(&p).ok())
+        .map(|u| u.to_string());
+
+    let mut doc = parse_inner(html, viewport_width, font_data, Some(provider), base_url);
+
+    // Replay every Resource (= parsed stylesheet) that the provider
+    // captured during HTML parsing into the document so the stylist
+    // sees them before `resolve()`.
+    for resource in net_provider.drain_pending_resources() {
+        doc.load_resource(resource);
+    }
+
+    // Fold the per-stylesheet GCPM contexts into one. The caller still
+    // has to merge this with its own AssetBundle-derived context.
+    let mut gcpm = crate::gcpm::GcpmContext::default();
+    for ctx in net_provider.drain_gcpm_contexts() {
+        gcpm.extend_from(ctx);
+    }
+    (doc, gcpm)
+}
+
+/// The single primitive that actually constructs an `HtmlDocument`.
+/// All other `parse*` functions in this module funnel through here.
+fn parse_inner(
     html: &str,
     viewport_width: f32,
     font_data: &[Arc<Vec<u8>>],
@@ -109,16 +146,6 @@ pub fn parse_with_provider(
     };
 
     HtmlDocument::from_html(html, config)
-}
-
-/// Apply a list of [`Resource`]s (typically drained from
-/// [`crate::net::FulgurNetProvider::drain_pending_resources`]) to a
-/// document so that the stylesheets they carry are attached to the
-/// stylist before [`resolve`] is called.
-pub fn apply_resources(doc: &mut HtmlDocument, resources: Vec<Resource>) {
-    for resource in resources {
-        doc.load_resource(resource);
-    }
 }
 
 /// Apply a sequence of DOM passes to a parsed document.

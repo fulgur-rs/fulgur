@@ -56,66 +56,43 @@ impl Engine {
             .map(|a| a.combined_css())
             .unwrap_or_default();
 
-        // Parse the GCPM constructs out of the AssetBundle CSS first.
-        // CSS that arrives later via `<link>` / `@import` is parsed
-        // inside `FulgurNetProvider::fetch` and merged into this context
-        // after `parse_with_provider` returns.
         let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
         let css_to_inject = gcpm.cleaned_css.clone();
 
-        // --- Pipeline: parse → DomPass → resolve ---
         let fonts = self
             .assets
             .as_ref()
             .map(|a| a.fonts.as_slice())
             .unwrap_or(&[]);
 
-        // Build a NetProvider so Blitz can resolve <link rel="stylesheet">
-        // and @import URLs against the document's base directory. The
-        // provider records every CSS payload it serves so we can merge
-        // its GCPM context with the AssetBundle context below.
-        let net_provider =
-            std::sync::Arc::new(crate::net::FulgurNetProvider::new(self.base_path.clone()));
-        let base_url = self
-            .base_path
-            .as_ref()
-            .and_then(|p| p.canonicalize().ok())
-            .and_then(|p| blitz_traits::net::Url::from_directory_path(&p).ok())
-            .map(|u| u.to_string());
-
-        let mut doc = crate::blitz_adapter::parse_with_provider(
+        // Parse the HTML and resolve every <link rel="stylesheet"> /
+        // @import file inside `base_path` in one shot. The returned
+        // `link_gcpm` carries the GCPM constructs extracted from those
+        // stylesheets, which we fold into the AssetBundle-derived
+        // context below.
+        //
+        // `cleaned_css` is folded too: it is consumed by `render.rs` as
+        // the sole stylesheet for the margin-box mini-documents (see
+        // `render_to_pdf_with_gcpm` and `strip_display_none`). Without
+        // it, declarations like `.pageHeader { font-size: 8px; }`
+        // defined in a `<link>`-loaded stylesheet would never reach
+        // the margin-box renderer, so headers/footers would appear in
+        // default browser styles even though their content resolved
+        // correctly.
+        let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
             self.config.content_width(),
             fonts,
-            Some(net_provider.clone() as std::sync::Arc<dyn blitz_traits::net::NetProvider<_>>),
-            base_url,
+            self.base_path.as_deref(),
         );
-
-        // Drain any Resources the provider queued during parsing (one
-        // per `<link>` / `@import` target) and apply them to the
-        // document so the corresponding stylesheets are attached to
-        // the stylist before resolve.
-        let pending = net_provider.drain_pending_resources();
-        crate::blitz_adapter::apply_resources(&mut doc, pending);
-
-        // Merge GCPM contexts collected from `<link>` / `@import` CSS
-        // into the engine-level context derived from the AssetBundle.
-        for ctx in net_provider.drain_gcpm_contexts() {
-            gcpm.margin_boxes.extend(ctx.margin_boxes);
-            gcpm.running_mappings.extend(ctx.running_mappings);
-            gcpm.string_set_mappings.extend(ctx.string_set_mappings);
-            gcpm.page_settings.extend(ctx.page_settings);
-            gcpm.counter_mappings.extend(ctx.counter_mappings);
-            gcpm.content_counter_mappings
-                .extend(ctx.content_counter_mappings);
-        }
+        gcpm.extend_from(link_gcpm);
 
         // Build and apply DOM passes
         let mut passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
 
         if !css_to_inject.is_empty() {
             passes.push(Box::new(crate::blitz_adapter::InjectCssPass {
-                css: css_to_inject.clone(),
+                css: css_to_inject,
             }));
         }
 

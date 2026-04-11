@@ -97,33 +97,30 @@ impl FulgurNetProvider {
     }
 
     fn looks_like_css(request: &Request, path: &Path) -> bool {
-        if request.content_type.contains("css") {
+        // Strict MIME match — `text/cssfoo` must not be treated as CSS.
+        let ct = request.content_type.as_str();
+        if ct == "text/css" || ct.starts_with("text/css;") {
             return true;
         }
         path.extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("css"))
-            .unwrap_or(false)
+            .is_some_and(|e| e.eq_ignore_ascii_case("css"))
     }
 }
 
 impl NetProvider<Resource> for FulgurNetProvider {
     fn fetch(&self, doc_id: usize, request: Request, handler: BoxedHandler<Resource>) {
-        // Resolve the URL to a local path inside the base directory.
         let Some(canonical_path) = self.resolve_local_path(&request) else {
             return;
         };
-
-        // Read the file synchronously. Errors are silent (matching the
-        // existing LinkStylesheetPass behaviour).
         let Ok(raw_bytes) = std::fs::read(&canonical_path) else {
             return;
         };
 
-        // For CSS payloads, run the GCPM parser to extract any `@page`
-        // / running / counter / string-set rules and produce a cleaned
-        // CSS body. Blitz only ever sees the cleaned CSS, so its style
-        // engine doesn't have to interpret GCPM constructs.
+        // For CSS, hand Blitz the *cleaned* body so its style engine
+        // never sees `@page` / `position: running(...)` constructs.
+        // The GCPM context goes into our buffer for the engine to
+        // merge after parse() returns.
         let bytes_for_blitz = if Self::looks_like_css(&request, &canonical_path) {
             if let Ok(text) = std::str::from_utf8(&raw_bytes) {
                 let gcpm = parse_gcpm(text);
@@ -137,8 +134,6 @@ impl NetProvider<Resource> for FulgurNetProvider {
             Bytes::from(raw_bytes)
         };
 
-        // Build a callback that captures parsed Resources into our queue
-        // so the engine can replay them onto the document after parse().
         let inner = self.inner.clone();
         let callback: SharedCallback<Resource> = Arc::new(
             move |_doc_id: usize, result: Result<Resource, Option<String>>| {
@@ -155,11 +150,29 @@ impl NetProvider<Resource> for FulgurNetProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blitz_traits::net::Url;
+    use blitz_traits::net::{NetHandler, Url};
     use std::fs;
 
     fn make_request(url: &str) -> Request {
         Request::get(Url::parse(url).unwrap())
+    }
+
+    /// A `NetHandler` that records every byte payload it receives, used
+    /// in tests to drive `FulgurNetProvider::fetch` end-to-end without
+    /// pulling in real Blitz handler types.
+    struct RecordingHandler {
+        bytes: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl NetHandler<Resource> for RecordingHandler {
+        fn bytes(
+            self: Box<Self>,
+            _doc_id: usize,
+            bytes: blitz_traits::net::Bytes,
+            _callback: blitz_traits::net::SharedCallback<Resource>,
+        ) {
+            *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+        }
     }
 
     #[test]
@@ -234,32 +247,85 @@ mod tests {
     }
 
     #[test]
-    fn fetch_buffers_gcpm_for_css_file() {
+    fn fetch_runs_gcpm_and_serves_cleaned_css() {
+        // End-to-end test of `fetch()`: drives the real entry point
+        // (URL resolution → file read → CSS detection → parse_gcpm →
+        // handler.bytes) so that a regression in any of those steps
+        // would fail this test rather than slip through.
         let dir = tempfile::tempdir().unwrap();
         let css_path = dir.path().join("style.css");
-        fs::write(
-            &css_path,
-            r#"
+        let original_css = r#"
             .pageHeader { position: running(pageHeader); }
             @page { @top-center { content: element(pageHeader); } }
-            "#,
-        )
-        .unwrap();
+            body { color: red; }
+        "#;
+        fs::write(&css_path, original_css).unwrap();
 
         let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let url = Url::from_file_path(&css_path).unwrap();
+        let request = Request::get(url);
 
-        // We can't easily call fetch directly without Blitz machinery, but
-        // we can simulate the CSS-side bookkeeping by reading the file and
-        // calling parse_gcpm directly — same logic the provider uses.
-        let text = fs::read_to_string(&css_path).unwrap();
-        let gcpm = parse_gcpm(&text);
-        provider.inner.lock().unwrap().gcpm_contexts.push(gcpm);
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
 
+        // The handler must have received cleaned CSS — i.e. the
+        // `body { color: red; }` rule survives, but `@page` and
+        // `position: running(...)` are stripped/replaced.
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("RecordingHandler must have received bytes from fetch()");
+        let cleaned = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            cleaned.contains("body { color: red; }"),
+            "non-GCPM rules should pass through to Blitz, got: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("@page"),
+            "@page rules should be stripped from cleaned CSS, got: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("position: running"),
+            "running declarations should be replaced in cleaned CSS, got: {cleaned}"
+        );
+
+        // The GCPM context buffer should now hold one entry with the
+        // running mapping and margin box extracted from the original CSS.
         let drained = provider.drain_gcpm_contexts();
         assert_eq!(drained.len(), 1);
         assert!(!drained[0].running_mappings.is_empty());
         assert!(!drained[0].margin_boxes.is_empty());
-        // Subsequent drain returns empty.
+
+        // Subsequent drain returns empty (drain semantics).
+        assert!(provider.drain_gcpm_contexts().is_empty());
+    }
+
+    #[test]
+    fn fetch_drops_request_outside_base_path() {
+        // A fetch for a file outside `canonical_base` must be a no-op:
+        // no bytes delivered to the handler, no GCPM context recorded.
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("base");
+        fs::create_dir(&base).unwrap();
+        let outside = parent.path().join("outside.css");
+        fs::write(&outside, "body { color: blue; }").unwrap();
+
+        let provider = FulgurNetProvider::new(Some(base));
+        let request = Request::get(Url::from_file_path(&outside).unwrap());
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
+
+        assert!(
+            recorded.lock().unwrap().is_none(),
+            "handler must not receive bytes for files outside the base path"
+        );
         assert!(provider.drain_gcpm_contexts().is_empty());
     }
 }
