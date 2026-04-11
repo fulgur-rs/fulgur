@@ -2663,11 +2663,9 @@ mod overflow_tests {
     }
 }
 
-/// Float-tolerance helpers shared across the transform test modules.
-///
-/// Exposed as `pub(crate)` so both in-crate `#[cfg(test)]` modules and the
-/// external `transform_integration.rs` test file can reuse a single
-/// definition.
+/// Float-tolerance helpers shared across the in-crate transform test
+/// modules (`affine_tests`, `transform_wrapper_tests`, and the
+/// `transform_tests` module in `blitz_adapter.rs`).
 #[cfg(test)]
 pub(crate) mod matrix_test_util {
     use super::Affine2D;
