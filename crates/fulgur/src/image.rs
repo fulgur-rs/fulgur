@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 
 /// Image format detected from data.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
     Png,
     Jpeg,
@@ -21,6 +21,47 @@ impl ImageFormat {
             ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true).map_err(|_| ()),
             ImageFormat::Gif => krilla::image::Image::from_gif(data, true).map_err(|_| ()),
         }
+    }
+}
+
+/// Classification of an asset's bytes for rendering path selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetKind {
+    /// Raster image (PNG/JPEG/GIF) → renders via `ImagePageable`.
+    Raster(ImageFormat),
+    /// SVG vector image → renders via `SvgPageable`.
+    Svg,
+    /// Unrecognized / unsupported.
+    Unknown,
+}
+
+impl AssetKind {
+    /// Classify raw asset bytes by sniffing the header.
+    ///
+    /// Accepts SVG via the `<svg` element start or `<?xml` prolog, tolerant
+    /// of an optional leading UTF-8 BOM and ASCII whitespace. Falls through
+    /// to `ImagePageable::detect_format` for raster magic bytes.
+    pub fn detect(data: &[u8]) -> AssetKind {
+        if let Some(format) = ImagePageable::detect_format(data) {
+            return AssetKind::Raster(format);
+        }
+        let mut slice = data;
+        // Strip optional UTF-8 BOM so `<svg` / `<?xml` detection works.
+        if slice.starts_with(b"\xEF\xBB\xBF") {
+            slice = &slice[3..];
+        }
+        // Skip ASCII whitespace that commonly precedes the SVG root.
+        while let Some((first, rest)) = slice.split_first() {
+            if first.is_ascii_whitespace() {
+                slice = rest;
+            } else {
+                break;
+            }
+        }
+        if slice.starts_with(b"<?xml") || slice.starts_with(b"<svg") {
+            return AssetKind::Svg;
+        }
+        AssetKind::Unknown
     }
 }
 
@@ -243,5 +284,60 @@ mod tests {
     fn test_truncated_data_returns_none() {
         let dims = ImagePageable::decode_dimensions(&[0x89, 0x50], ImageFormat::Png);
         assert_eq!(dims, None);
+    }
+
+    #[test]
+    fn test_detect_asset_kind_png() {
+        assert!(matches!(
+            AssetKind::detect(MINIMAL_PNG),
+            AssetKind::Raster(ImageFormat::Png)
+        ));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_jpeg() {
+        assert!(matches!(
+            AssetKind::detect(MINIMAL_JPEG),
+            AssetKind::Raster(ImageFormat::Jpeg)
+        ));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_gif() {
+        assert!(matches!(
+            AssetKind::detect(MINIMAL_GIF),
+            AssetKind::Raster(ImageFormat::Gif)
+        ));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_svg_tag() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
+        assert!(matches!(AssetKind::detect(svg), AssetKind::Svg));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_svg_xml_prolog() {
+        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
+        assert!(matches!(AssetKind::detect(svg), AssetKind::Svg));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_svg_with_utf8_bom() {
+        let svg = b"\xEF\xBB\xBF<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert!(matches!(AssetKind::detect(svg), AssetKind::Svg));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_empty() {
+        assert!(matches!(AssetKind::detect(&[]), AssetKind::Unknown));
+    }
+
+    #[test]
+    fn test_detect_asset_kind_unknown() {
+        assert!(matches!(
+            AssetKind::detect(b"not an image"),
+            AssetKind::Unknown
+        ));
     }
 }
