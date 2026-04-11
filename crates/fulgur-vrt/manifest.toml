@@ -1,0 +1,32 @@
+[defaults]
+page_size = "A4"
+dpi = 150
+tolerance_fulgur = { max_channel_diff = 2, max_diff_pixels_ratio = 0.001 }
+tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
+
+[[fixture]]
+path = "basic/solid-box.html"
+
+[[fixture]]
+path = "basic/borders.html"
+
+[[fixture]]
+path = "basic/border-radius.html"
+
+[[fixture]]
+path = "layout/flex-row.html"
+
+[[fixture]]
+path = "layout/grid-simple.html"
+
+[[fixture]]
+path = "layout/multicol-2.html"
+
+[[fixture]]
+path = "paint/background-gradient.html"
+
+[[fixture]]
+path = "paint/opacity.html"
+
+[[fixture]]
+path = "svg/shapes.html"
