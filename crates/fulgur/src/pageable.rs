@@ -2028,6 +2028,50 @@ mod tests {
     }
 
     #[test]
+    fn test_list_item_image_marker_split_keeps_on_first_part() {
+        use crate::image::{ImageFormat, ImagePageable};
+        use std::sync::Arc;
+
+        let mut body = BlockPageable::new(vec![
+            make_spacer(100.0),
+            make_spacer(100.0),
+            make_spacer(100.0),
+        ]);
+        body.wrap(200.0, 1000.0);
+
+        // Dummy PNG bytes are not actually decoded — we only exercise
+        // clone/split logic, not rendering.
+        let img = ImagePageable::new(Arc::new(vec![0u8; 4]), ImageFormat::Png, 12.0, 12.0);
+
+        let mut item = ListItemPageable {
+            marker: ListItemMarker::Image {
+                marker: ImageMarker::Raster(img),
+                width: 12.0,
+                height: 12.0,
+            },
+            marker_line_height: 14.0,
+            body: Box::new(body),
+            style: BlockStyle::default(),
+            width: 200.0,
+            height: 300.0,
+            opacity: 1.0,
+            visible: true,
+        };
+        item.wrap(200.0, 1000.0);
+        let result = item.split(200.0, 250.0);
+        assert!(result.is_some());
+        let (first, second) = result.unwrap();
+
+        let first_item = first.as_any().downcast_ref::<ListItemPageable>().unwrap();
+        assert!(matches!(first_item.marker, ListItemMarker::Image { .. }));
+        assert!((first_item.marker_line_height - 14.0).abs() < 0.01);
+
+        let second_item = second.as_any().downcast_ref::<ListItemPageable>().unwrap();
+        assert!(matches!(second_item.marker, ListItemMarker::None));
+        assert_eq!(second_item.marker_line_height, 0.0);
+    }
+
+    #[test]
     fn test_clamp_marker_size_below_line_height() {
         // 16x16 px image (= 12x12 pt) with line-height 24 pt → stays intrinsic
         let (w, h) = clamp_marker_size(12.0, 12.0, 24.0);
