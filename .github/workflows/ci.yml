@@ -25,7 +25,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     strategy:
@@ -53,13 +53,13 @@ jobs:
         uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
       - name: Build tests
         if: ${{ !matrix.coverage }}
-        run: cargo test --no-run
+        run: cargo test --workspace --exclude fulgur-vrt --no-run
       - name: Run tests
         if: ${{ !matrix.coverage }}
-        run: cargo test
+        run: cargo test --workspace --exclude fulgur-vrt
       - name: Run tests with coverage
         if: matrix.coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude fulgur-vrt --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
         uses: actions/upload-artifact@v4
@@ -67,6 +67,26 @@ jobs:
           name: lcov
           path: lcov.info
           if-no-files-found: error
+
+  vrt:
+    name: Visual Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run VRT
+        run: cargo test -p fulgur-vrt
+      - name: Upload diff artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrt-diffs
+          path: target/vrt-diff/
+          retention-days: 14
+          if-no-files-found: ignore
 
   octocov:
     needs: test
