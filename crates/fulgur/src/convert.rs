@@ -270,7 +270,8 @@ fn convert_node_inner(
             }
         } else {
             let children: &[usize] = &node.children;
-            let positioned_children = collect_positioned_children(doc, children, ctx, depth);
+            let mut positioned_children = collect_positioned_children(doc, children, ctx, depth);
+            inject_block_pseudo_images(doc, node, ctx.assets, &mut positioned_children);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_visible(visible);
@@ -317,19 +318,21 @@ fn convert_node_inner(
     {
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
-        if style.has_visual_style() {
+        let has_pseudo_image = has_block_pseudo_image(doc, node, ctx.assets);
+        if style.has_visual_style() || has_pseudo_image {
             let (child_x, child_y) = style.content_inset();
             // Propagate visibility to the inner paragraph — it's not a real CSS child
             // but the node's own text content, so it must respect the node's visibility.
             // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
             let mut p = paragraph;
             p.visible = visible;
-            let child = PositionedChild {
+            let mut children = vec![PositionedChild {
                 child: Box::new(p),
                 x: child_x,
                 y: child_y,
-            };
-            let mut block = BlockPageable::with_positioned_children(vec![child])
+            }];
+            inject_block_pseudo_images(doc, node, ctx.assets, &mut children);
+            let mut block = BlockPageable::with_positioned_children(children)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible);
@@ -365,7 +368,8 @@ fn convert_node_inner(
     }
 
     // Container node — collect children with Taffy-computed positions
-    let positioned_children = collect_positioned_children(doc, children, ctx, depth);
+    let mut positioned_children = collect_positioned_children(doc, children, ctx, depth);
+    inject_block_pseudo_images(doc, node, ctx.assets, &mut positioned_children);
 
     let style = extract_block_style(node, ctx.assets);
     let has_style = style.has_visual_style() || style.has_radius();
@@ -606,6 +610,164 @@ fn make_image_pageable(
     img.opacity = opacity;
     img.visible = visible;
     img
+}
+
+/// Build an `ImagePageable` for a `::before`/`::after` pseudo-element node
+/// whose computed `content` resolves to a single `url(...)` image.
+///
+/// Returns `None` if:
+///
+/// - `assets` is `None`
+/// - the pseudo's computed content is not a single image URL
+/// - the URL cannot be resolved in the `AssetBundle` (silent skip — matches
+///   background-image handling in `extract_block_style`)
+/// - the image format is unsupported by `ImagePageable::detect_format`
+///
+/// `parent_width` is the content-box width of the pseudo's containing block,
+/// used to resolve percentage `width` / `height` values on the pseudo itself.
+fn build_pseudo_image(
+    pseudo_node: &Node,
+    parent_width: f32,
+    assets: Option<&AssetBundle>,
+) -> Option<ImagePageable> {
+    let assets = assets?;
+
+    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let asset_name = extract_asset_name(&raw_url);
+    let data = Arc::clone(assets.get_image(asset_name)?);
+    let format = ImagePageable::detect_format(&data)?;
+
+    // Read computed CSS width / height on the pseudo-element itself. Blitz
+    // does not propagate these to `final_layout` for pseudos that lack a text
+    // child, so we must go directly to stylo.
+    let styles = pseudo_node.primary_styles()?;
+    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_width);
+    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_width);
+
+    let (opacity, visible) = extract_opacity_visible(pseudo_node);
+    Some(make_image_pageable(
+        data, format, css_w, css_h, opacity, visible,
+    ))
+}
+
+/// Cheap pre-check: does `node` have a `::before` or `::after` pseudo whose
+/// computed `content` is a block-display image URL that we would inject?
+///
+/// Used by the inline-root branch of `convert_node_inner` to decide whether
+/// to go through the `BlockPageable` wrapping path (needed to attach the
+/// pseudo image as a sibling of the paragraph).
+fn has_block_pseudo_image(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    assets: Option<&AssetBundle>,
+) -> bool {
+    if assets.is_none() {
+        return false;
+    }
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        let Some(pseudo) = doc.get_node(pseudo_id) else {
+            continue;
+        };
+        if !is_block_pseudo(pseudo) {
+            continue;
+        }
+        if crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// True iff the pseudo-element has `display: block` outside.
+///
+/// Phase 1 only emits pseudo images for block-outside pseudos. Inline pseudos
+/// fall through to Phase 2 work (tracked separately) where the image has to
+/// be injected into `ParagraphPageable`'s line layout.
+fn is_block_pseudo(pseudo: &Node) -> bool {
+    use style::values::specified::box_::DisplayOutside;
+    let Some(styles) = pseudo.primary_styles() else {
+        return false;
+    };
+    styles.clone_display().outside() == DisplayOutside::Block
+}
+
+/// Inject `BlockPageable`-style pseudo image children for `::before` / `::after`
+/// on `parent`, mutating `children` in place.
+///
+/// `::before` is inserted at index 0 with `(x, y) = (0, 0)`. `::after` is
+/// appended at the parent's content-box bottom.
+///
+/// **Known limitation (fulgur-ai3 Phase 1):** Because Blitz assigns a
+/// zero-sized layout to text-less pseudo elements, the pseudo image does not
+/// push subsequent real children down. Authors can work around this by
+/// adding `margin-top` / `margin-bottom` on the first / last real child to
+/// reserve space. Properly pushing content will be handled in a follow-up
+/// issue that round-trips the synthetic pseudo size through Taffy.
+fn inject_block_pseudo_images(
+    doc: &blitz_dom::BaseDocument,
+    parent: &Node,
+    assets: Option<&AssetBundle>,
+    children: &mut Vec<PositionedChild>,
+) {
+    let content_width = parent.final_layout.size.width;
+    let content_height = parent.final_layout.size.height;
+
+    // ::before
+    if let Some(before_id) = parent.before {
+        if let Some(pseudo) = doc.get_node(before_id) {
+            if is_block_pseudo(pseudo) {
+                if let Some(img) = build_pseudo_image(pseudo, content_width, assets) {
+                    children.insert(
+                        0,
+                        PositionedChild {
+                            child: Box::new(img),
+                            x: 0.0,
+                            y: 0.0,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // ::after
+    if let Some(after_id) = parent.after {
+        if let Some(pseudo) = doc.get_node(after_id) {
+            if is_block_pseudo(pseudo) {
+                if let Some(img) = build_pseudo_image(pseudo, content_width, assets) {
+                    children.push(PositionedChild {
+                        child: Box::new(img),
+                        x: 0.0,
+                        y: content_height,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a stylo `Size` (i.e. `width` / `height`) to an absolute `f32` in
+/// pt, or `None` if the size is `auto` or one of the intrinsic keywords.
+///
+/// Percentages resolve against `parent_width` — the containing block width.
+/// (Percentage heights on replaced elements technically reference the parent
+/// height, but Phase 1 only cares about block-display pseudo icons whose
+/// height is typically an explicit px value; using parent_width as the basis
+/// for both dimensions is a conscious simplification.)
+fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) -> Option<f32> {
+    use style::values::computed::Length;
+    use style::values::generics::length::GenericSize;
+    match size {
+        GenericSize::LengthPercentage(lp) => {
+            // NonNegativeLengthPercentage is a tuple struct with `.0` being
+            // the inner LengthPercentage.
+            Some(lp.0.resolve(Length::new(parent_width)).px())
+        }
+        // auto / min-content / max-content / fit-content / stretch etc. are
+        // all treated as "not specified" here. The `make_image_pageable`
+        // helper will fall back to intrinsic dimensions / aspect-ratio.
+        _ => None,
+    }
 }
 
 /// Convert an `<img>` element into an `ImagePageable`, wrapped in `BlockPageable` if styled.
@@ -1360,5 +1522,224 @@ mod tests {
         assert_eq!(img.height, 1.0);
         assert_eq!(img.opacity, 0.5);
         assert!(!img.visible);
+    }
+
+    fn find_h1(doc: &blitz_html::HtmlDocument) -> usize {
+        fn walk(doc: &blitz_dom::BaseDocument, id: usize) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if let Some(ed) = node.element_data() {
+                if ed.name.local.as_ref() == "h1" {
+                    return Some(id);
+                }
+            }
+            for &c in &node.children {
+                if let Some(v) = walk(doc, c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        walk(doc.deref(), doc.root_element().id).expect("h1 not found")
+    }
+
+    #[test]
+    fn test_build_pseudo_image_reads_content_url() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("read examples/image/icon.png");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before {
+                content: url("icon.png");
+                display: block;
+                width: 48px;
+                height: 48px;
+            }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let h1_id = find_h1(&doc);
+        let before_id = doc
+            .get_node(h1_id)
+            .unwrap()
+            .before
+            .expect("::before pseudo");
+        let pseudo = doc.get_node(before_id).unwrap();
+        let parent_width = doc.get_node(h1_id).unwrap().final_layout.size.width;
+
+        let img = build_pseudo_image(pseudo, parent_width, Some(&bundle))
+            .expect("build_pseudo_image should return Some for content: url()");
+        assert_eq!(img.width, 48.0);
+        assert_eq!(img.height, 48.0);
+    }
+
+    #[test]
+    fn test_build_pseudo_image_width_only_uses_intrinsic_aspect() {
+        // icon.png is 32x32 so aspect = 1.0. width=20 → height=20.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); display: block; width: 20px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        let parent_width = doc.get_node(h1_id).unwrap().final_layout.size.width;
+
+        let img = build_pseudo_image(pseudo, parent_width, Some(&bundle)).unwrap();
+        assert_eq!(img.width, 20.0);
+        assert_eq!(img.height, 20.0);
+    }
+
+    #[test]
+    fn test_build_pseudo_image_missing_asset_returns_none() {
+        let bundle = AssetBundle::new();
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("missing.png"); display: block; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        assert!(
+            build_pseudo_image(pseudo, 800.0, Some(&bundle)).is_none(),
+            "missing asset should silently return None"
+        );
+    }
+
+    #[test]
+    fn test_build_pseudo_image_no_assets_returns_none() {
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        assert!(build_pseudo_image(pseudo, 800.0, None).is_none());
+    }
+
+    /// Recursively walk a Pageable tree and push any ImagePageable found.
+    fn collect_images(p: &dyn Pageable, out: &mut Vec<(f32, f32)>) {
+        if let Some(img) = p.as_any().downcast_ref::<ImagePageable>() {
+            out.push((img.width, img.height));
+            return;
+        }
+        if let Some(block) = p.as_any().downcast_ref::<BlockPageable>() {
+            for child in &block.children {
+                collect_images(child.child.as_ref(), out);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_block_pseudo_image() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .wrap::before {
+                content: url("icon.png");
+                display: block;
+                width: 24px;
+                height: 24px;
+            }
+        </style></head><body><div class="wrap">hello</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.iter().any(|(w, h)| *w == 24.0 && *h == 24.0),
+            "expected a 24x24 ImagePageable from ::before pseudo, got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_inline_pseudo_ignored_phase1() {
+        // Phase 1 only handles display:block pseudos. An inline pseudo with
+        // content: url() should be silently ignored (Phase 2 will handle it).
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            p::before { content: url("icon.png"); width: 10px; height: 10px; }
+        </style></head><body><p>hello</p></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.is_empty(),
+            "Phase 1 must not emit inline pseudo images; got {:?}",
+            images
+        );
     }
 }
