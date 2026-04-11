@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Transform Examples</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<h1>CSS Transform Examples</h1>
+
+<p>Each cell below demonstrates a different 2D <code>transform</code> function.
+The dashed outline marks the untransformed box; the solid blue box shows the
+transformed result.</p>
+
+<h2>1. translate</h2>
+<div class="grid">
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-translate">translate<br>(20px, 10px)</div>
+    <div class="label">translate</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-translate-x">translateX<br>(30px)</div>
+    <div class="label">translateX</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-translate-y">translateY<br>(15px)</div>
+    <div class="label">translateY</div>
+  </div>
+</div>
+
+<h2>2. rotate</h2>
+<div class="grid">
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-rotate-15">rotate<br>15deg</div>
+    <div class="label">rotate 15deg</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-rotate-45">rotate<br>45deg</div>
+    <div class="label">rotate 45deg</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-rotate-neg">rotate<br>-20deg</div>
+    <div class="label">rotate -20deg</div>
+  </div>
+</div>
+
+<h2>3. scale</h2>
+<div class="grid">
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-scale-up">scale<br>1.3</div>
+    <div class="label">scale 1.3</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-scale-down">scale<br>0.7</div>
+    <div class="label">scale 0.7</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-scale-xy">scale<br>(1.4, 0.8)</div>
+    <div class="label">scale(x, y)</div>
+  </div>
+</div>
+
+<h2>4. skew</h2>
+<div class="grid">
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-skew-x">skewX<br>20deg</div>
+    <div class="label">skewX 20deg</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-skew-y">skewY<br>15deg</div>
+    <div class="label">skewY 15deg</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-skew-both">skew<br>(10, 10)</div>
+    <div class="label">skew(x, y)</div>
+  </div>
+</div>
+
+<h2>5. Combined &amp; matrix()</h2>
+<div class="grid">
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-combo">rotate +<br>scale</div>
+    <div class="label">rotate + scale</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-combo-2">translate +<br>rotate</div>
+    <div class="label">translate + rotate</div>
+  </div>
+  <div class="cell">
+    <div class="ghost"></div>
+    <div class="box t-matrix">matrix()</div>
+    <div class="label">matrix(1, .2, -.2, 1, 0, 0)</div>
+  </div>
+</div>
+
+</body>
+</html>
