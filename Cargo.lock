@@ -1073,6 +1073,7 @@ dependencies = [
  "cssparser",
  "krilla",
  "krilla-svg",
+ "log",
  "minijinja",
  "parley",
  "serde_json",
