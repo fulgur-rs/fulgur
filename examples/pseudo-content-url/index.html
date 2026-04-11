@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pseudo content: url() — Block</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<h1>Pseudo content: url() — Block</h1>
+
+<p>The <code>::before</code> pseudo element on each chapter title below uses
+<code>content: url("icon.png")</code> with <code>display: block</code>.
+The icon renders above the heading via fulgur's pseudo-content image path.</p>
+
+<section class="chapter">
+  <h2>Chapter 1</h2>
+  <p>Body text follows the pseudo icon above. Because blitz assigns a
+  zero-sized layout to text-less pseudo elements, the icon does not
+  displace this paragraph — the <code>margin-top</code> on the
+  <code>h2</code> reserves the space manually.</p>
+</section>
+
+<section class="chapter">
+  <h2>Chapter 2</h2>
+  <p>Another chapter demonstrating the same block-pseudo icon. Both
+  chapters share the same stylesheet rule, so the icon appears above
+  every chapter title automatically.</p>
+</section>
+
+<section class="after">
+  <h2>After pseudo</h2>
+  <p>This section uses an <code>::after</code> pseudo for its icon
+  instead, appended at the section's content-box bottom.</p>
+</section>
+
+</body>
+</html>
