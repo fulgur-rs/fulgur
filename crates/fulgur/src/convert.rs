@@ -418,9 +418,19 @@ fn convert_node_inner(
     let height = layout.size.height;
     let width = layout.size.width;
 
-    // Check if this is a list item with an outside marker (must be before inline root check)
-    // Inside-positioned markers are already injected into Parley's inline layout by Blitz,
-    // so they fall through to the normal paragraph path below.
+    // Check if this is a list item with an outside marker (must be before inline root check).
+    //
+    // Inside-positioned markers are injected into Parley's inline layout by Blitz
+    // (blitz-dom/src/layout/construct.rs in `build_inline_layout`), so when the
+    // `<li>` IS an inline root they fall through to the normal paragraph path below
+    // and render correctly. For `list-style-image` + inside, `resolve_inside_image_marker`
+    // injects the image at the start of the paragraph's first line.
+    //
+    // Known limitation: when `<li>` is NOT an inline root (contains only block
+    // children, e.g. `<li><p>...</p></li>`) or is empty, neither Blitz nor
+    // fulgur injects the marker, and the marker is not rendered. This matches
+    // upstream Blitz behavior — Blitz's inline-layout injection only fires for
+    // inline-root elements.
     if let Some(elem_data) = node.element_data()
         && elem_data.list_item_data.as_ref().is_some_and(|d| {
             matches!(

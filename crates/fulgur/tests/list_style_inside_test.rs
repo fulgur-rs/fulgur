@@ -101,6 +101,42 @@ fn test_outside_markers_still_work_after_inside_changes() {
     );
 }
 
+// Known limitation: when <li> contains only block children (not an inline
+// root) or is empty, Blitz does not inject the marker into any inline
+// layout, so the marker is not rendered. This matches upstream Blitz
+// behavior — Blitz's own layout construction in
+// blitz-dom/src/layout/construct.rs only injects inside markers in
+// `build_inline_layout`, which is not called for non-inline-root elements.
+//
+// Tracked as a follow-up: see CHANGELOG and the `list-style-inside`
+// limitations note. These tests guard that fulgur still produces a valid
+// PDF in these edge cases (no panic, no crash) even though the marker
+// is absent.
+#[test]
+fn test_inside_marker_with_block_child_does_not_crash() {
+    let engine = build_engine();
+    let html = r#"<html><body>
+        <ul style="list-style-position: inside">
+            <li><p>Nested paragraph</p></li>
+        </ul>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn test_inside_empty_li_does_not_crash() {
+    let engine = build_engine();
+    let html = r#"<html><body>
+        <ul style="list-style-position: inside">
+            <li></li>
+            <li>Not empty</li>
+        </ul>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
 #[test]
 fn test_inside_and_outside_in_same_document() {
     let engine = build_engine();
