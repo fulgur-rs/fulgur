@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-cli"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clap",
  "fulgur",
