@@ -1073,6 +1073,11 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
             let stripped = selector.replace("::marker", "");
             let stripped = stripped.trim();
 
+            // Skip if selector becomes empty (e.g., bare `::marker` without element)
+            if stripped.is_empty() {
+                continue;
+            }
+
             // Build the new rule
             let new_rule = if at_stack.is_empty() {
                 format!("\n{stripped}{{list-style-image:url({url})}}")
@@ -1857,6 +1862,18 @@ li::marker { content: url("star.png"); }
             url.as_deref(),
             Some("\"image(1).png\""),
             "should handle parentheses inside quoted URL"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_bare_marker_selector() {
+        // A bare `::marker` selector (no element) should not produce an
+        // empty-selector rule like `{list-style-image:...}`.
+        let css = r#"::marker { content: url("star.png"); }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(
+            !result.contains("\n{"),
+            "bare ::marker should not produce empty-selector rule, got: {result}"
         );
     }
 
