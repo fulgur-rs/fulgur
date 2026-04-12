@@ -548,6 +548,112 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
     }
 }
 
+/// Font metrics used by `recalculate_line_box` to position inline images
+/// relative to the text baseline.
+#[derive(Clone, Debug)]
+pub struct LineFontMetrics {
+    pub ascent: f32,
+    pub descent: f32,
+    pub x_height: f32,
+    pub subscript_offset: f32,
+    pub superscript_offset: f32,
+}
+
+/// Recalculate the line box height and baseline after inline images have been
+/// injected. Each image's `computed_y` (relative to the new line top) is set
+/// here; `draw_shaped_lines` uses it directly.
+///
+/// The algorithm:
+///
+/// 1. Start with the existing line box `[0, height)` from text metrics.
+/// 2. For each image (except `Top`/`Bottom`), compute `img_top` relative to
+///    the original coordinate system (0 = line top before expansion).
+/// 3. Expand `line_top` / `line_bottom` if the image overflows.
+/// 4. Handle `Top` and `Bottom` images (they align to the final edges).
+/// 5. Update `line.height`, `line.baseline`, and each image's `computed_y`.
+pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
+    let original_height = line.height;
+    let baseline = line.baseline;
+
+    let mut line_top: f32 = 0.0;
+    let mut line_bottom: f32 = original_height;
+
+    // Phase 1: compute img_top for flow-aligned images and expand line box.
+    // Store (index, img_top) for later computed_y assignment.
+    let mut positions: Vec<(usize, f32)> = Vec::new();
+
+    for (idx, item) in line.items.iter().enumerate() {
+        let img = match item {
+            LineItem::Image(img) => img,
+            LineItem::Text(_) => continue,
+        };
+
+        let img_top = match img.vertical_align {
+            VerticalAlign::Top | VerticalAlign::Bottom => {
+                // Deferred to phase 2
+                continue;
+            }
+            VerticalAlign::Baseline => baseline - img.height,
+            VerticalAlign::Middle => {
+                baseline - metrics.x_height / 2.0 - img.height / 2.0
+            }
+            VerticalAlign::Sub => {
+                baseline + metrics.subscript_offset - img.height
+            }
+            VerticalAlign::Super => {
+                baseline - metrics.superscript_offset - img.height
+            }
+            VerticalAlign::TextTop => baseline - metrics.ascent,
+            VerticalAlign::TextBottom => {
+                baseline + metrics.descent - img.height
+            }
+            VerticalAlign::Length(v) => baseline - v - img.height,
+            VerticalAlign::Percent(p) => {
+                baseline - (original_height * p) - img.height
+            }
+        };
+
+        if img_top < line_top {
+            line_top = img_top;
+        }
+        if img_top + img.height > line_bottom {
+            line_bottom = img_top + img.height;
+        }
+        positions.push((idx, img_top));
+    }
+
+    // Phase 2: Top / Bottom images use the (possibly expanded) line box.
+    for (idx, item) in line.items.iter().enumerate() {
+        let img = match item {
+            LineItem::Image(img) => img,
+            LineItem::Text(_) => continue,
+        };
+        let img_top = match img.vertical_align {
+            VerticalAlign::Top => line_top,
+            VerticalAlign::Bottom => line_bottom - img.height,
+            _ => continue,
+        };
+        if img_top < line_top {
+            line_top = img_top;
+        }
+        if img_top + img.height > line_bottom {
+            line_bottom = img_top + img.height;
+        }
+        positions.push((idx, img_top));
+    }
+
+    // Phase 3: Apply — shift everything so line_top becomes 0.
+    let shift = -line_top;
+    line.height = line_bottom - line_top;
+    line.baseline = baseline + shift;
+
+    for (idx, img_top) in positions {
+        if let LineItem::Image(img) = &mut line.items[idx] {
+            img.computed_y = img_top + shift;
+        }
+    }
+}
+
 impl Pageable for ParagraphPageable {
     fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
         self.cached_height = self.lines.iter().map(|l| l.height).sum();
@@ -641,5 +747,247 @@ impl Pageable for ParagraphPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::ImageFormat;
+
+    /// Minimal 1x1 red PNG for test images.
+    const TEST_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+        0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78,
+        0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92,
+        0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn make_inline_image(width: f32, height: f32, va: VerticalAlign) -> InlineImage {
+        InlineImage {
+            data: Arc::new(TEST_PNG.to_vec()),
+            format: ImageFormat::Png,
+            width,
+            height,
+            x_offset: 0.0,
+            vertical_align: va,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+        }
+    }
+
+    fn default_metrics() -> LineFontMetrics {
+        LineFontMetrics {
+            ascent: 12.0,
+            descent: 4.0,
+            x_height: 8.0,
+            subscript_offset: 4.0,
+            superscript_offset: 6.0,
+        }
+    }
+
+    /// A text-only line: height=16, baseline=12.
+    fn text_line(height: f32, baseline: f32) -> ShapedLine {
+        ShapedLine {
+            height,
+            baseline,
+            items: Vec::new(),
+        }
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    // ---------- Baseline ----------
+
+    #[test]
+    fn baseline_image_within_line_no_expansion() {
+        // 8px image at baseline: img_top = 12 - 8 = 4, img_bottom = 12.
+        // Line is [0, 16) so no expansion needed.
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Baseline)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        assert!(approx(line.height, 16.0), "height={}", line.height);
+        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 4.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    #[test]
+    fn baseline_image_taller_expands_line() {
+        // 20px image at baseline: img_top = 12 - 20 = -8, img_bottom = 12.
+        // line_top shifts to -8 → new height = 24, baseline = 20.
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 20.0, VerticalAlign::Baseline)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        assert!(approx(line.height, 24.0), "height={}", line.height);
+        assert!(approx(line.baseline, 20.0), "baseline={}", line.baseline);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Middle ----------
+
+    #[test]
+    fn middle_alignment() {
+        // img_top = baseline - x_height/2 - img.height/2 = 12 - 4 - 5 = 3
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 10.0, VerticalAlign::Middle)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        assert!(approx(line.height, 16.0), "height={}", line.height);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 3.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Sub ----------
+
+    #[test]
+    fn sub_alignment() {
+        // img_top = baseline + subscript_offset - img.height = 12 + 4 - 6 = 10
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Sub)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 10.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Super ----------
+
+    #[test]
+    fn super_alignment() {
+        // img_top = baseline - superscript_offset - img.height = 12 - 6 - 6 = 0
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Super)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- TextTop ----------
+
+    #[test]
+    fn text_top_alignment() {
+        // img_top = baseline - ascent = 12 - 12 = 0
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::TextTop)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- TextBottom ----------
+
+    #[test]
+    fn text_bottom_alignment() {
+        // img_top = baseline + descent - img.height = 12 + 4 - 8 = 8
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::TextBottom)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 8.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Top ----------
+
+    #[test]
+    fn top_alignment_uses_line_top() {
+        // Top image aligns to the top of the line box.
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Top)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Bottom ----------
+
+    #[test]
+    fn bottom_alignment_uses_line_bottom() {
+        // Bottom image aligns to the bottom of the line box.
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Bottom)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(
+                approx(img.computed_y, line.height - 8.0),
+                "computed_y={}",
+                img.computed_y,
+            );
+        }
+    }
+
+    // ---------- Length ----------
+
+    #[test]
+    fn length_offset() {
+        // img_top = baseline - v - img.height = 12 - 3.0 - 6 = 3
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Length(3.0))));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 3.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Percent ----------
+
+    #[test]
+    fn percent_offset() {
+        // img_top = baseline - (height * p) - img.height = 12 - (16 * 0.25) - 6 = 2
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Percent(0.25))));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 2.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Top image expands downward ----------
+
+    #[test]
+    fn top_image_taller_than_line_expands() {
+        // 20px Top image on a 16px line → line grows to 20.
+        let mut line = text_line(16.0, 12.0);
+        line.items
+            .push(LineItem::Image(make_inline_image(10.0, 20.0, VerticalAlign::Top)));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        assert!(approx(line.height, 20.0), "height={}", line.height);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
     }
 }
