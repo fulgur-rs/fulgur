@@ -5,7 +5,8 @@ use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
-    BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockPageable,
     BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable, ImageMarker,
     ListItemMarker, ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
     RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
@@ -1638,31 +1639,61 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                     // Extract the path/filename for AssetBundle lookup.
                     let src = extract_asset_name(raw_src);
                     if let Some(data) = assets.get_image(src) {
-                        if let Some(format) = ImagePageable::detect_format(data) {
-                            let (iw, ih) =
-                                ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+                        use crate::image::AssetKind;
+                        match AssetKind::detect(data) {
+                            AssetKind::Raster(format) => {
+                                let (iw, ih) =
+                                    ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+                                let size = convert_bg_size(&bg_sizes.0, i);
+                                let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                                let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                                let origin = convert_bg_origin(&bg_origins.0, i);
+                                let clip = convert_bg_clip(&bg_clips.0, i);
 
-                            let size = convert_bg_size(&bg_sizes.0, i);
-                            let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                            let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                            let origin = convert_bg_origin(&bg_origins.0, i);
-                            let clip = convert_bg_clip(&bg_clips.0, i);
+                                style.background_layers.push(BackgroundLayer {
+                                    content: BgImageContent::Raster {
+                                        data: Arc::clone(data),
+                                        format,
+                                    },
+                                    intrinsic_width: iw as f32,
+                                    intrinsic_height: ih as f32,
+                                    size,
+                                    position_x: px,
+                                    position_y: py,
+                                    repeat_x: rx,
+                                    repeat_y: ry,
+                                    origin,
+                                    clip,
+                                });
+                            }
+                            AssetKind::Svg => {
+                                let opts = usvg::Options::default();
+                                if let Ok(tree) = usvg::Tree::from_data(data, &opts) {
+                                    let svg_size = tree.size();
+                                    let size = convert_bg_size(&bg_sizes.0, i);
+                                    let (px, py) =
+                                        convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                                    let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                                    let origin = convert_bg_origin(&bg_origins.0, i);
+                                    let clip = convert_bg_clip(&bg_clips.0, i);
 
-                            style.background_layers.push(BackgroundLayer {
-                                content: crate::pageable::BgImageContent::Raster {
-                                    data: Arc::clone(data),
-                                    format,
-                                },
-                                intrinsic_width: iw as f32,
-                                intrinsic_height: ih as f32,
-                                size,
-                                position_x: px,
-                                position_y: py,
-                                repeat_x: rx,
-                                repeat_y: ry,
-                                origin,
-                                clip,
-                            });
+                                    style.background_layers.push(BackgroundLayer {
+                                        content: BgImageContent::Svg {
+                                            tree: Arc::new(tree),
+                                        },
+                                        intrinsic_width: svg_size.width(),
+                                        intrinsic_height: svg_size.height(),
+                                        size,
+                                        position_x: px,
+                                        position_y: py,
+                                        repeat_x: rx,
+                                        repeat_y: ry,
+                                        origin,
+                                        clip,
+                                    });
+                                }
+                            }
+                            AssetKind::Unknown => {}
                         }
                     }
                 }
