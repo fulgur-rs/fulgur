@@ -61,3 +61,53 @@ code {
   padding: 1px 4px;
   border-radius: 3px;
 }
+
+/* Phase 2: inline pseudo content: url() */
+.inline-before p::before {
+  content: url("icon.png");
+  width: 16px;
+  height: 16px;
+}
+
+.inline-after p::after {
+  content: url("icon.png");
+  width: 16px;
+  height: 16px;
+}
+
+.inline-before h2,
+.inline-after h2,
+.valign h2 {
+  font-size: 16px;
+  margin-top: 24px;
+  margin-bottom: 8px;
+  color: #1a6faa;
+}
+
+.inline-before p,
+.inline-after p,
+.valign p {
+  margin: 0 0 12px 0;
+}
+
+/* vertical-align variants */
+.va-middle::before {
+  content: url("icon.png");
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+}
+
+.va-top::before {
+  content: url("icon.png");
+  width: 16px;
+  height: 16px;
+  vertical-align: top;
+}
+
+.va-bottom::before {
+  content: url("icon.png");
+  width: 16px;
+  height: 16px;
+  vertical-align: bottom;
+}
