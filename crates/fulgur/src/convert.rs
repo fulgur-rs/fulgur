@@ -483,10 +483,17 @@ fn convert_node_inner(
 
     // Fallback: display: list-item with list-style-image but no list_item_data
     // (Blitz 0.2.4 skips list_item_data when list-style-type: none).
-    // The primary path's guard already consumed `list_item_data.is_some()`,
-    // so reaching here means list_item_data is None — only check display.
+    //
+    // The primary guard above now only matches Outside-positioned items, so we
+    // must additionally require `list_item_data.is_none()` here to avoid
+    // intercepting inside-positioned items that DO have list_item_data — those
+    // should fall through to the inline-root path so `resolve_inside_image_marker`
+    // can inject the marker inline.
     if let Some(styles) = node.primary_styles()
         && styles.get_box().display.is_list_item()
+        && node
+            .element_data()
+            .map_or(true, |e| e.list_item_data.is_none())
     {
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
