@@ -883,7 +883,7 @@ fn build_pseudo_image(
 ) -> Option<ImagePageable> {
     let assets = assets?;
 
-    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
@@ -927,7 +927,7 @@ fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bo
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
         {
             return true;
         }
@@ -946,7 +946,7 @@ fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> b
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
         {
             return true;
         }
@@ -1072,7 +1072,7 @@ fn build_inline_pseudo_image(
     assets: Option<&AssetBundle>,
 ) -> Option<InlineImage> {
     let assets = assets?;
-    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;

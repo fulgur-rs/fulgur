@@ -237,22 +237,27 @@ pub fn extract_inline_svg_tree(
     }
 }
 
-/// Inspect a pseudo-element node's computed `content` property and return the
-/// first `Image` variant's URL as an owned `String` if the content is a single
+/// Inspect a node's computed `content` property and return the first `Image`
+/// variant's URL as an owned `String` if the content is a single
 /// `url(...)` / `image-set(url(...))` item.
+///
+/// This works for both pseudo-element nodes (`::before` / `::after`) and normal
+/// element nodes — the underlying `primary_styles().get_counters().content`
+/// path is the same for both.
 ///
 /// This exists because `blitz-dom` 0.2.4 does not materialize `content: url(...)`
 /// into a child image node — the match arm in
 /// `blitz-dom/src/layout/construct.rs` for non-`String` ContentItem variants is
 /// a TODO. fulgur bypasses that by reading the stylo computed value directly
-/// and constructing an `ImagePageable` itself (see `convert::build_pseudo_image`).
+/// and constructing an `ImagePageable` itself (see `convert::build_pseudo_image`
+/// and the normal-element `content: url()` path in `convert::convert_node_inner`).
 ///
 /// Scope: only single-item content is matched (per the fulgur-ai3 design scope
 /// — multi-item content that mixes text + image is out-of-scope). The URL is
 /// returned owned because `primary_styles()` yields a short-lived borrow guard
 /// that cannot outlive this function; callers normalize it (e.g. via
 /// `convert::extract_asset_name`) before querying `AssetBundle`.
-pub fn extract_pseudo_image_url(node: &blitz_dom::Node) -> Option<String> {
+pub fn extract_content_image_url(node: &blitz_dom::Node) -> Option<String> {
     use style::values::generics::counters::{Content, ContentItem};
     let styles = node.primary_styles()?;
     let content = &styles.get_counters().content;
@@ -1266,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pseudo_image_url_simple() {
+    fn test_extract_content_image_url_simple() {
         let html = r#"<!doctype html><html><head><style>
             h1::before { content: url("logo.png"); }
         </style></head><body><h1>T</h1></body></html>"#;
@@ -1278,14 +1283,14 @@ mod tests {
             .unwrap()
             .before
             .expect("::before pseudo");
-        let url = extract_pseudo_image_url(doc.get_node(before_id).unwrap());
+        let url = extract_content_image_url(doc.get_node(before_id).unwrap());
         assert!(url.is_some(), "expected Some(url), got None");
         let url = url.unwrap();
         assert!(url.ends_with("logo.png"), "unexpected url: {url}");
     }
 
     #[test]
-    fn test_extract_pseudo_image_url_returns_none_for_string_content() {
+    fn test_extract_content_image_url_returns_none_for_string_content() {
         let html = r#"<!doctype html><html><head><style>
             h1::before { content: "prefix "; }
         </style></head><body><h1>T</h1></body></html>"#;
@@ -1298,13 +1303,13 @@ mod tests {
             .before
             .expect("::before pseudo");
         assert!(
-            extract_pseudo_image_url(doc.get_node(before_id).unwrap()).is_none(),
+            extract_content_image_url(doc.get_node(before_id).unwrap()).is_none(),
             "string content should not return a url"
         );
     }
 
     #[test]
-    fn test_extract_pseudo_image_url_image_set() {
+    fn test_extract_content_image_url_image_set() {
         // image-set(url(...) 1x) should resolve to the same URL after stylo
         // picks the selected candidate.
         let html = r#"<!doctype html><html><head><style>
@@ -1318,7 +1323,7 @@ mod tests {
             .unwrap()
             .before
             .expect("::before pseudo");
-        let url = extract_pseudo_image_url(doc.get_node(before_id).unwrap());
+        let url = extract_content_image_url(doc.get_node(before_id).unwrap());
         assert!(url.is_some(), "expected Some from image-set, got None");
         assert!(
             url.unwrap().ends_with("hi.png"),
