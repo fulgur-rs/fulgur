@@ -201,3 +201,11 @@ instructions. Making this configurable at the library API level (so
 `fulgur::Engine` callers get determinism without touching fontconfig) is
 tracked as a follow-up — once landed, library callers will be able to
 supply their own font database directly.
+
+## Security
+
+If you plan to accept untrusted HTML templates or JSON data (e.g. in a
+multi-tenant SaaS), see the
+[threat model](docs/security/threat-model.md)
+([日本語](docs/security/threat-model.ja.md)) for the full analysis of
+attack vectors and mitigations.
