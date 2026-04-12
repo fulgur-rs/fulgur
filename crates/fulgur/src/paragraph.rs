@@ -525,16 +525,12 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                         let Ok(image) = img.format.to_krilla_image(data) else {
                             return;
                         };
-                        let Some(size) =
-                            krilla::geom::Size::from_wh(img.width, img.height)
-                        else {
+                        let Some(size) = krilla::geom::Size::from_wh(img.width, img.height) else {
                             return;
                         };
                         let img_y = y + img.computed_y;
-                        let transform = krilla::geom::Transform::from_translate(
-                            x + img.x_offset,
-                            img_y,
-                        );
+                        let transform =
+                            krilla::geom::Transform::from_translate(x + img.x_offset, img_y);
                         canvas.surface.push_transform(&transform);
                         canvas.surface.draw_image(image, size);
                         canvas.surface.pop();
@@ -594,23 +590,13 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
                 continue;
             }
             VerticalAlign::Baseline => baseline - img.height,
-            VerticalAlign::Middle => {
-                baseline - metrics.x_height / 2.0 - img.height / 2.0
-            }
-            VerticalAlign::Sub => {
-                baseline + metrics.subscript_offset - img.height
-            }
-            VerticalAlign::Super => {
-                baseline - metrics.superscript_offset - img.height
-            }
+            VerticalAlign::Middle => baseline - metrics.x_height / 2.0 - img.height / 2.0,
+            VerticalAlign::Sub => baseline + metrics.subscript_offset - img.height,
+            VerticalAlign::Super => baseline - metrics.superscript_offset - img.height,
             VerticalAlign::TextTop => baseline - metrics.ascent,
-            VerticalAlign::TextBottom => {
-                baseline + metrics.descent - img.height
-            }
+            VerticalAlign::TextBottom => baseline + metrics.descent - img.height,
             VerticalAlign::Length(v) => baseline - v - img.height,
-            VerticalAlign::Percent(p) => {
-                baseline - (original_height * p) - img.height
-            }
+            VerticalAlign::Percent(p) => baseline - (original_height * p) - img.height,
         };
 
         if img_top < line_top {
@@ -714,6 +700,14 @@ impl Pageable for ParagraphPageable {
             .cloned()
             .map(|mut line| {
                 line.baseline -= consumed;
+                // Rebase inline image positions for the new fragment:
+                // computed_y is paragraph-absolute (like baseline), so it
+                // must also be shifted by the consumed height.
+                for item in &mut line.items {
+                    if let LineItem::Image(img) = item {
+                        img.computed_y -= consumed;
+                    }
+                }
                 line
             })
             .collect();
@@ -757,11 +751,11 @@ mod tests {
 
     /// Minimal 1x1 red PNG for test images.
     const TEST_PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
-        0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92,
-        0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn make_inline_image(width: f32, height: f32, va: VerticalAlign) -> InlineImage {
@@ -808,8 +802,11 @@ mod tests {
         // 8px image at baseline: img_top = 12 - 8 = 4, img_bottom = 12.
         // Line is [0, 16) so no expansion needed.
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Baseline)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::Baseline,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         assert!(approx(line.height, 16.0), "height={}", line.height);
@@ -824,8 +821,11 @@ mod tests {
         // 20px image at baseline: img_top = 12 - 20 = -8, img_bottom = 12.
         // line_top shifts to -8 → new height = 24, baseline = 20.
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 20.0, VerticalAlign::Baseline)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            20.0,
+            VerticalAlign::Baseline,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         assert!(approx(line.height, 24.0), "height={}", line.height);
@@ -841,8 +841,11 @@ mod tests {
     fn middle_alignment() {
         // img_top = baseline - x_height/2 - img.height/2 = 12 - 4 - 5 = 3
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 10.0, VerticalAlign::Middle)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            10.0,
+            VerticalAlign::Middle,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         assert!(approx(line.height, 16.0), "height={}", line.height);
@@ -857,12 +860,19 @@ mod tests {
     fn sub_alignment() {
         // img_top = baseline + subscript_offset - img.height = 12 + 4 - 6 = 10
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Sub)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            6.0,
+            VerticalAlign::Sub,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 10.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx(img.computed_y, 10.0),
+                "computed_y={}",
+                img.computed_y
+            );
         }
     }
 
@@ -872,8 +882,11 @@ mod tests {
     fn super_alignment() {
         // img_top = baseline - superscript_offset - img.height = 12 - 6 - 6 = 0
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Super)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            6.0,
+            VerticalAlign::Super,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -887,8 +900,11 @@ mod tests {
     fn text_top_alignment() {
         // img_top = baseline - ascent = 12 - 12 = 0
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::TextTop)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::TextTop,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -902,8 +918,11 @@ mod tests {
     fn text_bottom_alignment() {
         // img_top = baseline + descent - img.height = 12 + 4 - 8 = 8
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::TextBottom)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::TextBottom,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -917,8 +936,11 @@ mod tests {
     fn top_alignment_uses_line_top() {
         // Top image aligns to the top of the line box.
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Top)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::Top,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -932,8 +954,11 @@ mod tests {
     fn bottom_alignment_uses_line_bottom() {
         // Bottom image aligns to the bottom of the line box.
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 8.0, VerticalAlign::Bottom)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::Bottom,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -951,8 +976,11 @@ mod tests {
     fn length_offset() {
         // img_top = baseline - v - img.height = 12 - 3.0 - 6 = 3
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Length(3.0))));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            6.0,
+            VerticalAlign::Length(3.0),
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -966,8 +994,11 @@ mod tests {
     fn percent_offset() {
         // img_top = baseline - (height * p) - img.height = 12 - (16 * 0.25) - 6 = 2
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Percent(0.25))));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            6.0,
+            VerticalAlign::Percent(0.25),
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
@@ -981,13 +1012,105 @@ mod tests {
     fn top_image_taller_than_line_expands() {
         // 20px Top image on a 16px line → line grows to 20.
         let mut line = text_line(16.0, 12.0);
-        line.items
-            .push(LineItem::Image(make_inline_image(10.0, 20.0, VerticalAlign::Top)));
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            20.0,
+            VerticalAlign::Top,
+        )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         assert!(approx(line.height, 20.0), "height={}", line.height);
         if let LineItem::Image(img) = &line.items[0] {
             assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- Multi-line regression: coordinate system ----------
+
+    #[test]
+    fn multiline_second_line_image_no_inflation() {
+        // Regression: recalculate_line_box assumes baseline is line-local.
+        // For a second line with paragraph-absolute baseline=28, calling
+        // recalculate_line_box directly would compute img_top = 28 - 8 = 20,
+        // which is way outside [0, 16) and would incorrectly inflate height.
+        //
+        // The correct approach (used by recalculate_paragraph_line_boxes in
+        // convert.rs) is to convert baseline to line-local first.
+        let mut line2 = text_line(16.0, 28.0); // paragraph-absolute baseline
+        line2.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            8.0,
+            VerticalAlign::Baseline,
+        )));
+
+        // Simulate the caller's coordinate conversion:
+        let y_acc = 16.0; // first line height
+        line2.baseline -= y_acc; // now line-local: 12.0
+        let m = default_metrics();
+        recalculate_line_box(&mut line2, &m);
+        // Image fits within [0, 16): no expansion
+        assert!(
+            approx(line2.height, 16.0),
+            "height should stay 16, got {}",
+            line2.height
+        );
+        // Convert computed_y to paragraph-absolute
+        if let LineItem::Image(img) = &mut line2.items[0] {
+            img.computed_y += y_acc;
+            // paragraph-absolute computed_y = line-local (4.0) + y_acc (16.0) = 20.0
+            assert!(
+                approx(img.computed_y, 20.0),
+                "paragraph-absolute computed_y should be 20, got {}",
+                img.computed_y
+            );
+        }
+        line2.baseline += y_acc; // restore to paragraph-absolute: 28.0
+        assert!(
+            approx(line2.baseline, 28.0),
+            "baseline should be 28, got {}",
+            line2.baseline
+        );
+    }
+
+    // ---------- Split with inline image ----------
+
+    #[test]
+    fn split_rebases_inline_image_computed_y() {
+        // Four lines so orphans/widows (default=2) allow splitting at line 2.
+        // Split after lines 1+2 (consumed=32), leaving lines 3+4 in second fragment.
+        // Line4 has an image with paragraph-absolute computed_y.
+        let line1 = text_line(16.0, 12.0);
+        let line2 = text_line(16.0, 28.0);
+        let line3 = text_line(16.0, 44.0);
+        let mut line4 = text_line(16.0, 60.0);
+        let mut img = make_inline_image(10.0, 8.0, VerticalAlign::Baseline);
+        img.computed_y = 52.0; // paragraph-absolute (baseline 60 - img height 8)
+        line4.items.push(LineItem::Image(img));
+
+        let para = ParagraphPageable::new(vec![line1, line2, line3, line4]);
+
+        // Split after line2: avail_height = 32 fits lines 1+2 exactly
+        let (_first, second) = para.split(100.0, 32.0).expect("should split");
+
+        // Second fragment has 2 lines (line3, line4), rebased by consumed=32
+        let second_para = second.as_any().downcast_ref::<ParagraphPageable>().unwrap();
+        assert_eq!(second_para.lines.len(), 2);
+        let line = &second_para.lines[1]; // line4 in second fragment
+        // baseline was 60, consumed=32 → rebased to 28
+        assert!(
+            approx(line.baseline, 28.0),
+            "rebased baseline should be 28, got {}",
+            line.baseline
+        );
+        if let LineItem::Image(img) = &line.items[0] {
+            // computed_y was 52, consumed=32 → rebased to 20
+            assert!(
+                approx(img.computed_y, 20.0),
+                "rebased computed_y should be 20, got {}",
+                img.computed_y
+            );
+        } else {
+            panic!("expected image item");
         }
     }
 }

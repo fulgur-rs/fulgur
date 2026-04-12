@@ -277,9 +277,9 @@ fn convert_node_inner(
         // own content (paragraph/image), since those are synthetic children
         // representing the node's own content, not real CSS children.
         let content_box = compute_content_box(node, &style);
-        let body: Box<dyn Pageable> = if node.flags.is_inline_root()
-            && let Some(mut paragraph) = extract_paragraph(doc, node, ctx)
-        {
+        let body: Box<dyn Pageable> = if node.flags.is_inline_root() {
+            let paragraph_opt = extract_paragraph(doc, node, ctx);
+
             // Inline pseudo images for list item body
             let before_inline = node
                 .before
@@ -296,42 +296,102 @@ fn convert_node_inner(
                     build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
                 });
 
-            if before_inline.is_some() || after_inline.is_some() {
-                inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
-                let font_metrics = extract_line_font_metrics(node);
-                for line in &mut paragraph.lines {
-                    crate::paragraph::recalculate_line_box(line, &font_metrics);
+            if let Some(mut paragraph) = paragraph_opt {
+                if before_inline.is_some() || after_inline.is_some() {
+                    inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                    let font_metrics = extract_line_font_metrics(node);
+                    recalculate_paragraph_line_boxes(&mut paragraph.lines, &font_metrics);
                 }
-            }
 
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
-                let (child_x, child_y) = style.content_inset();
-                let mut p = paragraph;
-                p.visible = visible;
-                let paragraph_children = vec![PositionedChild {
-                    child: Box::new(p),
-                    x: child_x,
-                    y: child_y,
-                }];
-                let children = wrap_with_block_pseudo_images(
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+                if style.needs_block_wrapper() || has_pseudo {
+                    let (child_x, child_y) = style.content_inset();
+                    let mut p = paragraph;
+                    p.visible = visible;
+                    let paragraph_children = vec![PositionedChild {
+                        child: Box::new(p),
+                        x: child_x,
+                        y: child_y,
+                    }];
+                    let children = wrap_with_block_pseudo_images(
+                        before_pseudo,
+                        after_pseudo,
+                        content_box,
+                        paragraph_children,
+                    );
+                    let mut block = BlockPageable::with_positioned_children(children)
+                        .with_style(style)
+                        .with_visible(visible);
+                    block.wrap(width, height);
+                    block.layout_size = Some(Size { width, height });
+                    Box::new(block)
+                } else {
+                    let mut p = paragraph;
+                    p.visible = visible;
+                    Box::new(p)
+                }
+            } else if before_inline.is_some() || after_inline.is_some() {
+                // Synthesize a minimal paragraph for pseudo-only list items
+                let mut line = ShapedLine {
+                    height: 0.0,
+                    baseline: 0.0,
+                    items: vec![],
+                };
+                inject_inline_pseudo_images(
+                    std::slice::from_mut(&mut line),
+                    before_inline,
+                    after_inline,
+                );
+                let font_metrics = extract_line_font_metrics(node);
+                crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
+                let mut paragraph = ParagraphPageable::new(vec![line]);
+                paragraph.visible = visible;
+
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+                if style.needs_block_wrapper() || has_pseudo {
+                    let (child_x, child_y) = style.content_inset();
+                    let paragraph_children = vec![PositionedChild {
+                        child: Box::new(paragraph),
+                        x: child_x,
+                        y: child_y,
+                    }];
+                    let children = wrap_with_block_pseudo_images(
+                        before_pseudo,
+                        after_pseudo,
+                        content_box,
+                        paragraph_children,
+                    );
+                    let mut block = BlockPageable::with_positioned_children(children)
+                        .with_style(style)
+                        .with_visible(visible);
+                    block.wrap(width, height);
+                    block.layout_size = Some(Size { width, height });
+                    Box::new(block)
+                } else {
+                    Box::new(paragraph)
+                }
+            } else {
+                // Inline root with no text and no inline pseudo images —
+                // fall through to the non-inline-root path below.
+                let children: &[usize] = &node.children;
+                let positioned_children = collect_positioned_children(doc, children, ctx, depth);
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let positioned_children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
-                    paragraph_children,
+                    positioned_children,
                 );
-                let mut block = BlockPageable::with_positioned_children(children)
+                let mut block = BlockPageable::with_positioned_children(positioned_children)
                     .with_style(style)
                     .with_visible(visible);
-                block.wrap(width, height);
-                block.layout_size = Some(Size { width, height });
+                block.wrap(width, 10000.0);
                 Box::new(block)
-            } else {
-                let mut p = paragraph;
-                p.visible = visible;
-                Box::new(p)
             }
         } else {
             let children: &[usize] = &node.children;
@@ -385,9 +445,8 @@ fn convert_node_inner(
     }
 
     // Check if this is an inline root (contains text layout)
-    if node.flags.is_inline_root()
-        && let Some(mut paragraph) = extract_paragraph(doc, node, ctx)
-    {
+    if node.flags.is_inline_root() {
+        let paragraph_opt = extract_paragraph(doc, node, ctx);
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
         let content_box = compute_content_box(node, &style);
@@ -408,49 +467,96 @@ fn convert_node_inner(
                 build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
             });
 
-        if before_inline.is_some() || after_inline.is_some() {
-            inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
-            let font_metrics = extract_line_font_metrics(node);
-            for line in &mut paragraph.lines {
-                crate::paragraph::recalculate_line_box(line, &font_metrics);
+        if let Some(mut paragraph) = paragraph_opt {
+            // Existing path: inject inline pseudo images into real paragraph
+            if before_inline.is_some() || after_inline.is_some() {
+                inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                let font_metrics = extract_line_font_metrics(node);
+                recalculate_paragraph_line_boxes(&mut paragraph.lines, &font_metrics);
             }
-        }
 
-        // Then existing block pseudo check
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.needs_block_wrapper() || has_pseudo {
-            let (child_x, child_y) = style.content_inset();
-            // Propagate visibility to the inner paragraph — it's not a real CSS child
-            // but the node's own text content, so it must respect the node's visibility.
-            // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+            // Then existing block pseudo check
+            let (before_pseudo, after_pseudo) =
+                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            if style.needs_block_wrapper() || has_pseudo {
+                let (child_x, child_y) = style.content_inset();
+                // Propagate visibility to the inner paragraph — it's not a real CSS child
+                // but the node's own text content, so it must respect the node's visibility.
+                // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+                let mut p = paragraph;
+                p.visible = visible;
+                let paragraph_children = vec![PositionedChild {
+                    child: Box::new(p),
+                    x: child_x,
+                    y: child_y,
+                }];
+                let children = wrap_with_block_pseudo_images(
+                    before_pseudo,
+                    after_pseudo,
+                    content_box,
+                    paragraph_children,
+                );
+                let mut block = BlockPageable::with_positioned_children(children)
+                    .with_style(style)
+                    .with_opacity(opacity)
+                    .with_visible(visible);
+                block.wrap(width, height);
+                // Use Taffy's computed height (includes padding + border) instead of children-only height
+                block.layout_size = Some(Size { width, height });
+                return Box::new(block);
+            }
             let mut p = paragraph;
+            p.opacity = opacity;
             p.visible = visible;
-            let paragraph_children = vec![PositionedChild {
-                child: Box::new(p),
-                x: child_x,
-                y: child_y,
-            }];
-            let children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                paragraph_children,
+            return Box::new(p);
+        } else if before_inline.is_some() || after_inline.is_some() {
+            // Synthesize a minimal paragraph for pseudo-only elements (e.g.
+            // `<span class="icon"></span>` with `::before { content: url(...) }`)
+            let mut line = ShapedLine {
+                height: 0.0,
+                baseline: 0.0,
+                items: vec![],
+            };
+            inject_inline_pseudo_images(
+                std::slice::from_mut(&mut line),
+                before_inline,
+                after_inline,
             );
-            let mut block = BlockPageable::with_positioned_children(children)
-                .with_style(style)
-                .with_opacity(opacity)
-                .with_visible(visible);
-            block.wrap(width, height);
-            // Use Taffy's computed height (includes padding + border) instead of children-only height
-            block.layout_size = Some(Size { width, height });
-            return Box::new(block);
+            let font_metrics = extract_line_font_metrics(node);
+            crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
+            let mut paragraph = ParagraphPageable::new(vec![line]);
+            paragraph.opacity = opacity;
+            paragraph.visible = visible;
+
+            // Check for block pseudo images too
+            let (before_pseudo, after_pseudo) =
+                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            if style.needs_block_wrapper() || has_pseudo {
+                let (child_x, child_y) = style.content_inset();
+                let paragraph_children = vec![PositionedChild {
+                    child: Box::new(paragraph),
+                    x: child_x,
+                    y: child_y,
+                }];
+                let children = wrap_with_block_pseudo_images(
+                    before_pseudo,
+                    after_pseudo,
+                    content_box,
+                    paragraph_children,
+                );
+                let mut block = BlockPageable::with_positioned_children(children)
+                    .with_style(style)
+                    .with_opacity(opacity)
+                    .with_visible(visible);
+                block.wrap(width, height);
+                block.layout_size = Some(Size { width, height });
+                return Box::new(block);
+            }
+            return Box::new(paragraph);
         }
-        let mut p = paragraph;
-        p.opacity = opacity;
-        p.visible = visible;
-        return Box::new(p);
+        // Fall through: inline root with no text and no inline pseudo images
     }
 
     let children: &[usize] = &node.children;
@@ -554,6 +660,7 @@ fn collect_positioned_children(
             && child_layout.size.width == 0.0
             && child_node.children.is_empty()
             && !node_has_block_pseudo_image(doc, child_node)
+            && !node_has_inline_pseudo_image(doc, child_node)
         {
             emit_orphan_string_set_markers(
                 child_id,
@@ -827,6 +934,25 @@ fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bo
     false
 }
 
+/// Returns `true` if `node` has a `::before` or `::after` pseudo-element that
+/// is an inline (non-block) pseudo with a `content: url(...)` image.
+///
+/// Used by the zero-size leaf filter to let elements like
+/// `<span class="icon"></span>` with `::before { content: url(...) }` through
+/// to `convert_node_inner` where the inline pseudo path can synthesize a
+/// `ParagraphPageable`.
+fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        if let Some(pseudo) = doc.get_node(pseudo_id)
+            && !is_block_pseudo(pseudo)
+            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Geometry of a parent's content-box, used by the pseudo-image helpers so
 /// `::before`/`::after` land at the content-box corners (not the border-box
 /// corners) and percentage sizes resolve against the content-box dimensions.
@@ -1011,6 +1137,36 @@ fn inject_inline_pseudo_images(
             img.x_offset = last_end;
             last_line.items.push(LineItem::Image(img));
         }
+    }
+}
+
+/// Recalculate line boxes for all lines in a paragraph, correctly handling
+/// the coordinate system difference between paragraph-absolute baselines and
+/// line-local coordinates expected by `recalculate_line_box`.
+///
+/// `recalculate_line_box` assumes `line.baseline` is line-local (i.e. relative
+/// to the line's own top edge), but Parley sets baselines as paragraph-absolute
+/// offsets. For the first line these coincide, but for subsequent lines the
+/// baseline is offset by the cumulative height of preceding lines. This helper
+/// converts to line-local before calling `recalculate_line_box`, then converts
+/// back to paragraph-absolute and promotes `computed_y` to paragraph-absolute
+/// so `draw_shaped_lines` can use `y + img.computed_y` directly (matching the
+/// `y + line.baseline` pattern used for text).
+fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine], font_metrics: &LineFontMetrics) {
+    let mut y_acc: f32 = 0.0;
+    for line in lines.iter_mut() {
+        // Convert baseline from paragraph-absolute to line-local
+        line.baseline -= y_acc;
+        crate::paragraph::recalculate_line_box(line, font_metrics);
+        // Convert computed_y from line-local to paragraph-absolute
+        for item in &mut line.items {
+            if let LineItem::Image(img) = item {
+                img.computed_y += y_acc;
+            }
+        }
+        // Convert baseline back to paragraph-absolute
+        line.baseline += y_acc;
+        y_acc += line.height;
     }
 }
 
