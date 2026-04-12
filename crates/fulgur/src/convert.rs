@@ -301,6 +301,7 @@ fn convert_node_inner(
                 if before_inline.is_some() || after_inline.is_some() {
                     inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
                     recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                    paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
                 }
 
                 let (before_pseudo, after_pseudo) =
@@ -472,6 +473,7 @@ fn convert_node_inner(
             if before_inline.is_some() || after_inline.is_some() {
                 inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
                 recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
             }
 
             // Then existing block pseudo check
@@ -1191,21 +1193,29 @@ fn metrics_from_line(line: &ShapedLine) -> LineFontMetrics {
 /// Font metrics are extracted per-line from the line's own Text items via
 /// skrifa, so lines with different font sizes get accurate vertical-align.
 fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
-    let mut y_acc: f32 = 0.0;
+    // Track original and new cumulative heights separately.
+    // Parley baselines are computed against original heights, so we use
+    // original_y_acc for paragraph→line-local conversion. After expansion,
+    // new_y_acc tracks the updated positions for line-local→paragraph.
+    let mut original_y_acc: f32 = 0.0;
+    let mut new_y_acc: f32 = 0.0;
     for line in lines.iter_mut() {
+        let original_height = line.height;
         let font_metrics = metrics_from_line(line);
         // Convert baseline from paragraph-absolute to line-local
-        line.baseline -= y_acc;
+        // using original cumulative heights (what Parley computed against)
+        line.baseline -= original_y_acc;
         crate::paragraph::recalculate_line_box(line, &font_metrics);
-        // Convert computed_y from line-local to paragraph-absolute
+        // Convert computed_y from line-local to new paragraph-absolute
         for item in &mut line.items {
             if let LineItem::Image(img) = item {
-                img.computed_y += y_acc;
+                img.computed_y += new_y_acc;
             }
         }
-        // Convert baseline back to paragraph-absolute
-        line.baseline += y_acc;
-        y_acc += line.height;
+        // Convert baseline to new paragraph-absolute
+        line.baseline += new_y_acc;
+        original_y_acc += original_height;
+        new_y_acc += line.height;
     }
 }
 
