@@ -1649,8 +1649,10 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                             let clip = convert_bg_clip(&bg_clips.0, i);
 
                             style.background_layers.push(BackgroundLayer {
-                                image_data: Arc::clone(data),
-                                format,
+                                content: crate::pageable::BgImageContent::Raster {
+                                    data: Arc::clone(data),
+                                    format,
+                                },
                                 intrinsic_width: iw as f32,
                                 intrinsic_height: ih as f32,
                                 size,

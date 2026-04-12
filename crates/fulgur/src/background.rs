@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::pageable::{
-    BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockStyle, Canvas,
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockStyle, Canvas,
 };
 
 /// Draw all background layers for a block element.
@@ -111,20 +112,35 @@ fn draw_background_layer(
         .surface
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
-    let data: krilla::Data = Arc::clone(&layer.image_data).into();
-    let Ok(image) = layer.format.to_krilla_image(data) else {
-        canvas.surface.pop();
-        return;
-    };
-
-    for (tx, ty, tw, th) in &tiles {
-        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-            continue;
-        };
-        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-        canvas.surface.push_transform(&transform);
-        canvas.surface.draw_image(image.clone(), size);
-        canvas.surface.pop();
+    match &layer.content {
+        BgImageContent::Raster { data, format } => {
+            let data: krilla::Data = Arc::clone(data).into();
+            let Ok(image) = format.to_krilla_image(data) else {
+                canvas.surface.pop();
+                return;
+            };
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                canvas.surface.draw_image(image.clone(), size);
+                canvas.surface.pop();
+            }
+        }
+        BgImageContent::Svg { tree } => {
+            use krilla_svg::{SurfaceExt, SvgSettings};
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                let _ = canvas.surface.draw_svg(tree, size, SvgSettings::default());
+                canvas.surface.pop();
+            }
+        }
     }
 
     canvas.surface.pop();
@@ -359,8 +375,10 @@ mod tests {
 
     fn make_layer(iw: f32, ih: f32, size: BgSize) -> BackgroundLayer {
         BackgroundLayer {
-            image_data: Arc::new(vec![]),
-            format: ImageFormat::Png,
+            content: BgImageContent::Raster {
+                data: Arc::new(vec![]),
+                format: ImageFormat::Png,
+            },
             intrinsic_width: iw,
             intrinsic_height: ih,
             size,
