@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::pageable::{
-    BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockStyle, Canvas,
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockStyle, Canvas,
 };
 
 /// Draw all background layers for a block element.
@@ -111,20 +112,41 @@ fn draw_background_layer(
         .surface
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
-    let data: krilla::Data = Arc::clone(&layer.image_data).into();
-    let Ok(image) = layer.format.to_krilla_image(data) else {
-        canvas.surface.pop();
-        return;
-    };
-
-    for (tx, ty, tw, th) in &tiles {
-        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-            continue;
-        };
-        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-        canvas.surface.push_transform(&transform);
-        canvas.surface.draw_image(image.clone(), size);
-        canvas.surface.pop();
+    match &layer.content {
+        BgImageContent::Raster { data, format } => {
+            let data: krilla::Data = Arc::clone(data).into();
+            let Ok(image) = format.to_krilla_image(data) else {
+                canvas.surface.pop();
+                return;
+            };
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                canvas.surface.draw_image(image.clone(), size);
+                canvas.surface.pop();
+            }
+        }
+        BgImageContent::Svg { tree } => {
+            use krilla_svg::{SurfaceExt, SvgSettings};
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                if canvas
+                    .surface
+                    .draw_svg(tree, size, SvgSettings::default())
+                    .is_none()
+                {
+                    log::warn!("failed to draw SVG background tile");
+                }
+                canvas.surface.pop();
+            }
+        }
     }
 
     canvas.surface.pop();
@@ -359,8 +381,10 @@ mod tests {
 
     fn make_layer(iw: f32, ih: f32, size: BgSize) -> BackgroundLayer {
         BackgroundLayer {
-            image_data: Arc::new(vec![]),
-            format: ImageFormat::Png,
+            content: BgImageContent::Raster {
+                data: Arc::new(vec![]),
+                format: ImageFormat::Png,
+            },
             intrinsic_width: iw,
             intrinsic_height: ih,
             size,
@@ -425,6 +449,30 @@ mod tests {
         assert_eq!(size, 100.0);
         assert_eq!(space, 0.0);
         assert_eq!(start, 0.0);
+    }
+
+    #[test]
+    fn test_svg_layer_resolve_size_contain() {
+        let svg_data = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="blue"/></svg>"#;
+        let opts = usvg::Options::default();
+        let tree = usvg::Tree::from_data(svg_data, &opts).unwrap();
+        let layer = BackgroundLayer {
+            content: BgImageContent::Svg {
+                tree: std::sync::Arc::new(tree),
+            },
+            intrinsic_width: 200.0,
+            intrinsic_height: 100.0,
+            size: BgSize::Contain,
+            position_x: BgLengthPercentage::Percentage(0.0),
+            position_y: BgLengthPercentage::Percentage(0.0),
+            repeat_x: BgRepeat::NoRepeat,
+            repeat_y: BgRepeat::NoRepeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::BorderBox,
+        };
+        let (w, h) = resolve_size(&layer, 300.0, 300.0);
+        assert_eq!(w, 300.0);
+        assert_eq!(h, 150.0);
     }
 
     #[test]

@@ -5,11 +5,11 @@ use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
-    BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
-    BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable, ImageMarker,
-    ListItemMarker, ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
-    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
-    StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockPageable, BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
+    ImageMarker, ListItemMarker, ListItemPageable, Pageable, PositionedChild,
+    RunningElementMarkerPageable, RunningElementWrapperPageable, Size, SpacerPageable,
+    StringSetPageable, StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
 use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, ParagraphPageable, ShapedGlyph, ShapedGlyphRun,
@@ -1638,10 +1638,48 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                     // Extract the path/filename for AssetBundle lookup.
                     let src = extract_asset_name(raw_src);
                     if let Some(data) = assets.get_image(src) {
-                        if let Some(format) = ImagePageable::detect_format(data) {
-                            let (iw, ih) =
-                                ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+                        use crate::image::AssetKind;
 
+                        // Resolve content + intrinsic size per asset kind.
+                        let resolved: Option<(BgImageContent, f32, f32)> =
+                            match AssetKind::detect(data) {
+                                AssetKind::Raster(format) => {
+                                    let (iw, ih) = ImagePageable::decode_dimensions(data, format)
+                                        .unwrap_or((1, 1));
+                                    Some((
+                                        BgImageContent::Raster {
+                                            data: Arc::clone(data),
+                                            format,
+                                        },
+                                        iw as f32,
+                                        ih as f32,
+                                    ))
+                                }
+                                AssetKind::Svg => {
+                                    let opts = usvg::Options::default();
+                                    match usvg::Tree::from_data(data, &opts) {
+                                        Ok(tree) => {
+                                            let svg_size = tree.size();
+                                            Some((
+                                                BgImageContent::Svg {
+                                                    tree: Arc::new(tree),
+                                                },
+                                                svg_size.width(),
+                                                svg_size.height(),
+                                            ))
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "failed to parse SVG background-image '{src}': {e}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                }
+                                AssetKind::Unknown => None,
+                            };
+
+                        if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
                             let size = convert_bg_size(&bg_sizes.0, i);
                             let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
                             let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
@@ -1649,10 +1687,9 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                             let clip = convert_bg_clip(&bg_clips.0, i);
 
                             style.background_layers.push(BackgroundLayer {
-                                image_data: Arc::clone(data),
-                                format,
-                                intrinsic_width: iw as f32,
-                                intrinsic_height: ih as f32,
+                                content,
+                                intrinsic_width,
+                                intrinsic_height,
                                 size,
                                 position_x: px,
                                 position_y: py,
