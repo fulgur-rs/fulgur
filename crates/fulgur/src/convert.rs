@@ -1639,67 +1639,65 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                     let src = extract_asset_name(raw_src);
                     if let Some(data) = assets.get_image(src) {
                         use crate::image::AssetKind;
-                        match AssetKind::detect(data) {
-                            AssetKind::Raster(format) => {
-                                let (iw, ih) = ImagePageable::decode_dimensions(data, format)
-                                    .unwrap_or((1, 1));
-                                let size = convert_bg_size(&bg_sizes.0, i);
-                                let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                                let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                                let origin = convert_bg_origin(&bg_origins.0, i);
-                                let clip = convert_bg_clip(&bg_clips.0, i);
 
-                                style.background_layers.push(BackgroundLayer {
-                                    content: BgImageContent::Raster {
-                                        data: Arc::clone(data),
-                                        format,
-                                    },
-                                    intrinsic_width: iw as f32,
-                                    intrinsic_height: ih as f32,
-                                    size,
-                                    position_x: px,
-                                    position_y: py,
-                                    repeat_x: rx,
-                                    repeat_y: ry,
-                                    origin,
-                                    clip,
-                                });
-                            }
-                            AssetKind::Svg => {
-                                let opts = usvg::Options::default();
-                                match usvg::Tree::from_data(data, &opts) {
-                                    Ok(tree) => {
-                                        let svg_size = tree.size();
-                                        let size = convert_bg_size(&bg_sizes.0, i);
-                                        let (px, py) =
-                                            convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                                        let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                                        let origin = convert_bg_origin(&bg_origins.0, i);
-                                        let clip = convert_bg_clip(&bg_clips.0, i);
-
-                                        style.background_layers.push(BackgroundLayer {
-                                            content: BgImageContent::Svg {
-                                                tree: Arc::new(tree),
-                                            },
-                                            intrinsic_width: svg_size.width(),
-                                            intrinsic_height: svg_size.height(),
-                                            size,
-                                            position_x: px,
-                                            position_y: py,
-                                            repeat_x: rx,
-                                            repeat_y: ry,
-                                            origin,
-                                            clip,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "failed to parse SVG background-image '{src}': {e}"
-                                        );
+                        // Resolve content + intrinsic size per asset kind.
+                        let resolved: Option<(BgImageContent, f32, f32)> =
+                            match AssetKind::detect(data) {
+                                AssetKind::Raster(format) => {
+                                    let (iw, ih) = ImagePageable::decode_dimensions(data, format)
+                                        .unwrap_or((1, 1));
+                                    Some((
+                                        BgImageContent::Raster {
+                                            data: Arc::clone(data),
+                                            format,
+                                        },
+                                        iw as f32,
+                                        ih as f32,
+                                    ))
+                                }
+                                AssetKind::Svg => {
+                                    let opts = usvg::Options::default();
+                                    match usvg::Tree::from_data(data, &opts) {
+                                        Ok(tree) => {
+                                            let svg_size = tree.size();
+                                            Some((
+                                                BgImageContent::Svg {
+                                                    tree: Arc::new(tree),
+                                                },
+                                                svg_size.width(),
+                                                svg_size.height(),
+                                            ))
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "failed to parse SVG background-image '{src}': {e}"
+                                            );
+                                            None
+                                        }
                                     }
                                 }
-                            }
-                            AssetKind::Unknown => {}
+                                AssetKind::Unknown => None,
+                            };
+
+                        if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
+                            let size = convert_bg_size(&bg_sizes.0, i);
+                            let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                            let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                            let origin = convert_bg_origin(&bg_origins.0, i);
+                            let clip = convert_bg_clip(&bg_clips.0, i);
+
+                            style.background_layers.push(BackgroundLayer {
+                                content,
+                                intrinsic_width,
+                                intrinsic_height,
+                                size,
+                                position_x: px,
+                                position_y: py,
+                                repeat_x: rx,
+                                repeat_y: ry,
+                                origin,
+                                clip,
+                            });
                         }
                     }
                 }
