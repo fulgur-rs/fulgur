@@ -419,8 +419,13 @@ fn convert_node_inner(
     let width = layout.size.width;
 
     // Check if this is a list item with an outside marker (must be before inline root check)
+    // Inside-positioned markers are already injected into Parley's inline layout by Blitz,
+    // so they fall through to the normal paragraph path below.
     if let Some(elem_data) = node.element_data()
-        && elem_data.list_item_data.is_some()
+        && elem_data
+            .list_item_data
+            .as_ref()
+            .is_some_and(|d| matches!(d.position, blitz_dom::node::ListItemLayoutPosition::Outside(_)))
     {
         let (marker_lines, marker_width, marker_line_height) = extract_marker_lines(doc, node, ctx);
         let style = extract_block_style(node, ctx.assets);
