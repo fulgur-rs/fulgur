@@ -1133,7 +1133,7 @@ fn resolve_list_marker(
     };
     let raw_src = match &url {
         style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-        style::servo::url::ComputedUrl::Invalid(_) => return None,
+        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
     };
     let src = extract_asset_name(raw_src);
     let data = assets.get_image(src)?;
