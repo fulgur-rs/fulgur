@@ -928,14 +928,18 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
     let chars: Vec<char> = css.chars().collect();
     let len = chars.len();
 
-    // We'll collect "rewrites" — each is (insert_position, extra_css_text).
-    // After scanning we splice them in (back-to-front so offsets stay valid).
+    // We'll collect "rewrites" — each is an extra CSS text string.
+    // After scanning we append them all at the end of the CSS text.
     let mut rewrites: Vec<String> = Vec::new();
 
     // Track at-rule wrappers (e.g. @media print) so we can re-wrap the
     // generated rule in the same at-rule context.
-    // Stack entries: the text of the at-rule header (e.g. "@media print ").
-    let mut at_stack: Vec<String> = Vec::new();
+    // Stack entries: (brace_depth_when_opened, header_text).
+    let mut at_stack: Vec<(u32, String)> = Vec::new();
+
+    // Unified brace-depth counter — incremented on every `{`, decremented
+    // on every `}` (including those inside rule blocks we scan over).
+    let mut brace_depth: u32 = 0;
 
     let mut i = 0;
     while i < len {
@@ -965,31 +969,37 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
             continue;
         }
 
-        // Detect at-rule start: @something ... {
+        // Detect at-rule start: @something ... { OR @charset/import ... ;
         if ch == '@' {
             let at_start = i;
-            // Scan to the opening brace.
-            while i < len && chars[i] != '{' {
+            // Scan to the first `{` or `;` — whichever comes first.
+            while i < len && chars[i] != '{' && chars[i] != ';' {
                 i += 1;
             }
             if i < len {
-                let header: String = chars[at_start..i].iter().collect();
-                at_stack.push(header.trim_end().to_string());
-                i += 1; // skip {
+                if chars[i] == ';' {
+                    // Statement at-rule (@charset, @import, etc.) — skip it
+                    // without pushing onto at_stack.
+                    i += 1; // skip ;
+                } else {
+                    // Block at-rule — push header and open brace.
+                    let header: String = chars[at_start..i].iter().collect();
+                    at_stack.push((brace_depth, header.trim_end().to_string()));
+                    brace_depth += 1;
+                    i += 1; // skip {
+                }
             }
             continue;
         }
 
         // Detect closing brace — could close an at-rule or a rule block.
         if ch == '}' {
-            // If we're inside an at-rule wrapper (at_stack non-empty) and
-            // there's no rule block open, this closes the at-rule.
-            // We handle rule block closing below; at-rule closing happens
-            // when we see } at the at-rule depth.
-            // For simplicity: we'll handle rule blocks inline and pop
-            // at-rule on bare }.
-            if !at_stack.is_empty() {
-                at_stack.pop();
+            brace_depth = brace_depth.saturating_sub(1);
+            // If the top at-rule was opened at the current depth, pop it.
+            if let Some(&(depth, _)) = at_stack.last() {
+                if depth == brace_depth {
+                    at_stack.pop();
+                }
             }
             i += 1;
             continue;
@@ -1017,6 +1027,7 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
 
         let selector: String = chars[selector_start..i].iter().collect();
         let selector = selector.trim();
+        brace_depth += 1;
         i += 1; // skip {
 
         // Now scan the declaration block to the matching }.
@@ -1024,8 +1035,14 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
         let mut depth = 1u32;
         while i < len && depth > 0 {
             match chars[i] {
-                '{' => depth += 1,
-                '}' => depth -= 1,
+                '{' => {
+                    depth += 1;
+                    brace_depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
                 '"' | '\'' => {
                     let q = chars[i];
                     i += 1;
@@ -1060,7 +1077,7 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
             let new_rule = if at_stack.is_empty() {
                 format!("\n{stripped}{{list-style-image:url({url})}}")
             } else {
-                let at_header = at_stack.last().unwrap();
+                let (_, at_header) = at_stack.last().unwrap();
                 format!("\n{at_header}{{{stripped}{{list-style-image:url({url})}}}}")
             };
 
@@ -1094,21 +1111,26 @@ fn extract_content_url(declarations: &str) -> Option<String> {
             if let Some(value) = value.strip_prefix(':') {
                 let value = value.trim();
                 if let Some(rest) = value.strip_prefix("url(") {
-                    // Find the matching closing paren
+                    // Find the matching closing paren, respecting quotes.
                     let rest = rest.trim();
                     // The URL might be quoted or unquoted
-                    let url_end = rest.find(')')?;
-                    let url_inner = rest[..url_end].trim();
-                    // Strip quotes if present
-                    let url_inner = url_inner
-                        .strip_prefix('"')
-                        .and_then(|s| s.strip_suffix('"'))
-                        .or_else(|| {
-                            url_inner
-                                .strip_prefix('\'')
-                                .and_then(|s| s.strip_suffix('\''))
-                        })
-                        .unwrap_or(url_inner);
+                    let (url_inner, _) = if let Some(after_quote) = rest.strip_prefix('"') {
+                        // Quoted with double quotes — find closing quote,
+                        // then verify `)` follows. This handles parens
+                        // inside the URL like `url("image(1).png")`.
+                        let close_quote = after_quote.find('"')?;
+                        let inner = &after_quote[..close_quote];
+                        (inner, close_quote + 2) // +2 for both quotes
+                    } else if let Some(after_quote) = rest.strip_prefix('\'') {
+                        let close_quote = after_quote.find('\'')?;
+                        let inner = &after_quote[..close_quote];
+                        (inner, close_quote + 2)
+                    } else {
+                        // Unquoted — find the closing paren
+                        let url_end = rest.find(')')?;
+                        let inner = rest[..url_end].trim();
+                        (inner, url_end)
+                    };
                     return Some(format!("\"{}\"", url_inner));
                 }
             }
@@ -1710,5 +1732,39 @@ mod marker_rewrite_tests {
         assert!(result.contains("h1 { font-size: 2em; }"));
         assert!(result.contains("p { margin: 0; }"));
         assert!(result.contains("list-style-image"));
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_with_charset() {
+        let css = r#"@charset "UTF-8"; li::marker { content: url("star.png"); }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(
+            result.contains("list-style-image"),
+            "should work with @charset prefix, got: {result}"
+        );
+        assert!(
+            result.contains(r#"@charset "UTF-8";"#),
+            "charset rule preserved"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_with_import() {
+        let css = r#"@import url("base.css"); li::marker { content: url("icon.png"); }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(
+            result.contains("list-style-image"),
+            "should work with @import prefix, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_extract_content_url_quoted_parens() {
+        let url = extract_content_url(r#"content: url("image(1).png")"#);
+        assert_eq!(
+            url.as_deref(),
+            Some("\"image(1).png\""),
+            "should handle parentheses inside quoted URL"
+        );
     }
 }
