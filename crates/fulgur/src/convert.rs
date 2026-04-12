@@ -6,8 +6,8 @@ use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgLengthPercentage, BgRepeat, BgSize, BlockPageable,
-    BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
-    ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
+    BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable, ImageMarker,
+    ListItemMarker, ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
     RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
     StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
@@ -260,9 +260,17 @@ fn convert_node_inner(
     if let Some(elem_data) = node.element_data()
         && elem_data.list_item_data.is_some()
     {
-        let (marker_lines, marker_width) = extract_marker_lines(doc, node, ctx);
+        let (marker_lines, marker_width, marker_line_height) = extract_marker_lines(doc, node, ctx);
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
+
+        // Try list-style-image first; fall back to text marker if unresolved.
+        let marker = resolve_list_marker(node, marker_line_height, ctx.assets).unwrap_or(
+            ListItemMarker::Text {
+                lines: marker_lines,
+                width: marker_width,
+            },
+        );
 
         // Build body WITHOUT opacity — ListItemPageable wraps everything in
         // a single opacity group. But DO propagate visibility to the body's
@@ -319,8 +327,8 @@ fn convert_node_inner(
             Box::new(block)
         };
         let mut item = ListItemPageable {
-            marker_lines,
-            marker_width,
+            marker,
+            marker_line_height,
             body,
             style: BlockStyle::default(),
             width,
@@ -1437,23 +1445,93 @@ fn is_non_visual_element(node: &Node) -> bool {
     }
 }
 
+/// Resolve a list-style-image marker from the node's computed styles.
+///
+/// Returns `Some(ListItemMarker::Image { ... })` when the node's
+/// `list-style-image` is a URL that resolves to a supported image
+/// (PNG/JPEG/GIF or SVG) inside `ctx.assets`. Returns `None` for any
+/// failure (no bundle, URL not found, unknown format, parse error),
+/// and the caller must then fall back to the text marker produced by
+/// `extract_marker_lines` — matching CSS spec fallback semantics.
+fn resolve_list_marker(
+    node: &Node,
+    line_height: f32,
+    assets: Option<&AssetBundle>,
+) -> Option<ListItemMarker> {
+    use crate::image::AssetKind;
+    use style::values::computed::image::Image;
+
+    // Zero or negative line-height (e.g. list-style-position: inside where
+    // extract_marker_lines returns 0.0) would clamp image size to 0x0.
+    // Return None so the caller falls back to the text marker instead of
+    // creating an invisible image marker that suppresses the fallback.
+    if line_height <= 0.0 {
+        return None;
+    }
+    let assets = assets?;
+    let styles = node.primary_styles()?;
+    let image = styles.clone_list_style_image();
+    let url = match image {
+        Image::Url(u) => u,
+        _ => return None,
+    };
+    let raw_src = match &url {
+        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+    };
+    let src = extract_asset_name(raw_src);
+    let data = assets.get_image(src)?;
+    match AssetKind::detect(data) {
+        AssetKind::Raster(format) => {
+            let (iw, ih) = ImagePageable::decode_dimensions(data, format)?;
+            // px → pt (1px = 0.75pt)
+            let intrinsic_w = iw as f32 * 0.75;
+            let intrinsic_h = ih as f32 * 0.75;
+            let (width, height) =
+                crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+            let img = ImagePageable::new(Arc::clone(data), format, width, height);
+            Some(ListItemMarker::Image {
+                marker: ImageMarker::Raster(img),
+                width,
+                height,
+            })
+        }
+        AssetKind::Svg => {
+            let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
+            let size = tree.size();
+            // SVG user units = CSS px → PDF pt (1px = 0.75pt)
+            let intrinsic_w = size.width() * 0.75;
+            let intrinsic_h = size.height() * 0.75;
+            let (width, height) =
+                crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+            let svg = SvgPageable::new(Arc::new(tree), width, height);
+            Some(ListItemMarker::Image {
+                marker: ImageMarker::Svg(svg),
+                width,
+                height,
+            })
+        }
+        AssetKind::Unknown => None,
+    }
+}
+
 /// Extract shaped lines from a list marker's Parley layout.
 fn extract_marker_lines(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
-) -> (Vec<ShapedLine>, f32) {
+) -> (Vec<ShapedLine>, f32, f32) {
     let elem_data = match node.element_data() {
         Some(d) => d,
-        None => return (Vec::new(), 0.0),
+        None => return (Vec::new(), 0.0, 0.0),
     };
     let list_item_data = match &elem_data.list_item_data {
         Some(d) => d,
-        None => return (Vec::new(), 0.0),
+        None => return (Vec::new(), 0.0, 0.0),
     };
     let parley_layout = match &list_item_data.position {
         blitz_dom::node::ListItemLayoutPosition::Outside(layout) => layout,
-        blitz_dom::node::ListItemLayoutPosition::Inside => return (Vec::new(), 0.0),
+        blitz_dom::node::ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
     };
 
     let marker_text = match &list_item_data.marker {
@@ -1466,9 +1544,13 @@ fn extract_marker_lines(
 
     let mut shaped_lines = Vec::new();
     let mut max_width: f32 = 0.0;
+    let mut line_height_pt: f32 = 0.0;
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
+        if line_height_pt == 0.0 {
+            line_height_pt = metrics.line_height;
+        }
         let mut glyph_runs = Vec::new();
         let mut line_width: f32 = 0.0;
 
@@ -1519,7 +1601,7 @@ fn extract_marker_lines(
         });
     }
 
-    (shaped_lines, max_width)
+    (shaped_lines, max_width, line_height_pt)
 }
 
 /// Get text color from a DOM node's computed styles.
