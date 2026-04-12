@@ -916,6 +916,209 @@ fn op_to_matrix(
     }
 }
 
+/// Rewrite `::marker { content: url(...) }` rules into `list-style-image` equivalents.
+///
+/// Blitz 0.2.4 does not expose `::marker` pseudo-element computed styles, so we
+/// rewrite the CSS text to convert `::marker { content: url(...) }` into
+/// `list-style-image: url(...)` on the parent selector, which Blitz already supports.
+///
+/// The original rule is preserved verbatim (for forward-compat); the rewritten rule
+/// is appended immediately after it.
+pub fn rewrite_marker_content_url(css: &str) -> String {
+    let chars: Vec<char> = css.chars().collect();
+    let len = chars.len();
+
+    // We'll collect "rewrites" — each is (insert_position, extra_css_text).
+    // After scanning we splice them in (back-to-front so offsets stay valid).
+    let mut rewrites: Vec<(usize, String)> = Vec::new();
+
+    // Track at-rule wrappers (e.g. @media print) so we can re-wrap the
+    // generated rule in the same at-rule context.
+    // Stack entries: the text of the at-rule header (e.g. "@media print ").
+    let mut at_stack: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+
+        // Skip string literals so we don't match ::marker inside them.
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            i += 1;
+            while i < len && chars[i] != quote {
+                if chars[i] == '\\' {
+                    i += 1; // skip escaped char
+                }
+                i += 1;
+            }
+            i += 1; // skip closing quote
+            continue;
+        }
+
+        // Skip CSS comments.
+        if ch == '/' && i + 1 < len && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2; // skip */
+            continue;
+        }
+
+        // Detect at-rule start: @something ... {
+        if ch == '@' {
+            let at_start = i;
+            // Scan to the opening brace.
+            while i < len && chars[i] != '{' {
+                i += 1;
+            }
+            if i < len {
+                let header: String = chars[at_start..i].iter().collect();
+                at_stack.push(header.trim_end().to_string());
+                i += 1; // skip {
+            }
+            continue;
+        }
+
+        // Detect closing brace — could close an at-rule or a rule block.
+        if ch == '}' {
+            // If we're inside an at-rule wrapper (at_stack non-empty) and
+            // there's no rule block open, this closes the at-rule.
+            // We handle rule block closing below; at-rule closing happens
+            // when we see } at the at-rule depth.
+            // For simplicity: we'll handle rule blocks inline and pop
+            // at-rule on bare }.
+            if !at_stack.is_empty() {
+                at_stack.pop();
+            }
+            i += 1;
+            continue;
+        }
+
+        // Anything else might be the start of a selector.
+        // Scan the selector up to '{'.
+        let selector_start = i;
+        let mut found_brace = false;
+        while i < len {
+            if chars[i] == '{' {
+                found_brace = true;
+                break;
+            }
+            // If we hit } or ; outside a block, this isn't a rule.
+            if chars[i] == '}' || chars[i] == ';' {
+                break;
+            }
+            i += 1;
+        }
+        if !found_brace {
+            i += 1;
+            continue;
+        }
+
+        let selector: String = chars[selector_start..i].iter().collect();
+        let selector = selector.trim();
+        i += 1; // skip {
+
+        // Now scan the declaration block to the matching }.
+        let block_start = i;
+        let mut depth = 1u32;
+        while i < len && depth > 0 {
+            match chars[i] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                '"' | '\'' => {
+                    let q = chars[i];
+                    i += 1;
+                    while i < len && chars[i] != q {
+                        if chars[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        // i now points just past the closing }
+        let block_end = i - 1; // index of the closing }
+        let declarations: String = chars[block_start..block_end].iter().collect();
+
+        // Check if selector contains ::marker
+        if !selector.contains("::marker") {
+            continue;
+        }
+
+        // Extract content: url(...) from declarations
+        let url_value = extract_content_url(&declarations);
+        if let Some(url) = url_value {
+            // Build the stripped selector (remove ::marker)
+            let stripped = selector.replace("::marker", "");
+            let stripped = stripped.trim();
+
+            // Build the new rule
+            let new_rule = if at_stack.is_empty() {
+                format!("\n{stripped}{{list-style-image:url({url})}}")
+            } else {
+                let at_header = at_stack.last().unwrap();
+                format!("\n{at_header}{{{stripped}{{list-style-image:url({url})}}}}")
+            };
+
+            rewrites.push((i, new_rule));
+        }
+    }
+
+    if rewrites.is_empty() {
+        return css.to_string();
+    }
+
+    // Build the result by inserting rewrites (they're in forward order).
+    let mut result = css.to_string();
+    // Insert back-to-front so byte offsets remain valid.
+    // But our positions are char-based; convert to byte positions.
+    for (char_pos, extra) in rewrites.into_iter().rev() {
+        let byte_pos: usize = chars[..char_pos].iter().map(|c| c.len_utf8()).sum();
+        result.insert_str(byte_pos, &extra);
+    }
+
+    result
+}
+
+/// Extract the URL from a `content: url(...)` declaration, if present.
+/// Returns the inner URL string (without the `url()` wrapper).
+fn extract_content_url(declarations: &str) -> Option<String> {
+    // Find `content` property followed by `:` and then `url(`
+    let decls = declarations.trim();
+    for decl in decls.split(';') {
+        let decl = decl.trim();
+        if let Some(value) = decl.strip_prefix("content") {
+            let value = value.trim();
+            if let Some(value) = value.strip_prefix(':') {
+                let value = value.trim();
+                if let Some(rest) = value.strip_prefix("url(") {
+                    // Find the matching closing paren
+                    let rest = rest.trim();
+                    // The URL might be quoted or unquoted
+                    let url_end = rest.find(')')?;
+                    let url_inner = rest[..url_end].trim();
+                    // Strip quotes if present
+                    let url_inner = url_inner
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .or_else(|| {
+                            url_inner
+                                .strip_prefix('\'')
+                                .and_then(|s| s.strip_suffix('\''))
+                        })
+                        .unwrap_or(url_inner);
+                    return Some(format!("\"{}\"", url_inner));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1432,5 +1635,57 @@ mod transform_tests {
         let y = m.b * 1.0 + m.d * 0.0 + m.f;
         assert!(approx(x, 0.0), "x expected 0.0, got {x}");
         assert!(approx(y, 1.0), "y expected 1.0, got {y}");
+    }
+}
+
+#[cfg(test)]
+mod marker_rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn test_rewrite_marker_content_url_simple() {
+        let css = r#"li::marker { content: url("star.png"); }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(result.contains("::marker"), "original rule preserved");
+        assert!(result.contains("list-style-image"), "new rule appended");
+        assert!(result.contains("star.png"), "URL preserved");
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_compound_selector() {
+        let css = r#".list li.custom::marker { content: url("check.svg"); }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(result.contains(".list li.custom") && result.contains("list-style-image"));
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_no_marker_passthrough() {
+        let css = "p { color: red; }";
+        let result = rewrite_marker_content_url(css);
+        assert_eq!(result, css);
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_non_url_content_ignored() {
+        let css = r#"li::marker { content: "→ "; }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(!result.contains("list-style-image"));
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_at_media() {
+        let css = r#"@media print { li::marker { content: url("print-bullet.png"); } }"#;
+        let result = rewrite_marker_content_url(css);
+        assert!(result.contains("@media print") && result.contains("list-style-image"));
+    }
+
+    #[test]
+    fn test_rewrite_marker_content_url_preserves_other_rules() {
+        let css =
+            "h1 { font-size: 2em; }\nli::marker { content: url(\"icon.png\"); }\np { margin: 0; }";
+        let result = rewrite_marker_content_url(css);
+        assert!(result.contains("h1 { font-size: 2em; }"));
+        assert!(result.contains("p { margin: 0; }"));
+        assert!(result.contains("list-style-image"));
     }
 }
