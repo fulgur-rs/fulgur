@@ -137,7 +137,13 @@ fn draw_background_layer(
                 };
                 let transform = krilla::geom::Transform::from_translate(*tx, *ty);
                 canvas.surface.push_transform(&transform);
-                let _ = canvas.surface.draw_svg(tree, size, SvgSettings::default());
+                if canvas
+                    .surface
+                    .draw_svg(tree, size, SvgSettings::default())
+                    .is_none()
+                {
+                    log::warn!("failed to draw SVG background tile");
+                }
                 canvas.surface.pop();
             }
         }
