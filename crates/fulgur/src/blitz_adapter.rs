@@ -295,6 +295,44 @@ fn extract_url_from_stylo_image(image: &style::values::computed::image::Image) -
     }
 }
 
+/// Extract the CSS `vertical-align` value from a node's computed styles and
+/// map it to fulgur's `VerticalAlign` enum.
+pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::VerticalAlign {
+    use crate::paragraph::VerticalAlign;
+    let Some(styles) = node.primary_styles() else {
+        return VerticalAlign::Baseline;
+    };
+    let va = styles.clone_vertical_align();
+    match va {
+        style::values::generics::box_::VerticalAlign::Keyword(kw) => {
+            use style::values::generics::box_::VerticalAlignKeyword;
+            match kw {
+                VerticalAlignKeyword::Baseline => VerticalAlign::Baseline,
+                VerticalAlignKeyword::Middle => VerticalAlign::Middle,
+                VerticalAlignKeyword::Top => VerticalAlign::Top,
+                VerticalAlignKeyword::Bottom => VerticalAlign::Bottom,
+                VerticalAlignKeyword::Sub => VerticalAlign::Sub,
+                VerticalAlignKeyword::Super => VerticalAlign::Super,
+                VerticalAlignKeyword::TextTop => VerticalAlign::TextTop,
+                VerticalAlignKeyword::TextBottom => VerticalAlign::TextBottom,
+                #[allow(unreachable_patterns)]
+                _ => VerticalAlign::Baseline,
+            }
+        }
+        style::values::generics::box_::VerticalAlign::Length(lp) => {
+            if let Some(pct) = lp.to_percentage() {
+                VerticalAlign::Percent(pct.0)
+            } else {
+                // Note: for calc() mixed values like `calc(10px + 50%)`,
+                // to_percentage() returns None and we resolve with basis=0,
+                // which drops the percentage component. This is a known
+                // limitation — calc() in vertical-align is extremely rare.
+                VerticalAlign::Length(lp.resolve(style::values::computed::Length::new(0.0)).px())
+            }
+        }
+    }
+}
+
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
     blitz_dom::QualName::new(
         None,

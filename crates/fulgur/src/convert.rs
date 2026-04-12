@@ -12,12 +12,13 @@ use crate::pageable::{
     StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
 use crate::paragraph::{
-    ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
-    TextDecorationStyle,
+    InlineImage, LineFontMetrics, LineItem, ParagraphPageable, ShapedGlyph, ShapedGlyphRun,
+    ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle,
 };
 use crate::svg::SvgPageable;
 use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
+use skrifa::MetadataProvider;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -277,37 +278,121 @@ fn convert_node_inner(
         // own content (paragraph/image), since those are synthetic children
         // representing the node's own content, not real CSS children.
         let content_box = compute_content_box(node, &style);
-        let body: Box<dyn Pageable> = if node.flags.is_inline_root()
-            && let Some(paragraph) = extract_paragraph(doc, node, ctx)
-        {
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
-                let (child_x, child_y) = style.content_inset();
-                let mut p = paragraph;
-                p.visible = visible;
-                let paragraph_children = vec![PositionedChild {
-                    child: Box::new(p),
-                    x: child_x,
-                    y: child_y,
-                }];
-                let children = wrap_with_block_pseudo_images(
+        let body: Box<dyn Pageable> = if node.flags.is_inline_root() {
+            let paragraph_opt = extract_paragraph(doc, node, ctx);
+
+            // Inline pseudo images for list item body
+            let before_inline = node
+                .before
+                .and_then(|id| doc.get_node(id))
+                .filter(|p| !is_block_pseudo(p))
+                .and_then(|p| {
+                    build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                });
+            let after_inline = node
+                .after
+                .and_then(|id| doc.get_node(id))
+                .filter(|p| !is_block_pseudo(p))
+                .and_then(|p| {
+                    build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                });
+
+            if let Some(mut paragraph) = paragraph_opt {
+                if before_inline.is_some() || after_inline.is_some() {
+                    inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                    recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                    paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+                }
+
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+                if style.needs_block_wrapper() || has_pseudo {
+                    let (child_x, child_y) = style.content_inset();
+                    let mut p = paragraph;
+                    p.visible = visible;
+                    let paragraph_children = vec![PositionedChild {
+                        child: Box::new(p),
+                        x: child_x,
+                        y: child_y,
+                    }];
+                    let children = wrap_with_block_pseudo_images(
+                        before_pseudo,
+                        after_pseudo,
+                        content_box,
+                        paragraph_children,
+                    );
+                    let mut block = BlockPageable::with_positioned_children(children)
+                        .with_style(style)
+                        .with_visible(visible);
+                    block.wrap(width, height);
+                    block.layout_size = Some(Size { width, height });
+                    Box::new(block)
+                } else {
+                    let mut p = paragraph;
+                    p.visible = visible;
+                    Box::new(p)
+                }
+            } else if before_inline.is_some() || after_inline.is_some() {
+                // Synthesize a minimal paragraph for pseudo-only list items
+                let mut line = ShapedLine {
+                    height: 0.0,
+                    baseline: 0.0,
+                    items: vec![],
+                };
+                inject_inline_pseudo_images(
+                    std::slice::from_mut(&mut line),
+                    before_inline,
+                    after_inline,
+                );
+                let font_metrics = metrics_from_line(&line);
+                crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
+                let mut paragraph = ParagraphPageable::new(vec![line]);
+                paragraph.visible = visible;
+
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+                if style.needs_block_wrapper() || has_pseudo {
+                    let (child_x, child_y) = style.content_inset();
+                    let paragraph_children = vec![PositionedChild {
+                        child: Box::new(paragraph),
+                        x: child_x,
+                        y: child_y,
+                    }];
+                    let children = wrap_with_block_pseudo_images(
+                        before_pseudo,
+                        after_pseudo,
+                        content_box,
+                        paragraph_children,
+                    );
+                    let mut block = BlockPageable::with_positioned_children(children)
+                        .with_style(style)
+                        .with_visible(visible);
+                    block.wrap(width, height);
+                    block.layout_size = Some(Size { width, height });
+                    Box::new(block)
+                } else {
+                    Box::new(paragraph)
+                }
+            } else {
+                // Inline root with no text and no inline pseudo images —
+                // fall through to the non-inline-root path below.
+                let children: &[usize] = &node.children;
+                let positioned_children = collect_positioned_children(doc, children, ctx, depth);
+                let (before_pseudo, after_pseudo) =
+                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                let positioned_children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
-                    paragraph_children,
+                    positioned_children,
                 );
-                let mut block = BlockPageable::with_positioned_children(children)
+                let mut block = BlockPageable::with_positioned_children(positioned_children)
                     .with_style(style)
                     .with_visible(visible);
-                block.wrap(width, height);
-                block.layout_size = Some(Size { width, height });
+                block.wrap(width, 10000.0);
                 Box::new(block)
-            } else {
-                let mut p = paragraph;
-                p.visible = visible;
-                Box::new(p)
             }
         } else {
             let children: &[usize] = &node.children;
@@ -361,46 +446,118 @@ fn convert_node_inner(
     }
 
     // Check if this is an inline root (contains text layout)
-    if node.flags.is_inline_root()
-        && let Some(paragraph) = extract_paragraph(doc, node, ctx)
-    {
+    if node.flags.is_inline_root() {
+        let paragraph_opt = extract_paragraph(doc, node, ctx);
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
         let content_box = compute_content_box(node, &style);
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.needs_block_wrapper() || has_pseudo {
-            let (child_x, child_y) = style.content_inset();
-            // Propagate visibility to the inner paragraph — it's not a real CSS child
-            // but the node's own text content, so it must respect the node's visibility.
-            // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+
+        // Inline pseudo images (display: inline is the CSS default for pseudos)
+        let before_inline = node
+            .before
+            .and_then(|id| doc.get_node(id))
+            .filter(|p| !is_block_pseudo(p))
+            .and_then(|p| {
+                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+            });
+        let after_inline = node
+            .after
+            .and_then(|id| doc.get_node(id))
+            .filter(|p| !is_block_pseudo(p))
+            .and_then(|p| {
+                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+            });
+
+        if let Some(mut paragraph) = paragraph_opt {
+            // Existing path: inject inline pseudo images into real paragraph
+            if before_inline.is_some() || after_inline.is_some() {
+                inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+            }
+
+            // Then existing block pseudo check
+            let (before_pseudo, after_pseudo) =
+                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            if style.needs_block_wrapper() || has_pseudo {
+                let (child_x, child_y) = style.content_inset();
+                // Propagate visibility to the inner paragraph — it's not a real CSS child
+                // but the node's own text content, so it must respect the node's visibility.
+                // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+                let mut p = paragraph;
+                p.visible = visible;
+                let paragraph_children = vec![PositionedChild {
+                    child: Box::new(p),
+                    x: child_x,
+                    y: child_y,
+                }];
+                let children = wrap_with_block_pseudo_images(
+                    before_pseudo,
+                    after_pseudo,
+                    content_box,
+                    paragraph_children,
+                );
+                let mut block = BlockPageable::with_positioned_children(children)
+                    .with_style(style)
+                    .with_opacity(opacity)
+                    .with_visible(visible);
+                block.wrap(width, height);
+                // Use Taffy's computed height (includes padding + border) instead of children-only height
+                block.layout_size = Some(Size { width, height });
+                return Box::new(block);
+            }
             let mut p = paragraph;
+            p.opacity = opacity;
             p.visible = visible;
-            let paragraph_children = vec![PositionedChild {
-                child: Box::new(p),
-                x: child_x,
-                y: child_y,
-            }];
-            let children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                paragraph_children,
+            return Box::new(p);
+        } else if before_inline.is_some() || after_inline.is_some() {
+            // Synthesize a minimal paragraph for pseudo-only elements (e.g.
+            // `<span class="icon"></span>` with `::before { content: url(...) }`)
+            let mut line = ShapedLine {
+                height: 0.0,
+                baseline: 0.0,
+                items: vec![],
+            };
+            inject_inline_pseudo_images(
+                std::slice::from_mut(&mut line),
+                before_inline,
+                after_inline,
             );
-            let mut block = BlockPageable::with_positioned_children(children)
-                .with_style(style)
-                .with_opacity(opacity)
-                .with_visible(visible);
-            block.wrap(width, height);
-            // Use Taffy's computed height (includes padding + border) instead of children-only height
-            block.layout_size = Some(Size { width, height });
-            return Box::new(block);
+            let font_metrics = metrics_from_line(&line);
+            crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
+            let mut paragraph = ParagraphPageable::new(vec![line]);
+            paragraph.opacity = opacity;
+            paragraph.visible = visible;
+
+            // Check for block pseudo images too
+            let (before_pseudo, after_pseudo) =
+                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            if style.needs_block_wrapper() || has_pseudo {
+                let (child_x, child_y) = style.content_inset();
+                let paragraph_children = vec![PositionedChild {
+                    child: Box::new(paragraph),
+                    x: child_x,
+                    y: child_y,
+                }];
+                let children = wrap_with_block_pseudo_images(
+                    before_pseudo,
+                    after_pseudo,
+                    content_box,
+                    paragraph_children,
+                );
+                let mut block = BlockPageable::with_positioned_children(children)
+                    .with_style(style)
+                    .with_opacity(opacity)
+                    .with_visible(visible);
+                block.wrap(width, height);
+                block.layout_size = Some(Size { width, height });
+                return Box::new(block);
+            }
+            return Box::new(paragraph);
         }
-        let mut p = paragraph;
-        p.opacity = opacity;
-        p.visible = visible;
-        return Box::new(p);
+        // Fall through: inline root with no text and no inline pseudo images
     }
 
     let children: &[usize] = &node.children;
@@ -504,6 +661,7 @@ fn collect_positioned_children(
             && child_layout.size.width == 0.0
             && child_node.children.is_empty()
             && !node_has_block_pseudo_image(doc, child_node)
+            && !node_has_inline_pseudo_image(doc, child_node)
         {
             emit_orphan_string_set_markers(
                 child_id,
@@ -666,6 +824,25 @@ where
 /// The intrinsic dimensions come from `ImagePageable::decode_dimensions`.
 /// A zero-height decode result silently degrades to a 1:1 aspect so width-only
 /// sizing does not produce NaN.
+/// Resolve CSS width/height against intrinsic image dimensions + aspect ratio.
+fn resolve_image_dimensions(
+    data: &[u8],
+    format: crate::image::ImageFormat,
+    css_w: Option<f32>,
+    css_h: Option<f32>,
+) -> (f32, f32) {
+    let (iw, ih) = ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+    let iw = iw as f32;
+    let ih = ih as f32;
+    let aspect = if ih > 0.0 { iw / ih } else { 1.0 };
+    match (css_w, css_h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, if aspect > 0.0 { w / aspect } else { w }),
+        (None, Some(h)) => (h * aspect, h),
+        (None, None) => (iw, ih),
+    }
+}
+
 fn make_image_pageable(
     data: Arc<Vec<u8>>,
     format: crate::image::ImageFormat,
@@ -674,18 +851,7 @@ fn make_image_pageable(
     opacity: f32,
     visible: bool,
 ) -> ImagePageable {
-    let (iw, ih) = ImagePageable::decode_dimensions(&data, format).unwrap_or((1, 1));
-    let iw = iw as f32;
-    let ih = ih as f32;
-    let aspect = if ih > 0.0 { iw / ih } else { 1.0 };
-
-    let (w, h) = match (css_w, css_h) {
-        (Some(w), Some(h)) => (w, h),
-        (Some(w), None) => (w, if aspect > 0.0 { w / aspect } else { w }),
-        (None, Some(h)) => (h * aspect, h),
-        (None, None) => (iw, ih),
-    };
-
+    let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
     let mut img = ImagePageable::new(data, format, w, h);
     img.opacity = opacity;
     img.visible = visible;
@@ -761,6 +927,25 @@ fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bo
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_block_pseudo(pseudo)
+            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` if `node` has a `::before` or `::after` pseudo-element that
+/// is an inline (non-block) pseudo with a `content: url(...)` image.
+///
+/// Used by the zero-size leaf filter to let elements like
+/// `<span class="icon"></span>` with `::before { content: url(...) }` through
+/// to `convert_node_inner` where the inline pseudo path can synthesize a
+/// `ParagraphPageable`.
+fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        if let Some(pseudo) = doc.get_node(pseudo_id)
+            && !is_block_pseudo(pseudo)
             && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
         {
             return true;
@@ -872,6 +1057,166 @@ fn wrap_with_block_pseudo_images(
         });
     }
     out
+}
+
+/// Build an `InlineImage` for a `::before`/`::after` pseudo-element whose
+/// computed `content` resolves to a single `url(...)` image and whose
+/// `display` is NOT block-outside (i.e. it is inline, the CSS default for
+/// pseudo-elements).
+///
+/// Returns `None` under the same conditions as `build_pseudo_image`.
+fn build_inline_pseudo_image(
+    pseudo_node: &Node,
+    parent_content_width: f32,
+    parent_content_height: f32,
+    assets: Option<&AssetBundle>,
+) -> Option<InlineImage> {
+    let assets = assets?;
+    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let asset_name = extract_asset_name(&raw_url);
+    let data = Arc::clone(assets.get_image(asset_name)?);
+    let format = ImagePageable::detect_format(&data)?;
+
+    let styles = pseudo_node.primary_styles()?;
+    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
+    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
+    let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
+    let (opacity, visible) = extract_opacity_visible(pseudo_node);
+    let vertical_align = crate::blitz_adapter::extract_vertical_align(pseudo_node);
+    Some(InlineImage {
+        data,
+        format,
+        width: w,
+        height: h,
+        x_offset: 0.0,
+        vertical_align,
+        opacity,
+        visible,
+        computed_y: 0.0,
+    })
+}
+
+/// Inject an inline pseudo image at the start (::before) and/or end (::after)
+/// of the shaped lines. The ::before image is prepended to the first line and
+/// all existing items are shifted right by its width. The ::after image is
+/// appended to the last line at the end of existing content.
+fn inject_inline_pseudo_images(
+    lines: &mut [ShapedLine],
+    before: Option<InlineImage>,
+    after: Option<InlineImage>,
+) {
+    if let Some(mut img) = before {
+        if let Some(first_line) = lines.first_mut() {
+            let shift = img.width;
+            for item in &mut first_line.items {
+                match item {
+                    LineItem::Text(run) => run.x_offset += shift,
+                    LineItem::Image(i) => i.x_offset += shift,
+                }
+            }
+            img.x_offset = 0.0;
+            first_line.items.insert(0, LineItem::Image(img));
+        }
+    }
+    if let Some(mut img) = after {
+        if let Some(last_line) = lines.last_mut() {
+            let last_end = last_line
+                .items
+                .iter()
+                .map(|item| match item {
+                    LineItem::Text(run) => {
+                        run.x_offset
+                            + run
+                                .glyphs
+                                .iter()
+                                .map(|g| g.x_advance * run.font_size)
+                                .sum::<f32>()
+                    }
+                    LineItem::Image(i) => i.x_offset + i.width,
+                })
+                .fold(0.0_f32, f32::max);
+            img.x_offset = last_end;
+            last_line.items.push(LineItem::Image(img));
+        }
+    }
+}
+
+/// Extract `LineFontMetrics` from a `ShapedLine`'s Text items using skrifa.
+/// Returns per-line accurate metrics instead of reusing a single set from the
+/// first glyph run in the paragraph. Falls back to defaults if no text items.
+fn metrics_from_line(line: &ShapedLine) -> LineFontMetrics {
+    let default = LineFontMetrics {
+        ascent: 12.0,
+        descent: 4.0,
+        x_height: 8.0,
+        subscript_offset: 4.0,
+        superscript_offset: 6.0,
+    };
+    for item in &line.items {
+        let run = match item {
+            LineItem::Text(r) => r,
+            LineItem::Image(_) => continue,
+        };
+        if let Ok(font_ref) = skrifa::FontRef::from_index(&run.font_data, run.font_index) {
+            let metrics = font_ref.metrics(
+                skrifa::instance::Size::new(run.font_size),
+                skrifa::instance::LocationRef::default(),
+            );
+            // skrifa Metrics exposes x_height but not subscript/superscript
+            // offsets directly. Approximate from ascent (same ratios as CSS
+            // typographic conventions).
+            return LineFontMetrics {
+                ascent: metrics.ascent,
+                descent: metrics.descent.abs(),
+                x_height: metrics.x_height.unwrap_or(metrics.ascent * 0.5),
+                subscript_offset: metrics.ascent * 0.3,
+                superscript_offset: metrics.ascent * 0.4,
+            };
+        }
+    }
+    default
+}
+
+/// Recalculate line boxes for all lines in a paragraph, correctly handling
+/// the coordinate system difference between paragraph-absolute baselines and
+/// line-local coordinates expected by `recalculate_line_box`.
+///
+/// `recalculate_line_box` assumes `line.baseline` is line-local (i.e. relative
+/// to the line's own top edge), but Parley sets baselines as paragraph-absolute
+/// offsets. For the first line these coincide, but for subsequent lines the
+/// baseline is offset by the cumulative height of preceding lines. This helper
+/// converts to line-local before calling `recalculate_line_box`, then converts
+/// back to paragraph-absolute and promotes `computed_y` to paragraph-absolute
+/// so `draw_shaped_lines` can use `y + img.computed_y` directly (matching the
+/// `y + line.baseline` pattern used for text).
+///
+/// Font metrics are extracted per-line from the line's own Text items via
+/// skrifa, so lines with different font sizes get accurate vertical-align.
+fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
+    // Track original and new cumulative heights separately.
+    // Parley baselines are computed against original heights, so we use
+    // original_y_acc for paragraph→line-local conversion. After expansion,
+    // new_y_acc tracks the updated positions for line-local→paragraph.
+    let mut original_y_acc: f32 = 0.0;
+    let mut new_y_acc: f32 = 0.0;
+    for line in lines.iter_mut() {
+        let original_height = line.height;
+        let font_metrics = metrics_from_line(line);
+        // Convert baseline from paragraph-absolute to line-local
+        // using original cumulative heights (what Parley computed against)
+        line.baseline -= original_y_acc;
+        crate::paragraph::recalculate_line_box(line, &font_metrics);
+        // Convert computed_y from line-local to new paragraph-absolute
+        for item in &mut line.items {
+            if let LineItem::Image(img) = item {
+                img.computed_y += new_y_acc;
+            }
+        }
+        // Convert baseline to new paragraph-absolute
+        line.baseline += new_y_acc;
+        original_y_acc += original_height;
+        new_y_acc += line.height;
+    }
 }
 
 /// Resolve a stylo `Size` (i.e. `width` / `height`) to an absolute `f32` in
@@ -1100,7 +1445,7 @@ fn extract_paragraph(
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
-        let mut glyph_runs = Vec::new();
+        let mut items = Vec::new();
 
         for item in line.items() {
             if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -1131,7 +1476,7 @@ fn extract_paragraph(
                 if !glyphs.is_empty() {
                     let run_text = text.clone();
 
-                    glyph_runs.push(ShapedGlyphRun {
+                    items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
                         font_size,
@@ -1140,7 +1485,7 @@ fn extract_paragraph(
                         glyphs,
                         text: run_text,
                         x_offset: glyph_run.offset(),
-                    });
+                    }));
                 }
             }
         }
@@ -1148,7 +1493,7 @@ fn extract_paragraph(
         shaped_lines.push(ShapedLine {
             height: metrics.line_height,
             baseline: metrics.baseline,
-            glyph_runs,
+            items,
         });
     }
 
@@ -1551,7 +1896,7 @@ fn extract_marker_lines(
         if line_height_pt == 0.0 {
             line_height_pt = metrics.line_height;
         }
-        let mut glyph_runs = Vec::new();
+        let mut items = Vec::new();
         let mut line_width: f32 = 0.0;
 
         for item in line.items() {
@@ -1579,7 +1924,7 @@ fn extract_marker_lines(
                 }
 
                 if !glyphs.is_empty() {
-                    glyph_runs.push(ShapedGlyphRun {
+                    items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
                         font_size,
@@ -1588,7 +1933,7 @@ fn extract_marker_lines(
                         glyphs,
                         text: marker_text.clone(),
                         x_offset: glyph_run.offset(),
-                    });
+                    }));
                 }
             }
         }
@@ -1597,7 +1942,7 @@ fn extract_marker_lines(
         shaped_lines.push(ShapedLine {
             height: metrics.line_height,
             baseline: metrics.baseline,
-            glyph_runs,
+            items,
         });
     }
 
@@ -2165,5 +2510,207 @@ mod tests {
         if let Some(item) = p.as_any().downcast_ref::<ListItemPageable>() {
             walk_all_children(item.body.as_ref(), visit);
         }
+    }
+
+    // ---- inline pseudo image tests ----
+
+    use crate::paragraph::VerticalAlign;
+
+    fn make_test_inline_image(w: f32, h: f32) -> InlineImage {
+        InlineImage {
+            data: sample_png_arc(),
+            format: ImageFormat::Png,
+            width: w,
+            height: h,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+        }
+    }
+
+    fn make_test_text_run(x_offset: f32, advance: f32) -> ShapedGlyphRun {
+        ShapedGlyphRun {
+            font_data: sample_png_arc(), // dummy — not rendered in unit tests
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: advance / 12.0, // normalized by font_size
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".to_string(),
+            x_offset,
+        }
+    }
+
+    #[test]
+    fn test_inject_before_shifts_existing_items() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(20.0, 16.0);
+        inject_inline_pseudo_images(&mut lines, Some(img), None);
+
+        assert_eq!(lines[0].items.len(), 2);
+        // First item should be the image at x_offset 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01, "img x_offset={}", i.x_offset);
+            assert!((i.width - 20.0).abs() < 0.01);
+        } else {
+            panic!("expected Image at index 0");
+        }
+        // Second item (text) should be shifted by 20.0
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!(
+                (r.x_offset - 20.0).abs() < 0.01,
+                "text x_offset={}",
+                r.x_offset,
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_after_appends_at_end() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(15.0, 16.0);
+        inject_inline_pseudo_images(&mut lines, None, Some(img));
+
+        assert_eq!(lines[0].items.len(), 2);
+        // Last item should be the image
+        if let LineItem::Image(ref i) = lines[0].items[1] {
+            // Text run width = advance (normalized x_advance * font_size) = (60/12) * 12 = 60
+            assert!(
+                (i.x_offset - 60.0).abs() < 0.01,
+                "after img x_offset={}",
+                i.x_offset,
+            );
+        } else {
+            panic!("expected Image at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_both_before_and_after() {
+        let run = make_test_text_run(0.0, 36.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let before = make_test_inline_image(10.0, 16.0);
+        let after = make_test_inline_image(10.0, 16.0);
+        inject_inline_pseudo_images(&mut lines, Some(before), Some(after));
+
+        assert_eq!(lines[0].items.len(), 3);
+        // Before image at 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01);
+        }
+        // Text shifted by 10
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!((r.x_offset - 10.0).abs() < 0.01);
+        }
+        // After image at 10 (before width) + 36 (text width) = 46
+        if let LineItem::Image(ref i) = lines[0].items[2] {
+            assert!(
+                (i.x_offset - 46.0).abs() < 0.01,
+                "after x_offset={}",
+                i.x_offset,
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_inline_pseudo_image_returns_some_for_inline_pseudo() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("icon.png fixture must exist");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); width: 24px; height: 24px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.expect("::before");
+        let pseudo = doc.get_node(before_id).unwrap();
+
+        // Inline pseudos have display: inline by default (not block)
+        assert!(
+            !is_block_pseudo(pseudo),
+            "pseudo should be inline by default"
+        );
+
+        let img = build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        assert!(img.is_some(), "should return Some for inline pseudo");
+        let img = img.unwrap();
+        assert_eq!(img.width, 24.0);
+        assert_eq!(img.height, 24.0);
+    }
+
+    #[test]
+    fn test_build_inline_pseudo_image_does_not_filter_display() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("icon.png fixture must exist");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); display: block; width: 24px; height: 24px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.expect("::before");
+        let pseudo = doc.get_node(before_id).unwrap();
+
+        assert!(
+            is_block_pseudo(pseudo),
+            "pseudo with display:block should be block"
+        );
+
+        // The inline builder should NOT produce an image for block pseudos
+        // (the caller filters with !is_block_pseudo, but we verify the function
+        // itself still returns Some — the filtering is done at the call site)
+        // Here we verify the function works, the call-site filter is tested
+        // by the integration test above.
+        let img = build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        // build_inline_pseudo_image doesn't check display, so this will be Some.
+        // The call site filters with !is_block_pseudo.
+        assert!(
+            img.is_some(),
+            "build_inline_pseudo_image itself doesn't filter display"
+        );
     }
 }
