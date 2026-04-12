@@ -12,8 +12,8 @@ use crate::pageable::{
     StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
 use crate::paragraph::{
-    ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
-    TextDecorationStyle,
+    LineItem, ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration,
+    TextDecorationLine, TextDecorationStyle,
 };
 use crate::svg::SvgPageable;
 use blitz_dom::{Node, NodeData};
@@ -1100,7 +1100,7 @@ fn extract_paragraph(
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
-        let mut glyph_runs = Vec::new();
+        let mut items = Vec::new();
 
         for item in line.items() {
             if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -1131,7 +1131,7 @@ fn extract_paragraph(
                 if !glyphs.is_empty() {
                     let run_text = text.clone();
 
-                    glyph_runs.push(ShapedGlyphRun {
+                    items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
                         font_size,
@@ -1140,7 +1140,7 @@ fn extract_paragraph(
                         glyphs,
                         text: run_text,
                         x_offset: glyph_run.offset(),
-                    });
+                    }));
                 }
             }
         }
@@ -1148,7 +1148,7 @@ fn extract_paragraph(
         shaped_lines.push(ShapedLine {
             height: metrics.line_height,
             baseline: metrics.baseline,
-            glyph_runs,
+            items,
         });
     }
 
@@ -1551,7 +1551,7 @@ fn extract_marker_lines(
         if line_height_pt == 0.0 {
             line_height_pt = metrics.line_height;
         }
-        let mut glyph_runs = Vec::new();
+        let mut items = Vec::new();
         let mut line_width: f32 = 0.0;
 
         for item in line.items() {
@@ -1579,7 +1579,7 @@ fn extract_marker_lines(
                 }
 
                 if !glyphs.is_empty() {
-                    glyph_runs.push(ShapedGlyphRun {
+                    items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
                         font_size,
@@ -1588,7 +1588,7 @@ fn extract_marker_lines(
                         glyphs,
                         text: marker_text.clone(),
                         x_offset: glyph_run.offset(),
-                    });
+                    }));
                 }
             }
         }
@@ -1597,7 +1597,7 @@ fn extract_marker_lines(
         shaped_lines.push(ShapedLine {
             height: metrics.line_height,
             baseline: metrics.baseline,
-            glyph_runs,
+            items,
         });
     }
 

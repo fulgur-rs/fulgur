@@ -81,13 +81,51 @@ pub struct ShapedGlyphRun {
     pub x_offset: f32,
 }
 
+/// Vertical alignment for inline replaced elements (images).
+#[derive(Clone, Copy, Debug, Default)]
+pub enum VerticalAlign {
+    #[default]
+    Baseline,
+    Middle,
+    Top,
+    Bottom,
+    Sub,
+    Super,
+    TextTop,
+    TextBottom,
+    Length(f32),
+    Percent(f32),
+}
+
+/// An inline image run within a shaped line.
+#[derive(Clone)]
+pub struct InlineImage {
+    pub data: Arc<Vec<u8>>,
+    pub format: crate::image::ImageFormat,
+    pub width: f32,
+    pub height: f32,
+    pub x_offset: f32,
+    pub vertical_align: VerticalAlign,
+    pub opacity: f32,
+    pub visible: bool,
+    /// Y position relative to line top, computed by recalculate_line_box.
+    pub computed_y: f32,
+}
+
+/// A single item in a shaped line: either a text glyph run or an inline image.
+#[derive(Clone)]
+pub enum LineItem {
+    Text(ShapedGlyphRun),
+    Image(InlineImage),
+}
+
 /// A shaped line of text.
 #[derive(Clone)]
 pub struct ShapedLine {
     pub height: f32,
     /// Absolute offset from the paragraph's top edge to this line's baseline (from Parley).
     pub baseline: f32,
-    pub glyph_runs: Vec<ShapedGlyphRun>,
+    pub items: Vec<LineItem>,
 }
 
 /// Paragraph element that renders shaped text.
@@ -338,15 +376,14 @@ struct DecorationSpan {
 }
 
 /// Collect contiguous runs with the same decoration into spans, then draw each span once.
-fn draw_line_decorations(
-    canvas: &mut Canvas<'_, '_>,
-    runs: &[ShapedGlyphRun],
-    x: Pt,
-    baseline_y: Pt,
-) {
+fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt, baseline_y: Pt) {
     let mut spans: Vec<DecorationSpan> = Vec::new();
 
-    for run in runs {
+    for item in items {
+        let run = match item {
+            LineItem::Text(run) => run,
+            LineItem::Image(_) => continue,
+        };
         if run.decoration.line.is_none() {
             continue;
         }
@@ -429,56 +466,67 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
     for line in lines {
         let baseline_y = y + line.baseline;
 
-        for run in &line.glyph_runs {
-            // Create Krilla font from cached data
-            let data: krilla::Data = Arc::clone(&run.font_data).into();
-            let Some(font) = krilla::text::Font::new(data, run.font_index) else {
-                continue;
-            };
+        for item in &line.items {
+            match item {
+                LineItem::Text(run) => {
+                    // Create Krilla font from cached data
+                    let data: krilla::Data = Arc::clone(&run.font_data).into();
+                    let Some(font) = krilla::text::Font::new(data, run.font_index) else {
+                        continue;
+                    };
 
-            // Convert shaped glyphs to Krilla glyphs
-            // Values are already normalized (/ font_size) in convert.rs
-            let krilla_glyphs: Vec<krilla::text::KrillaGlyph> = run
-                .glyphs
-                .iter()
-                .map(|g| krilla::text::KrillaGlyph {
-                    glyph_id: krilla::text::GlyphId::new(g.id),
-                    text_range: g.text_range.clone(),
-                    x_advance: g.x_advance,
-                    x_offset: g.x_offset,
-                    y_offset: g.y_offset,
-                    y_advance: 0.0,
-                    location: None,
-                })
-                .collect();
+                    // Convert shaped glyphs to Krilla glyphs
+                    // Values are already normalized (/ font_size) in convert.rs
+                    let krilla_glyphs: Vec<krilla::text::KrillaGlyph> = run
+                        .glyphs
+                        .iter()
+                        .map(|g| krilla::text::KrillaGlyph {
+                            glyph_id: krilla::text::GlyphId::new(g.id),
+                            text_range: g.text_range.clone(),
+                            x_advance: g.x_advance,
+                            x_offset: g.x_offset,
+                            y_offset: g.y_offset,
+                            y_advance: 0.0,
+                            location: None,
+                        })
+                        .collect();
 
-            if krilla_glyphs.is_empty() {
-                continue;
+                    if krilla_glyphs.is_empty() {
+                        continue;
+                    }
+
+                    // Set text color
+                    let fill = krilla::paint::Fill {
+                        paint: krilla::color::rgb::Color::new(
+                            run.color[0],
+                            run.color[1],
+                            run.color[2],
+                        )
+                        .into(),
+                        opacity: krilla::num::NormalizedF32::new(run.color[3] as f32 / 255.0)
+                            .unwrap_or(krilla::num::NormalizedF32::ONE),
+                        rule: Default::default(),
+                    };
+                    canvas.surface.set_fill(Some(fill));
+
+                    let start = krilla::geom::Point::from_xy(x + run.x_offset, baseline_y);
+                    canvas.surface.draw_glyphs(
+                        start,
+                        &krilla_glyphs,
+                        font,
+                        &run.text,
+                        run.font_size,
+                        false,
+                    );
+                }
+                LineItem::Image(_) => {
+                    // Inline image drawing will be implemented in a later task.
+                }
             }
-
-            // Set text color
-            let fill = krilla::paint::Fill {
-                paint: krilla::color::rgb::Color::new(run.color[0], run.color[1], run.color[2])
-                    .into(),
-                opacity: krilla::num::NormalizedF32::new(run.color[3] as f32 / 255.0)
-                    .unwrap_or(krilla::num::NormalizedF32::ONE),
-                rule: Default::default(),
-            };
-            canvas.surface.set_fill(Some(fill));
-
-            let start = krilla::geom::Point::from_xy(x + run.x_offset, baseline_y);
-            canvas.surface.draw_glyphs(
-                start,
-                &krilla_glyphs,
-                font,
-                &run.text,
-                run.font_size,
-                false,
-            );
         }
 
         // Draw decorations after all glyphs so lines appear on top
-        draw_line_decorations(canvas, &line.glyph_runs, x, baseline_y);
+        draw_line_decorations(canvas, &line.items, x, baseline_y);
     }
 }
 
