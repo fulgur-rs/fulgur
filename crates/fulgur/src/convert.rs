@@ -13,7 +13,7 @@ use crate::pageable::{
 };
 use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, ParagraphPageable, ShapedGlyph, ShapedGlyphRun,
-    ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle,
+    ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
 use crate::svg::SvgPageable;
 use blitz_dom::{Node, NodeData};
@@ -418,9 +418,26 @@ fn convert_node_inner(
     let height = layout.size.height;
     let width = layout.size.width;
 
-    // Check if this is a list item with an outside marker (must be before inline root check)
+    // Check if this is a list item with an outside marker (must be before inline root check).
+    //
+    // Inside-positioned markers are injected into Parley's inline layout by Blitz
+    // (blitz-dom/src/layout/construct.rs in `build_inline_layout`), so when the
+    // `<li>` IS an inline root they fall through to the normal paragraph path below
+    // and render correctly. For `list-style-image` + inside, `resolve_inside_image_marker`
+    // injects the image at the start of the paragraph's first line.
+    //
+    // Known limitation: when `<li>` is NOT an inline root (contains only block
+    // children, e.g. `<li><p>...</p></li>`) or is empty, neither Blitz nor
+    // fulgur injects the marker, and the marker is not rendered. This matches
+    // upstream Blitz behavior — Blitz's inline-layout injection only fires for
+    // inline-root elements.
     if let Some(elem_data) = node.element_data()
-        && elem_data.list_item_data.is_some()
+        && elem_data.list_item_data.as_ref().is_some_and(|d| {
+            matches!(
+                d.position,
+                blitz_dom::node::ListItemLayoutPosition::Outside(_)
+            )
+        })
     {
         let (marker_lines, marker_width, marker_line_height) = extract_marker_lines(doc, node, ctx);
         let style = extract_block_style(node, ctx.assets);
@@ -466,10 +483,17 @@ fn convert_node_inner(
 
     // Fallback: display: list-item with list-style-image but no list_item_data
     // (Blitz 0.2.4 skips list_item_data when list-style-type: none).
-    // The primary path's guard already consumed `list_item_data.is_some()`,
-    // so reaching here means list_item_data is None — only check display.
+    //
+    // The primary guard above now only matches Outside-positioned items, so we
+    // must additionally require `list_item_data.is_none()` here to avoid
+    // intercepting inside-positioned items that DO have list_item_data — those
+    // should fall through to the inline-root path so `resolve_inside_image_marker`
+    // can inject the marker inline.
     if let Some(styles) = node.primary_styles()
         && styles.get_box().display.is_list_item()
+        && node
+            .element_data()
+            .is_none_or(|e| e.list_item_data.is_none())
     {
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
@@ -568,11 +592,39 @@ fn convert_node_inner(
             });
 
         if let Some(mut paragraph) = paragraph_opt {
-            // Existing path: inject inline pseudo images into real paragraph
+            // Inject pseudo images BEFORE the list marker so the marker stays
+            // at index 0 of the first line after both injections. CSS order
+            // for list-style-position: inside is: marker → ::before → content.
+            // Blitz already pushes text markers to the inline layout before
+            // ::before, so when list-style-image triggers marker injection we
+            // must put it at index 0 last.
             if before_inline.is_some() || after_inline.is_some() {
                 inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
                 recalculate_paragraph_line_boxes(&mut paragraph.lines);
                 paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+            }
+
+            // Inject inside list-style-image as inline image at start of first line.
+            // Runs AFTER pseudo image injection so the marker ends up at index 0
+            // and pushes existing items (including ::before) to index 1+.
+            if !paragraph.lines.is_empty() {
+                let first_line_height = paragraph.lines[0].height;
+                if let Some(inline_img) =
+                    resolve_inside_image_marker(node, first_line_height, ctx.assets)
+                {
+                    let shift = inline_img.width;
+                    for item in &mut paragraph.lines[0].items {
+                        match item {
+                            LineItem::Text(run) => run.x_offset += shift,
+                            LineItem::Image(i) => i.x_offset += shift,
+                        }
+                    }
+                    paragraph.lines[0]
+                        .items
+                        .insert(0, LineItem::Image(inline_img));
+                    recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                    paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+                }
             }
 
             // Then existing block pseudo check
@@ -1951,6 +2003,49 @@ fn is_non_visual_element(node: &Node) -> bool {
     }
 }
 
+/// Resolve a node's computed `list-style-image` to bundled asset bytes and
+/// detected asset kind. Returns `None` when there is no `list-style-image`,
+/// the computed value is not a plain `url(...)`, no asset bundle is set, or
+/// the asset is not registered in the bundle.
+fn resolve_list_style_image_asset<'a>(
+    node: &Node,
+    assets: Option<&'a AssetBundle>,
+) -> Option<(&'a Arc<Vec<u8>>, crate::image::AssetKind)> {
+    use style::values::computed::image::Image;
+    let assets = assets?;
+    let styles = node.primary_styles()?;
+    let image = styles.clone_list_style_image();
+    let url = match image {
+        Image::Url(u) => u,
+        _ => return None,
+    };
+    let raw_src = match &url {
+        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+    };
+    let src = extract_asset_name(raw_src);
+    let data = assets.get_image(src)?;
+    let kind = crate::image::AssetKind::detect(data);
+    Some((data, kind))
+}
+
+/// Clamp a raster image's intrinsic dimensions (in CSS px) to a marker size
+/// bounded by `line_height`. Returns `(width_pt, height_pt)`.
+fn size_raster_marker(
+    data: &Arc<Vec<u8>>,
+    format: crate::image::ImageFormat,
+    line_height: f32,
+) -> Option<(f32, f32)> {
+    let (iw, ih) = ImagePageable::decode_dimensions(data, format)?;
+    let intrinsic_w = iw as f32 * PX_TO_PT;
+    let intrinsic_h = ih as f32 * PX_TO_PT;
+    Some(crate::pageable::clamp_marker_size(
+        intrinsic_w,
+        intrinsic_h,
+        line_height,
+    ))
+}
+
 /// Resolve a list-style-image marker from the node's computed styles.
 ///
 /// Returns `Some(ListItemMarker::Image { ... })` when the node's
@@ -1965,7 +2060,6 @@ fn resolve_list_marker(
     assets: Option<&AssetBundle>,
 ) -> Option<ListItemMarker> {
     use crate::image::AssetKind;
-    use style::values::computed::image::Image;
 
     // Zero or negative line-height (e.g. list-style-position: inside where
     // extract_marker_lines returns 0.0) would clamp image size to 0x0.
@@ -1974,26 +2068,10 @@ fn resolve_list_marker(
     if line_height <= 0.0 {
         return None;
     }
-    let assets = assets?;
-    let styles = node.primary_styles()?;
-    let image = styles.clone_list_style_image();
-    let url = match image {
-        Image::Url(u) => u,
-        _ => return None,
-    };
-    let raw_src = match &url {
-        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
-    };
-    let src = extract_asset_name(raw_src);
-    let data = assets.get_image(src)?;
-    match AssetKind::detect(data) {
+    let (data, kind) = resolve_list_style_image_asset(node, assets)?;
+    match kind {
         AssetKind::Raster(format) => {
-            let (iw, ih) = ImagePageable::decode_dimensions(data, format)?;
-            let intrinsic_w = iw as f32 * PX_TO_PT;
-            let intrinsic_h = ih as f32 * PX_TO_PT;
-            let (width, height) =
-                crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+            let (width, height) = size_raster_marker(data, format, line_height)?;
             let img = ImagePageable::new(Arc::clone(data), format, width, height);
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Raster(img),
@@ -2016,6 +2094,51 @@ fn resolve_list_marker(
             })
         }
         AssetKind::Unknown => None,
+    }
+}
+
+/// For `list-style-position: inside` with `list-style-image`, resolve
+/// the image and return it as an `InlineImage` sized to match the
+/// paragraph's first line height. Only supports raster images (PNG/JPEG/GIF).
+/// Returns `None` when the node is not an inside list item, the image URL
+/// cannot be resolved, or the image is SVG.
+fn resolve_inside_image_marker(
+    node: &Node,
+    first_line_height: f32,
+    assets: Option<&AssetBundle>,
+) -> Option<InlineImage> {
+    use crate::image::AssetKind;
+
+    let elem_data = node.element_data()?;
+    let list_data = elem_data.list_item_data.as_ref()?;
+    if !matches!(
+        list_data.position,
+        blitz_dom::node::ListItemLayoutPosition::Inside
+    ) {
+        return None;
+    }
+    if first_line_height <= 0.0 {
+        return None;
+    }
+
+    let (data, kind) = resolve_list_style_image_asset(node, assets)?;
+    match kind {
+        AssetKind::Raster(format) => {
+            let (width, height) = size_raster_marker(data, format, first_line_height)?;
+            Some(InlineImage {
+                data: Arc::clone(data),
+                format,
+                width,
+                height,
+                x_offset: 0.0,
+                vertical_align: VerticalAlign::Baseline,
+                opacity: 1.0,
+                visible: true,
+                computed_y: 0.0,
+            })
+        }
+        // SVG inline images are not yet supported in LineItem::Image
+        AssetKind::Svg | AssetKind::Unknown => None,
     }
 }
 
