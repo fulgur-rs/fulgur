@@ -2,6 +2,257 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.4] - 2026-04-12
+
+### Bug Fixes
+
+- use bash shebang in mise update-examples task
+- regenerate example PDFs in release-prepare workflow
+- wrap left/right margin box content in div for height measurement
+- include height in render cache key for left/right margin boxes
+- update docstring and add defensive first-except handling
+- propagate pagination from child in maybe_prepend_string_set
+- address coderabbit review on PR #56
+- avoid eating style rule closing brace after string-set
+- preserve string-set on zero-size elements and skip script/style
+- propagate Taffy coordinates to orphan string-set markers
+- address coderabbit review on PR #57
+- address second-pass review on PR #57
+- address code review — remove dead code, handle margin:0, reject negative size
+- address AI review feedback on @page settings
+- address second-round AI review feedback
+- use config.page_size for `size: auto` keyword instead of hardcoded A4
+- case-insensitive CSS units and reject trailing tokens
+- path traversal defense, panic-safe fd handling, recursion limits
+- broader .env gitignore + depth guard in collect_positioned_children
+- serialize concurrent access via static BLITZ_LOCK mutex
+- gate engine.rs DomPass calls via apply_single_pass
+- revert BLITZ_LOCK, remove suppress_stdout fd 1 race
+- retry StdoutIsolator::write_all on EINTR
+- address coderabbit review on #62
+- address AI review — counter edge cases and consistency
+- remove duplicate PageSizeDecl/PageSettingsRule definitions in mod.rs
+- address AI review on counter-reset PR
+- route CounterPass/InjectCssPass through apply_single_pass
+- flush stdout buffer in StdoutIsolator::Drop
+- push parent GcpmContext after nested @import fetches
+- address AI review feedback on PR #68
+- sort read_dir output before passing --image args
+- add lang attribute and title to VRT fixtures
+- wire overflow clip through convert + TablePageable
+- address AI review feedback on PR #70
+- 0x0 block leaf with pseudo image no longer dropped
+- defer zero-size check until after axis expansion
+- address integration test review issues
+- address AI review feedback
+- broaden Point2 doc + cover non-zero draw position
+- SVG px→pt conversion and decode_dimensions fallback
+- update stale doc comment and reject invalid URLs early
+- match background-image pattern for ComputedUrl::Invalid
+- guard resolve_list_marker against zero line_height
+- address AI review feedback
+- use per-line font metrics for vertical-align
+- split y_acc for correct multi-line baseline rebase
+- add log::warn for SVG background-image parse and draw failures
+- correct off-by-one in page count byte scan
+- revert off-by-one change that introduced index out-of-bounds risk
+- align comment with >= 2 assertion in page-spanning test
+- honour explicit line-height in image-only list marker fallback
+- correct @media double-wrapping in rewrite_marker_content_url
+- handle statement at-rules and quoted URL parens in marker rewrite
+- guard against empty selector from bare ::marker rewrite
+- skip ListItemPageable for inside-positioned list markers
+- shift existing x_offsets when injecting inside image marker
+- inject pseudo images before inside marker to preserve CSS order
+- exclude inside-positioned items from list-item fallback guard
+- use is_none_or instead of map_or(true, ...) for clippy
+
+### CI
+
+- run fulgur-vrt visual regression tests in a dedicated job
+- add manual workflow skeleton for chrome golden updates
+
+### Documentation
+
+- add implementation plan for GCPM string-set/string()
+- clarify ElementPolicy semantics and add Default derive
+- document Start/First equivalence, invalid policy asymmetry, and marker split limitation
+- add implementation plan for GCPM element() 4-policy support
+- align resolve_element_policy docstring with Start split
+- mark blitz thread-safety action items A-D as completed
+- fix markdownlint errors in plan file
+- add examples/svg with shapes, chart, gradient, opacity
+- link stylesheet in examples/svg/index.html
+- direct callers to parse_html_with_local_resources, harden test
+- unify <link rel=stylesheet> across all examples
+- correct font-update checklist (no golden hashes exist)
+- add crate README with workflow instructions
+- record VRT infrastructure implementation plan
+- add overflow-hidden example
+- record overflow:hidden implementation plan
+- add CSS transform example
+- CSS transform implementation plan
+- fix markdownlint violations in CSS transform plan
+- correct matrix_test_util visibility comment
+- add list-style-image example with PNG/SVG bullets
+- record list-style-image implementation plan (fulgur-507)
+- fix markdownlint command to use repo-standard glob
+- add threat model for SaaS multi-tenant use case (en + ja)
+- add implementation plan for content: url() Phase 3
+- document inside marker limitation for non-inline-root <li>
+
+### Features
+
+- add height measurement for left/right margin boxes
+- integrate left/right margin boxes into rendering pipeline
+- add StringSet data types and StringRef content item for GCPM string-set support
+- parse string-set property and string() function in GCPM parser
+- add StringSetStore and StringSetPass for GCPM string-set extraction
+- add StringSetPageable zero-size marker for string-set tracking
+- insert StringSetPageable markers during DOM-to-Pageable conversion
+- collect per-page string set states during pagination
+- resolve string() references in counter content resolution
+- wire string-set states into margin box rendering
+- wire StringSetPass into render_html pipeline
+- add ElementPolicy enum and restructure ContentItem::Element
+- parse element() policy second argument
+- rewrite RunningElementStore with instance-list storage
+- record node_id when registering running element instances
+- add RunningElementMarkerPageable zero-size marker
+- emit RunningElementMarkerPageable at running element source positions
+- add collect_running_element_states for per-page instance tracking
+- add resolve_element_policy and wire into resolve_content_to_html
+- wire per-page running element states through rendering pipeline
+- add parse_css_length helper for CSS unit to pt conversion
+- add PageSettingsRule, PageSizeDecl, and PageMarginDecl types
+- parse @page size/margin declarations into PageSettingsRule
+- add ConfigOverrides to track explicit CLI/API settings
+- add resolve_page_settings with CLI-priority override logic
+- apply resolved @page size/margin per page in GCPM pipeline
+- CSS counter-reset / counter-increment / counter-set support
+- add SvgPageable skeleton with unit tests
+- implement SvgPageable::draw via krilla-svg
+- wire inline <svg> elements through convert_svg
+- FulgurNetProvider for <link> / @import GCPM parity
+- pin font environment for byte-deterministic PDFs
+- scaffold dev-only VRT crate
+- manifest.toml parser with tolerance defaults
+- pixel diff engine with diff image output
+- render fulgur PDF to RGBA via pdftocairo
+- scaffold chrome-golden screenshot adapter stub
+- runner with fulgur golden compare and update modes
+- add Overflow enum and BlockStyle overflow fields
+- compute_overflow_clip_path helper
+- apply overflow clipping in BlockPageable::draw
+- read CSS overflow-x/y from stylo in convert
+- add extract_pseudo_image_url helper
+- emit block-display pseudo content: url() images
+- add Affine2D value type for CSS transform
+- add TransformWrapperPageable with atomic split
+- compute_transform helper reading stylo transform/origin
+- wire TransformWrapperPageable into convert_node
+- add clamp_marker_size helper for list-style-image
+- AssetKind::detect for raster/SVG classification
+- list-style-image raster marker support
+- list-style-image SVG marker support
+- draw inline images in shaped lines
+- vertical-align line box recalculation
+- inject inline pseudo content: url() images
+- support SVG rendering in draw_background_layer via BgImageContent
+- detect SVG in background-image via AssetKind and build Svg layer
+- support content: url() on normal elements (Phase 3)
+- support list-style-image when list-style-type is none
+- add rewrite_marker_content_url CSS transformer
+- integrate marker content url rewrite into render pipeline
+- inject inline image marker for inside list-style-image
+
+### Miscellaneous
+
+- regenerate example PDFs
+- regenerate example PDFs
+- regenerate example PDFs
+- silence pre-existing clippy warnings under -D warnings
+- regenerate example PDFs
+- regenerate example PDFs
+- regenerate example PDFs
+- loosen log pin to 0.4
+- regenerate example PDFs
+- regenerate example PDFs
+- fix rustfmt formatting in convert.rs and background_test.rs
+
+### Refactor
+
+- rename distribute_widths to distribute_sizes for axis-independence
+- extract axis-independent slot layout in compute_edge_layout
+- simplify margin box code with edge() method and unified helpers
+- simplify after string-set review
+- extract shared parse_policy_ident helper
+- tighten RunningElementStore API per review
+- conditionally compute running_states matching string_set_states pattern
+- cleanup per simplify review
+- replace PageMarginDecl with Margin, fix measure_cache key
+- use std::mem::discriminant for counter ops dedupe
+- extract wrap_replaced_in_block_style helper
+- address AI review feedback on PR #66
+- remove dead GenericImageView import from diff.rs
+- extract make_image_pageable sizing helper
+- single-walk pseudo image lookup, avoid O(n) insert
+- simplify per code review
+- extract_marker_lines returns line_height
+- ListItemMarker enum (Text/None)
+- replace glyph_runs with LineItem enum
+- extract resolve_image_dimensions, clean up review items
+- introduce BgImageContent enum for Raster/SVG background layers
+- deduplicate background-layer attribute computation
+- narrow compute_overflow_clip_path visibility to pub(crate)
+- rename extract_pseudo_image_url to extract_content_image_url
+- extract list-item body builder and clean up fallback path
+- use PX_TO_PT constant and eliminate redundant style lookups
+
+### Styling
+
+- fix rustfmt and revert clippy-redundant guard
+- fix rustfmt formatting
+- fix rustfmt import ordering for CI
+- fix rustfmt long-string wrapping in counter ops test
+- add PartialEq, Debug, Copy derives per review
+
+### Testing
+
+- add integration tests for left/right margin boxes
+- add regression test for asymmetric side margin boxes
+- add integration tests for GCPM string-set/string() pipeline
+- integration tests for element() policy across multiple pages
+- add integration tests for @page size/margin declarations
+- verify border and padding wrapping for <svg>
+- strengthen border/padding assertion via plain-SVG baseline
+- verify multiple SVGs render on same page
+- verify SVG is atomic (no page split)
+- verify opacity and visibility propagation
+- gate committed PDF match check to Linux
+- add initial fixture set and fulgur goldens
+- add overflow-hidden VRT fixtures
+- end-to-end integration tests for CSS transform
+- split keeps image marker on first list fragment only
+- tighten list-style-image SVG assertion
+- add unit test for SVG background layer resolve_size
+- add integration test for SVG background-image rendering
+- add page-spanning overflow:hidden integration test
+- add edge case tests for content: url() normal element
+- add integration tests for marker content url with image asset
+- add integration tests for list-style-position: inside
+- add integration test for inside position + list-style-image
+- add mixed-mode regression tests for list-style-position
+
+### Deps
+
+- bump krilla to 0.7, add krilla-svg and usvg
+
+### Example
+
+- add block pseudo content: url() example
+- add inline pseudo and vertical-align cases
+
 ## [0.4.3] - 2026-04-04
 
 ### Bug Fixes
@@ -16,6 +267,10 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - add Python-style format filter to MiniJinja templates
+
+### Release
+
+- v0.4.3
 
 ## [0.4.2] - 2026-04-04
 
