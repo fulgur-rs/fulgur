@@ -371,11 +371,22 @@ pub enum BgClip {
     Text,
 }
 
+/// Content payload for a background-image layer.
+#[derive(Clone, Debug)]
+pub enum BgImageContent {
+    /// Raster image (PNG/JPEG/GIF) — rendered via krilla Image API.
+    Raster {
+        data: Arc<Vec<u8>>,
+        format: ImageFormat,
+    },
+    /// SVG vector image — rendered via krilla-svg draw_svg.
+    Svg { tree: Arc<usvg::Tree> },
+}
+
 /// A single CSS background image layer with all associated properties.
 #[derive(Clone, Debug)]
 pub struct BackgroundLayer {
-    pub image_data: Arc<Vec<u8>>,
-    pub format: ImageFormat,
+    pub content: BgImageContent,
     pub intrinsic_width: f32,
     pub intrinsic_height: f32,
     pub size: BgSize,
@@ -2607,8 +2618,10 @@ mod background_tests {
         let mut style = BlockStyle::default();
         assert!(!style.has_visual_style());
         style.background_layers.push(BackgroundLayer {
-            image_data: Arc::new(vec![]),
-            format: ImageFormat::Png,
+            content: BgImageContent::Raster {
+                data: Arc::new(vec![]),
+                format: ImageFormat::Png,
+            },
             intrinsic_width: 100.0,
             intrinsic_height: 100.0,
             size: BgSize::Auto,
