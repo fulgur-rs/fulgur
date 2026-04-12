@@ -9,7 +9,7 @@ use crate::pageable::{
     BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
     ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
     RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
-    StringSetWrapperPageable, TablePageable,
+    StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
 use crate::paragraph::{
     ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration, TextDecorationLine,
@@ -104,7 +104,8 @@ fn convert_node(
     }
     let result = convert_node_inner(doc, node_id, ctx, depth);
     let result = maybe_prepend_string_set(node_id, result, ctx);
-    maybe_prepend_counter_ops(node_id, result, ctx)
+    let result = maybe_prepend_counter_ops(node_id, result, ctx);
+    maybe_wrap_transform(doc, node_id, result)
 }
 
 /// If the given node has string-set entries, wrap the pageable in a
@@ -141,6 +142,28 @@ fn maybe_prepend_counter_ops(
     match ops {
         Some(ops) if !ops.is_empty() => Box::new(CounterOpWrapperPageable::new(ops, child)),
         _ => child,
+    }
+}
+
+/// If the given node has a non-identity `transform`, wrap the pageable in a
+/// `TransformWrapperPageable`. The wrapper holds a pre-resolved affine matrix
+/// and enforces atomic pagination (a transformed element never splits across
+/// a page boundary).
+fn maybe_wrap_transform(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    child: Box<dyn Pageable>,
+) -> Box<dyn Pageable> {
+    let Some(node) = doc.get_node(node_id) else {
+        return child;
+    };
+    let Some(styles) = node.primary_styles() else {
+        return child;
+    };
+    let layout = node.final_layout;
+    match crate::blitz_adapter::compute_transform(&styles, layout.size.width, layout.size.height) {
+        Some((matrix, origin)) => Box::new(TransformWrapperPageable::new(child, matrix, origin)),
+        None => child,
     }
 }
 

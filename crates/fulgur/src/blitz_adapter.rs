@@ -767,6 +767,117 @@ fn resolve_string_set_values(
     out
 }
 
+// ─── transform support ────────────────────────────────────
+
+use crate::pageable::{Affine2D, Point2};
+
+/// Read the computed `transform` and `transform-origin` from `styles` and
+/// fold the `TransformOperation` list into a single pre-resolved affine
+/// matrix.
+///
+/// Percentages in `translate` and `transform-origin` are resolved against
+/// the caller-supplied `border_box_width` / `border_box_height` (Taffy's
+/// final layout size — CSS `transform` does not affect layout, so this is
+/// correct).
+///
+/// Returns `None` if the transform is absent, folds to identity, or
+/// produces a non-finite matrix. Callers use this to suppress wrapper
+/// construction in the fast path.
+///
+/// 3D operations (`translate3d`, `rotate3d`, `scale3d`, `matrix3d`,
+/// `perspective`, etc.) are treated as identity with a `log::warn!`.
+/// fulgur is a 2D PDF renderer.
+pub(crate) fn compute_transform(
+    styles: &style::properties::ComputedValues,
+    border_box_width: f32,
+    border_box_height: f32,
+) -> Option<(Affine2D, Point2)> {
+    use style::values::computed::Length;
+
+    // Fast path: most DOM nodes have no transform. Reading the
+    // `OwnedSlice` through `get_box()` avoids cloning it for the empty
+    // case, and lets the non-empty path borrow instead of clone.
+    let transform = &styles.get_box().transform.0;
+    if transform.is_empty() {
+        return None;
+    }
+
+    let mut m = Affine2D::IDENTITY;
+    for op in transform.iter() {
+        m = m * op_to_matrix(op, border_box_width, border_box_height);
+    }
+
+    if !m.a.is_finite()
+        || !m.b.is_finite()
+        || !m.c.is_finite()
+        || !m.d.is_finite()
+        || !m.e.is_finite()
+        || !m.f.is_finite()
+    {
+        log::warn!("transform produced non-finite matrix; falling back to identity");
+        return None;
+    }
+    if m.is_identity() {
+        return None;
+    }
+
+    let origin = styles.clone_transform_origin();
+    let origin_x = origin
+        .horizontal
+        .resolve(Length::new(border_box_width))
+        .px();
+    let origin_y = origin.vertical.resolve(Length::new(border_box_height)).px();
+
+    Some((m, Point2::new(origin_x, origin_y)))
+}
+
+fn op_to_matrix(
+    op: &style::values::computed::transform::TransformOperation,
+    w: f32,
+    h: f32,
+) -> Affine2D {
+    use style::values::computed::Length;
+    use style::values::generics::transform::GenericTransformOperation::*;
+
+    match op {
+        Matrix(m) => Affine2D {
+            a: m.a,
+            b: m.b,
+            c: m.c,
+            d: m.d,
+            e: m.e,
+            f: m.f,
+        },
+        Translate(x, y) => Affine2D::translation(
+            x.resolve(Length::new(w)).px(),
+            y.resolve(Length::new(h)).px(),
+        ),
+        TranslateX(x) => Affine2D::translation(x.resolve(Length::new(w)).px(), 0.0),
+        TranslateY(y) => Affine2D::translation(0.0, y.resolve(Length::new(h)).px()),
+        Scale(sx, sy) => Affine2D::scale(*sx, *sy),
+        ScaleX(sx) => Affine2D::scale(*sx, 1.0),
+        ScaleY(sy) => Affine2D::scale(1.0, *sy),
+        Rotate(angle) | RotateZ(angle) => Affine2D::rotation(angle.radians()),
+        Skew(ax, ay) => Affine2D::skew(ax.radians(), ay.radians()),
+        SkewX(ax) => Affine2D::skew(ax.radians(), 0.0),
+        SkewY(ay) => Affine2D::skew(0.0, ay.radians()),
+        Matrix3D(_)
+        | Translate3D(..)
+        | TranslateZ(_)
+        | Scale3D(..)
+        | ScaleZ(_)
+        | Rotate3D(..)
+        | RotateX(_)
+        | RotateY(_)
+        | Perspective(_)
+        | InterpolateMatrix { .. }
+        | AccumulateMatrix { .. } => {
+            log::warn!("unsupported 3D/animation transform op: {:?}", op);
+            Affine2D::IDENTITY
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,5 +1286,113 @@ mod tests {
             url.unwrap().ends_with("hi.png"),
             "image-set should resolve to the selected url"
         );
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+    use crate::pageable::{Affine2D, Point2, matrix_test_util::approx};
+
+    /// Parse a minimal HTML snippet and return the computed transform of
+    /// the first `<div>` it contains, via `compute_transform()`.
+    fn compute_for_div(html: &str, box_w: f32, box_h: f32) -> Option<(Affine2D, Point2)> {
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let div_id = find_element_by_tag(&doc, "div")?;
+        let node = doc.get_node(div_id)?;
+        let styles = node.primary_styles()?;
+        compute_transform(&styles, box_w, box_h)
+    }
+
+    #[test]
+    fn no_transform_returns_none() {
+        let html = r#"<!DOCTYPE html><html><body><div>hi</div></body></html>"#;
+        assert!(compute_for_div(html, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn translate_px_returns_translation_matrix() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translate(10px, 20px)">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        assert!(approx(m.e, 10.0));
+        assert!(approx(m.f, 20.0));
+        assert!(approx(m.a, 1.0));
+        assert!(approx(m.d, 1.0));
+    }
+
+    #[test]
+    fn translate_percent_resolves_against_border_box() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translate(50%, 25%)">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 200.0, 80.0).expect("should have transform");
+        assert!(approx(m.e, 100.0), "expected 100 (50% of 200), got {}", m.e);
+        assert!(approx(m.f, 20.0), "expected 20 (25% of 80), got {}", m.f);
+    }
+
+    #[test]
+    fn matrix_is_preserved_verbatim() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: matrix(1, 2, 3, 4, 5, 6)">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        assert!(approx(m.a, 1.0));
+        assert!(approx(m.b, 2.0));
+        assert!(approx(m.c, 3.0));
+        assert!(approx(m.d, 4.0));
+        assert!(approx(m.e, 5.0));
+        assert!(approx(m.f, 6.0));
+    }
+
+    #[test]
+    fn origin_default_is_center() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: rotate(45deg)">hi</div>
+        </body></html>"#;
+        let (_, origin) = compute_for_div(html, 100.0, 60.0).expect("should have transform");
+        assert!(
+            approx(origin.x, 50.0),
+            "default origin x should be 50% of 100, got {}",
+            origin.x
+        );
+        assert!(
+            approx(origin.y, 30.0),
+            "default origin y should be 50% of 60, got {}",
+            origin.y
+        );
+    }
+
+    #[test]
+    fn identity_transform_returns_none() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translate(0, 0)">hi</div>
+        </body></html>"#;
+        assert!(compute_for_div(html, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn three_d_op_folds_to_identity_and_is_suppressed() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translate3d(0, 0, 50px)">hi</div>
+        </body></html>"#;
+        assert!(compute_for_div(html, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn rotate_z_is_treated_as_2d_rotation() {
+        // CSS spec: rotateZ(angle) is equivalent to rotate(angle).
+        // Both must produce the same 2D rotation matrix, not fall back
+        // to identity through the 3D arm.
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: rotateZ(90deg); transform-origin: 0 0">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("rotateZ should produce a wrapper");
+        // 90° rotation: (1, 0) → (0, 1).
+        let x = m.a * 1.0 + m.c * 0.0 + m.e;
+        let y = m.b * 1.0 + m.d * 0.0 + m.f;
+        assert!(approx(x, 0.0), "x expected 0.0, got {x}");
+        assert!(approx(y, 1.0), "y expected 1.0, got {y}");
     }
 }

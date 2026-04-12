@@ -25,6 +25,7 @@ stylo = "0.8.0"
 thiserror = "2"
 minijinja = { version = "=2.19.0", features = ["unstable_machinery"] }
 serde_json = "1"
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3.27.0"
