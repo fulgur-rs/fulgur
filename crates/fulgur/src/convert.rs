@@ -445,6 +445,15 @@ fn convert_node_inner(
         }
     }
 
+    // CSS `content: url(...)` on a normal element replaces its children with
+    // the image (CSS Content L3 §2). Blitz 0.2.4 does not materialise this
+    // in layout, so we read the computed value and build an ImagePageable.
+    // Early return skips pseudo-element processing (spec-correct: replaced
+    // elements do not generate ::before/::after).
+    if let Some(img) = convert_content_url(node, ctx.assets) {
+        return img;
+    }
+
     // Check if this is an inline root (contains text layout)
     if node.flags.is_inline_root() {
         let paragraph_opt = extract_paragraph(doc, node, ctx);
@@ -883,7 +892,7 @@ fn build_pseudo_image(
 ) -> Option<ImagePageable> {
     let assets = assets?;
 
-    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
@@ -927,7 +936,7 @@ fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bo
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
         {
             return true;
         }
@@ -946,7 +955,7 @@ fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> b
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_pseudo_image_url(pseudo).is_some()
+            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
         {
             return true;
         }
@@ -1072,7 +1081,7 @@ fn build_inline_pseudo_image(
     assets: Option<&AssetBundle>,
 ) -> Option<InlineImage> {
     let assets = assets?;
-    let raw_url = crate::blitz_adapter::extract_pseudo_image_url(pseudo_node)?;
+    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
@@ -1241,6 +1250,31 @@ fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) 
         // helper will fall back to intrinsic dimensions / aspect-ratio.
         _ => None,
     }
+}
+
+/// Convert a normal element whose computed `content` resolves to a single
+/// `url(...)` image into an `ImagePageable`. Per CSS spec, `content` on a
+/// normal element replaces the element's children — so we return early and
+/// skip pseudo-element processing.
+///
+/// Returns `None` when the element has no `content: url()`, the asset is
+/// missing, or the format is unsupported — callers fall through to the
+/// standard conversion path.
+fn convert_content_url(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+    let raw_url = crate::blitz_adapter::extract_content_image_url(node)?;
+    let asset_name = extract_asset_name(&raw_url);
+    let bundle = assets?;
+    let data = Arc::clone(bundle.get_image(asset_name)?);
+    let format = ImagePageable::detect_format(&data)?;
+
+    Some(wrap_replaced_in_block_style(
+        node,
+        assets,
+        move |w, h, opacity, visible| {
+            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            Box::new(img)
+        },
+    ))
 }
 
 /// Convert an `<img>` element into an `ImagePageable`, wrapped in `BlockPageable` if styled.
@@ -2748,6 +2782,109 @@ mod tests {
         assert!(
             img.is_some(),
             "build_inline_pseudo_image itself doesn't filter display"
+        );
+    }
+
+    #[test]
+    fn test_convert_content_url_normal_element() {
+        // A normal element with `content: url(...)` + explicit width/height
+        // should produce an ImagePageable, replacing its text children.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .replaced { content: url("icon.png"); width: 24px; height: 24px; }
+        </style></head><body><div class="replaced">This text should be replaced</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.iter().any(|(w, h)| *w == 24.0 && *h == 24.0),
+            "expected a 24x24 ImagePageable from content: url() on normal element, got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_convert_content_url_no_content_falls_through() {
+        // A normal div without content: url() should NOT produce an ImagePageable.
+        let html = r#"<!doctype html><html><head><style>
+            div { width: 100px; height: 50px; background: red; }
+        </style></head><body><div>Normal text</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.is_empty(),
+            "normal div without content: url() should not produce images, got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_convert_content_url_missing_asset_falls_through() {
+        // content: url("missing.png") where the asset is not in the bundle
+        // should silently fall through to the normal conversion path.
+        let bundle = AssetBundle::new(); // empty bundle
+
+        let html = r#"<!doctype html><html><head><style>
+            .replaced { content: url("missing.png"); width: 24px; height: 24px; }
+        </style></head><body><div class="replaced">fallback text</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.is_empty(),
+            "missing asset should not produce images, got {:?}",
+            images
         );
     }
 }
