@@ -83,7 +83,7 @@ jobs:
             # Skip hidden directories (.fonts, .fontconfig).
             [ "${dir#examples/.}" = "$dir" ] || continue
             args=()
-            for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif; do
+            for img in "${dir}"*.png "${dir}"*.jpg "${dir}"*.gif "${dir}"*.svg; do
               [ -f "$img" ] || continue
               args+=(--image "$(basename "$img")=$img")
             done

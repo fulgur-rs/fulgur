@@ -1,0 +1,16 @@
+body {
+  font-family: "Noto Sans", sans-serif;
+  line-height: 1.5;
+}
+
+ul.png-bullet {
+  list-style: disc url(bullet.png);
+}
+
+ul.svg-bullet {
+  list-style: disc url(bullet.svg);
+}
+
+ul.missing-bullet {
+  list-style: disc url(missing.png);
+}

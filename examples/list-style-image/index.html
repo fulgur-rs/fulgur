@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>list-style-image Examples</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<h1>list-style-image Examples</h1>
+
+<h2>1. PNG bullet</h2>
+<ul class="png-bullet">
+  <li>First item with PNG marker</li>
+  <li>Second item</li>
+  <li>Third item</li>
+</ul>
+
+<h2>2. SVG bullet</h2>
+<ul class="svg-bullet">
+  <li>Vector marker via usvg + krilla-svg</li>
+  <li>Scales with line-height</li>
+</ul>
+
+<h2>3. Shorthand fallback (list-style: disc url(missing))</h2>
+<ul class="missing-bullet">
+  <li>Missing image falls back to text marker</li>
+  <li>Second item still shows disc</li>
+</ul>
+
+<h2>4. Mixed with other content</h2>
+<ul class="png-bullet">
+  <li>Item with <strong>bold</strong> and <em>italic</em></li>
+  <li>Another item</li>
+</ul>
+
+</body>
+</html>
