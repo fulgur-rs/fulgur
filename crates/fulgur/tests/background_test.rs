@@ -103,3 +103,37 @@ fn test_background_clip_padding_box() {
     let pdf = engine.render_html(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+#[test]
+fn test_background_image_svg_renders() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="green"/></svg>"#;
+    let mut assets = AssetBundle::new();
+    assets.add_image("circle.svg", svg.to_vec());
+    let engine = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .assets(assets)
+        .build();
+
+    let html = r#"<html><body>
+        <div style="width:100px;height:100px;background-image:url(circle.svg);background-size:contain;background-repeat:no-repeat"></div>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"), "output should be a PDF");
+
+    // PDF with SVG background should be larger than without (verifies SVG is embedded)
+    let pdf_no_bg = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .build()
+        .render_html(
+            r#"<html><body><div style="width:100px;height:100px"></div></body></html>"#,
+        )
+        .unwrap();
+    assert!(
+        pdf.len() > pdf_no_bg.len(),
+        "PDF with SVG background-image ({} bytes) should be larger than without ({} bytes)",
+        pdf.len(),
+        pdf_no_bg.len()
+    );
+}
