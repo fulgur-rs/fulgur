@@ -225,7 +225,7 @@ fn test_overflow_hidden_page_spanning_clip() {
     let prefix = b"/Type /Page";
     let mut page_count = 0usize;
     let mut i = 0;
-    while i + prefix.len() <= pdf_hidden.len() {
+    while i + prefix.len() < pdf_hidden.len() {
         if &pdf_hidden[i..i + prefix.len()] == prefix {
             let next = pdf_hidden[i + prefix.len()];
             if !next.is_ascii_alphanumeric() {
