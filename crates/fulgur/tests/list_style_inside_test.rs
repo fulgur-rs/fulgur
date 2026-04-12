@@ -137,6 +137,37 @@ fn test_inside_empty_li_does_not_crash() {
     assert!(pdf.starts_with(b"%PDF"));
 }
 
+// Regression: when list-style-position: inside + list-style-image is combined
+// with li::before (also an image pseudo), the marker must appear before
+// ::before in the inline flow (order: marker → ::before → content).
+// The injection code must run pseudo images first so the marker ends up at
+// index 0 after both injections.
+#[test]
+fn test_inside_image_marker_with_before_pseudo_does_not_crash() {
+    let mut assets = AssetBundle::new();
+    assets.add_image("bullet.png", MINIMAL_PNG.to_vec());
+    assets.add_image("pseudo.png", MINIMAL_PNG.to_vec());
+    let engine = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(72.0))
+        .assets(assets)
+        .build();
+    let html = r#"<html><head><style>
+        li::before { content: url(pseudo.png); }
+    </style></head><body>
+        <ul style="list-style-position: inside; list-style-image: url(bullet.png)">
+            <li>Item with pseudo</li>
+        </ul>
+    </body></html>"#;
+    let pdf = engine.render_html(html).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    // Both the marker image and the ::before image should be embedded.
+    assert!(
+        pdf_contains(&pdf, b"/Subtype /Image") || pdf_contains(&pdf, b"/Subtype/Image"),
+        "PDF should embed an Image XObject"
+    );
+}
+
 #[test]
 fn test_inside_and_outside_in_same_document() {
     let engine = build_engine();
