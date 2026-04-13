@@ -36,6 +36,7 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
         // Pass margin offsets as x/y origin to draw
         let mut canvas = Canvas {
             surface: &mut surface,
+            heading_collector: None,
         };
         page_content.draw(
             &mut canvas,
@@ -235,6 +236,7 @@ pub fn render_to_pdf_with_gcpm(
         let mut surface = page.surface();
         let mut canvas = Canvas {
             surface: &mut surface,
+            heading_collector: None,
         };
 
         // Resolve margin boxes: for each position, pick the most specific

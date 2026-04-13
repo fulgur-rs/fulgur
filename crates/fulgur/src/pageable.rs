@@ -182,6 +182,7 @@ impl Default for Pagination {
 /// This decouples Pageable types from Krilla's concrete Surface type.
 pub struct Canvas<'a, 'b> {
     pub surface: &'a mut krilla::surface::Surface<'b>,
+    pub heading_collector: Option<&'a mut HeadingCollector>,
 }
 
 /// Run a draw closure wrapped in opacity guards.
@@ -1401,6 +1402,105 @@ impl Pageable for SpacerPageable {
 
     fn height(&self) -> Pt {
         self.height
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── HeadingMarkerPageable ──────────────────────────────
+
+/// One record captured by `HeadingCollector` during draw.
+#[derive(Debug, Clone)]
+pub struct HeadingEntry {
+    pub page_idx: usize,
+    pub y_pt: Pt,
+    pub level: u8,
+    pub text: String,
+}
+
+/// Shared, mutable collector threaded through `Canvas` during page
+/// rendering. `render.rs` sets `current_page_idx` before drawing each page;
+/// `HeadingMarkerPageable::draw` pushes an entry for each marker it sees.
+#[derive(Debug, Default)]
+pub struct HeadingCollector {
+    current_page_idx: usize,
+    entries: Vec<HeadingEntry>,
+}
+
+impl HeadingCollector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_current_page(&mut self, idx: usize) {
+        self.current_page_idx = idx;
+    }
+
+    pub fn record(&mut self, level: u8, text: String, y_pt: Pt) {
+        self.entries.push(HeadingEntry {
+            page_idx: self.current_page_idx,
+            y_pt,
+            level,
+            text,
+        });
+    }
+
+    pub fn into_entries(self) -> Vec<HeadingEntry> {
+        self.entries
+    }
+}
+
+/// Zero-size marker for a heading element, for PDF outline generation.
+/// Attached to the heading's block so the marker travels with the first
+/// fragment on page splits (see `HeadingMarkerWrapperPageable`).
+#[derive(Clone)]
+pub struct HeadingMarkerPageable {
+    pub level: u8,
+    pub text: String,
+}
+
+impl HeadingMarkerPageable {
+    pub fn new(level: u8, text: String) -> Self {
+        Self { level, text }
+    }
+
+    /// Helper used by both `draw` and unit tests — records into the collector
+    /// if one is present.
+    pub fn record_if_collecting(&self, y: Pt, collector: Option<&mut HeadingCollector>) {
+        if let Some(c) = collector {
+            c.record(self.level, self.text.clone(), y);
+        }
+    }
+}
+
+impl Pageable for HeadingMarkerPageable {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn split(
+        &self,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        None
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, _x: Pt, y: Pt, _aw: Pt, _ah: Pt) {
+        self.record_if_collecting(y, canvas.heading_collector.as_deref_mut());
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -3022,5 +3122,43 @@ mod transform_wrapper_tests {
         let size = w.wrap(1000.0, 1000.0);
         assert!(approx(size.width, 100.0));
         assert!(approx(size.height, 100.0));
+    }
+
+    #[test]
+    fn heading_marker_is_zero_sized_and_draws_nothing() {
+        let m = HeadingMarkerPageable::new(1, "Chapter 1".to_string());
+        let size = {
+            let mut c = m.clone();
+            c.wrap(100.0, 100.0)
+        };
+        assert_eq!(size.width, 0.0);
+        assert_eq!(size.height, 0.0);
+        assert_eq!(m.height(), 0.0);
+        assert_eq!(m.level, 1);
+        assert_eq!(m.text, "Chapter 1");
+    }
+
+    #[test]
+    fn heading_collector_records_entry_on_draw() {
+        use crate::pageable::HeadingCollector;
+        let mut collector = HeadingCollector::new();
+        collector.set_current_page(2);
+
+        let marker = HeadingMarkerPageable::new(2, "Section".to_string());
+
+        // Build a krilla surface stand-in. Since we can't easily construct a real
+        // Surface in unit tests, only verify the collector path: the marker
+        // records to the collector via a helper, not via Canvas plumbing directly.
+        //
+        // Therefore: expose a `HeadingMarkerPageable::record_if_collecting(y, collector)`
+        // helper that the test calls directly.
+        marker.record_if_collecting(42.0, Some(&mut collector));
+
+        let entries = collector.into_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_idx, 2);
+        assert_eq!(entries[0].y_pt, 42.0);
+        assert_eq!(entries[0].level, 2);
+        assert_eq!(entries[0].text, "Section");
     }
 }
