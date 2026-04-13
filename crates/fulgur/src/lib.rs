@@ -12,6 +12,7 @@ pub mod error;
 pub mod gcpm;
 pub mod image;
 pub(crate) mod net;
+pub mod outline;
 pub mod pageable;
 pub mod paginate;
 pub mod paragraph;
@@ -23,6 +24,7 @@ pub mod template;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
 pub use engine::{Engine, EngineBuilder};
 pub use error::{Error, Result};
+pub use outline::build_outline;
 
 /// Convert HTML to PDF with default settings.
 pub fn convert_html(html: &str) -> Result<Vec<u8>> {
