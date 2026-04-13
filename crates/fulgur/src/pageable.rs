@@ -1412,7 +1412,7 @@ impl Pageable for SpacerPageable {
 // ─── HeadingMarkerPageable ──────────────────────────────
 
 /// One record captured by `HeadingCollector` during draw.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HeadingEntry {
     pub page_idx: usize,
     pub y_pt: Pt,
