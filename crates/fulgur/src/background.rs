@@ -12,7 +12,8 @@ use crate::pageable::{
 /// Per CSS Backgrounds §7.2, shadows are painted in reverse declaration order
 /// (last-declared shadow at the bottom of the paint stack, first-declared on top).
 /// Outer shadows are drawn _below_ the element's background and border.
-/// `inset` shadows are currently unsupported and filtered out upstream.
+/// `inset` shadows are currently unsupported and excluded upstream in
+/// `convert.rs::extract_block_style` (never pushed into `box_shadows`).
 pub fn draw_box_shadows(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -26,7 +27,7 @@ pub fn draw_box_shadows(
     }
     for shadow in style.box_shadows.iter().rev() {
         if shadow.inset {
-            continue; // defensive; should already be filtered in convert.rs
+            continue; // defensive; inset shadows are excluded upstream in convert.rs
         }
         draw_single_box_shadow(canvas, style, shadow, x, y, w, h);
     }
