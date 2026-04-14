@@ -101,6 +101,18 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
     }
 }
 
+/// Return heading level (1-6) for `<h1>` … `<h6>`, else None.
+fn heading_level(node: &Node) -> Option<u8> {
+    let elem = node.element_data()?;
+    let tag = elem.name.local.as_ref();
+    let bytes = tag.as_bytes();
+    if bytes.len() == 2 && bytes[0] == b'h' && (b'1'..=b'6').contains(&bytes[1]) {
+        Some(bytes[1] - b'0')
+    } else {
+        None
+    }
+}
+
 fn convert_node(
     doc: &blitz_dom::BaseDocument,
     node_id: usize,
@@ -113,7 +125,32 @@ fn convert_node(
     let result = convert_node_inner(doc, node_id, ctx, depth);
     let result = maybe_prepend_string_set(node_id, result, ctx);
     let result = maybe_prepend_counter_ops(node_id, result, ctx);
-    maybe_wrap_transform(doc, node_id, result)
+    let result = maybe_wrap_transform(doc, node_id, result);
+    maybe_wrap_heading(doc, node_id, result)
+}
+
+/// Wrap the result with `HeadingMarkerWrapperPageable` if the node is an
+/// `h1`-`h6` element, so its position is captured during draw for PDF outline.
+fn maybe_wrap_heading(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    result: Box<dyn Pageable>,
+) -> Box<dyn Pageable> {
+    use crate::pageable::{HeadingMarkerPageable, HeadingMarkerWrapperPageable};
+    let Some(node) = doc.get_node(node_id) else {
+        return result;
+    };
+    let Some(level) = heading_level(node) else {
+        return result;
+    };
+    let text = crate::gcpm::string_set::extract_text_content(doc, node_id);
+    if text.is_empty() {
+        return result;
+    }
+    Box::new(HeadingMarkerWrapperPageable::new(
+        HeadingMarkerPageable::new(level, text),
+        result,
+    ))
 }
 
 /// If the given node has string-set entries, wrap the pageable in a
@@ -3130,5 +3167,72 @@ mod tests {
             "missing asset should not produce images, got {:?}",
             images
         );
+    }
+
+    #[test]
+    fn h1_wraps_block_with_heading_marker() {
+        use crate::pageable::HeadingMarkerWrapperPageable;
+
+        let html = r#"<html><body><h1>Chapter One</h1></body></html>"#;
+        let doc = crate::blitz_adapter::parse_and_layout(html, 500.0, 500.0, &[]);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let root = dom_to_pageable(&doc, &mut ctx);
+
+        fn collect(p: &dyn crate::pageable::Pageable, out: &mut Vec<(u8, String)>) {
+            let any = p.as_any();
+            if let Some(w) = any.downcast_ref::<HeadingMarkerWrapperPageable>() {
+                out.push((w.marker.level, w.marker.text.clone()));
+                collect(w.child.as_ref(), out);
+                return;
+            }
+            if let Some(b) = any.downcast_ref::<crate::pageable::BlockPageable>() {
+                for c in &b.children {
+                    collect(c.child.as_ref(), out);
+                }
+            }
+        }
+        let mut found = vec![];
+        collect(root.as_ref(), &mut found);
+        assert_eq!(found, vec![(1u8, "Chapter One".to_string())]);
+    }
+
+    #[test]
+    fn h3_produces_level_3_marker() {
+        use crate::pageable::HeadingMarkerWrapperPageable;
+
+        let html = r#"<html><body><h3>Subsection</h3></body></html>"#;
+        let doc = crate::blitz_adapter::parse_and_layout(html, 500.0, 500.0, &[]);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+        };
+        let root = dom_to_pageable(&doc, &mut ctx);
+
+        fn find(p: &dyn crate::pageable::Pageable) -> Option<(u8, String)> {
+            let any = p.as_any();
+            if let Some(w) = any.downcast_ref::<HeadingMarkerWrapperPageable>() {
+                return Some((w.marker.level, w.marker.text.clone()));
+            }
+            if let Some(b) = any.downcast_ref::<crate::pageable::BlockPageable>() {
+                for c in &b.children {
+                    if let Some(h) = find(c.child.as_ref()) {
+                        return Some(h);
+                    }
+                }
+            }
+            None
+        }
+        assert_eq!(find(root.as_ref()), Some((3u8, "Subsection".to_string())));
     }
 }

@@ -182,6 +182,7 @@ impl Default for Pagination {
 /// This decouples Pageable types from Krilla's concrete Surface type.
 pub struct Canvas<'a, 'b> {
     pub surface: &'a mut krilla::surface::Surface<'b>,
+    pub heading_collector: Option<&'a mut HeadingCollector>,
 }
 
 /// Run a draw closure wrapped in opacity guards.
@@ -1443,6 +1444,164 @@ impl Pageable for SpacerPageable {
 
     fn height(&self) -> Pt {
         self.height
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── HeadingMarkerPageable ──────────────────────────────
+
+/// One record captured by `HeadingCollector` during draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeadingEntry {
+    pub page_idx: usize,
+    pub y_pt: Pt,
+    pub level: u8,
+    pub text: String,
+}
+
+/// Shared, mutable collector threaded through `Canvas` during page
+/// rendering. `render.rs` sets `current_page_idx` before drawing each page;
+/// `HeadingMarkerPageable::draw` pushes an entry for each marker it sees.
+#[derive(Debug, Default)]
+pub struct HeadingCollector {
+    current_page_idx: usize,
+    entries: Vec<HeadingEntry>,
+}
+
+impl HeadingCollector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_current_page(&mut self, idx: usize) {
+        self.current_page_idx = idx;
+    }
+
+    pub fn record(&mut self, level: u8, text: String, y_pt: Pt) {
+        self.entries.push(HeadingEntry {
+            page_idx: self.current_page_idx,
+            y_pt,
+            level,
+            text,
+        });
+    }
+
+    pub fn into_entries(self) -> Vec<HeadingEntry> {
+        self.entries
+    }
+}
+
+/// Zero-size marker for a heading element, for PDF outline generation.
+/// Attached to the heading's block so the marker travels with the first
+/// fragment on page splits (see `HeadingMarkerWrapperPageable`).
+#[derive(Clone)]
+pub struct HeadingMarkerPageable {
+    pub level: u8,
+    pub text: String,
+}
+
+impl HeadingMarkerPageable {
+    pub fn new(level: u8, text: String) -> Self {
+        Self { level, text }
+    }
+
+    /// Helper used by both `draw` and unit tests — records into the collector
+    /// if one is present.
+    pub fn record_if_collecting(&self, y: Pt, collector: Option<&mut HeadingCollector>) {
+        if let Some(c) = collector {
+            c.record(self.level, self.text.clone(), y);
+        }
+    }
+}
+
+impl Pageable for HeadingMarkerPageable {
+    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn split(
+        &self,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        None
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, _x: Pt, y: Pt, _aw: Pt, _ah: Pt) {
+        self.record_if_collecting(y, canvas.heading_collector.as_deref_mut());
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        0.0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─── HeadingMarkerWrapperPageable ──────────────────────────
+
+/// Wraps a Pageable with a `HeadingMarkerPageable`, keeping the marker
+/// attached to the first fragment on `split()` so outline anchors land on
+/// the page where the heading visually starts.
+#[derive(Clone)]
+pub struct HeadingMarkerWrapperPageable {
+    pub marker: HeadingMarkerPageable,
+    pub child: Box<dyn Pageable>,
+}
+
+impl HeadingMarkerWrapperPageable {
+    pub fn new(marker: HeadingMarkerPageable, child: Box<dyn Pageable>) -> Self {
+        Self { marker, child }
+    }
+}
+
+impl Pageable for HeadingMarkerWrapperPageable {
+    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
+        self.child.wrap(avail_width, avail_height)
+    }
+
+    fn split(
+        &self,
+        avail_width: Pt,
+        avail_height: Pt,
+    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
+        let (first, second) = self.child.split(avail_width, avail_height)?;
+        let first_wrapped = HeadingMarkerWrapperPageable {
+            marker: self.marker.clone(),
+            child: first,
+        };
+        // Second fragment does NOT carry the marker — the heading started on
+        // the previous page.
+        Some((Box::new(first_wrapped), second))
+    }
+
+    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, aw: Pt, ah: Pt) {
+        self.marker.draw(canvas, x, y, aw, ah);
+        self.child.draw(canvas, x, y, aw, ah);
+    }
+
+    fn clone_box(&self) -> Box<dyn Pageable> {
+        Box::new(self.clone())
+    }
+
+    fn height(&self) -> Pt {
+        self.child.height()
+    }
+
+    fn pagination(&self) -> Pagination {
+        self.child.pagination()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -3100,5 +3259,94 @@ mod transform_wrapper_tests {
         let size = w.wrap(1000.0, 1000.0);
         assert!(approx(size.width, 100.0));
         assert!(approx(size.height, 100.0));
+    }
+
+    #[test]
+    fn heading_marker_is_zero_sized_and_draws_nothing() {
+        let m = HeadingMarkerPageable::new(1, "Chapter 1".to_string());
+        let size = {
+            let mut c = m.clone();
+            c.wrap(100.0, 100.0)
+        };
+        assert_eq!(size.width, 0.0);
+        assert_eq!(size.height, 0.0);
+        assert_eq!(m.height(), 0.0);
+        assert_eq!(m.level, 1);
+        assert_eq!(m.text, "Chapter 1");
+    }
+
+    #[test]
+    fn heading_wrapper_keeps_marker_with_first_fragment() {
+        // Build a splittable block: two 500pt spacers stacked so the
+        // boundary at y=500 is inside the available 500pt window.
+        let mut top = SpacerPageable::new(500.0);
+        top.wrap(500.0, 1000.0);
+        let mut bot = SpacerPageable::new(500.0);
+        bot.wrap(500.0, 1000.0);
+        let mut block = BlockPageable::with_positioned_children(vec![
+            PositionedChild {
+                child: Box::new(top),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: Box::new(bot),
+                x: 0.0,
+                y: 500.0,
+            },
+        ]);
+        block.wrap(500.0, 1000.0);
+
+        let child: Box<dyn Pageable> = Box::new(block);
+        let marker = HeadingMarkerPageable::new(1, "Title".into());
+        let wrapper = HeadingMarkerWrapperPageable::new(marker, child);
+
+        // Split at 500pt.
+        let split = wrapper.split(500.0, 500.0);
+        let (first, _second) = split.expect("tall child must split");
+
+        // First must contain the HeadingMarkerPageable.
+        let any = first.as_any();
+        let w = any
+            .downcast_ref::<HeadingMarkerWrapperPageable>()
+            .expect("first fragment wraps marker");
+        assert_eq!(w.marker.text, "Title");
+    }
+
+    #[test]
+    fn heading_wrapper_forwards_pagination() {
+        let block = BlockPageable::with_positioned_children(vec![]).with_pagination(Pagination {
+            break_before: BreakBefore::Page,
+            ..Pagination::default()
+        });
+        let wrapper = HeadingMarkerWrapperPageable::new(
+            HeadingMarkerPageable::new(1, "T".into()),
+            Box::new(block),
+        );
+        assert_eq!(wrapper.pagination().break_before, BreakBefore::Page);
+    }
+
+    #[test]
+    fn heading_collector_records_entry_on_draw() {
+        use crate::pageable::HeadingCollector;
+        let mut collector = HeadingCollector::new();
+        collector.set_current_page(2);
+
+        let marker = HeadingMarkerPageable::new(2, "Section".to_string());
+
+        // Build a krilla surface stand-in. Since we can't easily construct a real
+        // Surface in unit tests, only verify the collector path: the marker
+        // records to the collector via a helper, not via Canvas plumbing directly.
+        //
+        // Therefore: expose a `HeadingMarkerPageable::record_if_collecting(y, collector)`
+        // helper that the test calls directly.
+        marker.record_if_collecting(42.0, Some(&mut collector));
+
+        let entries = collector.into_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_idx, 2);
+        assert_eq!(entries[0].y_pt, 42.0);
+        assert_eq!(entries[0].level, 2);
+        assert_eq!(entries[0].text, "Section");
     }
 }

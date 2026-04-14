@@ -216,6 +216,10 @@ enum Commands {
         /// MiniJinja JSON data file for template rendering ("-" for stdin, see `fulgur template`)
         #[arg(long = "data", short = 'd')]
         data: Option<PathBuf>,
+
+        /// Generate PDF bookmarks (outline) from h1-h6 headings.
+        #[arg(long)]
+        bookmarks: bool,
     },
     /// Template utilities (powered by MiniJinja)
     Template {
@@ -312,6 +316,7 @@ fn main() {
             css_files,
             images,
             data,
+            bookmarks,
         } => {
             if stdin && data.as_ref().is_some_and(|p| p.as_os_str() == "-") {
                 eprintln!("Error: cannot use --stdin and --data - together (both read stdin)");
@@ -419,6 +424,9 @@ fn main() {
             }
             if let Some(creation_date) = creation_date {
                 builder = builder.creation_date(creation_date);
+            }
+            if bookmarks {
+                builder = builder.bookmarks(true);
             }
             if let Some(ref base_path) = base_path {
                 builder = builder.base_path(base_path);

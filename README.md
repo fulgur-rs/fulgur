@@ -98,6 +98,7 @@ fulgur render -o invoice.pdf -d data.json template.html
 | `--css` | CSS files to include (repeatable) | — |
 | `-i, --image` | Image files to bundle as name=path (repeatable) | — |
 | `-d, --data` | JSON data file for template mode (use `-` for stdin) | — |
+| `--bookmarks` | Generate PDF bookmarks (outline) from `h1`-`h6` headings | false |
 | `--stdin` | Read HTML from stdin | false |
 
 ## Library Usage

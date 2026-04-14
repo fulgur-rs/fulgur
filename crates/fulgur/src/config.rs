@@ -97,6 +97,8 @@ pub struct Config {
     pub producer: Option<String>,
     pub creation_date: Option<String>,
     pub lang: Option<String>,
+    /// Generate PDF bookmarks (outline) from h1–h6 headings.
+    pub bookmarks: bool,
 }
 
 impl Default for Config {
@@ -114,6 +116,7 @@ impl Default for Config {
             producer: Some(format!("fulgur v{}", env!("CARGO_PKG_VERSION"))),
             creation_date: None,
             lang: None,
+            bookmarks: false,
         }
     }
 }
@@ -214,6 +217,11 @@ impl ConfigBuilder {
 
     pub fn lang(mut self, lang: impl Into<String>) -> Self {
         self.config.lang = Some(lang.into());
+        self
+    }
+
+    pub fn bookmarks(mut self, enabled: bool) -> Self {
+        self.config.bookmarks = enabled;
         self
     }
 

@@ -312,6 +312,11 @@ impl EngineBuilder {
         self
     }
 
+    pub fn bookmarks(mut self, enabled: bool) -> Self {
+        self.config_builder = self.config_builder.bookmarks(enabled);
+        self
+    }
+
     pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config_builder = self.config_builder.authors(authors);
         self
@@ -376,6 +381,18 @@ impl EngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_bookmarks_defaults_to_false() {
+        let engine = Engine::builder().build();
+        assert!(!engine.config().bookmarks);
+    }
+
+    #[test]
+    fn builder_bookmarks_opt_in() {
+        let engine = Engine::builder().bookmarks(true).build();
+        assert!(engine.config().bookmarks);
+    }
 
     #[test]
     fn test_engine_builder_base_path() {

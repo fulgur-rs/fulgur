@@ -1092,6 +1092,7 @@ dependencies = [
  "fulgur",
  "libc",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
