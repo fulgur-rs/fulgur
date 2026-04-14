@@ -8,3 +8,9 @@ rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mitsuru/fulgur"
 homepage = "https://github.com/mitsuru/fulgur"
+
+[patch.crates-io]
+blitz-dom = { git = "https://github.com/mitsuru/blitz", branch = "set-media-type-v0.2.x" }
+blitz-traits = { git = "https://github.com/mitsuru/blitz", branch = "set-media-type-v0.2.x" }
+blitz-html = { git = "https://github.com/mitsuru/blitz", branch = "set-media-type-v0.2.x" }
+stylo_taffy = { git = "https://github.com/mitsuru/blitz", branch = "set-media-type-v0.2.x" }
