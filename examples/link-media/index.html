@@ -8,6 +8,6 @@
 </head>
 <body>
   <h1>Hello</h1>
-  <p>This paragraph reads in the "base" color both in a browser and in fulgur's PDF output. The <code>print-only.css</code> stylesheet is restricted to <code>media="print"</code>; fulgur currently renders with <code>media="screen"</code>, so its rules are excluded.</p>
+  <p>This paragraph is styled by both <code>base.css</code> and <code>print-only.css</code>. fulgur renders as <code>media="print"</code>, so the <code>media="print"</code> stylesheet applies: the body becomes red on yellow and each paragraph gains a dotted-red underline. Opening the same file in a browser shows the plain "base" color instead, because a browser uses <code>media="screen"</code>.</p>
 </body>
 </html>
