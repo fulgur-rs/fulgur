@@ -245,4 +245,37 @@ mod tests {
         }
         assert_eq!(bundle.fonts.len(), 0);
     }
+
+    #[test]
+    fn test_add_font_bytes_woff2_decodes_to_ttf_or_otf() {
+        let data = std::fs::read("tests/fixtures/fonts/NotoSans-Regular.woff2")
+            .expect("fixture must exist");
+        assert_eq!(detect_font_format(&data), FontFormat::Woff2);
+
+        let mut bundle = AssetBundle::new();
+        bundle.add_font_bytes(data).expect("WOFF2 should decode");
+        assert_eq!(bundle.fonts.len(), 1);
+
+        let decoded = &bundle.fonts[0];
+        let magic = &decoded[0..4];
+        assert!(
+            magic == [0x00, 0x01, 0x00, 0x00] || magic == b"OTTO",
+            "decoded magic should be TTF or OTF, got {magic:?}"
+        );
+    }
+
+    #[test]
+    fn test_add_font_bytes_woff2_invalid_returns_error() {
+        use crate::error::Error;
+        let mut bundle = AssetBundle::new();
+        let fake = b"wOF2\x00\x00\x00\x00garbagegarbagegarbage".to_vec();
+        let err = bundle
+            .add_font_bytes(fake)
+            .expect_err("bad WOFF2 must error");
+        match err {
+            Error::WoffDecode(_) => {}
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(bundle.fonts.len(), 0);
+    }
 }
