@@ -1,0 +1,12 @@
+body { font-family: "Noto Sans", sans-serif; color: #1f2937; }
+h1 { color: #064e3b; }
+
+@media screen {
+  .print-only { display: none; }
+  .screen-only { color: #0f766e; }
+}
+
+@media print {
+  .screen-only { display: none; }
+  .print-only { color: #9f1239; font-weight: bold; }
+}
