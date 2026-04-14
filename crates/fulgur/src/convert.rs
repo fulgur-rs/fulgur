@@ -1759,6 +1759,39 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
             ],
         ];
 
+        // Box shadows
+        let shadow_list = styles.clone_box_shadow();
+        for shadow in shadow_list.0.iter() {
+            if shadow.inset {
+                log::warn!("box-shadow: inset is not yet supported; skipping");
+                continue;
+            }
+            let blur_px = shadow.base.blur.px();
+            if blur_px > 0.0 {
+                log::warn!(
+                    "box-shadow: blur-radius > 0 is not yet supported; \
+                     drawing as blur=0 (blur={}px)",
+                    blur_px
+                );
+            }
+            let color_abs = shadow.base.color.resolve_to_absolute(&current_color);
+            let r = (color_abs.components.0.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let g = (color_abs.components.1.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let b = (color_abs.components.2.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let a = (color_abs.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if a == 0 {
+                continue; // fully transparent — skip
+            }
+            style.box_shadows.push(crate::pageable::BoxShadow {
+                offset_x: shadow.base.horizontal.px(),
+                offset_y: shadow.base.vertical.px(),
+                blur: blur_px,
+                spread: shadow.spread.px(),
+                color: [r, g, b, a],
+                inset: false,
+            });
+        }
+
         // Border styles
         let convert_border_style = |bs: style::values::specified::BorderStyle| -> BorderStyleValue {
             use style::values::specified::BorderStyle as BS;

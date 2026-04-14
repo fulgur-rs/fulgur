@@ -14,6 +14,9 @@ path = "basic/borders.html"
 path = "basic/border-radius.html"
 
 [[fixture]]
+path = "basic/box-shadow.html"
+
+[[fixture]]
 path = "layout/flex-row.html"
 
 [[fixture]]

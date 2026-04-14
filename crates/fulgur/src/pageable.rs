@@ -261,6 +261,23 @@ impl Clone for Box<dyn Pageable> {
 
 // ─── BlockStyle ──────────────────────────────────────────
 
+/// A resolved single box-shadow value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxShadow {
+    /// Horizontal offset in points.
+    pub offset_x: f32,
+    /// Vertical offset in points.
+    pub offset_y: f32,
+    /// Blur radius in points. Currently unused for rendering (v0.4.5 draws blur=0).
+    pub blur: f32,
+    /// Spread radius in points. Negative values shrink the shadow.
+    pub spread: f32,
+    /// Shadow color as RGBA.
+    pub color: [u8; 4],
+    /// Whether this is an inset shadow. Currently unsupported (skipped at draw time).
+    pub inset: bool,
+}
+
 /// Visual style for a block element.
 #[derive(Clone, Debug, Default)]
 pub struct BlockStyle {
@@ -282,6 +299,8 @@ pub struct BlockStyle {
     pub overflow_x: Overflow,
     /// `overflow-y` value
     pub overflow_y: Overflow,
+    /// Box shadows in CSS declaration order (first = top-most in paint stack).
+    pub box_shadows: Vec<BoxShadow>,
 }
 
 /// CSS border-style values supported by fulgur.
@@ -410,6 +429,7 @@ impl BlockStyle {
             || !self.background_layers.is_empty()
             || self.border_widths.iter().any(|&w| w > 0.0)
             || self.padding.iter().any(|&p| p > 0.0)
+            || !self.box_shadows.is_empty()
     }
 
     /// Returns (left_inset, top_inset) for content positioning inside border+padding.
@@ -594,6 +614,23 @@ pub fn build_rounded_rect_path(
     h: f32,
     radii: &[[f32; 2]; 4],
 ) -> Option<krilla::geom::Path> {
+    let mut pb = krilla::geom::PathBuilder::new();
+    append_rounded_rect_subpath(&mut pb, x, y, w, h, radii);
+    pb.finish()
+}
+
+/// Append a rounded rectangle as a subpath to an existing `PathBuilder`.
+///
+/// Useful for composing compound paths (e.g., ring shapes for box-shadow clipping).
+/// The subpath is self-closing; the caller can continue adding subpaths after this returns.
+pub(crate) fn append_rounded_rect_subpath(
+    pb: &mut krilla::geom::PathBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: &[[f32; 2]; 4],
+) {
     // Bézier approximation constant for quarter circle
     const KAPPA: f32 = 0.552_284_8;
 
@@ -618,8 +655,6 @@ pub fn build_rounded_rect_path(
         [radii[2][0] * f, radii[2][1] * f],
         [radii[3][0] * f, radii[3][1] * f],
     ];
-
-    let mut pb = krilla::geom::PathBuilder::new();
 
     // Start at top-left corner (after radius)
     pb.move_to(x + r[0][0], y);
@@ -677,7 +712,6 @@ pub fn build_rounded_rect_path(
     }
 
     pb.close();
-    pb.finish()
 }
 
 /// Build a clip path for `overflow` based on the padding box.
@@ -1305,6 +1339,14 @@ impl Pageable for BlockPageable {
 
             // visibility: hidden skips own rendering but children still draw
             if self.visible {
+                crate::background::draw_box_shadows(
+                    canvas,
+                    &self.style,
+                    x,
+                    y,
+                    total_width,
+                    total_height,
+                );
                 crate::background::draw_background(
                     canvas,
                     &self.style,
@@ -2235,6 +2277,14 @@ impl Pageable for TablePageable {
                 .unwrap_or(self.cached_height);
 
             if self.visible {
+                crate::background::draw_box_shadows(
+                    canvas,
+                    &self.style,
+                    x,
+                    y,
+                    total_width,
+                    total_height,
+                );
                 crate::background::draw_background(
                     canvas,
                     &self.style,
@@ -2633,6 +2683,34 @@ mod background_tests {
             clip: BgClip::BorderBox,
         });
         assert!(style.has_visual_style());
+    }
+
+    #[test]
+    fn has_visual_style_with_only_box_shadow() {
+        let style = BlockStyle {
+            box_shadows: vec![BoxShadow {
+                offset_x: 2.0,
+                offset_y: 2.0,
+                blur: 0.0,
+                spread: 0.0,
+                color: [0, 0, 0, 255],
+                inset: false,
+            }],
+            ..Default::default()
+        };
+        assert!(style.has_visual_style());
+    }
+
+    /// Pin BoxShadow default values to guard against accidental derive changes.
+    #[test]
+    fn box_shadow_default_values() {
+        let d = BoxShadow::default();
+        assert_eq!(d.offset_x, 0.0);
+        assert_eq!(d.offset_y, 0.0);
+        assert_eq!(d.blur, 0.0);
+        assert_eq!(d.spread, 0.0);
+        assert_eq!(d.color, [0, 0, 0, 0]);
+        assert!(!d.inset);
     }
 }
 

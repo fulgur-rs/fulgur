@@ -7,6 +7,122 @@ use crate::pageable::{
     BlockStyle, Canvas,
 };
 
+/// Draw outer box-shadows behind the element's background.
+///
+/// Per CSS Backgrounds §7.2, shadows are painted in reverse declaration order
+/// (last-declared shadow at the bottom of the paint stack, first-declared on top).
+/// Outer shadows are drawn _below_ the element's background and border.
+/// `inset` shadows are currently unsupported and excluded upstream in
+/// `convert.rs::extract_block_style` (never pushed into `box_shadows`).
+pub fn draw_box_shadows(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    if style.box_shadows.is_empty() {
+        return;
+    }
+    for shadow in style.box_shadows.iter().rev() {
+        if shadow.inset {
+            continue; // defensive; inset shadows are excluded upstream in convert.rs
+        }
+        draw_single_box_shadow(canvas, style, shadow, x, y, w, h);
+    }
+}
+
+fn draw_single_box_shadow(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    shadow: &crate::pageable::BoxShadow,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    // NOTE: when blur rendering is implemented (fulgur-4ie follow-up), this rect
+    // must also be expanded by the blur radius, and the blur extent drawn via
+    // rasterization + gaussian blur + image embed.
+    let sx = x + shadow.offset_x - shadow.spread;
+    let sy = y + shadow.offset_y - shadow.spread;
+    let sw = w + 2.0 * shadow.spread;
+    let sh = h + 2.0 * shadow.spread;
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+
+    // Build the (expanded) shadow shape.
+    let shadow_path = if style.has_radius() {
+        let radii = expand_radii(&style.border_radii, shadow.spread);
+        crate::pageable::build_rounded_rect_path(sx, sy, sw, sh, &radii)
+    } else {
+        build_rect_path(sx, sy, sw, sh)
+    };
+    let Some(shadow_path) = shadow_path else {
+        return;
+    };
+
+    // Per CSS Backgrounds §7.2, outer shadows are only visible *outside* the
+    // element's border-box. If we painted the expanded shape directly, elements
+    // with transparent or semi-transparent backgrounds would show the shadow
+    // bleeding through the interior. To prevent this we clip the shadow by
+    // excluding the border-box using an EvenOdd clip path: the clip region
+    // covers the shadow's bounding box minus the border-box.
+    let clip_path = {
+        let mut pb = krilla::geom::PathBuilder::new();
+        let Some(bbox) = krilla::geom::Rect::from_xywh(sx, sy, sw, sh) else {
+            return;
+        };
+        pb.push_rect(bbox);
+        if style.has_radius() {
+            crate::pageable::append_rounded_rect_subpath(&mut pb, x, y, w, h, &style.border_radii);
+        } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
+            pb.push_rect(box_rect);
+        } else {
+            return;
+        }
+        pb.finish()
+    };
+    let Some(clip_path) = clip_path else { return };
+
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+
+    let [r, g, b, a] = shadow.color;
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: krilla::color::rgb::Color::new(r, g, b).into(),
+        opacity: krilla::num::NormalizedF32::new(a as f32 / 255.0)
+            .unwrap_or(krilla::num::NormalizedF32::ONE),
+        rule: Default::default(),
+    }));
+    canvas.surface.set_stroke(None);
+    canvas.surface.draw_path(&shadow_path);
+
+    canvas.surface.pop();
+}
+
+/// Expand border radii by `spread`. Negative `spread` clamps to zero per CSS spec
+/// (shadow corners become sharp when spread < -radius). Corners with zero radius
+/// stay sharp regardless of spread, per CSS Backgrounds and Borders Level 3.
+fn expand_radii(outer: &[[f32; 2]; 4], spread: f32) -> [[f32; 2]; 4] {
+    let expand = |r: f32| {
+        if r == 0.0 {
+            0.0
+        } else {
+            f32::max(r + spread, 0.0)
+        }
+    };
+    [
+        [expand(outer[0][0]), expand(outer[0][1])],
+        [expand(outer[1][0]), expand(outer[1][1])],
+        [expand(outer[2][0]), expand(outer[2][1])],
+        [expand(outer[3][0]), expand(outer[3][1])],
+    ]
+}
+
 /// Draw all background layers for a block element.
 pub fn draw_background(
     canvas: &mut Canvas<'_, '_>,
@@ -483,5 +599,37 @@ mod tests {
             resolve_repeat_axis(BgRepeat::Repeat, 25.0, 20.0, 10.0, 100.0);
         assert_eq!(size, 20.0);
         assert_eq!(start, 5.0);
+    }
+
+    #[test]
+    fn expand_radii_positive_spread_increases_each_corner() {
+        let outer = [[10.0, 10.0]; 4];
+        let got = expand_radii(&outer, 5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 15.0);
+            assert_eq!(corner[1], 15.0);
+        }
+    }
+
+    #[test]
+    fn expand_radii_negative_spread_clamps_to_zero() {
+        let outer = [[2.0, 2.0]; 4];
+        let got = expand_radii(&outer, -5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 0.0);
+            assert_eq!(corner[1], 0.0);
+        }
+    }
+
+    /// Sharp corners (r == 0) must stay sharp even when spread is positive,
+    /// per CSS Backgrounds and Borders Level 3 §7.2.
+    #[test]
+    fn expand_radii_zero_radii_unchanged() {
+        let outer = [[0.0, 0.0]; 4];
+        let got = expand_radii(&outer, 5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 0.0);
+            assert_eq!(corner[1], 0.0);
+        }
     }
 }

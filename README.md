@@ -28,6 +28,7 @@ Built in Rust for server-side workloads where memory footprint and startup time 
 - Page sizes (A4 / Letter / A3) with landscape support
 - PDF metadata (title, author, keywords, language)
 - PDF bookmarks from heading structure
+- [CSS property support reference](docs/css-support.md)
 
 ## Installation
 

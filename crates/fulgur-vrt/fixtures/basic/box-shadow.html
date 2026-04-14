@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head><style>
+  body { margin: 0; padding: 20px; font-family: sans-serif; }
+  .box { width: 120px; height: 40px; background: #fff;
+         margin: 0 0 20px 0; padding: 10px; }
+  .basic  { box-shadow: 4px 4px 0 #888; }
+  .spread { box-shadow: 0 0 0 4px #c33; }
+  .multi  { box-shadow: 2px 2px 0 red, 6px 6px 0 blue; }
+  .alpha  { box-shadow: 4px 4px 0 rgba(0,0,0,0.4); }
+  .radius { border-radius: 12px; box-shadow: 4px 4px 0 2px #888; }
+  .neg    { background: #fcc; box-shadow: 0 4px 0 -2px #333; }
+  /* inset should be silently skipped (v0.4.5 limitation); just verify no crash. */
+  .inset-skip { box-shadow: inset 4px 4px 0 red; }
+</style></head>
+<body>
+  <div class="box basic">basic</div>
+  <div class="box spread">spread</div>
+  <div class="box multi">multi</div>
+  <div class="box alpha">alpha</div>
+  <div class="box radius">radius</div>
+  <div class="box neg">negative spread</div>
+  <div class="box inset-skip">inset (skipped)</div>
+</body>
+</html>
