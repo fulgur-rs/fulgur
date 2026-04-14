@@ -21,6 +21,7 @@
 //! for the full investigation and rationale.
 
 use blitz_dom::DocumentConfig;
+use blitz_dom::MediaType;
 use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
 use blitz_traits::net::{NetProvider, Url};
@@ -183,6 +184,7 @@ fn parse_inner(
         font_ctx,
         base_url: Some(base_url.unwrap_or_else(|| "file:///".to_string())),
         net_provider,
+        media_type: Some(MediaType::print()),
         ..DocumentConfig::default()
     };
 
