@@ -1320,6 +1320,7 @@ fn escape_css_url(raw: &str) -> String {
             '"' => out.push_str(r#"\""#),
             '\n' => out.push_str(r"\a "),
             '\r' => out.push_str(r"\d "),
+            '\x0c' => out.push_str(r"\c "),
             _ => out.push(ch),
         }
     }
@@ -1810,6 +1811,8 @@ mod tests {
         assert_eq!(escape_css_url(r#"a"b.css"#), r#"a\"b.css"#);
         assert_eq!(escape_css_url(r"a\b.css"), r"a\\b.css");
         assert_eq!(escape_css_url("a\nb.css"), r"a\a b.css");
+        assert_eq!(escape_css_url("a\rb.css"), r"a\d b.css");
+        assert_eq!(escape_css_url("a\x0cb.css"), r"a\c b.css");
     }
 
     #[test]
