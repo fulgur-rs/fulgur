@@ -23,7 +23,7 @@ Built in Rust for server-side workloads where memory footprint and startup time 
 - CSS Generated Content for Paged Media (page counters, running headers/footers, margin boxes)
 - Template engine with JSON data binding (MiniJinja)
 - Image embedding (PNG / JPEG / GIF)
-- Custom font bundling with subsetting
+- Custom font bundling with subsetting (TTF / OTF / TTC / WOFF2)
 - External CSS injection
 - Page sizes (A4 / Letter / A3) with landscape support
 - PDF metadata (title, author, keywords, language)
