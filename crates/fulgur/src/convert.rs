@@ -28,6 +28,11 @@ use crate::MAX_DOM_DEPTH;
 /// CSS px → PDF pt conversion factor (1 CSS px = 0.75 PDF pt).
 const PX_TO_PT: f32 = 0.75;
 
+#[inline]
+fn px_to_pt(px: f32) -> f32 {
+    px * PX_TO_PT
+}
+
 /// Default CSS line-height multiplier when the actual computed value is
 /// unavailable (CSS 2 §10.8.1 initial value for `line-height: normal`).
 const DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.2;
@@ -452,8 +457,8 @@ fn convert_node_inner(
 ) -> Box<dyn Pageable> {
     let node = doc.get_node(node_id).unwrap();
     let layout = node.final_layout;
-    let height = layout.size.height;
-    let width = layout.size.width;
+    let height = px_to_pt(layout.size.height);
+    let width = px_to_pt(layout.size.width);
 
     // Check if this is a list item with an outside marker (must be before inline root check).
     //
@@ -853,15 +858,15 @@ fn collect_positioned_children(
         {
             emit_orphan_string_set_markers(
                 child_id,
-                child_layout.location.x,
-                child_layout.location.y,
+                px_to_pt(child_layout.location.x),
+                px_to_pt(child_layout.location.y),
                 ctx,
                 &mut result,
             );
             emit_counter_op_markers(
                 child_id,
-                child_layout.location.x,
-                child_layout.location.y,
+                px_to_pt(child_layout.location.x),
+                px_to_pt(child_layout.location.y),
                 ctx,
                 &mut result,
             );
@@ -880,15 +885,15 @@ fn collect_positioned_children(
         {
             emit_orphan_string_set_markers(
                 child_id,
-                child_layout.location.x,
-                child_layout.location.y,
+                px_to_pt(child_layout.location.x),
+                px_to_pt(child_layout.location.y),
                 ctx,
                 &mut result,
             );
             emit_counter_op_markers(
                 child_id,
-                child_layout.location.x,
-                child_layout.location.y,
+                px_to_pt(child_layout.location.x),
+                px_to_pt(child_layout.location.y),
                 ctx,
                 &mut result,
             );
@@ -926,8 +931,8 @@ fn collect_positioned_children(
         }
         result.push(PositionedChild {
             child: child_pageable,
-            x: child_layout.location.x,
-            y: child_layout.location.y,
+            x: px_to_pt(child_layout.location.x),
+            y: px_to_pt(child_layout.location.y),
         });
     }
 
@@ -964,8 +969,8 @@ where
     F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
 {
     let layout = node.final_layout;
-    let width = layout.size.width;
-    let height = layout.size.height;
+    let width = px_to_pt(layout.size.width);
+    let height = px_to_pt(layout.size.height);
 
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
@@ -1168,8 +1173,8 @@ fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
     let (left_inset, top_inset) = style.content_inset();
     let right_inset = style.border_widths[1] + style.padding[1];
     let bottom_inset = style.border_widths[2] + style.padding[2];
-    let border_w = node.final_layout.size.width;
-    let border_h = node.final_layout.size.height;
+    let border_w = px_to_pt(node.final_layout.size.width);
+    let border_h = px_to_pt(node.final_layout.size.height);
     ContentBox {
         origin_x: left_inset,
         origin_y: top_inset,
@@ -1508,8 +1513,8 @@ fn convert_table(
     depth: usize,
 ) -> Box<dyn Pageable> {
     let layout = node.final_layout;
-    let width = layout.size.width;
-    let height = layout.size.height;
+    let width = px_to_pt(layout.size.width);
+    let height = px_to_pt(layout.size.height);
     let style = extract_block_style(node, ctx.assets);
 
     let mut header_cells: Vec<PositionedChild> = Vec::new();
@@ -1587,7 +1592,13 @@ fn collect_table_cells(
     {
         let layout = node.final_layout;
         let out: &mut Vec<PositionedChild> = if is_header { header_cells } else { body_cells };
-        emit_counter_op_markers(node_id, layout.location.x, layout.location.y, ctx, out);
+        emit_counter_op_markers(
+            node_id,
+            px_to_pt(layout.location.x),
+            px_to_pt(layout.location.y),
+            ctx,
+            out,
+        );
     }
 
     for &child_id in &node.children {
@@ -1630,8 +1641,8 @@ fn collect_table_cells(
         let cell_pageable = convert_node(doc, child_id, ctx, depth + 1);
         let positioned = PositionedChild {
             child: cell_pageable,
-            x: child_layout.location.x,
-            y: child_layout.location.y,
+            x: px_to_pt(child_layout.location.x),
+            y: px_to_pt(child_layout.location.y),
         };
 
         if is_header {
@@ -1722,16 +1733,16 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
     let layout = node.final_layout;
     let mut style = BlockStyle {
         border_widths: [
-            layout.border.top,
-            layout.border.right,
-            layout.border.bottom,
-            layout.border.left,
+            px_to_pt(layout.border.top),
+            px_to_pt(layout.border.right),
+            px_to_pt(layout.border.bottom),
+            px_to_pt(layout.border.left),
         ],
         padding: [
-            layout.padding.top,
-            layout.padding.right,
-            layout.padding.bottom,
-            layout.padding.left,
+            px_to_pt(layout.padding.top),
+            px_to_pt(layout.padding.right),
+            px_to_pt(layout.padding.bottom),
+            px_to_pt(layout.padding.left),
         ],
         ..Default::default()
     };
@@ -1770,6 +1781,7 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
              -> f32 {
                 r.0.resolve(style::values::computed::Length::new(basis))
                     .px()
+                    * PX_TO_PT
             };
 
         let tl = styles.clone_border_top_left_radius();
@@ -1803,7 +1815,7 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                 log::warn!("box-shadow: inset is not yet supported; skipping");
                 continue;
             }
-            let blur_px = shadow.base.blur.px();
+            let blur_px = shadow.base.blur.px() * PX_TO_PT;
             if blur_px > 0.0 {
                 log::warn!(
                     "box-shadow: blur-radius > 0 is not yet supported; \
@@ -1820,10 +1832,10 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                 continue; // fully transparent — skip
             }
             style.box_shadows.push(crate::pageable::BoxShadow {
-                offset_x: shadow.base.horizontal.px(),
-                offset_y: shadow.base.vertical.px(),
+                offset_x: shadow.base.horizontal.px() * PX_TO_PT,
+                offset_y: shadow.base.vertical.px() * PX_TO_PT,
                 blur: blur_px,
-                spread: shadow.spread.px(),
+                spread: shadow.spread.px() * PX_TO_PT,
                 color: [r, g, b, a],
                 inset: false,
             });
@@ -2007,7 +2019,7 @@ fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthP
     if let Some(pct) = lp.to_percentage() {
         BgLengthPercentage::Percentage(pct.0)
     } else {
-        BgLengthPercentage::Length(lp.to_length().map(|l| l.px()).unwrap_or(0.0))
+        BgLengthPercentage::Length(lp.to_length().map(|l| l.px() * PX_TO_PT).unwrap_or(0.0))
     }
 }
 
