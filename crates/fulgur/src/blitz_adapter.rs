@@ -1266,6 +1266,30 @@ pub(crate) fn collect_link_media_rewrites(doc: &HtmlDocument) -> Vec<LinkMediaRe
     out
 }
 
+/// Escape a URL so it can appear inside a CSS `url("...")` literal.
+///
+/// Per CSS Syntax Module Level 3 §4.3.5, double quote and backslash
+/// must be escaped as `\"` and `\\`. Newlines are disallowed inside
+/// quoted strings but can be expressed as a numeric escape `\a`
+/// (followed by a single space that the tokenizer consumes) — we do
+/// the same for carriage return (`\d`).
+// Consumer `apply_link_media_rewrites` is added in Task 5 of the
+// fulgur-2ai link-media-url series; suppress dead-code until then.
+#[allow(dead_code)]
+fn escape_css_url(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\a "),
+            '\r' => out.push_str(r"\d "),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1709,6 +1733,14 @@ mod tests {
                 "print"
             ]
         );
+    }
+
+    #[test]
+    fn escape_css_url_escapes_backslash_and_quote() {
+        assert_eq!(escape_css_url("a.css"), "a.css");
+        assert_eq!(escape_css_url(r#"a"b.css"#), r#"a\"b.css"#);
+        assert_eq!(escape_css_url(r"a\b.css"), r"a\\b.css");
+        assert_eq!(escape_css_url("a\nb.css"), r"a\a b.css");
     }
 }
 
