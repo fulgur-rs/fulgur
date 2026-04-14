@@ -255,7 +255,7 @@ fn draw_background_layer(
                 canvas.surface.push_transform(&transform);
                 if canvas
                     .surface
-                    .draw_svg(tree, size, SvgSettings::default())
+                    .draw_svg(tree.as_ref(), size, SvgSettings::default())
                     .is_none()
                 {
                     log::warn!("failed to draw SVG background tile");

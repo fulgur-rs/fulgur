@@ -30,8 +30,7 @@
 
 use crate::gcpm::GcpmContext;
 use crate::gcpm::parser::parse_gcpm;
-use blitz_dom::net::Resource;
-use blitz_traits::net::{BoxedHandler, Bytes, NetProvider, Request, SharedCallback};
+use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -54,7 +53,6 @@ pub struct FulgurNetProvider {
 #[derive(Default)]
 struct Inner {
     gcpm_contexts: Vec<GcpmContext>,
-    pending_resources: Vec<Resource>,
 }
 
 impl FulgurNetProvider {
@@ -66,14 +64,6 @@ impl FulgurNetProvider {
             canonical_base,
             inner: Arc::new(Mutex::new(Inner::default())),
         }
-    }
-
-    /// Take the queued [`Resource`] objects loaded so far. The caller
-    /// is expected to apply each one to the document via
-    /// `BaseDocument::load_resource`.
-    pub fn drain_pending_resources(&self) -> Vec<Resource> {
-        let mut inner = self.inner.lock().unwrap();
-        std::mem::take(&mut inner.pending_resources)
     }
 
     /// Take the GCPM contexts extracted from CSS payloads. The caller
@@ -112,8 +102,8 @@ impl FulgurNetProvider {
     }
 }
 
-impl NetProvider<Resource> for FulgurNetProvider {
-    fn fetch(&self, doc_id: usize, request: Request, handler: BoxedHandler<Resource>) {
+impl NetProvider for FulgurNetProvider {
+    fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
         let Some(canonical_path) = self.resolve_local_path(&request) else {
             return;
         };
@@ -137,20 +127,12 @@ impl NetProvider<Resource> for FulgurNetProvider {
             (Bytes::from(raw_bytes), None)
         };
 
-        let inner = self.inner.clone();
-        let callback: SharedCallback<Resource> = Arc::new(
-            move |_doc_id: usize, result: Result<Resource, Option<String>>| {
-                if let Ok(res) = result {
-                    inner.lock().unwrap().pending_resources.push(res);
-                }
-            },
-        );
-
         // `handler.bytes` parses the CSS via stylo, which synchronously
         // triggers `fetch()` again for every `@import` before returning.
         // When it does return, every imported child stylesheet has
         // already pushed its own `GcpmContext`.
-        handler.bytes(doc_id, bytes_for_blitz, callback);
+        let resolved_url = request.url.to_string();
+        handler.bytes(resolved_url, bytes_for_blitz);
 
         // Post-order push: the parent context goes into the buffer
         // *after* its children, so the eventual `cleaned_css`
@@ -183,13 +165,8 @@ mod tests {
         bytes: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
-    impl NetHandler<Resource> for RecordingHandler {
-        fn bytes(
-            self: Box<Self>,
-            _doc_id: usize,
-            bytes: blitz_traits::net::Bytes,
-            _callback: blitz_traits::net::SharedCallback<Resource>,
-        ) {
+    impl NetHandler for RecordingHandler {
+        fn bytes(self: Box<Self>, _resolved_url: String, bytes: blitz_traits::net::Bytes) {
             *self.bytes.lock().unwrap() = Some(bytes.to_vec());
         }
     }

@@ -69,7 +69,7 @@ impl Pageable for SvgPageable {
             // when krilla::image::Image::from_* returns Err.
             let _ = canvas
                 .surface
-                .draw_svg(&self.tree, size, SvgSettings::default());
+                .draw_svg(self.tree.as_ref(), size, SvgSettings::default());
             canvas.surface.pop();
         });
     }
