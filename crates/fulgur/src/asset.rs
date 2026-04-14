@@ -79,6 +79,35 @@ impl Default for AssetBundle {
     }
 }
 
+/// Font container format detected from magic bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FontFormat {
+    Ttf,
+    Otf,
+    Ttc,
+    Woff1,
+    Woff2,
+    Unknown,
+}
+
+/// Detect a font container format from the first four bytes.
+///
+/// Recognizes TrueType (`0x00010000`, `true`, `typ1`), OpenType (`OTTO`),
+/// TrueType Collection (`ttcf`), WOFF (`wOFF`), and WOFF2 (`wOF2`) magic
+/// sequences. Returns `FontFormat::Unknown` for anything else, including
+/// inputs shorter than four bytes.
+pub(crate) fn detect_font_format(bytes: &[u8]) -> FontFormat {
+    match bytes.get(0..4) {
+        Some(b"wOF2") => FontFormat::Woff2,
+        Some(b"wOFF") => FontFormat::Woff1,
+        Some(b"OTTO") => FontFormat::Otf,
+        Some(b"ttcf") => FontFormat::Ttc,
+        Some([0x00, 0x01, 0x00, 0x00]) => FontFormat::Ttf,
+        Some(b"true") | Some(b"typ1") => FontFormat::Ttf,
+        _ => FontFormat::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +133,46 @@ mod tests {
         bundle.add_image("images/./logo.png", vec![1, 2, 3]);
         assert!(bundle.get_image("images/./logo.png").is_some());
         assert!(bundle.get_image("logo.png").is_none());
+    }
+
+    #[test]
+    fn test_detect_font_format_ttf() {
+        assert_eq!(
+            detect_font_format(&[0x00, 0x01, 0x00, 0x00, 0xFF]),
+            FontFormat::Ttf
+        );
+    }
+
+    #[test]
+    fn test_detect_font_format_otf() {
+        assert_eq!(detect_font_format(b"OTTO\x00\x00"), FontFormat::Otf);
+    }
+
+    #[test]
+    fn test_detect_font_format_ttc() {
+        assert_eq!(detect_font_format(b"ttcf\x00\x00"), FontFormat::Ttc);
+    }
+
+    #[test]
+    fn test_detect_font_format_woff2() {
+        assert_eq!(detect_font_format(b"wOF2\x00\x00"), FontFormat::Woff2);
+    }
+
+    #[test]
+    fn test_detect_font_format_woff1() {
+        assert_eq!(detect_font_format(b"wOFF\x00\x00"), FontFormat::Woff1);
+    }
+
+    #[test]
+    fn test_detect_font_format_unknown() {
+        assert_eq!(detect_font_format(b"XXXX"), FontFormat::Unknown);
+        assert_eq!(detect_font_format(&[0x00]), FontFormat::Unknown);
+        assert_eq!(detect_font_format(&[]), FontFormat::Unknown);
+    }
+
+    #[test]
+    fn test_detect_font_format_old_mac_ttf() {
+        assert_eq!(detect_font_format(b"true\x00\x00"), FontFormat::Ttf);
+        assert_eq!(detect_font_format(b"typ1\x00\x00"), FontFormat::Ttf);
     }
 }
