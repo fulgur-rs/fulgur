@@ -179,3 +179,32 @@ fn link_media_print_does_not_duplicate_gcpm_context() {
     // TODO (fulgur-owa): assert margin-box "HDR" appears exactly once in
     // the rendered page margin, not twice.
 }
+
+#[test]
+fn link_media_print_nested_import_also_excluded_on_screen() {
+    use std::fs;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    fs::write(root.join("leaf.css"), "body { background: red; }\n").unwrap();
+    fs::write(root.join("print.css"), "@import url(\"leaf.css\");\n").unwrap();
+
+    let html = r#"
+        <!DOCTYPE html>
+        <html><head>
+            <link rel="stylesheet" href="print.css" media="print">
+        </head><body>
+            <p>hello</p>
+        </body></html>
+    "#;
+
+    let result = match render_contains_red(html, root) {
+        Some(v) => v,
+        None => return, // pdftocairo unavailable; skip
+    };
+    assert!(
+        !result,
+        "nested @import under a print-only <link> must also be excluded on screen"
+    );
+}
