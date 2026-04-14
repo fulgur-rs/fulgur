@@ -22,6 +22,7 @@ blitz-traits = "0.2"
 parley = "0.6"
 skrifa = "0.37"
 stylo = "0.8.0"
+woff2-patched = "0.4"
 thiserror = "2"
 minijinja = { version = "=2.19.0", features = ["unstable_machinery"] }
 serde_json = "1"

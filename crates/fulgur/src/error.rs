@@ -17,6 +17,12 @@ pub enum Error {
 
     #[error("Template error: {0}")]
     Template(String),
+
+    #[error("WOFF decode error: {0}")]
+    WoffDecode(String),
+
+    #[error("Unsupported font format: {0}")]
+    UnsupportedFontFormat(String),
 }
 
 impl From<minijinja::Error> for Error {
