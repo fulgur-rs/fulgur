@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `<link rel="stylesheet" media="...">` is now honoured. External
+  stylesheets tagged with a media query (for example `media="print"`)
+  are rewritten to `<style>@import url("...") media;</style>` during
+  parsing so that blitz/stylo applies the correct `MediaList` instead
+  of loading the sheet unconditionally. CSS-internal `url()` resolution
+  against each stylesheet's own directory is also covered by a new
+  regression test. (fulgur-2ai)
+
+### Known limitations
+
+- `<link media="...">` CSS files that contain GCPM constructs (`@page`,
+  `position: running`, `string-set`, counters) currently get their GCPM
+  context registered twice because both the discarded first fetch and
+  the rewrite's `@import` re-fetch push to the provider's buffer.
+  Tracked as `fulgur-owa`; pinned by an ignored test in
+  `crates/fulgur/tests/link_media_attribute.rs`.
+
 ## [0.4.4] - 2026-04-12
 
 ### Bug Fixes
