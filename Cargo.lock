@@ -1110,6 +1110,7 @@ dependencies = [
  "blitz-html",
  "blitz-traits",
  "cssparser",
+ "image",
  "krilla",
  "krilla-svg",
  "log",

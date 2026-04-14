@@ -1,0 +1,4 @@
+/* Intentionally aggressive: if the media filter regresses and this
+   stylesheet gets applied, the change is impossible to miss. */
+body { color: red !important; background: yellow !important; }
+p { text-decoration: underline dotted red; }

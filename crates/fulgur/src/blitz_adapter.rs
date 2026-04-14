@@ -82,12 +82,29 @@ pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> Htm
 /// `base_path → file://` URL derivation, and resource draining,
 /// keeping the Blitz API surface fully encapsulated in
 /// `blitz_adapter.rs` (CLAUDE.md adapter-isolation rule).
+///
+/// # Known limitation (tracked as beads fulgur-owa)
+///
+/// Each `<link rel=stylesheet media=X>` that is rewritten to
+/// `<style>@import url(Y) X;</style>` triggers two fetches of `Y`
+/// through [`crate::net::FulgurNetProvider`]: once during the initial
+/// HTML parse (discarded at the resource level here) and once when the
+/// synthetic `<style>` is processed. The second fetch pushes a fresh
+/// [`crate::gcpm::GcpmContext`] into the provider's buffer, but the
+/// first fetch's context is still there because this function cannot
+/// currently tell them apart. As a result, `@page` margin boxes,
+/// running elements, and counters declared in media-restricted
+/// stylesheets get registered twice. Fixing this requires
+/// URL-tagged GCPM drain semantics in `FulgurNetProvider`; see
+/// `bd show fulgur-owa`.
 pub fn parse_html_with_local_resources(
     html: &str,
     viewport_width: f32,
     font_data: &[Arc<Vec<u8>>],
     base_path: Option<&Path>,
 ) -> (HtmlDocument, crate::gcpm::GcpmContext) {
+    use std::collections::HashSet;
+
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
         base_path.map(|p| p.to_path_buf()),
     ));
@@ -99,9 +116,33 @@ pub fn parse_html_with_local_resources(
 
     let mut doc = parse_inner(html, viewport_width, font_data, Some(provider), base_url);
 
-    // Replay every Resource (= parsed stylesheet) that the provider
-    // captured during HTML parsing into the document so the stylist
-    // sees them before `resolve()`.
+    // Identify <link rel=stylesheet media=X> nodes *before* mutating so
+    // their attributes are stable, and before loading so we can filter
+    // out the (wrong-media) resources that blitz's parser already
+    // triggered for them.
+    let rewrites = collect_link_media_rewrites(&doc);
+    let rewrite_node_ids: HashSet<usize> = rewrites.iter().map(|r| r.link_node_id).collect();
+
+    // First drain: load resources that correspond to <link> elements
+    // WITHOUT a media rewrite. Discard resources for nodes we are about
+    // to rewrite — their @import replacements will re-fetch with the
+    // correct MediaList.
+    for resource in net_provider.drain_pending_resources() {
+        if let Resource::Css(node_id, _) = &resource {
+            if rewrite_node_ids.contains(node_id) {
+                continue;
+            }
+        }
+        doc.load_resource(resource);
+    }
+
+    // Apply the DOM rewrite. Mutator's `drop` synchronously triggers
+    // `process_style_element` for each new <style>, which parses the
+    // @import, calls StylesheetLoader → NetProvider::fetch → CssHandler
+    // with `MediaList` properly propagated, and pushes new Resources.
+    apply_link_media_rewrites(&mut doc, &rewrites);
+
+    // Second drain: load the correctly-fetched stylesheets.
     for resource in net_provider.drain_pending_resources() {
         doc.load_resource(resource);
     }
@@ -1205,6 +1246,120 @@ fn extract_content_url(declarations: &str) -> Option<String> {
     None
 }
 
+/// Description of a `<link rel="stylesheet" media=...>` node that needs
+/// to be rewritten into `<style>@import url("...") media;</style>`.
+///
+/// Collected by [`collect_link_media_rewrites`] before DOM mutation so
+/// the href and media values remain borrowed from a stable document
+/// state (no interleaved mutation concerns).
+#[derive(Debug, Clone)]
+pub(crate) struct LinkMediaRewrite {
+    pub link_node_id: usize,
+    pub href: String,
+    pub media: String,
+}
+
+/// Walk the parsed document and return every `<link rel=... stylesheet ...>`
+/// element that carries a non-empty `media` attribute other than `all`.
+///
+/// Returned entries follow pre-order DOM traversal so the resulting
+/// `<style>` elements keep the same cascade order as the original
+/// `<link>` elements — insertion order matters for stylo's origin
+/// sorting.
+pub(crate) fn collect_link_media_rewrites(doc: &HtmlDocument) -> Vec<LinkMediaRewrite> {
+    fn walk(doc: &HtmlDocument, node_id: usize, depth: usize, out: &mut Vec<LinkMediaRewrite>) {
+        if depth >= MAX_DOM_DEPTH {
+            return;
+        }
+        let Some(node) = doc.get_node(node_id) else {
+            return;
+        };
+        if let Some(el) = node.element_data() {
+            if el.name.local.as_ref() == "link" {
+                let rel_ok = get_attr(el, "rel")
+                    .map(|rel| {
+                        rel.split_ascii_whitespace()
+                            .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+                    })
+                    .unwrap_or(false);
+                let href = get_attr(el, "href").unwrap_or("").trim();
+                let media = get_attr(el, "media").unwrap_or("").trim();
+                let media_active = !media.is_empty() && !media.eq_ignore_ascii_case("all");
+                if rel_ok && !href.is_empty() && media_active {
+                    out.push(LinkMediaRewrite {
+                        link_node_id: node_id,
+                        href: href.to_string(),
+                        media: media.to_string(),
+                    });
+                }
+            }
+        }
+        for &child in &node.children {
+            walk(doc, child, depth + 1, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    let root = doc.root_element().id;
+    walk(doc, root, 0, &mut out);
+    out
+}
+
+/// Escape a URL so it can appear inside a CSS `url("...")` literal.
+///
+/// Per CSS Syntax Module Level 3 §4.3.5, double quote and backslash
+/// must be escaped as `\"` and `\\`. Newlines are disallowed inside
+/// quoted strings but can be expressed as a numeric escape `\a`
+/// (followed by a single space that the tokenizer consumes) — we do
+/// the same for carriage return (`\d`).
+fn escape_css_url(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\a "),
+            '\r' => out.push_str(r"\d "),
+            '\x0c' => out.push_str(r"\c "),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Replace every collected `<link rel=stylesheet media=X href=Y>` with
+/// a `<style>@import url("Y") X;</style>` element inserted in the same
+/// document position.
+///
+/// Why this shape: blitz-dom 0.2.4's `CssHandler` hardcodes
+/// `MediaList::empty()` when loading `<link>` stylesheets, so the
+/// `media` attribute is silently dropped. However the `@import`
+/// resolution path (`StylesheetLoaderInner::request_stylesheet`) does
+/// propagate the media query into stylo's `ImportRule`, so routing the
+/// load through `@import` re-activates the media restriction.
+///
+/// The `<style>` is inserted *before* the original `<link>` to preserve
+/// cascade order; the `<link>` is then removed. The caller (Task 6
+/// integration) must filter any stylesheet resources that blitz already
+/// fetched for the `<link>` node before DOM mutation, otherwise the
+/// empty-media copy would also apply.
+pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[LinkMediaRewrite]) {
+    for rw in rewrites {
+        let css = format!(
+            r#"@import url("{}") {};"#,
+            escape_css_url(&rw.href),
+            rw.media
+        );
+
+        let mut mutator = doc.mutate();
+        let style_id = mutator.create_element(make_qual_name("style"), vec![]);
+        let text_id = mutator.create_text_node(&css);
+        mutator.append_children(style_id, &[text_id]);
+        mutator.insert_nodes_before(rw.link_node_id, &[style_id]);
+        mutator.remove_and_drop_node(rw.link_node_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1613,6 +1768,99 @@ mod tests {
             url.unwrap().ends_with("hi.png"),
             "image-set should resolve to the selected url"
         );
+    }
+
+    #[test]
+    fn collect_link_media_rewrites_picks_only_linked_sheets_with_non_empty_media() {
+        let html = r#"
+            <html><head>
+                <link rel="stylesheet" href="a.css" media="print">
+                <link rel="stylesheet" href="b.css">
+                <link rel="stylesheet" href="c.css" media="all">
+                <link rel="stylesheet" href="d.css" media="">
+                <link rel="stylesheet" href="e.css" media="screen and (min-width: 600px)">
+                <link rel="stylesheet" href="g.css" media="screen, print">
+                <link rel="alternate stylesheet" href="f.css" media="print">
+                <link rel="icon" href="favicon.ico" media="print">
+            </head><body><p>hi</p></body></html>
+        "#;
+        let doc = parse(html, 800.0, &[]);
+        let rewrites = collect_link_media_rewrites(&doc);
+
+        // a.css and e.css should be rewritten. f.css has `rel="alternate stylesheet"`
+        // which tokenizes to ["alternate", "stylesheet"]; since "stylesheet" is a
+        // token, include it. `media="all"` and `media=""` are treated as identity
+        // (skipped). favicon is not a stylesheet.
+        let hrefs: Vec<&str> = rewrites.iter().map(|r| r.href.as_str()).collect();
+        assert_eq!(hrefs, vec!["a.css", "e.css", "g.css", "f.css"]);
+        let medias: Vec<&str> = rewrites.iter().map(|r| r.media.as_str()).collect();
+        assert_eq!(
+            medias,
+            vec![
+                "print",
+                "screen and (min-width: 600px)",
+                "screen, print",
+                "print"
+            ]
+        );
+    }
+
+    #[test]
+    fn escape_css_url_escapes_backslash_and_quote() {
+        assert_eq!(escape_css_url("a.css"), "a.css");
+        assert_eq!(escape_css_url(r#"a"b.css"#), r#"a\"b.css"#);
+        assert_eq!(escape_css_url(r"a\b.css"), r"a\\b.css");
+        assert_eq!(escape_css_url("a\nb.css"), r"a\a b.css");
+        assert_eq!(escape_css_url("a\rb.css"), r"a\d b.css");
+        assert_eq!(escape_css_url("a\x0cb.css"), r"a\c b.css");
+    }
+
+    #[test]
+    fn apply_link_media_rewrites_replaces_link_with_style_import() {
+        let html = r#"
+            <html><head>
+                <link rel="stylesheet" href="a.css" media="print">
+                <link rel="stylesheet" href="b.css">
+            </head><body><p>hi</p></body></html>
+        "#;
+        let mut doc = parse(html, 800.0, &[]);
+        let rewrites = collect_link_media_rewrites(&doc);
+        assert_eq!(rewrites.len(), 1);
+
+        apply_link_media_rewrites(&mut doc, &rewrites);
+
+        let head = find_element_by_tag(&doc, "head").expect("head exists");
+        let head_node = doc.get_node(head).unwrap();
+
+        let mut style_text_found: Option<String> = None;
+        let mut a_css_link_found = false;
+        let mut b_css_link_found = false;
+        for &cid in &head_node.children {
+            let child = doc.get_node(cid).unwrap();
+            if let Some(el) = child.element_data() {
+                match el.name.local.as_ref() {
+                    "style" => {
+                        for &gc in &child.children {
+                            let gnode = doc.get_node(gc).unwrap();
+                            if let blitz_dom::node::NodeData::Text(t) = &gnode.data {
+                                style_text_found = Some(t.content.clone());
+                            }
+                        }
+                    }
+                    "link" => match get_attr(el, "href") {
+                        Some("a.css") => a_css_link_found = true,
+                        Some("b.css") => b_css_link_found = true,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(!a_css_link_found, "<link href=a.css> must be removed");
+        assert!(b_css_link_found, "<link href=b.css> must be preserved");
+        let text = style_text_found.expect("<style> with @import must exist");
+        assert_eq!(text, r#"@import url("a.css") print;"#);
     }
 }
 

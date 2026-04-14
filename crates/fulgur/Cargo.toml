@@ -30,3 +30,4 @@ log = "0.4"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
