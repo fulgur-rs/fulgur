@@ -1685,6 +1685,7 @@ mod tests {
                 <link rel="stylesheet" href="c.css" media="all">
                 <link rel="stylesheet" href="d.css" media="">
                 <link rel="stylesheet" href="e.css" media="screen and (min-width: 600px)">
+                <link rel="stylesheet" href="g.css" media="screen, print">
                 <link rel="alternate stylesheet" href="f.css" media="print">
                 <link rel="icon" href="favicon.ico" media="print">
             </head><body><p>hi</p></body></html>
@@ -1697,11 +1698,16 @@ mod tests {
         // token, include it. `media="all"` and `media=""` are treated as identity
         // (skipped). favicon is not a stylesheet.
         let hrefs: Vec<&str> = rewrites.iter().map(|r| r.href.as_str()).collect();
-        assert_eq!(hrefs, vec!["a.css", "e.css", "f.css"]);
+        assert_eq!(hrefs, vec!["a.css", "e.css", "g.css", "f.css"]);
         let medias: Vec<&str> = rewrites.iter().map(|r| r.media.as_str()).collect();
         assert_eq!(
             medias,
-            vec!["print", "screen and (min-width: 600px)", "print"]
+            vec![
+                "print",
+                "screen and (min-width: 600px)",
+                "screen, print",
+                "print"
+            ]
         );
     }
 }
