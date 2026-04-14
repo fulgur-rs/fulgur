@@ -352,7 +352,7 @@ dependencies = [
 [[package]]
 name = "blitz-dom"
 version = "0.2.4"
-source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#704c883b9a7679147eaaf2a080bd090308abb341"
+source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#1cabf1194a3fccea6632b06da3f14dc2d8561c2d"
 dependencies = [
  "accesskit",
  "app_units",
@@ -392,7 +392,7 @@ dependencies = [
 [[package]]
 name = "blitz-html"
 version = "0.2.0"
-source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#704c883b9a7679147eaaf2a080bd090308abb341"
+source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#1cabf1194a3fccea6632b06da3f14dc2d8561c2d"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -403,7 +403,7 @@ dependencies = [
 [[package]]
 name = "blitz-traits"
 version = "0.2.0"
-source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#704c883b9a7679147eaaf2a080bd090308abb341"
+source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#1cabf1194a3fccea6632b06da3f14dc2d8561c2d"
 dependencies = [
  "bitflags 2.11.1",
  "bytes",
@@ -797,7 +797,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "debug_timer"
 version = "0.1.2"
-source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#704c883b9a7679147eaaf2a080bd090308abb341"
+source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#1cabf1194a3fccea6632b06da3f14dc2d8561c2d"
 
 [[package]]
 name = "derive_more"
@@ -920,7 +920,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2603,7 +2603,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3047,7 +3047,7 @@ checksum = "ca4c89da4ab6ac0beda8b03db38216967c99f1f7287a0f3b0f366b45d34ac7c4"
 [[package]]
 name = "stylo_taffy"
 version = "0.2.0"
-source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#704c883b9a7679147eaaf2a080bd090308abb341"
+source = "git+https://github.com/mitsuru/blitz?branch=set-media-type-v0.2.x#1cabf1194a3fccea6632b06da3f14dc2d8561c2d"
 dependencies = [
  "stylo",
  "stylo_atoms",
@@ -3179,7 +3179,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3824,7 +3824,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
