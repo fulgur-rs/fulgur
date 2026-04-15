@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod gcpm;
 pub mod image;
+pub(crate) mod link;
 pub(crate) mod net;
 pub mod outline;
 pub mod pageable;

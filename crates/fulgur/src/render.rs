@@ -32,31 +32,62 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
         None
     };
 
+    // Pre-pass: collect block-level anchor destinations so `href="#id"`
+    // links can resolve to `(page_idx, y)` during annotation emission.
+    let mut dest_registry = crate::pageable::DestinationRegistry::new();
+    for (idx, p) in pages.iter().enumerate() {
+        dest_registry.set_current_page(idx);
+        p.collect_ids(
+            config.margin.left,
+            config.margin.top,
+            content_width,
+            content_height,
+            &mut dest_registry,
+        );
+    }
+
+    let mut link_collector = crate::pageable::LinkCollector::new();
+
     for (page_idx, page_content) in pages.iter().enumerate() {
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
 
         let mut page = document.start_page_with(settings);
-        let mut surface = page.surface();
 
         if let Some(c) = collector.as_mut() {
             c.set_current_page(page_idx);
         }
+        link_collector.set_current_page(page_idx);
 
-        // Pass margin offsets as x/y origin to draw
-        let mut canvas = Canvas {
-            surface: &mut surface,
-            heading_collector: collector.as_mut(),
-            link_collector: None,
-        };
-        page_content.draw(
-            &mut canvas,
-            config.margin.left,
-            config.margin.top,
-            content_width,
-            content_height,
-        );
-        // Surface::finish is handled by Drop
+        // Scope the surface borrow so we can mutate `page` (add_annotation)
+        // afterwards: `page.surface()` returns a `Surface<'_>` that exclusively
+        // borrows `page` until dropped.
+        {
+            let mut surface = page.surface();
+            let mut canvas = Canvas {
+                surface: &mut surface,
+                heading_collector: collector.as_mut(),
+                link_collector: Some(&mut link_collector),
+            };
+            page_content.draw(
+                &mut canvas,
+                config.margin.left,
+                config.margin.top,
+                content_width,
+                content_height,
+            );
+            // Surface drops here, releasing the borrow on `page`.
+        }
+
+        // Emit link annotations for this page now that `page` is exclusively
+        // ours again. Filter the collector's occurrences to this page.
+        let per_page: Vec<_> = link_collector
+            .occurrences()
+            .iter()
+            .filter(|o| o.page_idx == page_idx)
+            .cloned()
+            .collect();
+        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
     }
 
     if let Some(c) = collector {
@@ -236,6 +267,24 @@ pub fn render_to_pdf_with_gcpm(
         None
     };
 
+    // Pre-pass: collect block-level anchor destinations. Margins differ
+    // per-page under GCPM, but the destination y-coordinate only needs to
+    // land the viewer near the anchor; using `config.margin` here is a
+    // reasonable approximation and matches the non-GCPM path's accuracy.
+    let mut dest_registry = crate::pageable::DestinationRegistry::new();
+    for (idx, p) in pages.iter().enumerate() {
+        dest_registry.set_current_page(idx);
+        p.collect_ids(
+            config.margin.left,
+            config.margin.top,
+            content_width,
+            content_height,
+            &mut dest_registry,
+        );
+    }
+
+    let mut link_collector = crate::pageable::LinkCollector::new();
+
     // Pass 2: render each page with margin boxes
     for (page_idx, page_content) in pages.iter().enumerate() {
         let page_num = page_idx + 1;
@@ -257,17 +306,23 @@ pub fn render_to_pdf_with_gcpm(
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
         let mut page = document.start_page_with(settings);
-        let mut surface = page.surface();
 
         if let Some(c) = collector.as_mut() {
             c.set_current_page(page_idx);
         }
+        link_collector.set_current_page(page_idx);
+
+        let mut surface = page.surface();
 
         // Margin boxes use a Canvas with no heading collector — running
         // elements promoted into margin boxes may contain h1-h6, but their
         // bookmark entry must come from the source position in the body,
         // not from each margin-box repetition. The body Canvas (created
         // after this scope) carries the collector instead.
+        //
+        // Margin-box links are out of scope for this task — only the body
+        // canvas wires the link collector below. Clickable `<a>` inside
+        // header/footer content is a follow-up.
         let mut canvas = Canvas {
             surface: &mut surface,
             heading_collector: None,
@@ -455,12 +510,13 @@ pub fn render_to_pdf_with_gcpm(
         // Draw body content with resolved per-page margin. Reuse `canvas`
         // by overwriting it so the previous (collector-less) Canvas's
         // borrow on `surface` is released, then reborrow with the heading
-        // collector so h1-h6 markers in body content can record their
-        // (page_idx, y) for the PDF outline.
+        // and link collectors so h1-h6 markers can record their
+        // (page_idx, y) for the PDF outline and `<a>` rects for link
+        // annotations.
         canvas = Canvas {
             surface: &mut surface,
             heading_collector: collector.as_mut(),
-            link_collector: None,
+            link_collector: Some(&mut link_collector),
         };
         let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
         let page_content_height = page_size.height - resolved_margin.top - resolved_margin.bottom;
@@ -471,6 +527,19 @@ pub fn render_to_pdf_with_gcpm(
             page_content_width,
             page_content_height,
         );
+        // Release the surface borrow before mutating `page` to add
+        // annotations. `Surface` has a `Drop` impl that flushes the content
+        // stream and releases its borrow on `page`. `Canvas` is a no-drop
+        // wrapper around `&mut surface`, so dropping `surface` is enough.
+        drop(surface);
+
+        let per_page: Vec<_> = link_collector
+            .occurrences()
+            .iter()
+            .filter(|o| o.page_idx == page_idx)
+            .cloned()
+            .collect();
+        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
     }
 
     if let Some(c) = collector {
