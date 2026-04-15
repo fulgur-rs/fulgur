@@ -1,3 +1,4 @@
+pub mod bookmark;
 pub mod counter;
 pub mod margin_box;
 pub mod page_settings;
