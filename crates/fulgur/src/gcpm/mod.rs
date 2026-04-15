@@ -6,6 +6,7 @@ pub mod parser;
 pub mod running;
 pub mod string_set;
 
+use bookmark::BookmarkMapping;
 use margin_box::MarginBoxPosition;
 
 /// A simple CSS selector parsed from a style rule.
@@ -222,6 +223,8 @@ pub struct GcpmContext {
     pub counter_mappings: Vec<CounterMapping>,
     /// Mappings from CSS selectors + pseudo-elements to content items with counter().
     pub content_counter_mappings: Vec<ContentCounterMapping>,
+    /// Mappings from CSS selectors to `bookmark-level` / `bookmark-label` declarations.
+    pub bookmark_mappings: Vec<BookmarkMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
@@ -235,6 +238,7 @@ impl GcpmContext {
             && self.page_settings.is_empty()
             && self.counter_mappings.is_empty()
             && self.content_counter_mappings.is_empty()
+            && self.bookmark_mappings.is_empty()
     }
 
     /// Append every GCPM mapping from `other` into `self`, and concatenate
@@ -253,6 +257,7 @@ impl GcpmContext {
         self.counter_mappings.extend(other.counter_mappings);
         self.content_counter_mappings
             .extend(other.content_counter_mappings);
+        self.bookmark_mappings.extend(other.bookmark_mappings);
         if !other.cleaned_css.is_empty() {
             if !self.cleaned_css.is_empty() {
                 self.cleaned_css.push('\n');
@@ -275,6 +280,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -297,6 +303,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -314,6 +321,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -331,6 +339,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "body { color: red; }".to_string(),
         };
         let b = GcpmContext {
@@ -348,6 +357,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "p { margin: 0; }".to_string(),
         };
 
@@ -367,6 +377,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         let b = GcpmContext {
@@ -376,6 +387,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "body { color: blue; }".to_string(),
         };
 

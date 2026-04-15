@@ -1566,6 +1566,7 @@ mod tests {
             counter_mappings: vec![],
             content_counter_mappings: vec![],
             page_settings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -1609,6 +1610,7 @@ mod tests {
             counter_mappings: vec![],
             content_counter_mappings: vec![],
             page_settings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -1638,6 +1640,7 @@ mod tests {
             counter_mappings: vec![],
             content_counter_mappings: vec![],
             page_settings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
 
@@ -1670,6 +1673,7 @@ mod tests {
             counter_mappings: vec![],
             content_counter_mappings: vec![],
             page_settings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
 
