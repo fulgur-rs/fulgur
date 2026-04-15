@@ -21,7 +21,6 @@
 //! for the full investigation and rationale.
 
 use blitz_dom::DocumentConfig;
-use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
 use blitz_traits::net::{NetProvider, Url};
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -103,12 +102,10 @@ pub fn parse_html_with_local_resources(
     font_data: &[Arc<Vec<u8>>],
     base_path: Option<&Path>,
 ) -> (HtmlDocument, crate::gcpm::GcpmContext) {
-    use std::collections::HashSet;
-
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
         base_path.map(|p| p.to_path_buf()),
     ));
-    let provider: Arc<dyn NetProvider<Resource>> = net_provider.clone();
+    let provider: Arc<dyn NetProvider> = net_provider.clone();
     let base_url = base_path
         .and_then(|p| p.canonicalize().ok())
         .and_then(|p| Url::from_directory_path(&p).ok())
@@ -116,36 +113,15 @@ pub fn parse_html_with_local_resources(
 
     let mut doc = parse_inner(html, viewport_width, font_data, Some(provider), base_url);
 
-    // Identify <link rel=stylesheet media=X> nodes *before* mutating so
-    // their attributes are stable, and before loading so we can filter
-    // out the (wrong-media) resources that blitz's parser already
-    // triggered for them.
+    // Identify <link rel=stylesheet media=X> nodes before mutating so
+    // their attributes are stable.
     let rewrites = collect_link_media_rewrites(&doc);
-    let rewrite_node_ids: HashSet<usize> = rewrites.iter().map(|r| r.link_node_id).collect();
-
-    // First drain: load resources that correspond to <link> elements
-    // WITHOUT a media rewrite. Discard resources for nodes we are about
-    // to rewrite — their @import replacements will re-fetch with the
-    // correct MediaList.
-    for resource in net_provider.drain_pending_resources() {
-        if let Resource::Css(node_id, _) = &resource {
-            if rewrite_node_ids.contains(node_id) {
-                continue;
-            }
-        }
-        doc.load_resource(resource);
-    }
 
     // Apply the DOM rewrite. Mutator's `drop` synchronously triggers
     // `process_style_element` for each new <style>, which parses the
     // @import, calls StylesheetLoader → NetProvider::fetch → CssHandler
-    // with `MediaList` properly propagated, and pushes new Resources.
+    // with `MediaList` properly propagated.
     apply_link_media_rewrites(&mut doc, &rewrites);
-
-    // Second drain: load the correctly-fetched stylesheets.
-    for resource in net_provider.drain_pending_resources() {
-        doc.load_resource(resource);
-    }
 
     // Fold the per-stylesheet GCPM contexts into one. The caller still
     // has to merge this with its own AssetBundle-derived context.
@@ -162,7 +138,7 @@ fn parse_inner(
     html: &str,
     viewport_width: f32,
     font_data: &[Arc<Vec<u8>>],
-    net_provider: Option<Arc<dyn NetProvider<Resource>>>,
+    net_provider: Option<Arc<dyn NetProvider>>,
     base_url: Option<String>,
 ) -> HtmlDocument {
     let viewport = Viewport::new(viewport_width as u32, 10000, 1.0, ColorScheme::Light);
@@ -349,7 +325,12 @@ pub fn extract_inline_svg_tree(
 ) -> Option<std::sync::Arc<usvg::Tree>> {
     use blitz_dom::node::ImageData;
     match elem.image_data()? {
-        ImageData::Svg(tree) => Some(std::sync::Arc::new((**tree).clone())),
+        ImageData::Svg(tree) => {
+            let svg = tree.to_string(&blitz_usvg::WriteOptions::default());
+            usvg::Tree::from_str(&svg, &usvg::Options::default())
+                .ok()
+                .map(std::sync::Arc::new)
+        }
         _ => None,
     }
 }
@@ -421,34 +402,39 @@ fn extract_url_from_stylo_image(image: &style::values::computed::image::Image) -
 /// map it to fulgur's `VerticalAlign` enum.
 pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::VerticalAlign {
     use crate::paragraph::VerticalAlign;
+    use style::Zero;
+
     let Some(styles) = node.primary_styles() else {
         return VerticalAlign::Baseline;
     };
-    let va = styles.clone_vertical_align();
-    match va {
-        style::values::generics::box_::VerticalAlign::Keyword(kw) => {
-            use style::values::generics::box_::VerticalAlignKeyword;
+
+    match styles.clone_baseline_shift() {
+        style::values::generics::box_::BaselineShift::Keyword(kw) => {
+            use style::values::generics::box_::BaselineShiftKeyword;
             match kw {
-                VerticalAlignKeyword::Baseline => VerticalAlign::Baseline,
-                VerticalAlignKeyword::Middle => VerticalAlign::Middle,
-                VerticalAlignKeyword::Top => VerticalAlign::Top,
-                VerticalAlignKeyword::Bottom => VerticalAlign::Bottom,
-                VerticalAlignKeyword::Sub => VerticalAlign::Sub,
-                VerticalAlignKeyword::Super => VerticalAlign::Super,
-                VerticalAlignKeyword::TextTop => VerticalAlign::TextTop,
-                VerticalAlignKeyword::TextBottom => VerticalAlign::TextBottom,
-                #[allow(unreachable_patterns)]
-                _ => VerticalAlign::Baseline,
+                BaselineShiftKeyword::Sub => VerticalAlign::Sub,
+                BaselineShiftKeyword::Super => VerticalAlign::Super,
+                BaselineShiftKeyword::Top => VerticalAlign::Top,
+                BaselineShiftKeyword::Center => VerticalAlign::Middle,
+                BaselineShiftKeyword::Bottom => VerticalAlign::Bottom,
             }
         }
-        style::values::generics::box_::VerticalAlign::Length(lp) => {
+        style::values::generics::box_::BaselineShift::Length(lp) => {
+            if lp.is_zero() {
+                return match styles.clone_alignment_baseline() {
+                    style::values::computed::AlignmentBaseline::Baseline => VerticalAlign::Baseline,
+                    style::values::computed::AlignmentBaseline::Middle => VerticalAlign::Middle,
+                    style::values::computed::AlignmentBaseline::TextTop => VerticalAlign::TextTop,
+                    style::values::computed::AlignmentBaseline::TextBottom => {
+                        VerticalAlign::TextBottom
+                    }
+                    _ => VerticalAlign::Baseline,
+                };
+            }
+
             if let Some(pct) = lp.to_percentage() {
                 VerticalAlign::Percent(pct.0)
             } else {
-                // Note: for calc() mixed values like `calc(10px + 50%)`,
-                // to_percentage() returns None and we resolve with basis=0,
-                // which drops the percentage component. This is a known
-                // limitation — calc() in vertical-align is extremely rare.
                 VerticalAlign::Length(lp.resolve(style::values::computed::Length::new(0.0)).px())
             }
         }

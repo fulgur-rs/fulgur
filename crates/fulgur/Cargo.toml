@@ -12,16 +12,17 @@ keywords = ["pdf", "html", "css", "converter"]
 categories = ["text-processing", "command-line-utilities"]
 
 [dependencies]
-cssparser = "0.35"
+cssparser = "0.36"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
 usvg = "0.45"
-blitz-html = "0.2"
-blitz-dom = "0.2"
-blitz-traits = "0.2"
-parley = "0.6"
-skrifa = "0.37"
-stylo = "0.8.0"
+blitz-usvg = { package = "usvg", version = "0.46" }
+blitz-html = { git = "https://github.com/dioxuslabs/blitz", branch = "main", default-features = false }
+blitz-dom = { git = "https://github.com/dioxuslabs/blitz", branch = "main", default-features = false, features = ["svg", "woff-rust"] }
+blitz-traits = { git = "https://github.com/dioxuslabs/blitz", branch = "main", default-features = false }
+parley = { git = "https://github.com/linebender/parley", rev = "5660d0b1acec4a3118f0301c2d35508b33dfe785", default-features = false, features = ["std"] }
+skrifa = { version = "0.40", default-features = false, features = ["std"] }
+stylo = "0.16.0"
 woff2-patched = "0.4"
 thiserror = "2"
 minijinja = { version = "=2.19.0", features = ["unstable_machinery"] }
