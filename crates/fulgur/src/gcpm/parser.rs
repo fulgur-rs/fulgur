@@ -1934,10 +1934,7 @@ mod tests {
         assert_eq!(ctx.bookmark_mappings.len(), 1);
         let m = &ctx.bookmark_mappings[0];
         assert!(m.level.is_none());
-        assert_eq!(
-            m.label,
-            Some(vec![ContentItem::String("Custom".into())])
-        );
+        assert_eq!(m.label, Some(vec![ContentItem::String("Custom".into())]));
     }
 
     #[test]
