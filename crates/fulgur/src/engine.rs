@@ -90,6 +90,17 @@ impl Engine {
         );
         gcpm.extend_from(link_gcpm);
 
+        // Prepend UA CSS bookmark mappings so author-CSS rules (appearing
+        // later in `bookmark_mappings`) override them via last-match
+        // cascade. The UA sheet is GCPM-only — it contributes only
+        // `bookmark-level`/`bookmark-label` for `h1`-`h6` and never
+        // reaches Blitz. Other UA sheets (presentation defaults) live
+        // inside Blitz itself.
+        let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
+        let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
+        combined_bookmarks.extend(gcpm.bookmark_mappings);
+        gcpm.bookmark_mappings = combined_bookmarks;
+
         // Build and apply DOM passes
         let mut passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
 
@@ -123,6 +134,18 @@ impl Engine {
         } else {
             crate::gcpm::string_set::StringSetStore::new()
         };
+
+        // Extract bookmark info via DomPass (before resolve). Runs even when
+        // the document has no author-CSS bookmark rules because the UA
+        // sheet always contributes `h1`-`h6` mappings (prepended above).
+        let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
+            if !gcpm.bookmark_mappings.is_empty() {
+                let pass = crate::blitz_adapter::BookmarkPass::new(gcpm.bookmark_mappings.clone());
+                crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
+                pass.into_results().into_iter().collect()
+            } else {
+                HashMap::new()
+            };
 
         // Extract counter operations and resolve body content
         let (counter_ops_by_node_vec, counter_css) =
@@ -172,6 +195,7 @@ impl Engine {
             font_cache: HashMap::new(),
             string_set_by_node,
             counter_ops_by_node: counter_ops_map,
+            bookmark_by_node,
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
@@ -257,6 +281,7 @@ impl Engine {
             font_cache: HashMap::new(),
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
         };
         crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
     }

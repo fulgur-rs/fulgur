@@ -244,7 +244,16 @@ pub struct GcpmContext {
 }
 
 impl GcpmContext {
-    /// Returns `true` if no GCPM features were found.
+    /// Returns `true` if no GCPM features that require the margin-box /
+    /// running-element render pipeline were found.
+    ///
+    /// `bookmark_mappings` is intentionally excluded: bookmarks are
+    /// resolved during the normal `convert` pass via `BookmarkPass` and
+    /// carried through `ConvertContext`, so they never need the two-pass
+    /// `render_to_pdf_with_gcpm` codepath. Including them here would
+    /// force every document through the GCPM render path once the UA
+    /// stylesheet starts prepending `h1`-`h6` bookmark rules
+    /// unconditionally.
     pub fn is_empty(&self) -> bool {
         self.margin_boxes.is_empty()
             && self.running_mappings.is_empty()
@@ -252,7 +261,6 @@ impl GcpmContext {
             && self.page_settings.is_empty()
             && self.counter_mappings.is_empty()
             && self.content_counter_mappings.is_empty()
-            && self.bookmark_mappings.is_empty()
     }
 
     /// Append every GCPM mapping from `other` into `self`, and concatenate
