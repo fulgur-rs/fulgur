@@ -263,7 +263,10 @@ pub fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Optio
 /// the visible text of an `<a>` element. Returns an empty string if the node
 /// has no text descendants or does not exist.
 pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
-    fn walk(doc: &blitz_dom::BaseDocument, id: usize, out: &mut String) {
+    fn walk(doc: &blitz_dom::BaseDocument, id: usize, depth: usize, out: &mut String) {
+        if depth >= MAX_DOM_DEPTH {
+            return;
+        }
         let Some(node) = doc.get_node(id) else {
             return;
         };
@@ -271,11 +274,11 @@ pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
             out.push_str(&t.content);
         }
         for &child_id in &node.children {
-            walk(doc, child_id, out);
+            walk(doc, child_id, depth + 1, out);
         }
     }
     let mut out = String::new();
-    walk(doc, node_id, &mut out);
+    walk(doc, node_id, 0, &mut out);
     out
 }
 
@@ -1883,6 +1886,29 @@ mod tests {
         assert!(b_css_link_found, "<link href=b.css> must be preserved");
         let text = style_text_found.expect("<style> with @import must exist");
         assert_eq!(text, r#"@import url("a.css") print;"#);
+    }
+
+    #[test]
+    fn element_text_does_not_stack_overflow_on_deep_nesting() {
+        // Regression guard: element_text used to recurse without a depth
+        // bound, so attacker-controlled HTML with thousands of nested
+        // elements could overflow the thread stack. MAX_DOM_DEPTH now caps
+        // the recursion — building ~2000 nested divs must return (possibly
+        // truncated) rather than panic.
+        let mut html = String::from("<html><body>");
+        for _ in 0..2000 {
+            html.push_str("<div>");
+        }
+        html.push_str("leaf");
+        for _ in 0..2000 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+
+        let (doc, _gcpm) = parse_html_with_local_resources(&html, 400.0, &[], None);
+        use std::ops::Deref;
+        let root = doc.root_element();
+        let _ = element_text(doc.deref(), root.id);
     }
 }
 

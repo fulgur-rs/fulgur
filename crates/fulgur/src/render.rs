@@ -267,18 +267,36 @@ pub fn render_to_pdf_with_gcpm(
         None
     };
 
-    // Pre-pass: collect block-level anchor destinations. Margins differ
-    // per-page under GCPM, but the destination y-coordinate only needs to
-    // land the viewer near the anchor; using `config.margin` here is a
-    // reasonable approximation and matches the non-GCPM path's accuracy.
+    // Pre-pass: collect block-level anchor destinations. Under GCPM,
+    // `@page :first` / `@page :left` / etc. can override the size or
+    // margins of individual pages, so we must replay the same
+    // `resolve_page_settings` logic the render loop uses below — using the
+    // global `config.margin` here would produce stale destination
+    // coordinates on pages whose size or margins differ from the default.
     let mut dest_registry = crate::pageable::DestinationRegistry::new();
     for (idx, p) in pages.iter().enumerate() {
+        let page_num = idx + 1;
+        let (resolved_size, resolved_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &gcpm.page_settings,
+                page_num,
+                total_pages,
+                config,
+            );
+        let page_size = if resolved_landscape {
+            resolved_size.landscape()
+        } else {
+            resolved_size
+        };
+        let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
+        let page_content_height = page_size.height - resolved_margin.top - resolved_margin.bottom;
+
         dest_registry.set_current_page(idx);
         p.collect_ids(
-            config.margin.left,
-            config.margin.top,
-            content_width,
-            content_height,
+            resolved_margin.left,
+            resolved_margin.top,
+            page_content_width,
+            page_content_height,
             &mut dest_registry,
         );
     }
