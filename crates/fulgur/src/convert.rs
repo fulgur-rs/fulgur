@@ -3326,7 +3326,6 @@ mod tests {
     /// without running the full `BookmarkPass` pipeline — these tests exercise
     /// the `convert_node` wrapping path in isolation.
     fn find_node_by_tag(doc: &blitz_html::HtmlDocument, tag: &str) -> Option<usize> {
-        use std::ops::Deref;
         fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
             let node = doc.get_node(node_id)?;
             if let Some(el) = node.element_data() {

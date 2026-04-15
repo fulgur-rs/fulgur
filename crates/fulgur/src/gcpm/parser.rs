@@ -252,10 +252,9 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         // { bookmark-level: 1 }` paired with a UA-default label from a
         // separate rule) and label-only rules (e.g. overriding the label
         // via `bookmark-label: content()` while inheriting the level)
-        // are both valid per GCPM. Bookmarks live in pseudo-element-free
-        // rules — `::before` / `::after` do not carry bookmark-* in any
-        // sensible reading of the spec, so `pseudo.is_some()` rules also
-        // emit mappings (downstream may filter them).
+        // are both valid per GCPM. Pseudo-element rules are currently
+        // passed through; bookmark properties on `::before` / `::after`
+        // have no defined semantic, so nothing downstream acts on them.
         if bookmark_level.is_some() || bookmark_label.is_some() {
             self.bookmark_mappings.push(BookmarkMapping {
                 selector: selector.clone(),
