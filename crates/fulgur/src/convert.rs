@@ -135,7 +135,19 @@ fn convert_node(
     let result = maybe_prepend_string_set(node_id, result, ctx);
     let result = maybe_prepend_counter_ops(node_id, result, ctx);
     let result = maybe_wrap_transform(doc, node_id, result);
-    maybe_wrap_heading(doc, node_id, result)
+    // CSS-driven bookmark wrapping takes priority. The hardcoded h1-h6
+    // fallback path only fires when no CSS entry exists for this node
+    // (relevant to tests that construct a `ConvertContext` directly and
+    // therefore never run `BookmarkPass`). Phase 5 removes the fallback.
+    if let Some(info) = ctx.bookmark_by_node.remove(&node_id) {
+        use crate::pageable::{BookmarkMarkerPageable, BookmarkMarkerWrapperPageable};
+        Box::new(BookmarkMarkerWrapperPageable::new(
+            BookmarkMarkerPageable::new(info.level, info.label),
+            result,
+        ))
+    } else {
+        maybe_wrap_heading(doc, node_id, result)
+    }
 }
 
 /// Wrap the result with `BookmarkMarkerWrapperPageable` if the node is an
