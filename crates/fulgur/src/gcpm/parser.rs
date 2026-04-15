@@ -973,8 +973,30 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                 Token::Function(ref name) => {
                     let fn_name = name.clone();
                     input.parse_nested_block(|input| {
+                        // `content()` is special: GCPM allows a bare
+                        // call with no arguments, which is equivalent to
+                        // `content(text)`. Handle that before trying
+                        // to read an ident, since `expect_ident` on an
+                        // empty block returns an error.
+                        if fn_name.eq_ignore_ascii_case("content") && input.is_exhausted() {
+                            items.push(ContentItem::ContentText);
+                            return Ok(());
+                        }
                         let arg = input.expect_ident()?.clone();
-                        if fn_name.eq_ignore_ascii_case("element") {
+                        if fn_name.eq_ignore_ascii_case("content") {
+                            // `content(text|before|after)`: DOM-scoped
+                            // lookup; unknown idents drop silently so a
+                            // typo does not poison the rest of the
+                            // content list.
+                            match &*arg {
+                                "text" => items.push(ContentItem::ContentText),
+                                "before" => items.push(ContentItem::ContentBefore),
+                                "after" => items.push(ContentItem::ContentAfter),
+                                _ => {}
+                            }
+                        } else if fn_name.eq_ignore_ascii_case("attr") {
+                            items.push(ContentItem::Attr(arg.to_string()));
+                        } else if fn_name.eq_ignore_ascii_case("element") {
                             let name = arg.to_string();
                             // Asymmetric with `string(name, <policy>)` below:
                             // invalid policy drops the item entirely here,
@@ -1832,6 +1854,51 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.bookmark_mappings.len(), 1);
         assert_eq!(ctx.bookmark_mappings[0].level, Some(BookmarkLevel::None_));
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_content() {
+        let css = "h1 { bookmark-label: content(); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(label, &vec![ContentItem::ContentText]);
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_content_text_equivalent() {
+        // `content()` (bare) and `content(text)` should both resolve to
+        // the same `ContentText` variant. Regression guard on the
+        // bare-call code path in `parse_content_value`.
+        let bare = parse_gcpm("h1 { bookmark-label: content(); }");
+        let explicit = parse_gcpm("h1 { bookmark-label: content(text); }");
+        assert_eq!(
+            bare.bookmark_mappings[0].label,
+            explicit.bookmark_mappings[0].label
+        );
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_literal_and_attr() {
+        let css = r#".c { bookmark-label: "Ch. " attr(data-num) " - " content(text); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(
+            label,
+            &vec![
+                ContentItem::String("Ch. ".into()),
+                ContentItem::Attr("data-num".into()),
+                ContentItem::String(" - ".into()),
+                ContentItem::ContentText,
+            ]
+        );
     }
 
     #[test]

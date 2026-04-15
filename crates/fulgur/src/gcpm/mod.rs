@@ -177,6 +177,19 @@ pub enum ContentItem {
         /// The policy for selecting the string value.
         policy: StringPolicy,
     },
+    /// The element's text content — `content()` or `content(text)`.
+    /// Appears in `bookmark-label` rules; margin-box contexts leave it
+    /// as an inert value (no resolution path). Mirrors
+    /// `StringSetValue::ContentText`.
+    ContentText,
+    /// The element's `::before` pseudo-element content — `content(before)`.
+    ContentBefore,
+    /// The element's `::after` pseudo-element content — `content(after)`.
+    ContentAfter,
+    /// The value of the named HTML attribute on the element — `attr(X)`.
+    /// Used inside `bookmark-label` and (indirectly, via `string-set`)
+    /// named strings; mirrors `StringSetValue::Attr`.
+    Attr(String),
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
