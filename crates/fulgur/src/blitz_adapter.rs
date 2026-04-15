@@ -1018,6 +1018,14 @@ impl BookmarkPass {
             None => extract_text_content(doc, node_id),
         };
 
+        // Skip entries with an empty resolved label. Emitting an outline
+        // node with an empty title is observable but carries no useful
+        // information — this matches the previous hardcoded h1-h6 path
+        // which bailed out when `extract_text_content` was empty.
+        if resolved_label.is_empty() {
+            return;
+        }
+
         self.results.borrow_mut().push((
             node_id,
             BookmarkInfo {
@@ -2697,5 +2705,47 @@ li::marker { content: url("star.png"); }
             }],
         );
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn bookmark_pass_skips_entry_when_resolved_label_is_empty() {
+        // Regression guard: the previous hardcoded h1-h6 path in
+        // `convert.rs::maybe_wrap_heading` bailed out when the extracted
+        // text was empty, so `<h1></h1>` produced no outline entry. The
+        // CSS-driven path must preserve that behaviour — emitting an
+        // outline node with an empty title is observable but silent.
+
+        // Case 1: `<h1></h1>` with the UA-style `bookmark-label: content()`
+        // resolves to "" and must not emit an entry.
+        let html = r#"<html><body><h1></h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![BookmarkMapping {
+                selector: ParsedSelector::Tag("h1".into()),
+                level: Some(BookmarkLevel::Integer(1)),
+                label: Some(vec![ContentItem::ContentText]),
+            }],
+        );
+        assert!(
+            results.is_empty(),
+            "empty content() must skip the outline entry, got: {results:?}"
+        );
+
+        // Case 2: level-only rule on an empty element — label falls back
+        // to `extract_text_content`, which is also "", so the entry must
+        // still be skipped.
+        let html = r#"<html><body><div class="ch"></div></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![BookmarkMapping {
+                selector: ParsedSelector::Class("ch".into()),
+                level: Some(BookmarkLevel::Integer(1)),
+                label: None,
+            }],
+        );
+        assert!(
+            results.is_empty(),
+            "empty text-content fallback must skip the outline entry, got: {results:?}"
+        );
     }
 }
