@@ -3460,6 +3460,7 @@ mod tests {
                 font_cache: HashMap::new(),
                 string_set_by_node: HashMap::new(),
                 counter_ops_by_node: HashMap::new(),
+                bookmark_by_node: HashMap::new(),
             }
         }};
     }
