@@ -286,16 +286,16 @@ impl Quad {
 
 /// One clickable link area captured by `LinkCollector` during draw.
 ///
-/// A single `<a>` element may produce multiple rects when its glyphs wrap
+/// A single `<a>` element may produce multiple quads when its glyphs wrap
 /// across lines (or when nested inlines split shaping into multiple runs);
-/// in that case `rects` holds one entry per fragment and `target`/`alt_text`
+/// in that case `quads` holds one entry per fragment and `target`/`alt_text`
 /// are the shared anchor metadata.
 #[derive(Debug, Clone)]
 pub struct LinkOccurrence {
     pub page_idx: usize,
     pub target: crate::paragraph::LinkTarget,
     pub alt_text: Option<String>,
-    pub rects: Vec<Rect>,
+    pub quads: Vec<Quad>,
 }
 
 /// Per-page collector of link activation rects, grouped by `<a>` identity.
@@ -322,6 +322,8 @@ pub struct LinkCollector {
     /// Occurrences grouped by `page_idx`. `BTreeMap` for deterministic
     /// iteration (CLAUDE.md rule) and cheap page-keyed removal.
     pages: BTreeMap<usize, Vec<LinkOccurrence>>,
+    /// Stack of transforms applied to rects before storing as quads.
+    transform_stack: Vec<Affine2D>,
 }
 
 impl LinkCollector {
@@ -333,11 +335,31 @@ impl LinkCollector {
         self.current_page_idx = idx;
     }
 
+    /// Push a transform onto the stack; subsequent `push_rect` calls will
+    /// transform the rect through the composed stack before storing.
+    pub fn push_transform(&mut self, m: Affine2D) {
+        self.transform_stack.push(m);
+    }
+
+    /// Pop the most recent transform off the stack.
+    pub fn pop_transform(&mut self) {
+        self.transform_stack.pop();
+    }
+
+    /// Compose all stacked transforms into a single matrix.
+    fn current_transform(&self) -> Affine2D {
+        self.transform_stack
+            .iter()
+            .copied()
+            .fold(Affine2D::IDENTITY, |acc, m| acc * m)
+    }
+
     /// Record a rect for the given `<a>`. Rects pointing at the same
     /// `Arc<LinkSpan>` *on the same page* are merged into a single
     /// `LinkOccurrence`; on different pages they produce separate
     /// occurrences.
     pub fn push_rect(&mut self, link: &std::sync::Arc<crate::paragraph::LinkSpan>, rect: Rect) {
+        let quad = self.current_transform().transform_rect(&rect);
         let page_idx = self.current_page_idx;
         let key = (page_idx, std::sync::Arc::as_ptr(link) as usize);
         let bucket = self.pages.entry(page_idx).or_default();
@@ -345,7 +367,7 @@ impl LinkCollector {
             // Defensive check: if the index is stale (e.g. the page was
             // already drained via `take_page`), `i` may be out of range.
             if let Some(occ) = bucket.get_mut(i) {
-                occ.rects.push(rect);
+                occ.quads.push(quad);
                 return;
             }
         }
@@ -355,7 +377,7 @@ impl LinkCollector {
             page_idx,
             target: link.target.clone(),
             alt_text: link.alt_text.clone(),
-            rects: vec![rect],
+            quads: vec![quad],
         });
     }
 
@@ -3926,5 +3948,138 @@ mod transform_wrapper_tests {
         assert_eq!(entries[0].y_pt, 42.0);
         assert_eq!(entries[0].level, 2);
         assert_eq!(entries[0].label, "Section");
+    }
+}
+
+#[cfg(test)]
+mod link_collector_transform_tests {
+    use super::*;
+    use crate::paragraph::{LinkSpan, LinkTarget};
+    use std::sync::Arc;
+
+    fn make_link() -> Arc<LinkSpan> {
+        Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new("https://test.example".to_string())),
+            alt_text: None,
+        })
+    }
+
+    #[test]
+    fn push_rect_without_transform_stores_axis_aligned_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 10.0,
+            },
+        );
+        let occs = lc.into_occurrences();
+        assert_eq!(occs.len(), 1);
+        assert_eq!(occs[0].quads.len(), 1);
+        let q = &occs[0].quads[0];
+        // Bottom-left of rect at (10, 20, w=30, h=10): (10, 30)
+        assert!((q.points[0][0] - 10.0).abs() < 1e-5, "bl.x");
+        assert!((q.points[0][1] - 30.0).abs() < 1e-5, "bl.y");
+    }
+
+    #[test]
+    fn push_rect_with_translation_shifts_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::translation(100.0, 200.0));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // BL: (0,10) + translate(100,200) = (100, 210)
+        assert!((q.points[0][0] - 100.0).abs() < 1e-5);
+        assert!((q.points[0][1] - 210.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nested_transforms_compose() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::translation(10.0, 0.0));
+        lc.push_transform(Affine2D::translation(0.0, 20.0));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            },
+        );
+        lc.pop_transform();
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // BL: (0,5) + translate(10,20) = (10, 25)
+        assert!((q.points[0][0] - 10.0).abs() < 1e-5);
+        assert!((q.points[0][1] - 25.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rotation_produces_non_axis_aligned_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::rotation(std::f32::consts::FRAC_PI_2));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 5.0,
+            },
+        );
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // After 90° rotation: (x,y) → (-y, x)
+        // BL (0,5) → (-5, 0)
+        assert!(
+            (q.points[0][0] - (-5.0)).abs() < 1e-4,
+            "bl.x after rot90"
+        );
+        assert!((q.points[0][1] - 0.0).abs() < 1e-4, "bl.y after rot90");
+    }
+
+    #[test]
+    fn empty_transform_stack_is_identity() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 5.0,
+                y: 10.0,
+                width: 20.0,
+                height: 15.0,
+            },
+        );
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // TL corner untransformed: (5, 10)
+        assert!((q.points[3][0] - 5.0).abs() < 1e-5, "tl.x identity");
+        assert!((q.points[3][1] - 10.0).abs() < 1e-5, "tl.y identity");
     }
 }
