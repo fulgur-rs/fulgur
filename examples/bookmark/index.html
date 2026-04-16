@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Bookmark Properties Example</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<h1>CSS Bookmark Properties</h1>
+
+<p>This example demonstrates the GCPM <code>bookmark-level</code> and
+<code>bookmark-label</code> properties. Open the PDF in a viewer that
+shows the outline (bookmarks) panel to see the result.</p>
+
+<h2>Automatic Headings</h2>
+<p>Headings h1 and h2 automatically appear in the PDF outline via
+fulgur's built-in UA stylesheet. Each heading gets a bookmark at its
+corresponding level with its text content as the label.</p>
+
+<h3>Suppressed Subheading</h3>
+<p>This h3 has <code>bookmark-level: none</code> in the author stylesheet,
+so it does <em>not</em> appear in the outline — even though fulgur's UA
+stylesheet would normally assign it level 3.</p>
+
+<h2>Custom Elements</h2>
+<p>Any element can opt into the outline. The appendix sections below use
+<code>bookmark-level: 2</code> and
+<code>bookmark-label: "Appendix: " attr(data-title)</code> to create
+outline entries from a <code>data-title</code> attribute.</p>
+
+<section class="appendix" data-title="Glossary">
+  <div class="appendix-title">Appendix A — Glossary</div>
+  <p><strong>bookmark-level</strong>: Sets the nesting depth of an
+  outline entry. An integer (1–6 typical) or <code>none</code> to
+  suppress.</p>
+  <p><strong>bookmark-label</strong>: Defines the text shown in the
+  outline. Accepts <code>content()</code>, <code>attr()</code>, and
+  string literals.</p>
+</section>
+
+<section class="appendix" data-title="References">
+  <div class="appendix-title">Appendix B — References</div>
+  <p>CSS Generated Content for Paged Media Module Level 3, §7 Bookmarks.
+  W3C Working Draft.</p>
+  <p>Prince XML — <code>prince-bookmark-state</code> property
+  documentation.</p>
+</section>
+
+<p class="note">Outline structure: "CSS Bookmark Properties" (level 1)
+→ "Automatic Headings" (level 2), "Custom Elements" (level 2),
+"Appendix: Glossary" (level 2), "Appendix: References" (level 2).
+The h3 "Suppressed Subheading" is absent from the outline.</p>
+
+</body>
+</html>

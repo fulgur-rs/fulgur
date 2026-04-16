@@ -27,7 +27,7 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
     };
 
     let mut collector = if config.bookmarks {
-        Some(crate::pageable::HeadingCollector::new())
+        Some(crate::pageable::BookmarkCollector::new())
     } else {
         None
     };
@@ -66,7 +66,7 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
             let mut surface = page.surface();
             let mut canvas = Canvas {
                 surface: &mut surface,
-                heading_collector: collector.as_mut(),
+                bookmark_collector: collector.as_mut(),
                 link_collector: Some(&mut link_collector),
             };
             page_content.draw(
@@ -258,7 +258,7 @@ pub fn render_to_pdf_with_gcpm(
     let mut document = krilla::Document::new();
 
     let mut collector = if config.bookmarks {
-        Some(crate::pageable::HeadingCollector::new())
+        Some(crate::pageable::BookmarkCollector::new())
     } else {
         None
     };
@@ -328,7 +328,7 @@ pub fn render_to_pdf_with_gcpm(
 
         let mut surface = page.surface();
 
-        // Margin boxes use a Canvas with no heading collector — running
+        // Margin boxes use a Canvas with no bookmark collector — running
         // elements promoted into margin boxes may contain h1-h6, but their
         // bookmark entry must come from the source position in the body,
         // not from each margin-box repetition. The body Canvas (created
@@ -339,7 +339,7 @@ pub fn render_to_pdf_with_gcpm(
         // header/footer content is a follow-up.
         let mut canvas = Canvas {
             surface: &mut surface,
-            heading_collector: None,
+            bookmark_collector: None,
             link_collector: None,
         };
 
@@ -511,6 +511,7 @@ pub fn render_to_pdf_with_gcpm(
                     font_cache: HashMap::new(),
                     string_set_by_node: HashMap::new(),
                     counter_ops_by_node: HashMap::new(),
+                    bookmark_by_node: HashMap::new(),
                 };
                 let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);
@@ -523,13 +524,13 @@ pub fn render_to_pdf_with_gcpm(
 
         // Draw body content with resolved per-page margin. Reuse `canvas`
         // by overwriting it so the previous (collector-less) Canvas's
-        // borrow on `surface` is released, then reborrow with the heading
-        // and link collectors so h1-h6 markers can record their
+        // borrow on `surface` is released, then reborrow with the bookmark
+        // and link collectors so bookmark markers can record their
         // (page_idx, y) for the PDF outline and `<a>` rects for link
         // annotations.
         canvas = Canvas {
             surface: &mut surface,
-            heading_collector: collector.as_mut(),
+            bookmark_collector: collector.as_mut(),
             link_collector: Some(&mut link_collector),
         };
         let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;

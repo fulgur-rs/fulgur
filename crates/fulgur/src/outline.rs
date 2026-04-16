@@ -1,10 +1,10 @@
-//! Build a krilla Outline (PDF bookmark tree) from flat HeadingEntry records.
+//! Build a krilla Outline (PDF bookmark tree) from flat BookmarkEntry records.
 
 use krilla::destination::XyzDestination;
 use krilla::geom::Point;
 use krilla::outline::{Outline, OutlineNode};
 
-use crate::pageable::{HeadingEntry, Pt};
+use crate::pageable::{BookmarkEntry, Pt};
 
 /// Intermediate, testable tree node. Converted to `OutlineNode` by
 /// `to_krilla_node` before being attached to an `Outline`.
@@ -14,7 +14,7 @@ use crate::pageable::{HeadingEntry, Pt};
 /// implicit in the tree shape, so this field is read only in `#[cfg(test)]`.
 #[derive(Debug)]
 pub(crate) struct TreeNode {
-    pub text: String,
+    pub label: String,
     #[allow(dead_code)]
     pub level: u8,
     pub page_idx: usize,
@@ -24,11 +24,11 @@ pub(crate) struct TreeNode {
 
 /// Build the nested tree using a stack of currently-open ancestors.
 ///
-/// Headings are nested according to their level: a heading with level L becomes
-/// a child of the most recent heading whose level < L. Orphan levels (e.g. an
-/// h3 with no preceding h1/h2) nest under the deepest currently-open shallower
-/// ancestor; if the stack is empty they become top-level.
-pub(crate) fn build_tree(entries: &[HeadingEntry]) -> Vec<TreeNode> {
+/// Bookmarks are nested according to their level: a bookmark with level L becomes
+/// a child of the most recent bookmark whose level < L. Orphan levels (e.g. a
+/// level-3 bookmark with no preceding level-1/2) nest under the deepest currently-open
+/// shallower ancestor; if the stack is empty they become top-level.
+pub(crate) fn build_tree(entries: &[BookmarkEntry]) -> Vec<TreeNode> {
     let mut roots: Vec<TreeNode> = Vec::new();
     // Stack of (level, path-from-roots) for currently-open ancestors.
     let mut open: Vec<(u8, Vec<usize>)> = Vec::new();
@@ -40,7 +40,7 @@ pub(crate) fn build_tree(entries: &[HeadingEntry]) -> Vec<TreeNode> {
         }
 
         let new_node = TreeNode {
-            text: e.text.clone(),
+            label: e.label.clone(),
             level: e.level,
             page_idx: e.page_idx,
             y_pt: e.y_pt,
@@ -72,13 +72,14 @@ fn walk_mut<'a>(roots: &'a mut [TreeNode], path: &[usize]) -> &'a mut TreeNode {
     node
 }
 
-/// Build a krilla `Outline` from a flat, source-ordered list of heading
-/// entries. Headings are nested according to their level: a heading with
-/// level L becomes a child of the most recent heading whose level < L.
+/// Build a krilla `Outline` from a flat, source-ordered list of bookmark
+/// entries. Bookmarks are nested according to their level: a bookmark with
+/// level L becomes a child of the most recent bookmark whose level < L.
 ///
-/// Orphan levels (e.g. an h3 with no preceding h1/h2) are promoted to the
-/// outermost open level; if the stack is empty they become top-level.
-pub fn build_outline(entries: &[HeadingEntry]) -> Outline {
+/// Orphan levels (e.g. a level-3 bookmark with no preceding level-1/2) are
+/// promoted to the outermost open level; if the stack is empty they become
+/// top-level.
+pub fn build_outline(entries: &[BookmarkEntry]) -> Outline {
     let tree = build_tree(entries);
     let mut outline = Outline::new();
     for node in tree {
@@ -89,7 +90,7 @@ pub fn build_outline(entries: &[HeadingEntry]) -> Outline {
 
 fn to_krilla_node(node: TreeNode) -> OutlineNode {
     let dest = XyzDestination::new(node.page_idx, Point::from_xy(0.0, node.y_pt));
-    let mut o = OutlineNode::new(node.text, dest);
+    let mut o = OutlineNode::new(node.label, dest);
     for child in node.children {
         o.push_child(to_krilla_node(child));
     }
@@ -100,18 +101,18 @@ fn to_krilla_node(node: TreeNode) -> OutlineNode {
 mod tests {
     use super::*;
 
-    fn entry(page: usize, y: Pt, level: u8, text: &str) -> HeadingEntry {
-        HeadingEntry {
+    fn entry(page: usize, y: Pt, level: u8, label: &str) -> BookmarkEntry {
+        BookmarkEntry {
             page_idx: page,
             y_pt: y,
             level,
-            text: text.to_string(),
+            label: label.to_string(),
         }
     }
 
     #[derive(Debug, PartialEq)]
     struct DebugNode {
-        text: String,
+        label: String,
         level: u8,
         page: usize,
         children: Vec<DebugNode>,
@@ -119,7 +120,7 @@ mod tests {
 
     fn to_debug(n: &TreeNode) -> DebugNode {
         DebugNode {
-            text: n.text.clone(),
+            label: n.label.clone(),
             level: n.level,
             page: n.page_idx,
             children: n.children.iter().map(to_debug).collect(),
@@ -140,18 +141,18 @@ mod tests {
             debug,
             vec![
                 DebugNode {
-                    text: "Chapter 1".into(),
+                    label: "Chapter 1".into(),
                     level: 1,
                     page: 0,
                     children: vec![
                         DebugNode {
-                            text: "Section 1.1".into(),
+                            label: "Section 1.1".into(),
                             level: 2,
                             page: 0,
                             children: vec![],
                         },
                         DebugNode {
-                            text: "Section 1.2".into(),
+                            label: "Section 1.2".into(),
                             level: 2,
                             page: 1,
                             children: vec![],
@@ -159,7 +160,7 @@ mod tests {
                     ],
                 },
                 DebugNode {
-                    text: "Chapter 2".into(),
+                    label: "Chapter 2".into(),
                     level: 1,
                     page: 2,
                     children: vec![],
@@ -173,7 +174,7 @@ mod tests {
         let entries = vec![entry(0, 10.0, 3, "Stray")];
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
-        assert_eq!(tree[0].text, "Stray");
+        assert_eq!(tree[0].label, "Stray");
         assert_eq!(tree[0].level, 3);
         assert!(tree[0].children.is_empty());
     }
@@ -184,7 +185,7 @@ mod tests {
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].children.len(), 1);
-        assert_eq!(tree[0].children[0].text, "A.x");
+        assert_eq!(tree[0].children[0].label, "A.x");
     }
 
     #[test]

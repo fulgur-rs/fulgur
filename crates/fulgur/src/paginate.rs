@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::gcpm::CounterOp;
 use crate::gcpm::counter::CounterState;
 use crate::pageable::{
-    BlockPageable, CounterOpMarkerPageable, CounterOpWrapperPageable, HeadingMarkerWrapperPageable,
-    ListItemPageable, Pageable, Pt, RunningElementMarkerPageable, RunningElementWrapperPageable,
-    StringSetPageable, StringSetWrapperPageable, TablePageable,
+    BlockPageable, BookmarkMarkerWrapperPageable, CounterOpMarkerPageable,
+    CounterOpWrapperPageable, ListItemPageable, Pageable, Pt, RunningElementMarkerPageable,
+    RunningElementWrapperPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
 };
 
 /// Per-page state for a named string.
@@ -98,7 +98,7 @@ fn collect_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, String)>)
         collect_markers(wrapper.child.as_ref(), markers);
     } else if let Some(wrapper) = any.downcast_ref::<CounterOpWrapperPageable>() {
         collect_markers(wrapper.child.as_ref(), markers);
-    } else if let Some(wrapper) = any.downcast_ref::<HeadingMarkerWrapperPageable>() {
+    } else if let Some(wrapper) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
         collect_markers(wrapper.child.as_ref(), markers);
     } else if let Some(marker) = any.downcast_ref::<StringSetPageable>() {
         // Used by unit tests that construct markers directly.
@@ -185,7 +185,7 @@ fn collect_running_markers(pageable: &dyn Pageable, markers: &mut Vec<(String, u
         collect_running_markers(wrapper.child.as_ref(), markers);
     } else if let Some(wrapper) = any.downcast_ref::<CounterOpWrapperPageable>() {
         collect_running_markers(wrapper.child.as_ref(), markers);
-    } else if let Some(wrapper) = any.downcast_ref::<HeadingMarkerWrapperPageable>() {
+    } else if let Some(wrapper) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
         collect_running_markers(wrapper.child.as_ref(), markers);
     } else if let Some(block) = any.downcast_ref::<BlockPageable>() {
         for child in &block.children {
@@ -245,7 +245,7 @@ fn collect_counter_markers(pageable: &dyn Pageable, ops: &mut Vec<CounterOp>) {
         collect_counter_markers(wrapper.child.as_ref(), ops);
     } else if let Some(wrapper) = any.downcast_ref::<RunningElementWrapperPageable>() {
         collect_counter_markers(wrapper.child.as_ref(), ops);
-    } else if let Some(wrapper) = any.downcast_ref::<HeadingMarkerWrapperPageable>() {
+    } else if let Some(wrapper) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
         collect_counter_markers(wrapper.child.as_ref(), ops);
     } else if let Some(table) = any.downcast_ref::<TablePageable>() {
         // Skip header_cells: they are cloned into every page fragment by
@@ -263,7 +263,7 @@ fn collect_counter_markers(pageable: &dyn Pageable, ops: &mut Vec<CounterOp>) {
 mod tests {
     use super::*;
     use crate::pageable::{
-        BlockPageable, HeadingMarkerPageable, HeadingMarkerWrapperPageable, PositionedChild,
+        BlockPageable, BookmarkMarkerPageable, BookmarkMarkerWrapperPageable, PositionedChild,
         SpacerPageable, StringSetPageable, StringSetWrapperPageable,
     };
 
@@ -352,8 +352,8 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_string_sets_inside_heading_wrapper() {
-        // Regression: `HeadingMarkerWrapperPageable` is the outermost wrapper
+    fn test_collect_string_sets_inside_bookmark_wrapper() {
+        // Regression: `BookmarkMarkerWrapperPageable` is the outermost wrapper
         // on every h1-h6 (emitted by convert_node). If the walkers miss this
         // type, all string-set / counter / running markers inside the heading
         // are silently dropped. See PR #84 discussion.
@@ -362,12 +362,12 @@ mod tests {
             vec![StringSetPageable::new("title".into(), "Ch1".into())],
             Box::new(heading_body),
         );
-        let with_heading_marker = HeadingMarkerWrapperPageable::new(
-            HeadingMarkerPageable::new(1, "Ch1".into()),
+        let with_bookmark_marker = BookmarkMarkerWrapperPageable::new(
+            BookmarkMarkerPageable::new(1, "Ch1".into()),
             Box::new(with_string_set),
         );
         let root =
-            BlockPageable::with_positioned_children(vec![pos(Box::new(with_heading_marker))]);
+            BlockPageable::with_positioned_children(vec![pos(Box::new(with_bookmark_marker))]);
 
         let pages = paginate(Box::new(root), 100.0, 200.0);
         let states = collect_string_set_states(&pages);
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(
             states[0].get("title").and_then(|s| s.first.clone()),
             Some("Ch1".to_string()),
-            "string-set marker under HeadingMarkerWrapperPageable must be visible to walker"
+            "string-set marker under BookmarkMarkerWrapperPageable must be visible to walker"
         );
     }
 

@@ -3,6 +3,7 @@ use cssparser::{
     ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
 };
 
+use super::bookmark::{BookmarkLevel, BookmarkMapping};
 use super::margin_box::MarginBoxPosition;
 use super::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle, ElementPolicy,
@@ -39,6 +40,7 @@ struct GcpmSheetParser<'a> {
     counter_mappings: &'a mut Vec<CounterMapping>,
     content_counter_mappings: &'a mut Vec<ContentCounterMapping>,
     page_settings: &'a mut Vec<PageSettingsRule>,
+    bookmark_mappings: &'a mut Vec<BookmarkMapping>,
 }
 
 /// Describes a region in the original CSS to edit when building `cleaned_css`.
@@ -195,6 +197,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         let mut string_set: Option<(String, Vec<StringSetValue>)> = None;
         let mut counter_ops: Vec<CounterOp> = Vec::new();
         let mut content_items: Option<Vec<ContentItem>> = None;
+        let mut bookmark_level: Option<BookmarkLevel> = None;
+        let mut bookmark_label: Option<Vec<ContentItem>> = None;
 
         let mut parser = StyleRuleParser {
             edits: self.edits,
@@ -202,6 +206,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
             string_set: &mut string_set,
             counter_ops: &mut counter_ops,
             content_items: &mut content_items,
+            bookmark_level: &mut bookmark_level,
+            bookmark_label: &mut bookmark_label,
             has_pseudo: pseudo.is_some(),
         };
         let iter = RuleBodyParser::new(input, &mut parser);
@@ -239,6 +245,18 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                     content: items,
                 });
             }
+        }
+
+        // Push a bookmark mapping when either `bookmark-level` or
+        // `bookmark-label` was declared on a real element (not a
+        // pseudo-element). `bookmark-*` on `::before` / `::after` has no
+        // defined semantic in GCPM, so pseudo-element rules are skipped.
+        if pseudo.is_none() && (bookmark_level.is_some() || bookmark_label.is_some()) {
+            self.bookmark_mappings.push(BookmarkMapping {
+                selector: selector.clone(),
+                level: bookmark_level,
+                label: bookmark_label,
+            });
         }
 
         Ok(TopLevelItem::StyleRule)
@@ -582,6 +600,8 @@ struct StyleRuleParser<'a> {
     string_set: &'a mut Option<(String, Vec<StringSetValue>)>,
     counter_ops: &'a mut Vec<CounterOp>,
     content_items: &'a mut Option<Vec<ContentItem>>,
+    bookmark_level: &'a mut Option<BookmarkLevel>,
+    bookmark_label: &'a mut Option<Vec<ContentItem>>,
     has_pseudo: bool,
 }
 
@@ -666,6 +686,21 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
                 end,
                 replacement: String::new(),
             });
+        } else if name.eq_ignore_ascii_case("bookmark-level") {
+            // Parse `bookmark-level: <integer> | none`. Last-declaration
+            // wins, matching CSS cascade within a single rule.
+            if let Ok(level) = parse_bookmark_level_value(input) {
+                *self.bookmark_level = Some(level);
+            } else {
+                while input.next().is_ok() {}
+            }
+        } else if name.eq_ignore_ascii_case("bookmark-label") {
+            // Parse `bookmark-label: <content-list>` reusing the same
+            // content-item grammar as `content:` inside margin boxes
+            // (string literals, `content(text|before|after)`, `attr(X)`,
+            // `counter()`, `string()`, `element()`).
+            let items = parse_content_value(input);
+            *self.bookmark_label = Some(items);
         } else if name.eq_ignore_ascii_case("content") && self.has_pseudo {
             let items = parse_content_value(input);
             let has_counter = items
@@ -864,6 +899,26 @@ fn parse_element_policy<'i>(
     })
 }
 
+/// Parse the value of a `bookmark-level` declaration.
+///
+/// Accepts a positive integer (clamped to `u8`, GCPM has no upper bound
+/// but PDF outlines are not meaningful past a handful of levels) or the
+/// identifier `none`. Any other value — floats, negative numbers, zero,
+/// other idents — is rejected so the rule is treated as if
+/// `bookmark-level` were absent.
+fn parse_bookmark_level_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BookmarkLevel, ParseError<'i, ()>> {
+    let token = input.next()?.clone();
+    match token {
+        Token::Number {
+            int_value: Some(n), ..
+        } if n >= 1 && n <= i32::from(u8::MAX) => Ok(BookmarkLevel::Integer(n as u8)),
+        Token::Ident(ref ident) if ident.eq_ignore_ascii_case("none") => Ok(BookmarkLevel::None_),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 /// Parse counter operations from `counter-reset`, `counter-increment`, or `counter-set`.
 fn parse_counter_ops(input: &mut Parser<'_, '_>, prop: &str) -> Vec<CounterOp> {
     let mut ops = Vec::new();
@@ -913,8 +968,30 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                 Token::Function(ref name) => {
                     let fn_name = name.clone();
                     input.parse_nested_block(|input| {
+                        // `content()` is special: GCPM allows a bare
+                        // call with no arguments, which is equivalent to
+                        // `content(text)`. Handle that before trying
+                        // to read an ident, since `expect_ident` on an
+                        // empty block returns an error.
+                        if fn_name.eq_ignore_ascii_case("content") && input.is_exhausted() {
+                            items.push(ContentItem::ContentText);
+                            return Ok(());
+                        }
                         let arg = input.expect_ident()?.clone();
-                        if fn_name.eq_ignore_ascii_case("element") {
+                        if fn_name.eq_ignore_ascii_case("content") {
+                            // `content(text|before|after)`: DOM-scoped
+                            // lookup; unknown idents drop silently so a
+                            // typo does not poison the rest of the
+                            // content list.
+                            match &*arg {
+                                "text" => items.push(ContentItem::ContentText),
+                                "before" => items.push(ContentItem::ContentBefore),
+                                "after" => items.push(ContentItem::ContentAfter),
+                                _ => {}
+                            }
+                        } else if fn_name.eq_ignore_ascii_case("attr") {
+                            items.push(ContentItem::Attr(arg.to_string()));
+                        } else if fn_name.eq_ignore_ascii_case("element") {
                             let name = arg.to_string();
                             // Asymmetric with `string(name, <policy>)` below:
                             // invalid policy drops the item entirely here,
@@ -990,6 +1067,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut counter_mappings = Vec::new();
     let mut content_counter_mappings = Vec::new();
     let mut page_settings = Vec::new();
+    let mut bookmark_mappings = Vec::new();
     let mut edits: Vec<CssEdit> = Vec::new();
 
     // Run the cssparser-based parse to collect GCPM data and edit spans.
@@ -1005,6 +1083,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
             counter_mappings: &mut counter_mappings,
             content_counter_mappings: &mut content_counter_mappings,
             page_settings: &mut page_settings,
+            bookmark_mappings: &mut bookmark_mappings,
         };
 
         let iter = StyleSheetParser::new(&mut input, &mut parser);
@@ -1023,6 +1102,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         counter_mappings,
         content_counter_mappings,
         page_settings,
+        bookmark_mappings,
         cleaned_css,
     }
 }
@@ -1746,5 +1826,145 @@ mod tests {
                 .any(|op| matches!(op, CounterOp::Reset { .. })),
             "counter-reset between two increments must survive"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // bookmark-level / bookmark-label (GCPM bookmark properties)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_bookmark_level_integer() {
+        let css = "h1 { bookmark-level: 1; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let m = &ctx.bookmark_mappings[0];
+        assert_eq!(m.selector, ParsedSelector::Tag("h1".into()));
+        assert_eq!(m.level, Some(BookmarkLevel::Integer(1)));
+        assert!(m.label.is_none());
+    }
+
+    #[test]
+    fn test_parse_bookmark_level_none() {
+        let css = "h1 { bookmark-level: none; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        assert_eq!(ctx.bookmark_mappings[0].level, Some(BookmarkLevel::None_));
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_content() {
+        let css = "h1 { bookmark-label: content(); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(label, &vec![ContentItem::ContentText]);
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_content_text_equivalent() {
+        // `content()` (bare) and `content(text)` should both resolve to
+        // the same `ContentText` variant. Regression guard on the
+        // bare-call code path in `parse_content_value`.
+        let bare = parse_gcpm("h1 { bookmark-label: content(); }");
+        let explicit = parse_gcpm("h1 { bookmark-label: content(text); }");
+        assert_eq!(
+            bare.bookmark_mappings[0].label,
+            explicit.bookmark_mappings[0].label
+        );
+    }
+
+    #[test]
+    fn test_parse_bookmark_label_literal_and_attr() {
+        let css = r#".c { bookmark-label: "Ch. " attr(data-num) " - " content(text); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(
+            label,
+            &vec![
+                ContentItem::String("Ch. ".into()),
+                ContentItem::Attr("data-num".into()),
+                ContentItem::String(" - ".into()),
+                ContentItem::ContentText,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_bookmark_combined() {
+        // Combined level + label in a single rule: both must land in the
+        // same `BookmarkMapping`. This is the canonical shape produced
+        // by `FULGUR_UA_CSS` for h1-h6.
+        let css = "h1 { bookmark-level: 1; bookmark-label: content(); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let m = &ctx.bookmark_mappings[0];
+        assert_eq!(m.selector, ParsedSelector::Tag("h1".into()));
+        assert_eq!(m.level, Some(BookmarkLevel::Integer(1)));
+        assert_eq!(m.label.as_deref(), Some(&[ContentItem::ContentText][..]));
+    }
+
+    #[test]
+    fn test_parse_bookmark_only_level_produces_mapping() {
+        // Level-only is valid: label inherits the UA default elsewhere.
+        let css = ".aside { bookmark-level: 2; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let m = &ctx.bookmark_mappings[0];
+        assert_eq!(m.level, Some(BookmarkLevel::Integer(2)));
+        assert!(m.label.is_none());
+    }
+
+    #[test]
+    fn test_parse_bookmark_only_label_produces_mapping() {
+        // Label-only is valid: level inherits from UA or parent rule.
+        let css = r#"h1 { bookmark-label: "Custom"; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let m = &ctx.bookmark_mappings[0];
+        assert!(m.level.is_none());
+        assert_eq!(m.label, Some(vec![ContentItem::String("Custom".into())]));
+    }
+
+    #[test]
+    fn test_parse_no_bookmark_no_mapping() {
+        let css = "p { color: red; }";
+        let ctx = parse_gcpm(css);
+        assert!(ctx.bookmark_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bookmark_pseudo_element_skipped() {
+        let css = "h1::before { bookmark-level: 1; bookmark-label: content(); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.bookmark_mappings.is_empty(),
+            "bookmark-* on pseudo-elements must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_parse_bookmark_level_invalid_values_ignored() {
+        // Zero, negative, non-integer, or unknown idents must not produce
+        // a level. The rule itself still parses fine; bookmark_mappings
+        // simply stays empty because neither level nor label is recorded.
+        for css in [
+            "h1 { bookmark-level: 0; }",
+            "h1 { bookmark-level: -1; }",
+            "h1 { bookmark-level: 1.5; }",
+            "h1 { bookmark-level: auto; }",
+        ] {
+            let ctx = parse_gcpm(css);
+            assert!(
+                ctx.bookmark_mappings.is_empty(),
+                "{css:?} should not produce a bookmark mapping"
+            );
+        }
     }
 }

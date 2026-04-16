@@ -1,10 +1,13 @@
+pub mod bookmark;
 pub mod counter;
 pub mod margin_box;
 pub mod page_settings;
 pub mod parser;
 pub mod running;
 pub mod string_set;
+pub mod ua_css;
 
+use bookmark::BookmarkMapping;
 use margin_box::MarginBoxPosition;
 
 /// A simple CSS selector parsed from a style rule.
@@ -175,6 +178,19 @@ pub enum ContentItem {
         /// The policy for selecting the string value.
         policy: StringPolicy,
     },
+    /// The element's text content — `content()` or `content(text)`.
+    /// Appears in `bookmark-label` rules; margin-box contexts leave it
+    /// as an inert value (no resolution path). Mirrors
+    /// `StringSetValue::ContentText`.
+    ContentText,
+    /// The element's `::before` pseudo-element content — `content(before)`.
+    ContentBefore,
+    /// The element's `::after` pseudo-element content — `content(after)`.
+    ContentAfter,
+    /// The value of the named HTML attribute on the element — `attr(X)`.
+    /// Used inside `bookmark-label` and (indirectly, via `string-set`)
+    /// named strings; mirrors `StringSetValue::Attr`.
+    Attr(String),
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
@@ -221,12 +237,23 @@ pub struct GcpmContext {
     pub counter_mappings: Vec<CounterMapping>,
     /// Mappings from CSS selectors + pseudo-elements to content items with counter().
     pub content_counter_mappings: Vec<ContentCounterMapping>,
+    /// Mappings from CSS selectors to `bookmark-level` / `bookmark-label` declarations.
+    pub bookmark_mappings: Vec<BookmarkMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
     pub cleaned_css: String,
 }
 
 impl GcpmContext {
-    /// Returns `true` if no GCPM features were found.
+    /// Returns `true` if no GCPM features that require the margin-box /
+    /// running-element render pipeline were found.
+    ///
+    /// `bookmark_mappings` is intentionally excluded: bookmarks are
+    /// resolved during the normal `convert` pass via `BookmarkPass` and
+    /// carried through `ConvertContext`, so they never need the two-pass
+    /// `render_to_pdf_with_gcpm` codepath. Including them here would
+    /// force every document through the GCPM render path once the UA
+    /// stylesheet starts prepending `h1`-`h6` bookmark rules
+    /// unconditionally.
     pub fn is_empty(&self) -> bool {
         self.margin_boxes.is_empty()
             && self.running_mappings.is_empty()
@@ -252,6 +279,7 @@ impl GcpmContext {
         self.counter_mappings.extend(other.counter_mappings);
         self.content_counter_mappings
             .extend(other.content_counter_mappings);
+        self.bookmark_mappings.extend(other.bookmark_mappings);
         if !other.cleaned_css.is_empty() {
             if !self.cleaned_css.is_empty() {
                 self.cleaned_css.push('\n');
@@ -274,6 +302,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(ctx.is_empty());
@@ -296,6 +325,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -313,6 +343,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         assert!(!ctx.is_empty());
@@ -330,6 +361,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "body { color: red; }".to_string(),
         };
         let b = GcpmContext {
@@ -347,6 +379,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "p { margin: 0; }".to_string(),
         };
 
@@ -366,6 +399,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
         let b = GcpmContext {
@@ -375,6 +409,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            bookmark_mappings: vec![],
             cleaned_css: "body { color: blue; }".to_string(),
         };
 

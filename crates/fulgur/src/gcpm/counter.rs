@@ -32,6 +32,14 @@ pub fn resolve_content_to_string(
                     out.push_str(resolve_string_policy(state, *policy));
                 }
             }
+            // `content()` / `content(before|after)` / `attr(X)` are only
+            // meaningful inside `bookmark-label`, where a DOM-element
+            // context provides the value. In margin-box content they
+            // have no referent, so they emit nothing.
+            ContentItem::ContentText
+            | ContentItem::ContentBefore
+            | ContentItem::ContentAfter
+            | ContentItem::Attr(_) => {}
         }
     }
     out
@@ -80,6 +88,12 @@ pub fn resolve_content_to_html(
                     push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
                 }
             }
+            // DOM-element-scoped items (see `resolve_content`): no
+            // referent in margin-box HTML, so emit nothing.
+            ContentItem::ContentText
+            | ContentItem::ContentBefore
+            | ContentItem::ContentAfter
+            | ContentItem::Attr(_) => {}
         }
     }
     out

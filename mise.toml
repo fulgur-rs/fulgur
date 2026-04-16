@@ -21,6 +21,12 @@ for dir in examples/*/; do
     [ -f "$img" ] || continue
     args+=(--image "$(basename "$img")=$img")
   done
+  if [ -f "${dir}fulgur.args" ]; then
+    while IFS= read -r line; do
+      [[ -z "$line" || "$line" == '#'* ]] && continue
+      args+=($line)
+    done < "${dir}fulgur.args"
+  fi
   target/release/fulgur render "$html" "${args[@]}" -o "$pdf"
 done
 """

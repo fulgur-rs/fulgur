@@ -1,0 +1,82 @@
+/* ── Bookmark CSS (GCPM) ─────────────────────── */
+
+/*
+ * h1-h6 automatically get bookmark-level via fulgur's UA stylesheet.
+ * Author CSS can override or suppress them, and add bookmarks to
+ * arbitrary elements.
+ */
+
+/* Custom bookmark on <section class="appendix"> */
+.appendix {
+  bookmark-level: 2;
+  bookmark-label: "Appendix: " attr(data-title);
+}
+
+/* Suppress h3 from appearing in the outline */
+h3 {
+  bookmark-level: none;
+}
+
+/* ── Page layout ─────────────────────────────── */
+
+@page {
+  size: a4;
+  margin: 20mm 25mm;
+}
+
+/* ── Typography ──────────────────────────────── */
+
+body {
+  font-family: sans-serif;
+  font-size: 11pt;
+  line-height: 1.6;
+  color: #333;
+}
+
+h1 {
+  font-size: 22pt;
+  color: #1a1a2e;
+  border-bottom: 2px solid #1a1a2e;
+  padding-bottom: 6pt;
+  margin-bottom: 16pt;
+}
+
+h2 {
+  font-size: 16pt;
+  color: #16213e;
+  margin-top: 24pt;
+  margin-bottom: 8pt;
+}
+
+h3 {
+  font-size: 13pt;
+  color: #0f3460;
+  margin-top: 16pt;
+  margin-bottom: 6pt;
+}
+
+p {
+  margin: 8pt 0;
+}
+
+.appendix {
+  margin-top: 32pt;
+  padding: 12pt 16pt;
+  background-color: #f0f4f8;
+  border-left: 4px solid #16213e;
+}
+
+.appendix-title {
+  font-weight: bold;
+  font-size: 14pt;
+  color: #16213e;
+  margin-bottom: 6pt;
+}
+
+.note {
+  font-size: 9pt;
+  color: #666;
+  margin-top: 24pt;
+  border-top: 1px solid #ccc;
+  padding-top: 8pt;
+}
