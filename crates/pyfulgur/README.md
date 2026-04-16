@@ -8,6 +8,8 @@ Python bindings for [fulgur](https://github.com/mitsuru/fulgur) — an offline, 
 
 ## Planned API
 
+> **Not available in v0.0.1.** The current release is a placeholder for name reservation.
+
 ```python
 from pyfulgur import Engine, AssetBundle
 
