@@ -373,12 +373,12 @@ fn collect_from_expr(
                 collect_from_expr(fe, root, scope);
             }
         }
-        ast::Expr::GetAttr(a) => {
+        ast::Expr::GetAttr(a)
             // If resolve_expr_path returned None (e.g. filter/call base),
             // recurse into the base expression to collect its variables.
-            if resolve_expr_path(expr, scope).is_none() {
-                collect_from_expr(&a.expr, root, scope);
-            }
+            if resolve_expr_path(expr, scope).is_none() =>
+        {
+            collect_from_expr(&a.expr, root, scope);
         }
         ast::Expr::GetItem(gi) => {
             // Recurse into both base and subscript expressions

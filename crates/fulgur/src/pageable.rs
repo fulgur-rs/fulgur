@@ -21,7 +21,9 @@ use crate::image::ImageFormat;
 #[derive(Debug, Default)]
 pub struct DestinationRegistry {
     current_page_idx: usize,
-    entries: BTreeMap<String, (usize, Pt)>,
+    entries: BTreeMap<String, (usize, Pt, Pt)>,
+    /// Stack of transforms applied to coordinates before storing.
+    transform_stack: Vec<Affine2D>,
 }
 
 impl DestinationRegistry {
@@ -34,15 +36,41 @@ impl DestinationRegistry {
         self.current_page_idx = idx;
     }
 
-    /// Record an anchor destination. First-write-wins: later duplicates are ignored.
-    pub fn record(&mut self, id: &str, y: Pt) {
-        self.entries
-            .entry(id.to_string())
-            .or_insert((self.current_page_idx, y));
+    /// Push a transform onto the stack; subsequent `record` calls will
+    /// transform coordinates through the composed stack before storing.
+    pub fn push_transform(&mut self, m: Affine2D) {
+        self.transform_stack.push(m);
     }
 
-    /// Look up a recorded anchor.
-    pub fn get(&self, id: &str) -> Option<(usize, Pt)> {
+    /// Pop the most recent transform off the stack.
+    ///
+    /// No-op if the stack is empty (debug builds will assert).
+    pub fn pop_transform(&mut self) {
+        debug_assert!(
+            !self.transform_stack.is_empty(),
+            "DestinationRegistry::pop_transform called on empty stack"
+        );
+        self.transform_stack.pop();
+    }
+
+    /// Compose all stacked transforms into a single matrix.
+    fn current_transform(&self) -> Affine2D {
+        self.transform_stack
+            .iter()
+            .copied()
+            .fold(Affine2D::IDENTITY, |acc, m| acc * m)
+    }
+
+    /// Record an anchor destination. First-write-wins: later duplicates are ignored.
+    pub fn record(&mut self, id: &str, x: Pt, y: Pt) {
+        let (tx, ty) = self.current_transform().transform_point(x, y);
+        self.entries
+            .entry(id.to_string())
+            .or_insert((self.current_page_idx, tx, ty));
+    }
+
+    /// Look up a recorded anchor. Returns `(page_idx, x, y)`.
+    pub fn get(&self, id: &str) -> Option<(usize, Pt, Pt)> {
         self.entries.get(id).copied()
     }
 }
@@ -148,6 +176,33 @@ impl Affine2D {
     pub fn to_krilla(&self) -> krilla::geom::Transform {
         krilla::geom::Transform::from_row(self.a, self.b, self.c, self.d, self.e, self.f)
     }
+
+    /// Apply this affine transform to a 2D point.
+    pub fn transform_point(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+
+    /// Transform a `Rect` into a `Quad` by applying this matrix to each corner.
+    ///
+    /// The four corners of the input rect (in Y-down page coordinates) are
+    /// transformed individually, preserving the krilla quad-point order:
+    /// bottom-left → bottom-right → top-right → top-left.
+    pub fn transform_rect(&self, r: &Rect) -> Quad {
+        let x0 = r.x;
+        let y0 = r.y;
+        let x1 = r.x + r.width;
+        let y1 = r.y + r.height;
+        let bl = self.transform_point(x0, y1);
+        let br = self.transform_point(x1, y1);
+        let tr = self.transform_point(x1, y0);
+        let tl = self.transform_point(x0, y0);
+        Quad {
+            points: [[bl.0, bl.1], [br.0, br.1], [tr.0, tr.1], [tl.0, tl.1]],
+        }
+    }
 }
 
 /// Matrix product `self * rhs`. Applied to a point `p`, this yields
@@ -236,18 +291,50 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// Four-point quadrilateral for transformed link areas.
+///
+/// Point order follows krilla convention:
+/// bottom-left → bottom-right → top-right → top-left (Y-down coordinates).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quad {
+    pub points: [[f32; 2]; 4],
+}
+
+impl Quad {
+    /// Returns `true` when the quad has collapsed to zero (or near-zero) area,
+    /// e.g. after a `scaleX(0)` transform. Uses the cross product of two edge
+    /// vectors originating from the bottom-left corner.
+    pub fn is_degenerate(&self) -> bool {
+        let ax = self.points[1][0] - self.points[0][0];
+        let ay = self.points[1][1] - self.points[0][1];
+        let bx = self.points[3][0] - self.points[0][0];
+        let by = self.points[3][1] - self.points[0][1];
+        (ax * by - ay * bx).abs() <= f32::EPSILON
+    }
+
+    /// Convert to krilla's `Quadrilateral` for PDF annotation emission.
+    pub fn to_krilla(&self) -> krilla::geom::Quadrilateral {
+        krilla::geom::Quadrilateral([
+            krilla::geom::Point::from_xy(self.points[0][0], self.points[0][1]),
+            krilla::geom::Point::from_xy(self.points[1][0], self.points[1][1]),
+            krilla::geom::Point::from_xy(self.points[2][0], self.points[2][1]),
+            krilla::geom::Point::from_xy(self.points[3][0], self.points[3][1]),
+        ])
+    }
+}
+
 /// One clickable link area captured by `LinkCollector` during draw.
 ///
-/// A single `<a>` element may produce multiple rects when its glyphs wrap
+/// A single `<a>` element may produce multiple quads when its glyphs wrap
 /// across lines (or when nested inlines split shaping into multiple runs);
-/// in that case `rects` holds one entry per fragment and `target`/`alt_text`
+/// in that case `quads` holds one entry per fragment and `target`/`alt_text`
 /// are the shared anchor metadata.
 #[derive(Debug, Clone)]
 pub struct LinkOccurrence {
     pub page_idx: usize,
     pub target: crate::paragraph::LinkTarget,
     pub alt_text: Option<String>,
-    pub rects: Vec<Rect>,
+    pub quads: Vec<Quad>,
 }
 
 /// Per-page collector of link activation rects, grouped by `<a>` identity.
@@ -274,6 +361,8 @@ pub struct LinkCollector {
     /// Occurrences grouped by `page_idx`. `BTreeMap` for deterministic
     /// iteration (CLAUDE.md rule) and cheap page-keyed removal.
     pages: BTreeMap<usize, Vec<LinkOccurrence>>,
+    /// Stack of transforms applied to rects before storing as quads.
+    transform_stack: Vec<Affine2D>,
 }
 
 impl LinkCollector {
@@ -285,11 +374,49 @@ impl LinkCollector {
         self.current_page_idx = idx;
     }
 
+    /// Push a transform onto the stack; subsequent `push_rect` calls will
+    /// transform the rect through the composed stack before storing.
+    pub fn push_transform(&mut self, m: Affine2D) {
+        self.transform_stack.push(m);
+    }
+
+    /// Pop the most recent transform off the stack.
+    ///
+    /// No-op if the stack is empty (debug builds will assert).
+    pub fn pop_transform(&mut self) {
+        debug_assert!(
+            !self.transform_stack.is_empty(),
+            "LinkCollector::pop_transform called on empty stack"
+        );
+        self.transform_stack.pop();
+    }
+
+    /// Compose all stacked transforms into a single matrix.
+    fn current_transform(&self) -> Affine2D {
+        self.transform_stack
+            .iter()
+            .copied()
+            .fold(Affine2D::IDENTITY, |acc, m| acc * m)
+    }
+
     /// Record a rect for the given `<a>`. Rects pointing at the same
     /// `Arc<LinkSpan>` *on the same page* are merged into a single
     /// `LinkOccurrence`; on different pages they produce separate
     /// occurrences.
     pub fn push_rect(&mut self, link: &std::sync::Arc<crate::paragraph::LinkSpan>, rect: Rect) {
+        // Skip degenerate rects (non-positive width or height) to match the
+        // filtering the old `rect_to_quad` helper performed via
+        // `KRect::from_xywh`, which rejects them.
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let quad = self.current_transform().transform_rect(&rect);
+        // Also reject quads that collapsed to zero area after transform
+        // (e.g. scaleX(0)). Cross product of two edge vectors gives
+        // twice the signed area of the parallelogram.
+        if quad.is_degenerate() {
+            return;
+        }
         let page_idx = self.current_page_idx;
         let key = (page_idx, std::sync::Arc::as_ptr(link) as usize);
         let bucket = self.pages.entry(page_idx).or_default();
@@ -297,7 +424,7 @@ impl LinkCollector {
             // Defensive check: if the index is stale (e.g. the page was
             // already drained via `take_page`), `i` may be out of range.
             if let Some(occ) = bucket.get_mut(i) {
-                occ.rects.push(rect);
+                occ.quads.push(quad);
                 return;
             }
         }
@@ -307,7 +434,7 @@ impl LinkCollector {
             page_idx,
             target: link.target.clone(),
             alt_text: link.alt_text.clone(),
-            rects: vec![rect],
+            quads: vec![quad],
         });
     }
 
@@ -1612,7 +1739,7 @@ impl Pageable for BlockPageable {
         if let Some(id) = &self.id
             && !id.is_empty()
         {
-            registry.record(id, y);
+            registry.record(id, x, y);
         }
         // Recurse into children using the same positional arithmetic
         // `draw()` uses (see the loop at the end of `draw`). We do NOT
@@ -2145,9 +2272,15 @@ impl Pageable for TransformWrapperPageable {
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         let full = self.effective_matrix(x, y);
+        if let Some(lc) = canvas.link_collector.as_deref_mut() {
+            lc.push_transform(full);
+        }
         canvas.surface.push_transform(&full.to_krilla());
         self.inner.draw(canvas, x, y, avail_width, avail_height);
         canvas.surface.pop();
+        if let Some(lc) = canvas.link_collector.as_deref_mut() {
+            lc.pop_transform();
+        }
     }
 
     fn clone_box(&self) -> Box<dyn Pageable> {
@@ -2174,10 +2307,11 @@ impl Pageable for TransformWrapperPageable {
         avail_height: Pt,
         registry: &mut DestinationRegistry,
     ) {
-        // Transform is a visual effect; the anchor position is the pre-transform
-        // block-top, matching where the destination "logically" lives.
+        let full = self.effective_matrix(x, y);
+        registry.push_transform(full);
         self.inner
             .collect_ids(x, y, avail_width, avail_height, registry);
+        registry.pop_transform();
     }
 }
 
@@ -2816,7 +2950,7 @@ impl Pageable for TablePageable {
         if let Some(id) = &self.id
             && !id.is_empty()
         {
-            registry.record(id, y);
+            registry.record(id, x, y);
         }
         // Mirror TablePageable::draw child iteration — header + body cells.
         let total_width = self.width;
@@ -3277,10 +3411,10 @@ mod tests {
     fn destination_registry_first_write_wins_for_duplicate_ids() {
         let mut reg = DestinationRegistry::default();
         reg.set_current_page(0);
-        reg.record("dup", 10.0);
+        reg.record("dup", 0.0, 10.0);
         reg.set_current_page(2);
-        reg.record("dup", 99.0);
-        assert_eq!(reg.get("dup"), Some((0, 10.0)));
+        reg.record("dup", 0.0, 99.0);
+        assert_eq!(reg.get("dup"), Some((0, 0.0, 10.0)));
     }
 }
 
@@ -3622,6 +3756,92 @@ mod affine_tests {
         assert!(approx(s.e, 0.0));
         assert!(approx(s.f, 0.0));
     }
+
+    #[test]
+    fn transform_point_identity() {
+        let m = Affine2D::IDENTITY;
+        let (x, y) = m.transform_point(10.0, 20.0);
+        assert!((x - 10.0).abs() < 1e-5);
+        assert!((y - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn transform_point_translation() {
+        let m = Affine2D::translation(5.0, -3.0);
+        let (x, y) = m.transform_point(10.0, 20.0);
+        assert!((x - 15.0).abs() < 1e-5);
+        assert!((y - 17.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn transform_point_rotation_90() {
+        let m = Affine2D::rotation(std::f32::consts::FRAC_PI_2);
+        let (x, y) = m.transform_point(1.0, 0.0);
+        assert!((x - 0.0).abs() < 1e-4);
+        assert!((y - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transform_rect_identity_produces_axis_aligned_quad() {
+        let r = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        let q = Affine2D::IDENTITY.transform_rect(&r);
+        let expected = [[10.0, 60.0], [40.0, 60.0], [40.0, 20.0], [10.0, 20.0]];
+        for (i, (got, exp)) in q.points.iter().zip(expected.iter()).enumerate() {
+            assert!((got[0] - exp[0]).abs() < 1e-5, "quad[{i}].x");
+            assert!((got[1] - exp[1]).abs() < 1e-5, "quad[{i}].y");
+        }
+    }
+
+    #[test]
+    fn transform_rect_translate() {
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let q = Affine2D::translation(100.0, 200.0).transform_rect(&r);
+        assert!((q.points[0][0] - 100.0).abs() < 1e-5);
+        assert!((q.points[0][1] - 210.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quad_is_degenerate_after_scale_zero() {
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let q = Affine2D::scale(0.0, 1.0).transform_rect(&r);
+        assert!(
+            q.is_degenerate(),
+            "scaleX(0) should produce degenerate quad"
+        );
+
+        let q2 = Affine2D::scale(1.0, 0.0).transform_rect(&r);
+        assert!(
+            q2.is_degenerate(),
+            "scaleY(0) should produce degenerate quad"
+        );
+    }
+
+    #[test]
+    fn quad_is_not_degenerate_for_normal_transform() {
+        let r = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        let q = Affine2D::rotation(std::f32::consts::FRAC_PI_4).transform_rect(&r);
+        assert!(!q.is_degenerate(), "rotated rect should not be degenerate");
+    }
 }
 
 #[cfg(test)]
@@ -3820,5 +4040,214 @@ mod transform_wrapper_tests {
         assert_eq!(entries[0].y_pt, 42.0);
         assert_eq!(entries[0].level, 2);
         assert_eq!(entries[0].label, "Section");
+    }
+}
+
+#[cfg(test)]
+mod link_collector_transform_tests {
+    use super::*;
+    use crate::paragraph::{LinkSpan, LinkTarget};
+    use std::sync::Arc;
+
+    fn make_link() -> Arc<LinkSpan> {
+        Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new("https://test.example".to_string())),
+            alt_text: None,
+        })
+    }
+
+    #[test]
+    fn push_rect_without_transform_stores_axis_aligned_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 10.0,
+            },
+        );
+        let occs = lc.into_occurrences();
+        assert_eq!(occs.len(), 1);
+        assert_eq!(occs[0].quads.len(), 1);
+        let q = &occs[0].quads[0];
+        // Bottom-left of rect at (10, 20, w=30, h=10): (10, 30)
+        assert!((q.points[0][0] - 10.0).abs() < 1e-5, "bl.x");
+        assert!((q.points[0][1] - 30.0).abs() < 1e-5, "bl.y");
+    }
+
+    #[test]
+    fn push_rect_with_translation_shifts_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::translation(100.0, 200.0));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // BL: (0,10) + translate(100,200) = (100, 210)
+        assert!((q.points[0][0] - 100.0).abs() < 1e-5);
+        assert!((q.points[0][1] - 210.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nested_transforms_compose() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::translation(10.0, 0.0));
+        lc.push_transform(Affine2D::translation(0.0, 20.0));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            },
+        );
+        lc.pop_transform();
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // BL: (0,5) + translate(10,20) = (10, 25)
+        assert!((q.points[0][0] - 10.0).abs() < 1e-5);
+        assert!((q.points[0][1] - 25.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rotation_produces_non_axis_aligned_quad() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::rotation(std::f32::consts::FRAC_PI_2));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 5.0,
+            },
+        );
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // After 90° rotation: (x,y) → (-y, x)
+        // BL (0,5) → (-5, 0)
+        assert!((q.points[0][0] - (-5.0)).abs() < 1e-4, "bl.x after rot90");
+        assert!((q.points[0][1] - 0.0).abs() < 1e-4, "bl.y after rot90");
+    }
+
+    #[test]
+    fn empty_transform_stack_is_identity() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 5.0,
+                y: 10.0,
+                width: 20.0,
+                height: 15.0,
+            },
+        );
+        let occs = lc.into_occurrences();
+        let q = &occs[0].quads[0];
+        // TL corner untransformed: (5, 10)
+        assert!((q.points[3][0] - 5.0).abs() < 1e-5, "tl.x identity");
+        assert!((q.points[3][1] - 10.0).abs() < 1e-5, "tl.y identity");
+    }
+
+    #[test]
+    fn scale_zero_x_produces_no_occurrence() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        lc.push_transform(Affine2D::scale(0.0, 1.0));
+        let link = make_link();
+        lc.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        lc.pop_transform();
+        let occs = lc.into_occurrences();
+        assert!(
+            occs.is_empty(),
+            "scaleX(0) should produce no link occurrence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dest_registry_transform_tests {
+    use super::*;
+
+    #[test]
+    fn record_without_transform_stores_original_coords() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(0);
+        reg.record("sec", 10.0, 50.0);
+        let (page, x, y) = reg.get("sec").unwrap();
+        assert_eq!(page, 0);
+        assert!((x - 10.0).abs() < 1e-5);
+        assert!((y - 50.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn record_with_translation_shifts_coords() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(0);
+        reg.push_transform(Affine2D::translation(100.0, 200.0));
+        reg.record("sec", 10.0, 50.0);
+        reg.pop_transform();
+        let (page, x, y) = reg.get("sec").unwrap();
+        assert_eq!(page, 0);
+        assert!((x - 110.0).abs() < 1e-5);
+        assert!((y - 250.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nested_transforms_compose_in_registry() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(0);
+        reg.push_transform(Affine2D::translation(10.0, 0.0));
+        reg.push_transform(Affine2D::translation(0.0, 20.0));
+        reg.record("nested", 5.0, 5.0);
+        reg.pop_transform();
+        reg.pop_transform();
+        let (_, x, y) = reg.get("nested").unwrap();
+        assert!((x - 15.0).abs() < 1e-5);
+        assert!((y - 25.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn first_write_wins_even_with_transform() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(0);
+        reg.record("dup", 0.0, 10.0);
+        reg.push_transform(Affine2D::translation(100.0, 100.0));
+        reg.record("dup", 0.0, 10.0);
+        reg.pop_transform();
+        let (_, x, y) = reg.get("dup").unwrap();
+        assert!((x - 0.0).abs() < 1e-5, "first write should win");
+        assert!((y - 10.0).abs() < 1e-5, "first write should win");
     }
 }

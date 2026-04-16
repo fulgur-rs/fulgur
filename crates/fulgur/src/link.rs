@@ -14,10 +14,10 @@
 use krilla::action::{Action, LinkAction};
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
 use krilla::destination::{Destination, XyzDestination};
-use krilla::geom::{Point, Quadrilateral, Rect as KRect};
+use krilla::geom::{Point, Quadrilateral};
 use krilla::page::Page;
 
-use crate::pageable::{DestinationRegistry, LinkOccurrence, Rect as FRect};
+use crate::pageable::{DestinationRegistry, LinkOccurrence};
 use crate::paragraph::LinkTarget;
 
 /// Emit PDF link annotations for every occurrence on the given page.
@@ -36,12 +36,10 @@ pub(crate) fn emit_link_annotations(
                 Target::Action(Action::Link(LinkAction::new(uri.as_str().to_string())))
             }
             LinkTarget::Internal(id) => match registry.get(id.as_str()) {
-                Some((page_idx, y_pt)) => {
-                    // Use x=0 so that viewers scroll so the anchor sits at the
-                    // top-left of the viewport. y is in page-local (top-down)
-                    // coordinates; krilla flips to PDF bottom-up during
-                    // serialization.
-                    let dest = XyzDestination::new(page_idx, Point::from_xy(0.0, y_pt));
+                Some((page_idx, x_pt, y_pt)) => {
+                    // x and y are in page-local (top-down) coordinates;
+                    // krilla flips to PDF bottom-up during serialization.
+                    let dest = XyzDestination::new(page_idx, Point::from_xy(x_pt, y_pt));
                     Target::Destination(Destination::Xyz(dest))
                 }
                 None => {
@@ -51,7 +49,7 @@ pub(crate) fn emit_link_annotations(
             },
         };
 
-        let quads: Vec<Quadrilateral> = occ.rects.iter().filter_map(rect_to_quad).collect();
+        let quads: Vec<Quadrilateral> = occ.quads.iter().map(|q| q.to_krilla()).collect();
         if quads.is_empty() {
             continue;
         }
@@ -60,15 +58,4 @@ pub(crate) fn emit_link_annotations(
         let annotation = Annotation::new_link(link_ann, occ.alt_text.clone());
         page.add_annotation(annotation);
     }
-}
-
-/// Convert a fulgur `Rect` (page-local, top-down, pt units) to a krilla
-/// `Quadrilateral` with the point order documented by krilla:
-/// bottom-left → bottom-right → top-right → top-left, Y-down.
-///
-/// Returns `None` for degenerate rects (non-positive width or height) since
-/// `krilla::geom::Rect::from_xywh` rejects them.
-fn rect_to_quad(r: &FRect) -> Option<Quadrilateral> {
-    let krect = KRect::from_xywh(r.x, r.y, r.width, r.height)?;
-    Some(Quadrilateral::from(krect))
 }

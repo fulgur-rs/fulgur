@@ -823,7 +823,7 @@ impl Pageable for ParagraphPageable {
 
     fn collect_ids(
         &self,
-        _x: Pt,
+        x: Pt,
         y: Pt,
         _avail_width: Pt,
         _avail_height: Pt,
@@ -832,7 +832,7 @@ impl Pageable for ParagraphPageable {
         if let Some(id) = &self.id
             && !id.is_empty()
         {
-            registry.record(id, y);
+            registry.record(id, x, y);
         }
         // No child recursion: paragraph lines are glyph data, not Pageables.
     }
@@ -1230,7 +1230,7 @@ mod tests {
         let mut reg = DestinationRegistry::default();
         reg.set_current_page(3);
         p.collect_ids(10.0, 42.0, 400.0, 600.0, &mut reg);
-        assert_eq!(reg.get("anchor"), Some((3, 42.0)));
+        assert_eq!(reg.get("anchor"), Some((3, 10.0, 42.0)));
     }
 
     #[test]
@@ -1357,16 +1357,16 @@ mod link_collect_tests {
             "unexpected target: {:?}",
             first.target,
         );
-        assert!(!first.rects.is_empty());
+        assert!(!first.quads.is_empty());
+        // Width: BR.x - BL.x; Height: BL.y - TL.y (axis-aligned, no transform)
+        let q = &first.quads[0];
+        let width = q.points[1][0] - q.points[0][0];
+        let height = q.points[0][1] - q.points[3][1];
+        assert!(width > 0.0, "expected positive quad width, got {}", width,);
         assert!(
-            first.rects[0].width > 0.0,
-            "expected positive rect width, got {}",
-            first.rects[0].width,
-        );
-        assert!(
-            first.rects[0].height > 0.0,
-            "expected positive rect height, got {}",
-            first.rects[0].height,
+            height > 0.0,
+            "expected positive quad height, got {}",
+            height,
         );
     }
 
@@ -1389,9 +1389,9 @@ mod link_collect_tests {
             occs.iter().map(|o| &o.target).collect::<Vec<_>>(),
         );
         assert!(
-            occs[0].rects.len() >= 2,
-            "expected at least two rects merged under one occurrence, got {}",
-            occs[0].rects.len(),
+            occs[0].quads.len() >= 2,
+            "expected at least two quads merged under one occurrence, got {}",
+            occs[0].quads.len(),
         );
     }
 
