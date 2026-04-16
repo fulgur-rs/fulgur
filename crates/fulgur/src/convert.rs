@@ -2630,7 +2630,8 @@ fn find_marker_font(
     // Try AssetBundle fonts first — check charmap coverage.
     if let Some(bundle) = assets {
         for font_arc in &bundle.fonts {
-            for idx in 0u32..16 {
+            // Try sub-fonts in a TTC collection; break on first Err (no more faces).
+            for idx in 0u32.. {
                 if let Ok(font_ref) = skrifa::FontRef::from_index(font_arc, idx) {
                     let charmap = font_ref.charmap();
                     if check_chars.iter().all(|&c| charmap.map(c).is_some()) {
@@ -2643,20 +2644,31 @@ fn find_marker_font(
         }
     }
 
-    // Fallback: find the first ShapedGlyphRun in children's ParagraphPageables.
-    fn find_run_font_in_children(children: &[PositionedChild]) -> Option<(Arc<Vec<u8>>, u32)> {
+    // Fallback: find the first ShapedGlyphRun in children's ParagraphPageables
+    // whose font covers all marker characters.
+    fn find_run_font_in_children(
+        children: &[PositionedChild],
+        check_chars: &[char],
+    ) -> Option<(Arc<Vec<u8>>, u32)> {
         for pc in children {
             if let Some(para) = pc.child.as_any().downcast_ref::<ParagraphPageable>() {
                 for line in &para.lines {
                     for item in &line.items {
                         if let LineItem::Text(run) = item {
-                            return Some((Arc::clone(&run.font_data), run.font_index));
+                            if let Ok(font_ref) =
+                                skrifa::FontRef::from_index(&run.font_data, run.font_index)
+                            {
+                                let charmap = font_ref.charmap();
+                                if check_chars.iter().all(|c| charmap.map(*c).is_some()) {
+                                    return Some((Arc::clone(&run.font_data), run.font_index));
+                                }
+                            }
                         }
                     }
                 }
             }
             if let Some(block) = pc.child.as_any().downcast_ref::<BlockPageable>() {
-                if let Some(result) = find_run_font_in_children(&block.children) {
+                if let Some(result) = find_run_font_in_children(&block.children, check_chars) {
                     return Some(result);
                 }
             }
@@ -2664,10 +2676,15 @@ fn find_marker_font(
         None
     }
 
-    find_run_font_in_children(children)
+    find_run_font_in_children(children, &check_chars)
 }
 
 /// Shape a list marker string into a `ShapedGlyphRun` using skrifa.
+///
+/// Performs simplified character-by-character glyph mapping (no complex
+/// OpenType shaping, kerning, or ligatures). This is sufficient for
+/// bullet characters (U+2022) and ordered markers ("1. ") which don't
+/// require advanced text layout.
 ///
 /// For `Marker::Char`, appends a trailing space (matching Blitz's
 /// `build_inline_layout` which does `format!("{char} ")`).
@@ -2748,17 +2765,7 @@ fn inject_inside_marker_into_children(
         .sum();
 
     // Direct ParagraphPageable child
-    if pc
-        .child
-        .as_any()
-        .downcast_ref::<ParagraphPageable>()
-        .is_some()
-    {
-        let para = pc
-            .child
-            .as_any()
-            .downcast_ref::<ParagraphPageable>()
-            .unwrap();
+    if let Some(para) = pc.child.as_any().downcast_ref::<ParagraphPageable>() {
         let mut para_clone = para.clone();
         if !para_clone.lines.is_empty() {
             for item in &mut para_clone.lines[0].items {
