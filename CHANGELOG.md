@@ -2,26 +2,154 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.4.5] - 2026-04-16
 
-### Added
+### Bug Fixes
 
-- `<link rel="stylesheet" media="...">` is now honoured. External
-  stylesheets tagged with a media query (for example `media="print"`)
-  are rewritten to `<style>@import url("...") media;</style>` during
-  parsing so that blitz/stylo applies the correct `MediaList` instead
-  of loading the sheet unconditionally. CSS-internal `url()` resolution
-  against each stylesheet's own directory is also covered by a new
-  regression test. (fulgur-2ai)
+- keep sharp corners sharp and round color components
+- clip shadow to exclude border-box so transparent elements render correctly
+- forward pagination through HeadingMarkerWrapperPageable
+- suppress collector during margin-box draws
+- descend into HeadingMarkerWrapperPageable in walkers
+- harden WOFF2 decoding and assert font embedding
+- reject oversized WOFF2 header before invoking decoder
+- gate font file size before reading into memory
+- escape form feed in escape_css_url; cover \r and \f in tests
+- guard element_text recursion depth and resolve per-page margins in GCPM destination pre-pass
+- insert space at block/br boundaries in element_text
+- add MAX_DOM_DEPTH guard to resolve_enclosing_anchor
+- capture id on TablePageable for anchor destinations
+- skip outline entry when resolved label is empty
+- resolve rebase conflicts with main's link feature
+- emit orphan marker for flattened / zero-size elements
+- escape comment pattern in mise.toml for TOML compatibility
+- address coderabbit review feedback on PR #94
+- address code review feedback on transform tracking
+- reject degenerate quads after transform in push_rect
+- collapse nested if into match guard (clippy::collapsible_match)
+- inject inside marker for non-inline-root <li> elements
+- address code review feedback on inside marker implementation
+- handle injection failures and empty paragraph edge case
+- use per-character text_range in shape_marker_with_skrifa
+- apply content_inset to empty <li> and support list-style-image
 
-### Known limitations
+### Documentation
 
-- `<link media="...">` CSS files that contain GCPM constructs (`@page`,
-  `position: running`, `string-set`, counters) currently get their GCPM
-  context registered twice because both the discarded first fetch and
-  the rewrite's `@import` re-fetch push to the provider's buffer.
-  Tracked as `fulgur-owa`; pinned by an ignored test in
-  `crates/fulgur/tests/link_media_attribute.rs`.
+- add box-shadow v0.4.5 implementation plan
+- add CSS property support reference with box-shadow
+- clarify that inset shadows are excluded upstream, not filtered
+- note blur rect expansion requirement for future blur impl
+- replace branch reference with PR number
+- document --bookmarks CLI flag in README
+- add PDF bookmarks implementation plan (fulgur-6e6)
+- document WOFF2 font support
+- add WOFF2 font support implementation plan
+- add fulgur-2ai link-media rewrite implementation plan
+- add link-media example for <link media=print>
+- rework link-media example to reflect current screen-media behaviour
+- note <link media> handling and GCPM double-count limit (fulgur-2ai)
+- satisfy markdownlint (blanks around lists/fences, code lang)
+- note Engine builder API, pdftocairo helper, and fulgur --lib split
+- implementation plan for fulgur-d5k
+- clarify pseudo-element handling in GCPM parser
+- add implementation plan for fulgur-yqi
+- add bookmark CSS property example
+
+### Features
+
+- add BoxShadow type and BlockStyle.box_shadows field
+- extract box-shadow from stylo computed values
+- render outer box-shadow behind background layer
+- add HeadingMarkerPageable and HeadingCollector
+- derive PartialEq on HeadingEntry
+- add HeadingMarkerWrapperPageable
+- wrap h1-h6 with HeadingMarkerWrapperPageable
+- add Config.bookmarks flag and builder method
+- add outline tree builder
+- wire HeadingCollector into render paths and emit outline
+- add --bookmarks CLI flag
+- add detect_font_format helper with magic byte detection
+- add add_font_bytes API with format auto-detection
+- decode WOFF2 fonts to TTF at ingestion
+- collect <link rel=stylesheet media=X> candidates from DOM
+- add escape_css_url helper for @import URL safety
+- rewrite <link media=X> to <style>@import url() X;</style>
+- wire LinkMediaRewrite into parse_html_with_local_resources
+- add LinkTarget/LinkSpan types and link field on text items
+- attach LinkSpan to glyph runs inside <a href>
+- collect block id→(page,y) registry for destinations
+- capture id on paragraph-level headings for destinations
+- LinkCollector collects per-page link rects during draw
+- emit URI actions and XYZ destinations as PDF link annotations
+- add BookmarkLevel / BookmarkMapping types
+- parse bookmark-level (integer | none)
+- parse bookmark-label (content-list)
+- add FULGUR_UA_CSS for h1-h6 default bookmarks
+- add BookmarkPass for DOM → outline resolution
+- plumb bookmark_by_node through ConvertContext
+- wrap CSS-driven bookmark elements in convert_node
+- wire FULGUR_UA_CSS and BookmarkPass into engine
+- add Affine2D::transform_point
+- add Quad type and Affine2D::transform_rect
+- add transform stack to LinkCollector, use Quad instead of Rect
+- add transform stack to DestinationRegistry, store x+y coords
+- wire transform push/pop in TransformWrapperPageable
+
+### Miscellaneous
+
+- regenerate example PDFs
+- regenerate example PDFs
+- regenerate example PDFs
+- regenerate example PDFs
+- regenerate example PDFs
+
+### Performance
+
+- LinkCollector take_page API avoids O(P×L) filter
+
+### Refactor
+
+- hardcode box-shadow inset=false since inset shadows are filtered above
+- reuse gcpm::string_set::extract_text_content
+- drop unused img fixture and document soft-pin semantics
+- skip tests when pdftocairo missing; pin blitz version in doc
+- address coderabbit — drop duplicate fs imports, dead write, format CSS
+- rename Heading* types to Bookmark* (fulgur-yqi)
+- remove h1-h6 hardcode path, rely on UA stylesheet
+
+### Styling
+
+- apply cargo fmt
+- fix formatting
+
+### Testing
+
+- add box-shadow fixture, golden, and example
+- fix box-shadow fixture to use block-level boxes
+- update box-shadow golden after EvenOdd clip fix
+- use tempfile::TempDir for CLI tests
+- add WOFF2 integration test via PDF render
+- pin CSS-relative url() resolution against stylesheet directory
+- add failing test for <link media=print> exclusion
+- cover comma-separated media attribute in collector
+- pin fulgur-owa GCPM duplication with #[ignore] and doc note
+- cover nested @import under a print-only <link>
+- pin rewrite-path liveness with media=screen
+- multi-line anchor emits /QuadPoints and page-crossing emits per-page annotation
+- verify GCPM render path and anchor-wrapping image behavior
+- cover combined / level-only / label-only / absent rule cases
+- cover BookmarkPass cascade, suppression, and label resolution
+- verify h1 auto-bookmarks via UA stylesheet (e2e)
+- cover suppression, custom CSS, mixed outline, counter graceful skip, label fallback
+
+### Build
+
+- support per-example fulgur.args for CLI flags
+- bump thin-vec in the cargo group across 1 directory
+
+### Deps
+
+- add woff2-patched crate and error variants for WOFF support
 
 ## [0.4.4] - 2026-04-12
 
@@ -273,6 +401,10 @@ All notable changes to this project will be documented in this file.
 
 - add block pseudo content: url() example
 - add inline pseudo and vertical-align cases
+
+### Release
+
+- v0.4.4
 
 ## [0.4.3] - 2026-04-04
 
