@@ -43,7 +43,13 @@ impl DestinationRegistry {
     }
 
     /// Pop the most recent transform off the stack.
+    ///
+    /// No-op if the stack is empty (debug builds will assert).
     pub fn pop_transform(&mut self) {
+        debug_assert!(
+            !self.transform_stack.is_empty(),
+            "DestinationRegistry::pop_transform called on empty stack"
+        );
         self.transform_stack.pop();
     }
 
@@ -364,7 +370,13 @@ impl LinkCollector {
     }
 
     /// Pop the most recent transform off the stack.
+    ///
+    /// No-op if the stack is empty (debug builds will assert).
     pub fn pop_transform(&mut self) {
+        debug_assert!(
+            !self.transform_stack.is_empty(),
+            "LinkCollector::pop_transform called on empty stack"
+        );
         self.transform_stack.pop();
     }
 
@@ -381,6 +393,12 @@ impl LinkCollector {
     /// `LinkOccurrence`; on different pages they produce separate
     /// occurrences.
     pub fn push_rect(&mut self, link: &std::sync::Arc<crate::paragraph::LinkSpan>, rect: Rect) {
+        // Skip degenerate rects (non-positive width or height) to match the
+        // filtering the old `rect_to_quad` helper performed via
+        // `KRect::from_xywh`, which rejects them.
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
         let quad = self.current_transform().transform_rect(&rect);
         let page_idx = self.current_page_idx;
         let key = (page_idx, std::sync::Arc::as_ptr(link) as usize);
@@ -2237,13 +2255,13 @@ impl Pageable for TransformWrapperPageable {
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         let full = self.effective_matrix(x, y);
-        if let Some(lc) = canvas.link_collector.as_mut() {
+        if let Some(lc) = canvas.link_collector.as_deref_mut() {
             lc.push_transform(full);
         }
         canvas.surface.push_transform(&full.to_krilla());
         self.inner.draw(canvas, x, y, avail_width, avail_height);
         canvas.surface.pop();
-        if let Some(lc) = canvas.link_collector.as_mut() {
+        if let Some(lc) = canvas.link_collector.as_deref_mut() {
             lc.pop_transform();
         }
     }
