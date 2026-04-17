@@ -36,14 +36,12 @@ RSpec.describe Fulgur::Margin do
   describe ".uniform / .symmetric" do
     it ".uniform(pt) — all sides equal" do
       m = described_class.uniform(50)
-      expect(m.top).to eq(50.0)
-      expect(m.left).to eq(50.0)
+      expect([m.top, m.right, m.bottom, m.left]).to eq([50.0, 50.0, 50.0, 50.0])
     end
 
-    it ".symmetric(v, h)" do
+    it ".symmetric(v, h) — vertical on top/bottom, horizontal on left/right" do
       m = described_class.symmetric(72, 36)
-      expect(m.top).to eq(72.0)
-      expect(m.right).to eq(36.0)
+      expect([m.top, m.right, m.bottom, m.left]).to eq([72.0, 36.0, 72.0, 36.0])
     end
   end
 end

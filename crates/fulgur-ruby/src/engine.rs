@@ -178,8 +178,8 @@ impl RbEngine {
     }
 
     /// HTML を PDF に変換してファイルに書き出す。`render_html` と同じく GVL を
-    /// 解放して実行する。
-    fn render_html_to_file(&self, html: String, path: String) -> Result<(), Error> {
+    /// 解放して実行する。`path` は `String` または `to_path` 応答オブジェクト (`Pathname` 等)。
+    fn render_html_to_file(&self, html: String, path: Value) -> Result<(), Error> {
         struct Args {
             engine: *const Engine,
             html: String,
@@ -190,10 +190,11 @@ impl RbEngine {
         // block するため、closure 実行中に `self` (= *engine) は生きている。
         unsafe impl Send for Args {}
 
+        let path_str = crate::pdf::coerce_to_path(path)?;
         let args = Args {
             engine: &self.inner as *const Engine,
             html,
-            path: std::path::PathBuf::from(path),
+            path: std::path::PathBuf::from(path_str),
         };
         let result: Result<(), fulgur::Error> = crate::gvl::without_gvl(args, |a| {
             // SAFETY: `a.engine` は呼び出し元の `&self.inner` から作った

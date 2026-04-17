@@ -17,9 +17,19 @@ Gem::Specification.new do |spec|
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
   spec.metadata["source_code_uri"] = "https://github.com/mitsuru/fulgur"
 
-  spec.files = Dir["lib/**/*.rb", "ext/**/*.{rs,toml,rb}", "Cargo.toml", "README.md", "LICENSE-*"]
+  spec.files = Dir[
+    "lib/**/*.rb",
+    "ext/**/*.{rs,toml,rb}",
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-*",
+  ]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/fulgur/extconf.rb"]
 
-  spec.add_dependency "rb_sys", "~> 0.9"
+  # rb_sys は extconf.rb がビルド時にのみ必要 (ext/fulgur/extconf.rb 経由)。
+  # インストール済みの拡張はランタイムで rb_sys に依存しないため、開発依存に限定する。
+  spec.add_development_dependency "rb_sys", "~> 0.9"
 end

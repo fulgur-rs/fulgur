@@ -28,7 +28,7 @@ pub fn map_fulgur_error(ruby: &Ruby, err: FulgurError) -> Error {
                     .class_object()
                     .const_get::<_, RModule>("Errno")
                     .and_then(|m| m.const_get::<_, ExceptionClass>("ENOENT"))
-                    .unwrap_or_else(|_| exception::standard_error());
+                    .unwrap_or_else(|_| exception::runtime_error());
                 Error::new(errno, io_err.to_string())
             }
             _ => render_error(ruby, io_err.to_string()),

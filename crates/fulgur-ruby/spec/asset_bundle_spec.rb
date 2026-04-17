@@ -58,5 +58,13 @@ RSpec.describe Fulgur::AssetBundle do
     it "has #image_file alias" do
       expect(bundle.method(:image_file)).to eq(bundle.method(:add_image_file))
     end
+
+    it "reads an image file" do
+      expect { bundle.add_image_file("logo", File.join(fixtures, "logo.png")) }.not_to raise_error
+    end
+
+    it "raises Errno::ENOENT for missing image" do
+      expect { bundle.add_image_file("missing", "/nope.png") }.to raise_error(Errno::ENOENT)
+    end
   end
 end

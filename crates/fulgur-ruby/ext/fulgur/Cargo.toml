@@ -12,10 +12,12 @@ path = "../../src/lib.rs"
 
 [features]
 default = ["ruby-api"]
-ruby-api = ["magnus", "rb-sys"]
+ruby-api = ["dep:magnus", "dep:rb-sys"]
 
 [dependencies]
 fulgur = { path = "../../../fulgur" }
 base64 = "0.22"
 magnus = { version = "0.7", optional = true }
 rb-sys = { version = "0.9", optional = true }
+# 親 crate の src/lib.rs `mod assertions` が使用。
+static_assertions = "1.1"

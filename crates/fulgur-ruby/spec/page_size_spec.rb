@@ -11,18 +11,21 @@ RSpec.describe Fulgur::PageSize do
 
     it "exposes Letter" do
       expect(described_class::LETTER.width).to be_within(0.1).of(612.0)
+      expect(described_class::LETTER.height).to be_within(0.1).of(792.0)
     end
 
     it "exposes A3" do
-      expect(described_class::A3).not_to be_nil
+      expect(described_class::A3.width).to be_within(0.1).of(841.89)
+      expect(described_class::A3.height).to be_within(0.1).of(1190.55)
     end
   end
 
   describe ".custom" do
-    it "accepts width/height in mm" do
+    it "accepts width/height in mm and converts both to pt" do
       ps = described_class.custom(100, 200)
-      # 100mm → ~283.46pt
+      # 100mm → ~283.46pt, 200mm → ~566.93pt
       expect(ps.width).to be_within(0.1).of(283.46)
+      expect(ps.height).to be_within(0.1).of(566.93)
     end
   end
 

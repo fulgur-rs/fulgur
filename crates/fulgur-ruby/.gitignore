@@ -7,3 +7,5 @@
 /ext/fulgur/target
 /ext/fulgur/Cargo.lock
 /.rspec_status
+/*.gem
+/lib/fulgur/*.bundle

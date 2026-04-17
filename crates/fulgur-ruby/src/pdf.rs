@@ -4,7 +4,7 @@
 //! `to_data_uri`, `inspect`, `write_to_path`, `write_to_io` を提供する。
 
 use base64::Engine as _;
-use magnus::{Error, Module, RModule, RString, Ruby, Value, method, prelude::*};
+use magnus::{Error, Module, RModule, RString, Ruby, TryConvert, Value, method, prelude::*};
 
 /// `write_to_io` でチャンク単位に分割するサイズ (64 KiB)。
 const CHUNK_SIZE: usize = 64 * 1024;
@@ -42,12 +42,13 @@ impl RbPdf {
 
     /// PDF バイト列をファイルパスに書き込む。
     ///
-    /// `std::fs::write` を利用し、エラーは `fulgur::Error::Io` 経由で
-    /// `map_fulgur_error` に委譲する (NotFound なら `Errno::ENOENT`, それ以外は
-    /// `Fulgur::RenderError`)。
-    fn write_to_path(&self, path: String) -> Result<(), Error> {
+    /// `path` は `String` または `to_path` に応答するオブジェクト (`Pathname` など)。
+    /// エラーは `fulgur::Error::Io` 経由で `map_fulgur_error` に委譲する
+    /// (`NotFound` なら `Errno::ENOENT`、それ以外は `Fulgur::RenderError`)。
+    fn write_to_path(&self, path: Value) -> Result<(), Error> {
         let ruby = Ruby::get().expect("ruby vm");
-        std::fs::write(&path, &self.bytes).map_err(|e| {
+        let path_str = coerce_to_path(path)?;
+        std::fs::write(&path_str, &self.bytes).map_err(|e| {
             let fulgur_err = fulgur::Error::Io(e);
             crate::error::map_fulgur_error(&ruby, fulgur_err)
         })
@@ -55,18 +56,37 @@ impl RbPdf {
 
     /// PDF バイト列を Ruby IO オブジェクトに書き込む。
     ///
-    /// - `binmode` を呼んでエンコーディング変換を防ぐ (`StringIO` / `File` /
-    ///   `Tempfile` / `$stdout` などすべてで定義されている)。
+    /// - `binmode` に応答する場合のみ呼んでエンコーディング変換を防ぐ。独自ダック型
+    ///   IO ラッパが `binmode` を実装していないケースでも `NoMethodError` を投げない。
     /// - 64 KiB チャンクに分割して `write` を呼ぶ。ピークメモリは `N + CHUNK` に収まる。
     fn write_to_io(&self, io: Value) -> Result<(), Error> {
-        let _: Value = io.funcall("binmode", ())?;
-
+        let responds: bool = io.funcall("respond_to?", (magnus::Symbol::new("binmode"),))?;
+        if responds {
+            let _: Value = io.funcall("binmode", ())?;
+        }
         for chunk in self.bytes.chunks(CHUNK_SIZE) {
             let rb_bytes = RString::from_slice(chunk);
             let _: Value = io.funcall("write", (rb_bytes,))?;
         }
         Ok(())
     }
+}
+
+/// Ruby 値をファイルパス文字列に変換する。`Pathname` 等 `to_path` に応答する
+/// オブジェクトを受け入れ、そうでなければ `to_str` で暗黙変換する。
+pub(crate) fn coerce_to_path(value: Value) -> Result<String, Error> {
+    let responds: bool = value.funcall("respond_to?", (magnus::Symbol::new("to_path"),))?;
+    let converted: Value = if responds {
+        value.funcall("to_path", ())?
+    } else {
+        value
+    };
+    <String>::try_convert(converted).map_err(|_| {
+        Error::new(
+            magnus::exception::type_error(),
+            "path must be a String or respond to to_path",
+        )
+    })
 }
 
 pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {

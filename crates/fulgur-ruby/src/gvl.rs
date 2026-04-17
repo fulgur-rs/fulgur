@@ -13,12 +13,12 @@
 //! - ubf (unblock function) は `None`。Ruby プロセスが signal を受けても
 //!   GVL 再取得まで保留される。v0.5.0 では interruptable rendering を
 //!   実装しないので OK。
-//! - 返り値 `Ret` は `Option` に包んで途中中断を表現することも考えたが、
-//!   現状 ubf 無しで shim は常に完走するため、`Ret` を直接返して内部で
-//!   `unwrap()` する。Payload が書き込まれないケース (shim が呼ばれない)
-//!   は起こらない前提で panic させる。
+//! - `body` 内で panic が発生した場合、`extern "C"` 境界を unwind すると
+//!   UB になる (rustc docs 参照)。shim 内で `catch_unwind` で捕捉し、
+//!   GVL 再取得後に `resume_unwind` で伝播させる。
 
 use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 /// `body` を GVL 解放状態で実行する。
 ///
@@ -27,11 +27,15 @@ use std::ffi::c_void;
 /// `body` 内で Ruby VM API を呼んではならない。`Value`, `RString`, `Ruby::get()`
 /// のような Ruby 依存の型・関数はすべて禁止。純粋な Rust データ (`String`,
 /// `&Engine` など) のみ操作すること。
+///
+/// `body` 内で panic が発生した場合は `catch_unwind` で捕捉され、GVL 再取得後に
+/// `resume_unwind` で呼び出し側スレッドに伝播する。unwind が `extern "C"` 境界を
+/// 越えないため UB にはならない。
 pub fn without_gvl<Data, Ret>(data: Data, body: fn(Data) -> Ret) -> Ret {
     struct Payload<D, R> {
         data: Option<D>,
         body: fn(D) -> R,
-        result: Option<R>,
+        result: Option<std::thread::Result<R>>,
     }
 
     unsafe extern "C" fn shim<D, R>(arg: *mut c_void) -> *mut c_void {
@@ -40,7 +44,11 @@ pub fn without_gvl<Data, Ret>(data: Data, body: fn(Data) -> Ret) -> Ret {
         // caller のスタックにあり、caller は block する)。
         let p = unsafe { &mut *(arg as *mut Payload<D, R>) };
         let data = p.data.take().expect("payload data taken twice");
-        p.result = Some((p.body)(data));
+        let body = p.body;
+        // panic を catch_unwind で捕捉し、extern "C" 境界を越える unwind (UB) を防ぐ。
+        // AssertUnwindSafe は `body: fn(Data) -> Ret` が UnwindSafe でないケース
+        // (e.g., `&Engine` を含む Data) でも、panic 後は payload を触らないため安全。
+        p.result = Some(catch_unwind(AssertUnwindSafe(move || body(data))));
         std::ptr::null_mut()
     }
 
@@ -60,7 +68,12 @@ pub fn without_gvl<Data, Ret>(data: Data, body: fn(Data) -> Ret) -> Ret {
             std::ptr::null_mut(),
         );
     }
-    payload
+    match payload
         .result
         .expect("rb_thread_call_without_gvl did not invoke shim")
+    {
+        Ok(v) => v,
+        // GVL 再取得済みの状態で panic を呼び出し側に伝播する。
+        Err(payload) => resume_unwind(payload),
+    }
 }

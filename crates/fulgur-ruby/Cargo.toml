@@ -21,6 +21,6 @@ fulgur = { path = "../fulgur" }
 base64 = "0.22"
 magnus = { version = "0.7", optional = true }
 rb-sys = { version = "0.9", optional = true }
-
-[dev-dependencies]
+# Send/Sync 保証 (Engine) のコンパイル時 assertion で使用。
+# ext/fulgur/Cargo.toml にも同じ依存を追加していること。
 static_assertions = "1.1"

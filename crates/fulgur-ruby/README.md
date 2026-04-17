@@ -5,10 +5,16 @@ deterministic HTML/CSS to PDF conversion library written in Rust.
 
 ## Status
 
-**MVP (v0.0.1, unreleased).** The core `Engine` / `EngineBuilder` /
+**MVP (gem v0.0.1, unreleased).** The core `Engine` / `EngineBuilder` /
 `AssetBundle` / `PageSize` / `Margin` / `Pdf` API is available. Precompiled
 gems, batch rendering, sandboxing, and template-engine wiring are planned
 for later releases.
+
+> **Versioning note:** the `fulgur` gem is versioned independently from the
+> underlying `fulgur` Rust crate and the `pyfulgur` PyPI package. This gem
+> starts at `0.0.1` as an MVP and will bump on its own cadence. "v0.5.0"
+> elsewhere in project documents refers to the parent epic that bundles
+> the Rust / Python / Ruby shipping milestones, not this gem's version.
 
 ## Install
 

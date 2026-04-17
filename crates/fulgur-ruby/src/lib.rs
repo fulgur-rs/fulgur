@@ -16,7 +16,9 @@ mod margin;
 mod page_size;
 mod pdf;
 
-#[cfg(test)]
+/// `engine.rs` の GVL 解放 (`unsafe impl Send for Args`) は `fulgur::Engine: Send + Sync` の
+/// コンパイル時保証に依存している。`[cfg(test)]` ゲートを付けずに通常ビルドで走らせることで、
+/// `fulgur` crate 側の変更で `Engine` が `!Send` になった瞬間に `rake compile` が落ちる。
 mod assertions {
     use static_assertions::assert_impl_all;
     assert_impl_all!(fulgur::Engine: Send, Sync);

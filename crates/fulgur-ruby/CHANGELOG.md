@@ -4,7 +4,7 @@ All notable changes to the `fulgur` gem will be documented here.
 
 ## [Unreleased]
 
-## [0.0.1] - 2026-04-TBD
+## [0.0.1] - 2026-04-17
 
 Initial Ruby binding for fulgur.
 

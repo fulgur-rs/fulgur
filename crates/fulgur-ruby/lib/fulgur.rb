@@ -3,8 +3,8 @@
 require_relative "fulgur/version"
 
 begin
-  RUBY_VERSION =~ /(\d+\.\d+)/
-  require_relative "fulgur/#{Regexp.last_match(1)}/fulgur"
+  minor = RUBY_VERSION[/\A\d+\.\d+/]
+  require_relative "fulgur/#{minor}/fulgur"
 rescue LoadError
   require_relative "fulgur/fulgur"
 end

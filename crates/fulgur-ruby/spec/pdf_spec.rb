@@ -54,9 +54,19 @@ RSpec.describe Fulgur::Pdf do
       end
     end
 
-    it "raises an IO-related error for invalid path" do
-      expect { pdf.write_to_path("/nonexistent/dir/out.pdf") }
-        .to raise_error(StandardError)
+    it "raises Errno::ENOENT for missing directory (map_fulgur_error 経由)" do
+      # std::fs::write は親ディレクトリが存在しない場合 NotFound を返し、
+      # src/error.rs の map_fulgur_error が Errno::ENOENT に写像する。
+      expect { pdf.write_to_path("/nonexistent/dir/out.pdf") }.to raise_error(Errno::ENOENT)
+    end
+
+    it "accepts Pathname" do
+      require "pathname"
+      Dir.mktmpdir do |dir|
+        path = Pathname.new(dir) + "out.pdf"
+        pdf.write_to_path(path)
+        expect(File.binread(path)).to eq(pdf.to_s)
+      end
     end
   end
 
@@ -73,12 +83,27 @@ RSpec.describe Fulgur::Pdf do
       expect(io.string.bytesize).to eq(pdf.bytesize)
     end
 
-    it "calls binmode on the IO object" do
+    it "calls binmode on the IO object when supported" do
       io = StringIO.new
-      # StringIO responds to binmode (noop on Ruby 3+ but defined).
       expect(io).to receive(:binmode).at_least(:once).and_call_original
       allow(io).to receive(:write).and_call_original
       pdf.write_to_io(io)
+    end
+
+    it "does not raise when IO lacks #binmode (duck-typed)" do
+      sink = Class.new do
+        attr_reader :buffer
+        def initialize = @buffer = String.new(encoding: Encoding::ASCII_8BIT)
+        def write(chunk) = @buffer << chunk.b
+      end.new
+      expect { pdf.write_to_io(sink) }.not_to raise_error
+      expect(sink.buffer.bytesize).to eq(pdf.bytesize)
+    end
+  end
+
+  describe "#inspect" do
+    it "returns a short descriptor with bytesize" do
+      expect(pdf.inspect).to match(/\A#<Fulgur::Pdf bytesize=\d+>\z/)
     end
   end
 end
