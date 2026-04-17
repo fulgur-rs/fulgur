@@ -59,14 +59,26 @@ impl RbPdf {
     /// - `binmode` に応答する場合のみ呼んでエンコーディング変換を防ぐ。独自ダック型
     ///   IO ラッパが `binmode` を実装していないケースでも `NoMethodError` を投げない。
     /// - 64 KiB チャンクに分割して `write` を呼ぶ。ピークメモリは `N + CHUNK` に収まる。
+    /// - `IO#write` が要求より少ないバイト数を返した場合 (socket / pipe / 独自 IO の短書き込み)
+    ///   は残りを再送する。戻り値が 0 の場合は無限ループを防ぐため `RuntimeError` を返す。
     fn write_to_io(&self, io: Value) -> Result<(), Error> {
         let responds: bool = io.funcall("respond_to?", (magnus::Symbol::new("binmode"),))?;
         if responds {
             let _: Value = io.funcall("binmode", ())?;
         }
         for chunk in self.bytes.chunks(CHUNK_SIZE) {
-            let rb_bytes = RString::from_slice(chunk);
-            let _: Value = io.funcall("write", (rb_bytes,))?;
+            let mut offset = 0;
+            while offset < chunk.len() {
+                let rb_bytes = RString::from_slice(&chunk[offset..]);
+                let written: usize = io.funcall("write", (rb_bytes,))?;
+                if written == 0 {
+                    return Err(Error::new(
+                        magnus::exception::runtime_error(),
+                        "IO#write returned 0 bytes; cannot make progress",
+                    ));
+                }
+                offset += written;
+            }
         }
         Ok(())
     }

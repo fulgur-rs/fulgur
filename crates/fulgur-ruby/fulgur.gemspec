@@ -29,7 +29,9 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/fulgur/extconf.rb"]
 
-  # rb_sys は extconf.rb がビルド時にのみ必要 (ext/fulgur/extconf.rb 経由)。
-  # インストール済みの拡張はランタイムで rb_sys に依存しないため、開発依存に限定する。
-  spec.add_development_dependency "rb_sys", "~> 0.9"
+  # `gem install fulgur` 時に `ext/fulgur/extconf.rb` が `require "rb_sys/mkmf"` するため、
+  # 利用者側でも install 段階で rb_sys が必要。ランタイム直接依存ではないが、
+  # RubyGems 的には `add_dependency` で配布する必要がある（`add_development_dependency`
+  # だと bundler の development グループでしか入らず、`gem install` の build が落ちる）。
+  spec.add_dependency "rb_sys", "~> 0.9"
 end

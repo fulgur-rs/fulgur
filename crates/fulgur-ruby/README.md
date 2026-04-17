@@ -21,7 +21,7 @@ for later releases.
 > **Note:** v0.0.1 is an early MVP. Pre-built gems are not yet published to
 > RubyGems; build from source for now.
 
-Requires a Rust toolchain (1.80+) and Ruby 3.3+.
+Requires a Rust toolchain (1.85+) and Ruby 3.3+.
 
 ```bash
 # From a checkout of the fulgur repository
@@ -116,7 +116,7 @@ pdf.to_s                       # => String (ASCII-8BIT binary)
 pdf.to_base64                  # => String (Base64)
 pdf.to_data_uri                # => "data:application/pdf;base64,..."
 pdf.write_to_path("out.pdf")   # write to file (binmode guaranteed)
-pdf.write_to_io(io)            # chunked write to any IO (binmode guaranteed)
+pdf.write_to_io(io)            # chunked write to any IO (calls binmode when supported)
 ```
 
 The result object keeps bytes on the Rust side. Methods like `to_base64`

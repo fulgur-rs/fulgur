@@ -93,11 +93,44 @@ RSpec.describe Fulgur::Pdf do
     it "does not raise when IO lacks #binmode (duck-typed)" do
       sink = Class.new do
         attr_reader :buffer
-        def initialize = @buffer = String.new(encoding: Encoding::ASCII_8BIT)
-        def write(chunk) = @buffer << chunk.b
+        def initialize
+          @buffer = String.new(encoding: Encoding::ASCII_8BIT)
+        end
+        # IO#write contract: return the number of bytes written (Integer).
+        def write(chunk)
+          bytes = chunk.b
+          @buffer << bytes
+          bytes.bytesize
+        end
       end.new
       expect { pdf.write_to_io(sink) }.not_to raise_error
       expect(sink.buffer.bytesize).to eq(pdf.bytesize)
+    end
+
+    it "raises RuntimeError when IO#write returns 0 bytes" do
+      stuck = Class.new do
+        def write(_chunk) = 0
+      end.new
+      expect { pdf.write_to_io(stuck) }.to raise_error(RuntimeError, /0 bytes/)
+    end
+
+    it "retries short writes" do
+      chunky = Class.new do
+        attr_reader :buffer
+        def initialize
+          @buffer = String.new(encoding: Encoding::ASCII_8BIT)
+        end
+        # 最初の 3 回は 7 バイトだけ書き込み、それ以降は全量書き込む。
+        def write(chunk)
+          @calls ||= 0
+          @calls += 1
+          take = (@calls <= 3 ? 7 : chunk.bytesize).clamp(1, chunk.bytesize)
+          @buffer << chunk.b[0, take]
+          take
+        end
+      end.new
+      pdf.write_to_io(chunky)
+      expect(chunky.buffer.bytesize).to eq(pdf.bytesize)
     end
   end
 
