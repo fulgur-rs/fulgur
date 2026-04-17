@@ -27,7 +27,32 @@ use std::sync::Arc;
 use crate::MAX_DOM_DEPTH;
 
 /// CSS px → PDF pt conversion factor (1 CSS px = 0.75 PDF pt).
-const PX_TO_PT: f32 = 0.75;
+pub(crate) const PX_TO_PT: f32 = 0.75;
+
+/// Convert a Taffy layout value (CSS px) to PDF pt.
+///
+/// Taffy's `final_layout.size/location` are in CSS px because we feed Blitz
+/// a CSS px viewport. All of fulgur's Pageable types store pt values, so
+/// we apply `PX_TO_PT` at the conversion boundary — here — rather than
+/// sprinkling multiplications throughout `convert.rs`.
+///
+/// Returns `(x, y, width, height)` in pt.
+#[inline]
+fn layout_in_pt(layout: &taffy::Layout) -> (f32, f32, f32, f32) {
+    (
+        layout.location.x * PX_TO_PT,
+        layout.location.y * PX_TO_PT,
+        layout.size.width * PX_TO_PT,
+        layout.size.height * PX_TO_PT,
+    )
+}
+
+/// Convert a Taffy `Size<f32>` (CSS px) to PDF pt. Useful when only the size
+/// half of a Layout is needed.
+#[inline]
+fn size_in_pt(size: taffy::Size<f32>) -> (f32, f32) {
+    (size.width * PX_TO_PT, size.height * PX_TO_PT)
+}
 
 /// Default CSS line-height multiplier when the actual computed value is
 /// unavailable (CSS 2 §10.8.1 initial value for `line-height: normal`).
