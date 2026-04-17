@@ -22,6 +22,7 @@ pub mod schema;
 pub mod svg;
 pub mod template;
 
+pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
 pub use engine::{Engine, EngineBuilder};
 pub use error::{Error, Result};

@@ -1,6 +1,6 @@
-
-# Build artifacts
-build/
-dist/
 *.egg-info/
-
+dist/
+target/
+.venv/
+__pycache__/
+*.so

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fulgur", "crates/fulgur-cli", "crates/fulgur-vrt"]
+members = ["crates/fulgur", "crates/fulgur-cli", "crates/fulgur-vrt", "crates/pyfulgur"]
 
 [workspace.package]
 edition = "2024"

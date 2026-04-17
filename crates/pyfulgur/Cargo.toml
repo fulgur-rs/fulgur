@@ -1,0 +1,27 @@
+[package]
+name = "pyfulgur"
+version = "0.0.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Python bindings for fulgur — offline HTML/CSS to PDF conversion"
+publish = false
+
+[lib]
+name = "pyfulgur"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# extension-module を有効化すると pyo3 を引き込み、libpython への undefined symbol
+# リンクを抑止する PyO3 モードでビルドする。maturin ビルドでのみ有効化し、
+# 通常の cargo build --workspace では off にして workspace テストを壊さない。
+extension-module = ["dep:pyo3", "pyo3/extension-module"]
+
+[dependencies]
+fulgur = { path = "../fulgur" }
+pyo3 = { version = "0.22", optional = true }
+
+[dev-dependencies]
+static_assertions = "1.1"
