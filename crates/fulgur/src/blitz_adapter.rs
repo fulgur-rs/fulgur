@@ -48,8 +48,6 @@ pub fn parse_and_layout(
 
 /// Context available to each DOM pass.
 pub struct PassContext<'a> {
-    pub viewport_width: f32,
-    pub viewport_height: f32,
     pub font_data: &'a [Arc<Vec<u8>>],
 }
 
@@ -1690,11 +1688,7 @@ mod tests {
     fn test_parse_resolve_roundtrip() {
         let html = "<html><body><p>Hello</p></body></html>";
         let mut doc = parse(html, 400.0, &[]);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         apply_passes(&mut doc, &[Box::new(NoOpPass)], &ctx);
         resolve(&mut doc);
         let root = doc.root_element();
@@ -1716,11 +1710,7 @@ mod tests {
         let pass = InjectCssPass {
             css: "p { color: red; }".to_string(),
         };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         apply_passes(&mut doc, &[Box::new(pass)], &ctx);
         resolve(&mut doc);
         assert!(
@@ -1734,11 +1724,7 @@ mod tests {
         let html = "<html><body><p>Hello</p></body></html>";
         let mut doc = parse(html, 400.0, &[]);
         let pass = InjectCssPass { css: String::new() };
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         apply_passes(&mut doc, &[Box::new(pass)], &ctx);
         resolve(&mut doc);
         assert!(
@@ -1770,11 +1756,7 @@ mod tests {
         };
 
         let pass = RunningElementPass::new(gcpm.running_mappings);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
@@ -1814,11 +1796,7 @@ mod tests {
         };
 
         let pass = RunningElementPass::new(gcpm.running_mappings);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
@@ -1844,11 +1822,7 @@ mod tests {
         };
 
         let pass = RunningElementPass::new(gcpm.running_mappings);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
@@ -1877,11 +1851,7 @@ mod tests {
         };
 
         let pass = RunningElementPass::new(gcpm.running_mappings);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
 
         let store = pass.into_running_store();
@@ -1909,11 +1879,7 @@ mod tests {
             <h2>Chapter Two</h2>
         </body></html>"#;
         let mut doc = parse(html, 400.0, &[]);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
 
         let counter_mappings = vec![
             CounterMapping {
@@ -2512,11 +2478,7 @@ li::marker { content: url("star.png"); }
     fn run_bookmark_pass(html: &str, mappings: Vec<BookmarkMapping>) -> Vec<(usize, BookmarkInfo)> {
         let mut doc = parse(html, 400.0, &[]);
         let pass = BookmarkPass::new(mappings);
-        let ctx = PassContext {
-            viewport_width: 400.0,
-            viewport_height: 10000.0,
-            font_data: &[],
-        };
+        let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
         pass.into_results()
     }

@@ -110,11 +110,7 @@ impl Engine {
             }));
         }
 
-        let ctx = crate::blitz_adapter::PassContext {
-            viewport_width: self.config.content_width() / crate::convert::PX_TO_PT,
-            viewport_height: self.config.content_height() / crate::convert::PX_TO_PT,
-            font_data: fonts,
-        };
+        let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         // Extract running elements via DomPass (before resolve)
@@ -261,11 +257,7 @@ impl Engine {
             self.base_path.as_deref(),
         );
 
-        let ctx = crate::blitz_adapter::PassContext {
-            viewport_width: self.config.content_width() / crate::convert::PX_TO_PT,
-            viewport_height: self.config.content_height() / crate::convert::PX_TO_PT,
-            font_data: fonts,
-        };
+        let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
