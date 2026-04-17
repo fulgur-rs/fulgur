@@ -38,3 +38,4 @@ test = ["pytest>=7"]
 module-name = "pyfulgur"
 manifest-path = "Cargo.toml"
 features = ["extension-module"]
+py-limited-api = "cp39"
