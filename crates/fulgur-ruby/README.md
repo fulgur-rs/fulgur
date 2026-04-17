@@ -115,7 +115,7 @@ pdf.bytesize                   # => Integer
 pdf.to_s                       # => String (ASCII-8BIT binary)
 pdf.to_base64                  # => String (Base64)
 pdf.to_data_uri                # => "data:application/pdf;base64,..."
-pdf.write_to_path("out.pdf")   # write to file (binmode guaranteed)
+pdf.write_to_path("out.pdf")   # write raw bytes to file path
 pdf.write_to_io(io)            # chunked write to any IO (calls binmode when supported)
 ```
 
