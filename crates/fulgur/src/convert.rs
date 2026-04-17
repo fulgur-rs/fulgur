@@ -4217,3 +4217,115 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod unit_oracle_tests {
+    //! Oracle tests asserting that `BlockPageable.layout_size` (set directly
+    //! from Taffy) has the correct width for a handful of CSS length units.
+    //!
+    //! These tests target the bug tracked by beads `fulgur-9ul`: the viewport
+    //! passed into Blitz is in pt while Blitz expects CSS px, and Taffy's
+    //! layout output is consumed without a px→pt conversion. Until the fix
+    //! lands, every width below should be off by a factor of 4/3.
+    //!
+    //! They are intentionally RED on `main` while the plan lands; Task 3+
+    //! flips them to GREEN.
+    use crate::pageable::{BlockPageable, Pageable};
+
+    /// Walk the Pageable tree looking for a `BlockPageable` whose HTML `id`
+    /// equals the requested value. Only descends into `BlockPageable`
+    /// children since the oracle fixtures only contain block boxes.
+    fn find_block_by_id<'a>(node: &'a dyn Pageable, id: &str) -> Option<&'a BlockPageable> {
+        if let Some(block) = node.as_any().downcast_ref::<BlockPageable>() {
+            if block.id.as_deref().map(|s| s.as_str()) == Some(id) {
+                return Some(block);
+            }
+            for positioned in &block.children {
+                if let Some(found) = find_block_by_id(positioned.child.as_ref(), id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    // All fixtures zero the default `body { margin: 8px }` so the oracle
+    // compares the div's width directly against the engine's content width
+    // (or the absolute-unit expectation) without the 16 px body margin
+    // confound. Without `margin:0`, `width:100%` would land ~12 pt short
+    // even after the viewport fix, masking the unit bug we're asserting.
+    const BODY_RESET: &str = "<style>body{margin:0}</style>";
+
+    #[test]
+    fn width_100_percent_equals_content_width() {
+        let html = format!(
+            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:100%;height:10pt;background:red"></div></body></html>"#
+        );
+        let eng = crate::Engine::builder().build();
+        let root = eng.build_pageable_for_testing_no_gcpm(&html);
+        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
+        let size = block.layout_size.expect("layout_size populated");
+        let expected = eng.config().content_width();
+        assert!(
+            (size.width - expected).abs() < 0.5,
+            "width:100% should be {expected}pt, got {}pt",
+            size.width
+        );
+    }
+
+    #[test]
+    fn width_10cm_is_283_46_pt() {
+        let html = format!(
+            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:10cm;height:1cm;background:red"></div></body></html>"#
+        );
+        let eng = crate::Engine::builder().build();
+        let root = eng.build_pageable_for_testing_no_gcpm(&html);
+        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
+        let size = block.layout_size.expect("layout_size populated");
+        let expected = 10.0 * 72.0 / 2.54;
+        assert!(
+            (size.width - expected).abs() < 0.5,
+            "width:10cm should be {expected}pt, got {}pt",
+            size.width
+        );
+    }
+
+    #[test]
+    fn width_360px_is_270_pt() {
+        let html = format!(
+            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:360px;height:10px;background:red"></div></body></html>"#
+        );
+        let eng = crate::Engine::builder().build();
+        let root = eng.build_pageable_for_testing_no_gcpm(&html);
+        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
+        let size = block.layout_size.expect("layout_size populated");
+        let expected = 360.0 * 0.75;
+        assert!(
+            (size.width - expected).abs() < 0.5,
+            "width:360px should be {expected}pt, got {}pt",
+            size.width
+        );
+    }
+
+    /// Uses an absolute unit (`in`) rather than `vw` so the oracle
+    /// discriminates the unit bug. A relative-to-viewport unit (vw, %)
+    /// compared against an expected value derived from `content_width()`
+    /// is tautological under the px↔pt scaling bug: numerator and
+    /// denominator scale together, so the ratio is preserved.
+    #[test]
+    fn width_1in_is_72_pt() {
+        let html = format!(
+            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:1in;height:0.1in;background:red"></div></body></html>"#
+        );
+        let eng = crate::Engine::builder().build();
+        let root = eng.build_pageable_for_testing_no_gcpm(&html);
+        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
+        let size = block.layout_size.expect("layout_size populated");
+        let expected = 72.0;
+        assert!(
+            (size.width - expected).abs() < 0.5,
+            "width:1in should be {expected}pt, got {}pt",
+            size.width
+        );
+    }
+}
