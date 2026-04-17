@@ -8,8 +8,10 @@
 
 use pyo3::prelude::*;
 
+mod margin;
 mod page_size;
 
+use margin::PyMargin;
 use page_size::PyPageSize;
 
 /// fulgur 公開型が Send + Sync であることを compile time に保証する。
@@ -24,5 +26,6 @@ mod assertions {
 #[pymodule]
 fn pyfulgur(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageSize>()?;
+    m.add_class::<PyMargin>()?;
     Ok(())
 }
