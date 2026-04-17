@@ -1,6 +1,7 @@
 use fulgur::{Engine, EngineBuilder, PageSize};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::asset_bundle::PyAssetBundle;
 use crate::margin::PyMargin;
@@ -112,5 +113,19 @@ impl PyEngine {
     #[staticmethod]
     fn builder() -> PyEngineBuilder {
         PyEngineBuilder::new()
+    }
+
+    fn render_html<'py>(
+        &self,
+        py: Python<'py>,
+        html: String,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        // Engine: Send + Sync は fulgur-d3r で保証済み + src/lib.rs の
+        // assert_impl_all! で compile time に検査している。Python スレッドから
+        // 並列で render できるよう、GIL を解放してから呼ぶ。
+        let bytes = py
+            .allow_threads(|| self.inner.render_html(&html))
+            .map_err(crate::error::map_fulgur_error)?;
+        Ok(PyBytes::new_bound(py, &bytes))
     }
 }

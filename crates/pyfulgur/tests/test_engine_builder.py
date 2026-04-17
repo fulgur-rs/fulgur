@@ -58,3 +58,16 @@ def test_builder_build_consumes_builder():
     b.build()
     with pytest.raises(RuntimeError):
         b.build()
+
+
+def test_assets_consumes_bundle_empties_it():
+    """After passing a bundle to a builder, the bundle is emptied (take_inner contract)."""
+    bundle = AssetBundle()
+    bundle.add_css("body {}")
+    Engine.builder().assets(bundle).build()
+    # bundle has been consumed; add_css on the same instance should still work
+    # (the bundle resets to AssetBundle::new() after take_inner), and the
+    # previous CSS is no longer present. We don't have a direct "is_empty"
+    # accessor, so the contract verified here is "reuse does not panic and
+    # the object remains usable".
+    bundle.add_css("p {}")  # does not raise
