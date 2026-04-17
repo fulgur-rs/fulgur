@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use fulgur::{Engine, EngineBuilder, PageSize};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -127,5 +129,15 @@ impl PyEngine {
             .allow_threads(|| self.inner.render_html(&html))
             .map_err(crate::error::map_fulgur_error)?;
         Ok(PyBytes::new_bound(py, &bytes))
+    }
+
+    fn render_html_to_file(
+        &self,
+        py: Python<'_>,
+        html: String,
+        path: PathBuf,
+    ) -> PyResult<()> {
+        py.allow_threads(|| self.inner.render_html_to_file(&html, &path))
+            .map_err(crate::error::map_fulgur_error)
     }
 }
