@@ -33,9 +33,7 @@ pub(crate) fn parse_page_size_str(name: &str) -> PyResult<PageSize> {
         "A4" => Ok(PageSize::A4),
         "LETTER" => Ok(PageSize::LETTER),
         "A3" => Ok(PageSize::A3),
-        other => Err(PyValueError::new_err(format!(
-            "unknown page size: {other}"
-        ))),
+        other => Err(PyValueError::new_err(format!("unknown page size: {other}"))),
     }
 }
 
@@ -124,6 +122,7 @@ impl PyEngine {
         bookmarks = None,
         assets = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         page_size: Option<&Bound<'_, PyAny>>,
         margin: Option<PyMargin>,
@@ -174,11 +173,7 @@ impl PyEngine {
         PyEngineBuilder::new()
     }
 
-    fn render_html<'py>(
-        &self,
-        py: Python<'py>,
-        html: String,
-    ) -> PyResult<Bound<'py, PyBytes>> {
+    fn render_html<'py>(&self, py: Python<'py>, html: String) -> PyResult<Bound<'py, PyBytes>> {
         // Engine: Send + Sync は fulgur-d3r で保証済み + src/lib.rs の
         // assert_impl_all! で compile time に検査している。Python スレッドから
         // 並列で render できるよう、GIL を解放してから呼ぶ。
@@ -188,12 +183,7 @@ impl PyEngine {
         Ok(PyBytes::new_bound(py, &bytes))
     }
 
-    fn render_html_to_file(
-        &self,
-        py: Python<'_>,
-        html: String,
-        path: PathBuf,
-    ) -> PyResult<()> {
+    fn render_html_to_file(&self, py: Python<'_>, html: String, path: PathBuf) -> PyResult<()> {
         py.allow_threads(|| self.inner.render_html_to_file(&html, &path))
             .map_err(crate::error::map_fulgur_error)
     }

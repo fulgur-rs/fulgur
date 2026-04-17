@@ -8,9 +8,7 @@ create_exception!(pyfulgur, RenderError, PyException, "Rendering failed");
 pub fn map_fulgur_error(err: FulgurError) -> PyErr {
     match err {
         FulgurError::Io(io_err) => match io_err.kind() {
-            std::io::ErrorKind::NotFound => {
-                PyFileNotFoundError::new_err(io_err.to_string())
-            }
+            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
             _ => RenderError::new_err(io_err.to_string()),
         },
         FulgurError::Asset(msg) => PyValueError::new_err(msg),
