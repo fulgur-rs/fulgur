@@ -3,13 +3,9 @@ name: Release (Ruby / RubyGems)
 on:
   release:
     types: [published]
+  # workflow_dispatch は build + smoke のみ実行 (publish は release event 限定)。
+  # 任意 ref からの publish 経路を塞ぐため dry_run input は持たない。
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Skip publish step (build + smoke test only)'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -166,13 +162,57 @@ jobs:
             puts "OK: #{pdf.bytesize} bytes"
           '
 
-  # NOTE: RubyGems has no TestGems equivalent, so dry_run skips publish entirely.
-  # OIDC / role-to-assume / credential config is exercised for the first time
-  # on the actual first release. See docs/RELEASE_SETUP.md.
+  smoke-test-musl:
+    # musl native loader / packaging の破損を検出する。Alpine container に隔離して
+    # 実行することで glibc 前提の actions 側と衝突しない (actions/download-artifact
+    # はホスト側、gem install + smoke test のみ alpine 内)。
+    name: Smoke test musl (${{ matrix.platform }})
+    needs: [build-precompiled]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux-musl
+            runner: ubuntu-latest
+          - platform: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: pkg
+      - name: Smoke test in Alpine (${{ matrix.platform }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/pkg:/pkg:ro" ruby:3.3-alpine sh -c '
+            set -eu
+            for gem in /pkg/*.gem; do
+              echo "Installing $gem"
+              gem install --local "$gem" --no-document
+            done
+            ruby -e "
+              require \"fulgur\"
+              engine = Fulgur::Engine.new
+              pdf = engine.render_html(\"<p>hi</p>\")
+              raise \"not a Fulgur::Pdf: #{pdf.class}\" unless pdf.is_a?(Fulgur::Pdf)
+              raise \"too short: #{pdf.bytesize}\" unless pdf.bytesize > 100
+              s = pdf.to_s
+              raise \"bad header: #{s[0, 5].inspect}\" unless s[0, 5] == \"%PDF-\".b
+              puts \"OK: #{pdf.bytesize} bytes\"
+            "
+          '
+
+  # NOTE: RubyGems publish は release イベント (release.yml がタグから発火) のみ。
+  # workflow_dispatch からは任意の ref を push できないようにする (security)。
+  # RubyGems には TestPyPI 相当が無いため、workflow_dispatch は build + smoke
+  # のみ実行し、OIDC / credential フローの実動作検証は初回本番リリースで行う。
+  # See docs/RELEASE_SETUP.md.
   publish:
     name: Publish to RubyGems
-    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test]
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl]
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: rubygems
     permissions:
