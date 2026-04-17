@@ -6,3 +6,4 @@
 /lib/fulgur/*.so
 /ext/fulgur/target
 /ext/fulgur/Cargo.lock
+/.rspec_status

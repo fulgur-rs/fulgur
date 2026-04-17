@@ -8,6 +8,8 @@
 
 use magnus::{Error, define_module};
 
+mod error;
+
 #[cfg(test)]
 mod assertions {
     use static_assertions::assert_impl_all;
