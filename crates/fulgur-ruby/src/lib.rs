@@ -9,6 +9,7 @@
 use magnus::{Error, define_module};
 
 mod error;
+mod margin;
 mod page_size;
 
 #[cfg(test)]
@@ -22,5 +23,6 @@ mod assertions {
 fn init(ruby: &magnus::Ruby) -> Result<(), Error> {
     let fulgur = define_module("Fulgur")?;
     page_size::define(ruby, &fulgur)?;
+    margin::define(ruby, &fulgur)?;
     Ok(())
 }

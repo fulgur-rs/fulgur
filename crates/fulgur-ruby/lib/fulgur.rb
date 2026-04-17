@@ -14,3 +14,5 @@ module Fulgur
   class RenderError < Error; end
   class AssetError < Error; end
 end
+
+require_relative "fulgur/margin"
