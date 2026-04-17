@@ -22,7 +22,7 @@ def test_font_file_missing_raises_file_not_found(tmp_path):
 
 
 def test_invalid_page_size_string_raises_value_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown page size"):
         Engine.builder().page_size("XX")
 
 

@@ -19,7 +19,7 @@ def test_builder_page_size_accepts_string():
 
 
 def test_builder_page_size_invalid_string_raises_value_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown page size"):
         Engine.builder().page_size("Z99").build()
 
 

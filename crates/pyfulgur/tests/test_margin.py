@@ -1,7 +1,5 @@
 import math
 
-import pytest
-
 from pyfulgur import Margin
 
 
@@ -27,6 +25,9 @@ def test_margin_symmetric():
 def test_margin_uniform_mm():
     m = Margin.uniform_mm(25.4)
     assert math.isclose(m.top, 72.0, abs_tol=0.01)
+    assert math.isclose(m.right, 72.0, abs_tol=0.01)
+    assert math.isclose(m.bottom, 72.0, abs_tol=0.01)
+    assert math.isclose(m.left, 72.0, abs_tol=0.01)
 
 
 def test_margin_repr():

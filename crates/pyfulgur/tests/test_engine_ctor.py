@@ -39,5 +39,5 @@ def test_engine_all_kwargs():
 
 
 def test_engine_invalid_page_size_string_raises_value_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown page size"):
         Engine(page_size="XX")

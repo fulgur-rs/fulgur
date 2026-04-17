@@ -8,11 +8,15 @@ Python bindings for [fulgur](https://github.com/mitsuru/fulgur) — an offline, 
 
 ## Install
 
+> **Note:** v0.0.2 is an early alpha. Pre-built wheels are not yet published to PyPI; install from source for now.
+
 ```bash
-pip install pyfulgur
+# From a checkout of the fulgur repository
+pip install maturin
+maturin develop --release -m crates/pyfulgur/Cargo.toml
 ```
 
-Pre-built wheels are published for manylinux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64).
+Pre-built wheels for manylinux / macOS / Windows will be published in a later release.
 
 ## Quick start
 
@@ -46,6 +50,8 @@ engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 ## API surface
 
 - `Engine(**kwargs)` / `Engine.builder()` → `EngineBuilder`
+- `Engine.render_html(html: str) -> bytes` — render to PDF bytes (releases the GIL)
+- `Engine.render_html_to_file(html: str, path: str | os.PathLike) -> None` — render to a file
 - `AssetBundle`: `add_css`, `add_css_file`, `add_font_file`, `add_image`, `add_image_file`
 - `PageSize`: `A4`, `LETTER`, `A3`, `custom(w_mm, h_mm)`, `.landscape()`
 - `Margin`: `Margin(top, right, bottom, left)`, `Margin.uniform(pt)`, `Margin.symmetric(v, h)`, `Margin.uniform_mm(mm)`

@@ -37,6 +37,17 @@ pub(crate) fn parse_page_size_str(name: &str) -> PyResult<PageSize> {
     }
 }
 
+/// `PageSize` オブジェクトまたは文字列名 (大文字小文字無視) を `fulgur::PageSize` に解決する。
+pub(crate) fn extract_page_size(value: &Bound<'_, PyAny>) -> PyResult<PageSize> {
+    if let Ok(ps) = value.extract::<PyPageSize>() {
+        Ok(ps.inner)
+    } else if let Ok(s) = value.extract::<String>() {
+        parse_page_size_str(&s)
+    } else {
+        Err(PyValueError::new_err("page_size must be PageSize or str"))
+    }
+}
+
 #[pymethods]
 impl PyEngineBuilder {
     #[new]
@@ -47,13 +58,7 @@ impl PyEngineBuilder {
     }
 
     fn page_size(mut slf: PyRefMut<'_, Self>, value: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
-        let size = if let Ok(ps) = value.extract::<PyPageSize>() {
-            ps.inner
-        } else if let Ok(s) = value.extract::<String>() {
-            parse_page_size_str(&s)?
-        } else {
-            return Err(PyValueError::new_err("page_size must be PageSize or str"));
-        };
+        let size = extract_page_size(value)?;
         slf.map(|b| b.page_size(size))?;
         Ok(slf.into())
     }
@@ -135,14 +140,7 @@ impl PyEngine {
     ) -> PyResult<Self> {
         let mut b = Engine::builder();
         if let Some(v) = page_size {
-            let size = if let Ok(ps) = v.extract::<PyPageSize>() {
-                ps.inner
-            } else if let Ok(s) = v.extract::<String>() {
-                parse_page_size_str(&s)?
-            } else {
-                return Err(PyValueError::new_err("page_size must be PageSize or str"));
-            };
-            b = b.page_size(size);
+            b = b.page_size(extract_page_size(v)?);
         }
         if let Some(m) = margin {
             b = b.margin(m.inner);

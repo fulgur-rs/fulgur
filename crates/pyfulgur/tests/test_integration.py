@@ -3,7 +3,7 @@ from pathlib import Path
 from pyfulgur import AssetBundle, Engine, Margin, PageSize
 
 
-def test_full_workflow_kwargs(tmp_path: Path):
+def test_full_workflow_kwargs():
     bundle = AssetBundle()
     bundle.add_css("h1 { color: red; font-size: 24pt; }")
     engine = Engine(

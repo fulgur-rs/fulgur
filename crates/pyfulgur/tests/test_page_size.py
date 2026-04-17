@@ -1,7 +1,5 @@
 import math
 
-import pytest
-
 from pyfulgur import PageSize
 
 
@@ -20,6 +18,7 @@ def test_letter_has_expected_dimensions():
 def test_a3_has_expected_dimensions():
     size = PageSize.A3
     assert math.isclose(size.width, 841.89, abs_tol=0.01)
+    assert math.isclose(size.height, 1190.55, abs_tol=0.01)
 
 
 def test_custom_mm_converts_to_points():

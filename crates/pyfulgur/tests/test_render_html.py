@@ -1,5 +1,3 @@
-import pytest
-
 from pyfulgur import AssetBundle, Engine, PageSize
 
 
