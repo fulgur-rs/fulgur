@@ -42,16 +42,22 @@ gh workflow run release-python.yml --field dry_run=true
 
 ## RubyGems Trusted Publisher
 
-1. <https://rubygems.org/profile/oidc/api_key_roles> にログイン
-2. "New API key role" → OIDC provider: GitHub Actions
-3. 以下を登録:
-   - Gem: `fulgur` (新規の場合は "Pending publishing" で予約)
-   - Repository: `mitsuru/fulgur`
-   - Workflow: `release-ruby.yml`
+既存 gem (fulgur) の場合:
+
+1. <https://rubygems.org/sign_in> にログイン (gem Owner アカウント)
+2. <https://rubygems.org/gems/fulgur/trusted_publishers> を開く
+3. "Create" で以下を登録:
+   - Repository owner: `mitsuru`
+   - Repository name: `fulgur`
+   - Workflow filename: `release-ruby.yml`
    - Environment: `rubygems`
-4. 生成された role 名 (例: `rg_oidc_akr_xxxxxxxx`) をコピーして
-   `.github/workflows/release-ruby.yml` の `role-to-assume:` 値を差し替える
-5. GitHub リポジトリで Environment `rubygems` を作成
+4. GitHub リポジトリで Environment `rubygems` を作成
+
+OIDC claim (repo + workflow + environment) で自動照合されるため、`role-to-assume`
+等の値は workflow 側に不要 (`rubygems/configure-rubygems-credentials` のデフォルト動作)。
+
+新規 gem を作成する場合は <https://rubygems.org/profile/oidc/pending_trusted_publishers>
+から "Pending Trusted Publisher" を登録。
 
 注意: RubyGems には TestPyPI に相当する staging 環境がないため、`release-ruby.yml`
 の `workflow_dispatch` dry-run は publish をスキップするのみ (build + smoke test

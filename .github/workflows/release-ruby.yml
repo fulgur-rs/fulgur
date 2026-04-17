@@ -151,12 +151,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # Uses RubyGems Trusted Publisher flow (default). The OIDC claim
+      # (repo + workflow + environment) is matched against the Trusted
+      # Publisher registered on rubygems.org/gems/fulgur/trusted_publishers.
+      # No role-to-assume needed. See docs/RELEASE_SETUP.md.
       - uses: rubygems/configure-rubygems-credentials@6f94374a7eb4cdf600b093bbcd94079187872fac  # main
-        with:
-          # TODO: replace placeholder with actual role name after RubyGems Trusted
-          # Publisher registration completes (value from rubygems.org UI).
-          # See docs/RELEASE_SETUP.md.
-          role-to-assume: rg_oidc_akr_mitsuru_fulgur
       - name: List gems to publish
         shell: bash
         run: ls -la dist/*.gem
