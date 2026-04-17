@@ -8,6 +8,7 @@
 
 use magnus::{Error, define_module};
 
+mod asset_bundle;
 mod error;
 mod margin;
 mod page_size;
@@ -24,5 +25,6 @@ fn init(ruby: &magnus::Ruby) -> Result<(), Error> {
     let fulgur = define_module("Fulgur")?;
     page_size::define(ruby, &fulgur)?;
     margin::define(ruby, &fulgur)?;
+    asset_bundle::define(ruby, &fulgur)?;
     Ok(())
 }

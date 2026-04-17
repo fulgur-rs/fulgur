@@ -16,3 +16,4 @@ module Fulgur
 end
 
 require_relative "fulgur/margin"
+require_relative "fulgur/asset_bundle"
