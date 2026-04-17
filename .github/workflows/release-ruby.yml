@@ -39,6 +39,40 @@ jobs:
           path: crates/fulgur-ruby/pkg/*.gem
           if-no-files-found: error
 
+  smoke-test-source-gem:
+    name: Smoke test (source gem)
+    needs: [build-source-gem]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+        with:
+          ruby-version: "3.3"
+          rustup-toolchain: stable
+          bundler-cache: false
+          cargo-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-gem
+          path: pkg
+      - name: Install source gem (compiles native ext)
+        shell: bash
+        run: |
+          shopt -s failglob
+          gem install --local pkg/*.gem
+      - name: Smoke test
+        shell: bash
+        run: |
+          ruby -e '
+            require "fulgur"
+            engine = Fulgur::Engine.new
+            pdf = engine.render_html("<p>hi</p>")
+            raise "not a Fulgur::Pdf: #{pdf.class}" unless pdf.is_a?(Fulgur::Pdf)
+            raise "too short: #{pdf.bytesize}" unless pdf.bytesize > 100
+            s = pdf.to_s
+            raise "bad header: #{s[0, 5].inspect}" unless s[0, 5] == "%PDF-".b
+            puts "OK: #{pdf.bytesize} bytes"
+          '
+
   build-precompiled:
     name: Build precompiled gem (${{ matrix.platform }})
     strategy:
@@ -137,7 +171,7 @@ jobs:
   # on the actual first release. See docs/RELEASE_SETUP.md.
   publish:
     name: Publish to RubyGems
-    needs: [build-source-gem, build-precompiled, smoke-test]
+    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test]
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     runs-on: ubuntu-latest
     environment: rubygems

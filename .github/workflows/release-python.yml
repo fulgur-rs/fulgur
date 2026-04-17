@@ -66,6 +66,36 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  smoke-test-sdist:
+    name: Smoke test (sdist)
+    needs: [build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install sdist (source build)
+        shell: bash
+        run: |
+          shopt -s failglob
+          python -m pip install dist/*.tar.gz
+      - name: Smoke test
+        shell: bash
+        run: |
+          python -c "
+          import pyfulgur
+          engine = pyfulgur.Engine()
+          pdf = engine.render_html('<p>hi</p>')
+          assert isinstance(pdf, (bytes, bytearray)), type(pdf)
+          assert len(pdf) > 100, len(pdf)
+          print(f'OK: {len(pdf)} bytes')
+          "
+
   smoke-test:
     name: Smoke test (${{ matrix.os }})
     needs: [build-wheels]
@@ -119,7 +149,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist, smoke-test]
+    needs: [build-wheels, build-sdist, smoke-test, smoke-test-sdist]
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     runs-on: ubuntu-latest
     environment: pypi
@@ -134,7 +164,7 @@ jobs:
 
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [build-wheels, build-sdist, smoke-test]
+    needs: [build-wheels, build-sdist, smoke-test, smoke-test-sdist]
     if: github.event_name == 'workflow_dispatch' && inputs.dry_run
     runs-on: ubuntu-latest
     environment: testpypi
