@@ -138,7 +138,7 @@ jobs:
   publish:
     name: Publish to RubyGems
     needs: [build-source-gem, build-precompiled, smoke-test]
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !fromJSON(inputs.dry_run))
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     runs-on: ubuntu-latest
     environment: rubygems
     permissions:
