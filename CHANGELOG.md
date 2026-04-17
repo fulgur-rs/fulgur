@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Breaking (visual):** Layout geometry now uses the correct CSS px → PDF pt ratio (1 px = 0.75 pt). Previously the Blitz viewport input was labeled as pt but consumed as CSS px, and Taffy's layout output was used as-is without conversion. The two bugs cancelled out for pure-px content but skewed absolute units (cm, in) and relative units (%, vw, vh) by 4/3×. After this fix, `width:360px` renders at 270 pt instead of 360 pt, `width:10cm` at 283.46 pt, `width:1in` at 72 pt, and `width:100%` fills the content area exactly — all matching Chrome, WeasyPrint, and Prince. Existing VRT goldens and example PDFs have been regenerated. ([fulgur-9ul](https://), supersedes [#90](https://github.com/mitsuru/fulgur/pull/90))
+- **Breaking (visual):** Layout geometry now uses the correct CSS px → PDF pt ratio (1 px = 0.75 pt). Previously the Blitz viewport input was labeled as pt but consumed as CSS px, and Taffy's layout output was used as-is without conversion. The two bugs cancelled out for pure-px content but skewed absolute units (cm, in) and relative units (%, vw, vh) by 4/3×. After this fix, `width:360px` renders at 270 pt instead of 360 pt, `width:10cm` at 283.46 pt, `width:1in` at 72 pt, and `width:100%` fills the content area exactly — all matching Chrome, WeasyPrint, and Prince. Existing VRT goldens and example PDFs have been regenerated. (tracked as `fulgur-9ul`; supersedes PR #90)
 
 ## [0.4.5] - 2026-04-16
 
