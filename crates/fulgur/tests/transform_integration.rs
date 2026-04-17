@@ -110,11 +110,9 @@ fn rotate_90_at_default_center_origin_fixes_center() {
     let html = make_html("transform: rotate(90deg);");
     let w = wrapper_from(&html);
     let m = w.effective_matrix(0.0, 0.0);
-    // The .t box is `width: 100px; height: 100px`. After Task 5 of
-    // fulgur-9ul, convert.rs emits layout sizes in pt (= px × 0.75), so
-    // the box is 75 × 75 pt in the Pageable tree. Default transform-origin
-    // is 50% 50%, i.e. (37.5, 37.5) pt. That is the fixed point of the
-    // rotation.
+    // .t is 100 × 100 CSS px = 75 × 75 pt in the Pageable tree; the default
+    // `transform-origin: 50% 50%` resolves to (37.5, 37.5) pt — the fixed
+    // point of the rotation.
     let cx = 100.0 * 0.75 / 2.0;
     let cy = 100.0 * 0.75 / 2.0;
     let x = m.a * cx + m.c * cy + m.e;

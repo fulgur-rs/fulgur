@@ -1,8 +1,6 @@
-//! Integration tests pinning down unit semantics across the Blitz boundary.
-//!
-//! Added for beads fulgur-9ul. These are smoke tests — real geometric
-//! assertions live alongside convert.rs where we can walk the Pageable
-//! tree directly.
+//! Integration smoke tests confirming the renderer produces a non-empty PDF
+//! for a variety of CSS length units. Precise geometric assertions live in
+//! `convert::unit_oracle_tests` where the Pageable tree is inspectable.
 
 use fulgur::Engine;
 

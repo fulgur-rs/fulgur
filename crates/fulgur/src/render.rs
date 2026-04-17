@@ -216,7 +216,7 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
         }
         0.0
     };
-    px * crate::convert::PX_TO_PT
+    crate::convert::px_to_pt(px)
 }
 
 /// Render a Pageable tree to PDF bytes with GCPM margin box support.
@@ -425,8 +425,8 @@ pub fn render_to_pdf_with_gcpm(
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
-                    content_width / crate::convert::PX_TO_PT,
-                    page_size.height / crate::convert::PX_TO_PT,
+                    crate::convert::pt_to_px(content_width),
+                    crate::convert::pt_to_px(page_size.height),
                     font_data,
                 );
                 get_body_child_dimension(&measure_doc, true)
@@ -449,8 +449,8 @@ pub fn render_to_pdf_with_gcpm(
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
-                    fixed_width / crate::convert::PX_TO_PT,
-                    page_size.height / crate::convert::PX_TO_PT,
+                    crate::convert::pt_to_px(fixed_width),
+                    crate::convert::pt_to_px(page_size.height),
                     font_data,
                 );
                 get_body_child_dimension(&measure_doc, false)

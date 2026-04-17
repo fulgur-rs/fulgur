@@ -27,31 +27,40 @@ use std::sync::Arc;
 use crate::MAX_DOM_DEPTH;
 
 /// CSS px → PDF pt conversion factor (1 CSS px = 0.75 PDF pt).
-pub(crate) const PX_TO_PT: f32 = 0.75;
+///
+/// Taffy lays out in CSS px (because we feed Blitz a CSS px viewport), but
+/// the Pageable tree and Krilla work in pt. Values cross the boundary
+/// through [`px_to_pt`] / [`pt_to_px`] and the tuple helpers
+/// [`layout_in_pt`] / [`size_in_pt`].
+const PX_TO_PT: f32 = 0.75;
 
-/// Convert a Taffy layout value (CSS px) to PDF pt.
-///
-/// Taffy's `final_layout.size/location` are in CSS px because we feed Blitz
-/// a CSS px viewport. All of fulgur's Pageable types store pt values, so
-/// we apply `PX_TO_PT` at the conversion boundary — here — rather than
-/// sprinkling multiplications throughout `convert.rs`.
-///
-/// Returns `(x, y, width, height)` in pt.
+/// Convert a CSS-px scalar to PDF pt.
+#[inline]
+pub(crate) fn px_to_pt(v: f32) -> f32 {
+    v * PX_TO_PT
+}
+
+/// Convert a PDF-pt scalar to CSS px — use when feeding the Blitz viewport.
+#[inline]
+pub(crate) fn pt_to_px(v: f32) -> f32 {
+    v / PX_TO_PT
+}
+
+/// Convert a Taffy `Layout` (CSS px) to PDF pt as `(x, y, width, height)`.
 #[inline]
 fn layout_in_pt(layout: &taffy::Layout) -> (f32, f32, f32, f32) {
     (
-        layout.location.x * PX_TO_PT,
-        layout.location.y * PX_TO_PT,
-        layout.size.width * PX_TO_PT,
-        layout.size.height * PX_TO_PT,
+        px_to_pt(layout.location.x),
+        px_to_pt(layout.location.y),
+        px_to_pt(layout.size.width),
+        px_to_pt(layout.size.height),
     )
 }
 
-/// Convert a Taffy `Size<f32>` (CSS px) to PDF pt. Useful when only the size
-/// half of a Layout is needed.
+/// Convert a Taffy `Size<f32>` (CSS px) to PDF pt as `(width, height)`.
 #[inline]
 fn size_in_pt(size: taffy::Size<f32>) -> (f32, f32) {
-    (size.width * PX_TO_PT, size.height * PX_TO_PT)
+    (px_to_pt(size.width), px_to_pt(size.height))
 }
 
 /// Default CSS line-height multiplier when the actual computed value is
@@ -215,7 +224,7 @@ fn maybe_wrap_transform(
     let Some(styles) = node.primary_styles() else {
         return child;
     };
-    let (_, _, width, height) = layout_in_pt(&node.final_layout);
+    let (width, height) = size_in_pt(node.final_layout.size);
     match crate::blitz_adapter::compute_transform(&styles, width, height) {
         Some((matrix, origin)) => Box::new(TransformWrapperPageable::new(child, matrix, origin)),
         None => child,
@@ -507,7 +516,7 @@ fn convert_node_inner(
     depth: usize,
 ) -> Box<dyn Pageable> {
     let node = doc.get_node(node_id).unwrap();
-    let (_, _, width, height) = layout_in_pt(&node.final_layout);
+    let (width, height) = size_in_pt(node.final_layout.size);
 
     // Check if this is a list item with an outside marker (must be before inline root check).
     //
@@ -1156,7 +1165,7 @@ fn wrap_replaced_in_block_style<F>(
 where
     F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
 {
-    let (_, _, width, height) = layout_in_pt(&node.final_layout);
+    let (width, height) = size_in_pt(node.final_layout.size);
 
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
@@ -1360,7 +1369,7 @@ fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
     let (left_inset, top_inset) = style.content_inset();
     let right_inset = style.border_widths[1] + style.padding[1];
     let bottom_inset = style.border_widths[2] + style.padding[2];
-    let (_, _, border_w, border_h) = layout_in_pt(&node.final_layout);
+    let (border_w, border_h) = size_in_pt(node.final_layout.size);
     ContentBox {
         origin_x: left_inset,
         origin_y: top_inset,
@@ -1721,7 +1730,7 @@ fn convert_table(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
 ) -> Box<dyn Pageable> {
-    let (_, _, width, height) = layout_in_pt(&node.final_layout);
+    let (width, height) = size_in_pt(node.final_layout.size);
     let style = extract_block_style(node, ctx.assets);
 
     let mut header_cells: Vec<PositionedChild> = Vec::new();
@@ -2062,14 +2071,19 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
             (bc_abs.alpha.clamp(0.0, 1.0) * 255.0) as u8,
         ];
 
-        // Border radii
-        let (width, height) = size_in_pt(layout.size);
+        // Border radii. Stylo evaluates length-percentage values in CSS px
+        // space, so we feed it the CSS-px border-box basis and convert the
+        // returned radius to pt. border_radii is consumed downstream alongside
+        // pt-space widths/heights (see `compute_padding_box_inner_radii`).
+        let width = layout.size.width;
+        let height = layout.size.height;
         let resolve_radius =
             |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
              basis: f32|
              -> f32 {
                 r.0.resolve(style::values::computed::Length::new(basis))
                     .px()
+                    * PX_TO_PT
             };
 
         let tl = styles.clone_border_top_left_radius();
@@ -3617,11 +3631,9 @@ mod tests {
 
         let mut images = Vec::new();
         collect_images(&*tree, &mut images);
-        // 24 CSS px * 0.75 = 18 pt after the layout_in_pt migration (fulgur-9ul).
         assert!(
             images.iter().any(|(w, h)| *w == 18.0 && *h == 18.0),
-            "expected an 18x18 pt ImagePageable from content: url() on normal element \
-             (width/height: 24px × PX_TO_PT), got {:?}",
+            "expected an 18x18 pt ImagePageable (24 CSS px × 0.75) from content: url(), got {:?}",
             images
         );
     }
@@ -4189,18 +4201,12 @@ mod unit_oracle_tests {
     //! Oracle tests asserting that `BlockPageable.layout_size` (set directly
     //! from Taffy) has the correct width for a handful of CSS length units.
     //!
-    //! These tests target the bug tracked by beads `fulgur-9ul`: the viewport
-    //! passed into Blitz is in pt while Blitz expects CSS px, and Taffy's
-    //! layout output is consumed without a px→pt conversion. Until the fix
-    //! lands, every width below should be off by a factor of 4/3.
-    //!
-    //! They are intentionally RED on `main` while the plan lands; Task 3+
-    //! flips them to GREEN.
+    //! Relative units (vw, %) are deliberately avoided for the absolute-
+    //! width oracles because a viewport-relative unit compared against a
+    //! content_width()-derived expectation is tautological: numerator and
+    //! denominator scale together under a unit bug.
     use crate::pageable::{BlockPageable, Pageable};
 
-    /// Walk the Pageable tree looking for a `BlockPageable` whose HTML `id`
-    /// equals the requested value. Only descends into `BlockPageable`
-    /// children since the oracle fixtures only contain block boxes.
     fn find_block_by_id<'a>(node: &'a dyn Pageable, id: &str) -> Option<&'a BlockPageable> {
         if let Some(block) = node.as_any().downcast_ref::<BlockPageable>() {
             if block.id.as_deref().map(|s| s.as_str()) == Some(id) {
@@ -4215,83 +4221,44 @@ mod unit_oracle_tests {
         None
     }
 
-    // All fixtures zero the default `body { margin: 8px }` so the oracle
-    // compares the div's width directly against the engine's content width
-    // (or the absolute-unit expectation) without the 16 px body margin
-    // confound. Without `margin:0`, `width:100%` would land ~12 pt short
-    // even after the viewport fix, masking the unit bug we're asserting.
+    // The default `body { margin: 8px }` would leave `width:100%` ~12 pt
+    // short of content_width — unrelated to the unit bug these tests
+    // discriminate — so every fixture resets it.
     const BODY_RESET: &str = "<style>body{margin:0}</style>";
 
-    #[test]
-    fn width_100_percent_equals_content_width() {
+    fn assert_target_width(style: &str, expected_fn: impl FnOnce(&crate::Engine) -> f32) {
         let html = format!(
-            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:100%;height:10pt;background:red"></div></body></html>"#
+            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="{style};background:red"></div></body></html>"#
         );
         let eng = crate::Engine::builder().build();
         let root = eng.build_pageable_for_testing_no_gcpm(&html);
         let block = find_block_by_id(root.as_ref(), "target").expect("target block");
         let size = block.layout_size.expect("layout_size populated");
-        let expected = eng.config().content_width();
+        let expected = expected_fn(&eng);
         assert!(
             (size.width - expected).abs() < 0.5,
-            "width:100% should be {expected}pt, got {}pt",
+            "[{style}] expected {expected}pt, got {}pt",
             size.width
         );
+    }
+
+    #[test]
+    fn width_100_percent_equals_content_width() {
+        assert_target_width("width:100%;height:10pt", |e| e.config().content_width());
     }
 
     #[test]
     fn width_10cm_is_283_46_pt() {
-        let html = format!(
-            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:10cm;height:1cm;background:red"></div></body></html>"#
-        );
-        let eng = crate::Engine::builder().build();
-        let root = eng.build_pageable_for_testing_no_gcpm(&html);
-        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
-        let size = block.layout_size.expect("layout_size populated");
-        let expected = 10.0 * 72.0 / 2.54;
-        assert!(
-            (size.width - expected).abs() < 0.5,
-            "width:10cm should be {expected}pt, got {}pt",
-            size.width
-        );
+        assert_target_width("width:10cm;height:1cm", |_| 10.0 * 72.0 / 2.54);
     }
 
     #[test]
     fn width_360px_is_270_pt() {
-        let html = format!(
-            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:360px;height:10px;background:red"></div></body></html>"#
-        );
-        let eng = crate::Engine::builder().build();
-        let root = eng.build_pageable_for_testing_no_gcpm(&html);
-        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
-        let size = block.layout_size.expect("layout_size populated");
-        let expected = 360.0 * 0.75;
-        assert!(
-            (size.width - expected).abs() < 0.5,
-            "width:360px should be {expected}pt, got {}pt",
-            size.width
-        );
+        assert_target_width("width:360px;height:10px", |_| 360.0 * 0.75);
     }
 
-    /// Uses an absolute unit (`in`) rather than `vw` so the oracle
-    /// discriminates the unit bug. A relative-to-viewport unit (vw, %)
-    /// compared against an expected value derived from `content_width()`
-    /// is tautological under the px↔pt scaling bug: numerator and
-    /// denominator scale together, so the ratio is preserved.
     #[test]
     fn width_1in_is_72_pt() {
-        let html = format!(
-            r#"<html><head>{BODY_RESET}</head><body><div id="target" style="width:1in;height:0.1in;background:red"></div></body></html>"#
-        );
-        let eng = crate::Engine::builder().build();
-        let root = eng.build_pageable_for_testing_no_gcpm(&html);
-        let block = find_block_by_id(root.as_ref(), "target").expect("target block");
-        let size = block.layout_size.expect("layout_size populated");
-        let expected = 72.0;
-        assert!(
-            (size.width - expected).abs() < 0.5,
-            "width:1in should be {expected}pt, got {}pt",
-            size.width
-        );
+        assert_target_width("width:1in;height:0.1in", |_| 72.0);
     }
 }
