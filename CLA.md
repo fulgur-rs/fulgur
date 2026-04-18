@@ -3,10 +3,11 @@
 > Version 1.0 — DRAFT, pending legal review. See the note at the end of this
 > document for details.
 
-Thank you for your interest in contributing to Fulgur ("Project"), a project currently
-maintained by Mitsuru Hayasaka ("We" or "Us"). This Individual Contributor License
-Agreement ("Agreement") sets out the terms governing copyright, patent, and other
-rights granted with any Contribution you submit to the Project.
+Thank you for your interest in contributing to Fulgur ("Project"), a project
+maintained by **Lutom LLC.** (ルトム合同会社), a limited liability company
+(*godo-kaisha*) organized under the laws of Japan ("We" or "Us"). This Individual
+Contributor License Agreement ("Agreement") sets out the terms governing copyright,
+patent, and other rights granted with any Contribution you submit to the Project.
 
 This Agreement is based on the [Project Harmony 1.0][harmony] Individual Contributor
 License Agreement (CLA-I-2013-03-17) with the "Any License" outbound option. A Japanese
@@ -173,6 +174,12 @@ I have read the CLA Document and I hereby sign the CLA
 ## 日本語訳 (参考)
 
 この日本語訳は参考情報であり、法的効力は英文が優先します。
+
+Fulgur (以下「本プロジェクト」) にご関心をお寄せいただきありがとうございます。本プロ
+ジェクトは **ルトム合同会社** (Lutom LLC.、日本法に基づき設立された合同会社。以下
+「当方」) が管理しています。本個人コントリビュータライセンス契約 (以下「本契約」) は、
+あなたが本プロジェクトに提出する貢献 (Contribution) に関する著作権、特許権その他の
+権利の付与条件を定めるものです。
 
 ### 第1条 定義
 
