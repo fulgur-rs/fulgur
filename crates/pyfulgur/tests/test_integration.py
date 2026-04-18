@@ -37,4 +37,10 @@ def test_full_workflow_builder(tmp_path: Path):
 
 def test_module_version():
     import pyfulgur
-    assert pyfulgur.__version__ == "0.0.2"
+    from importlib.metadata import version
+
+    # Rust 側の __version__ (CARGO_PKG_VERSION) と Python 側の pyproject.toml
+    # version が同期していることを確認する。release-prepare.yml の sed で片側
+    # だけ書き換え漏れた場合をここで fail させる (過去に 0.0.2 hardcode で
+    # 0.5.0 bump 時にすり抜けた Devin Review 指摘を契機に追加)。
+    assert pyfulgur.__version__ == version("pyfulgur")
