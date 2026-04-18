@@ -78,6 +78,15 @@ jobs:
           # fulgur-ruby (Ruby binding)
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-ruby/Cargo.toml
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-ruby/ext/fulgur/Cargo.toml
+          # ext/fulgur は fulgur を crates.io 参照 (container mount 外のため path 不可)。
+          # この依存行も sync する必要がある。
+          sed -i "s/^fulgur = \"[^\"]*\"$/fulgur = \"$VERSION\"/" crates/fulgur-ruby/ext/fulgur/Cargo.toml
+          # ext 依存は crates.io 公開版を参照する特殊運用のため、
+          # 置換失敗をリリース後まで気づかないと致命的。即時検証でフェイルファスト。
+          grep -Eq "^fulgur = \"$VERSION\"$" crates/fulgur-ruby/ext/fulgur/Cargo.toml || {
+            echo "::error::Failed to sync fulgur dependency version in crates/fulgur-ruby/ext/fulgur/Cargo.toml"
+            exit 1
+          }
           sed -i "s/VERSION = \".*\"/VERSION = \"$VERSION\"/" crates/fulgur-ruby/lib/fulgur/version.rb
 
           cargo check --workspace

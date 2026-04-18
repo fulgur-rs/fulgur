@@ -2,13 +2,52 @@
 
 require "bundler/gem_tasks"
 require "rake/extensiontask"
-require "rspec/core/rake_task"
 
-RSpec::Core::RakeTask.new(:spec)
-
-Rake::ExtensionTask.new("fulgur") do |ext|
-  ext.lib_dir = "lib/fulgur"
-  ext.source_pattern = "*.{rs,toml}"
+# rb-sys-dock container には rspec 系 gem が入っていない場合があるため、
+# rspec が解決できない環境でも compile タスクが定義されるように guard する。
+begin
+  require "rspec/core/rake_task"
+  RSpec::Core::RakeTask.new(:spec)
+rescue LoadError
+  # rspec なし環境 (rb-sys-dock container など) では spec タスクを skip。
 end
 
-task default: %i[compile spec]
+# Rake::ExtensionTask with dynamic cross_compile from RUBY_TARGET env var.
+# RbSys::ExtensionTask は cargo metadata inference が dual-Cargo.toml (ext/fulgur と
+# crates/fulgur-ruby で package 名が異なる) に合わず使えないため、Rake::ExtensionTask
+# を使いつつ cross-compile 動作だけ RbSys 同等のパターンで再現する:
+# rb-sys-dock container は --platform で指定された 1 platform のみについて rbconfig
+# を持つため、cross_platform にそれ以外の platform を並べると rake-compiler が
+# rbconfig enumeration で失敗する (rbconfig-<plat>-<ruby> no configuration section)。
+# 対策として RbSys::ExtensionTask と同様に ENV["RUBY_TARGET"] (rb-sys-dock が
+# container 起動時に設定) から 1 platform のみを登録する。
+# rake-compiler の native:<platform> cross-compile task は @gem_spec が設定されて
+# いないと生成されないため、gemspec を明示的に load して渡す。
+# (bundler/gem_tasks は Rake::ExtensionTask に gemspec を注入しない)
+fulgur_gemspec = Gem::Specification.load("fulgur.gemspec")
+
+Rake::ExtensionTask.new("fulgur", fulgur_gemspec) do |ext|
+  ext.lib_dir = "lib/fulgur"
+  ext.source_pattern = "*.{rs,toml}"
+  ext.cross_compile = ENV.key?("RUBY_TARGET")
+  ext.cross_platform = [ENV["RUBY_TARGET"]].compact
+
+  # Precompiled (native) gem では rb_sys は不要 (compile-time dep のみ)。
+  # 宣言したままだと `gem install --local fulgur-*.gem` が registry 無しで
+  # rb_sys を解決できず失敗する。RbSys::ExtensionTask が内部で同じ処理を
+  # しているのを移植。*.rs / Cargo.toml / Cargo.lock / extconf.rb は
+  # native gem に含めない (user は build 済みバイナリしか使わない)。
+  ext.cross_compiling do |native_spec|
+    native_spec.dependencies.reject! { |d| d.name == "rb_sys" }
+    native_spec.files.reject! { |f| f.end_with?(".rs") }
+    native_spec.files.reject! { |f| f.match?(/Cargo\.(toml|lock)\z/) }
+    native_spec.files.reject! { |f| f.end_with?("extconf.rb") }
+    native_spec.extensions.reject! { |f| f.end_with?("Cargo.toml") || f.end_with?("extconf.rb") }
+  end
+end
+
+# spec タスクは rspec guard と連動して条件付きで default に含める。
+# rb-sys-dock container など rspec 未 install 環境では spec を除外する。
+default_tasks = [:compile]
+default_tasks << :spec if Rake::Task.task_defined?(:spec)
+task default: default_tasks

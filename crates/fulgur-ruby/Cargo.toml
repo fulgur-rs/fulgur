@@ -1,11 +1,15 @@
 [package]
 name = "fulgur-ruby"
 version = "0.0.1"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
+# rb_sys cross-gem-action は `directory: crates/fulgur-ruby` のみをコンテナに
+# マウントするため、この Cargo.toml は workspace root 不在でも cargo metadata
+# を解決できる必要がある。したがって workspace 継承 (`.workspace = true`) は
+# 使わず、値は root Cargo.toml [workspace.package] と同期させて inline する。
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mitsuru/fulgur"
+homepage = "https://github.com/mitsuru/fulgur"
 description = "Ruby bindings for fulgur — offline HTML/CSS to PDF conversion"
 publish = false
 

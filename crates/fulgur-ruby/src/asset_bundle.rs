@@ -5,7 +5,8 @@
 //! `AssetBundle::new()` に差し替える。
 
 use crate::error::map_fulgur_error;
-use fulgur::AssetBundle;
+// `fulgur::AssetBundle` root re-export は 0.4.5 には存在しないため full path で参照。
+use fulgur::asset::AssetBundle;
 use magnus::{Error, Module, RModule, RString, Ruby, function, method, prelude::*};
 use std::cell::RefCell;
 use std::path::PathBuf;

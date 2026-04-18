@@ -22,7 +22,10 @@ mod pdf;
 mod assertions {
     use static_assertions::assert_impl_all;
     assert_impl_all!(fulgur::Engine: Send, Sync);
-    assert_impl_all!(fulgur::AssetBundle: Send, Sync);
+    // `fulgur::AssetBundle` (root re-export) は 0.4.5 には存在せず HEAD のみ。
+    // release-ruby は crates.io の ext 依存 (0.4.5 時点では 0.4.5) を使うため、
+    // full path `fulgur::asset::AssetBundle` を参照して前方互換を保つ。
+    assert_impl_all!(fulgur::asset::AssetBundle: Send, Sync);
 }
 
 #[magnus::init]
