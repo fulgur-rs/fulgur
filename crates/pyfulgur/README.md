@@ -59,7 +59,7 @@ engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 
 ## Known limitation: blitz parse-error noise on stdout
 
-The underlying `blitz-dom` parser writes non-fatal html5ever parse errors directly to the process's stdout via `println!` — even for well-formed HTML. In Jupyter notebooks or test output, those lines appear as `ERROR: ...` noise alongside your own output. The PDF bytes returned by `render_html` are **not** affected; only the caller's terminal is polluted.
+The underlying `blitz-dom` parser writes non-fatal html5ever parse errors directly to the process's stdout via `println!`. These fire for browser-tolerated but technically invalid HTML — documents without a `<!DOCTYPE>`, missing `<html>`/`<body>` wrappers, or structural quirks that browsers silently auto-correct — and show up as `ERROR: ...` noise in Jupyter notebooks or any environment that captures stdout. The PDF bytes returned by `render_html` are **not** affected; only the caller's terminal is polluted.
 
 pyfulgur intentionally does **not** redirect fd 1 from inside the binding: process-wide fd manipulation in a multi-threaded library context races with concurrent `render_html` calls from other threads (mixed suppress / non-suppress callers would silently lose stdout during a suppressed window). Correctness and parallelism take priority over cosmetic stdout cleanliness.
 
