@@ -216,3 +216,19 @@ multi-tenant SaaS), see the
 [threat model](docs/security/threat-model.md)
 ([日本語](docs/security/threat-model.ja.md)) for the full analysis of
 attack vectors and mitigations.
+
+## Contributing
+
+Contributions are welcome! Please read the [Contributing Guide](CONTRIBUTING.md)
+before opening a pull request. All contributors must sign the
+[Contributor License Agreement](CLA.md) — a bot will guide you through the
+one-time sign-off on your first PR.
+
+## License
+
+Fulgur is dual-licensed under either of:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
+
+at your option.
