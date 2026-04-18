@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-04-18
+
+### CI
+
+- upload coverage to Codecov alongside octocov
+- use OIDC auth instead of tokenless upload
+- enable Codecov Test Analytics via nextest JUnit output
+
+### Deps
+
+- upgrade pyo3 0.22 → 0.28
+- bump minimum maturin to 1.9.4 for pyo3 0.28
+
 ## [0.5.1] - 2026-04-18
 
 ### CI
@@ -14,6 +27,10 @@ All notable changes to this project will be documented in this file.
 
 - clarify fd 1 policy per crate, document stdout noise in pyfulgur
 - clarify blitz noise fires on recoverable parse errors
+
+### Release
+
+- v0.5.1
 
 ## [0.5.0] - 2026-04-18
 
