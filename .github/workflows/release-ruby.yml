@@ -1,0 +1,266 @@
+name: Release (Ruby / RubyGems)
+
+on:
+  release:
+    types: [published]
+  # workflow_dispatch は build + smoke のみ実行 (publish は release event 限定)。
+  # 任意 ref からの publish 経路を塞ぐため dry_run input は持たない。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-source-gem:
+    name: Build source gem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+        with:
+          ruby-version: "3.3"
+          rustup-toolchain: stable
+          bundler-cache: true
+          cargo-cache: true
+          working-directory: crates/fulgur-ruby
+      - name: Build source gem
+        working-directory: crates/fulgur-ruby
+        run: bundle exec rake build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-gem
+          path: crates/fulgur-ruby/pkg/*.gem
+          if-no-files-found: error
+
+  smoke-test-source-gem:
+    # source gem は precompiled 非対応プラットフォームの fallback。
+    # required_ruby_version >= 3.1.0 の下端 (3.1) と上端 (3.4) で native
+    # extension の build/install を検証する。
+    name: Smoke test (source gem / Ruby ${{ matrix.ruby }})
+    needs: [build-source-gem]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.1", "3.4"]
+    steps:
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          rustup-toolchain: stable
+          bundler-cache: false
+          cargo-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-gem
+          path: pkg
+      - name: Install source gem (compiles native ext)
+        shell: bash
+        run: |
+          shopt -s failglob
+          gem install --local pkg/*.gem
+      - name: Smoke test
+        shell: bash
+        run: |
+          ruby -e '
+            require "fulgur"
+            engine = Fulgur::Engine.new
+            pdf = engine.render_html("<p>hi</p>")
+            raise "not a Fulgur::Pdf: #{pdf.class}" unless pdf.is_a?(Fulgur::Pdf)
+            raise "too short: #{pdf.bytesize}" unless pdf.bytesize > 100
+            s = pdf.to_s
+            raise "bad header: #{s[0, 5].inspect}" unless s[0, 5] == "%PDF-".b
+            puts "OK: #{pdf.bytesize} bytes"
+          '
+
+  build-precompiled:
+    name: Build precompiled gem (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - x86_64-linux
+          - x86_64-linux-musl
+          - aarch64-linux
+          - aarch64-linux-musl
+          - x86_64-darwin
+          - arm64-darwin
+          - x64-mingw-ucrt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a  # v1.302.0
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: crates/fulgur-ruby
+      - uses: oxidize-rb/cross-gem-action@80f59339d90789841d772f412fe4a8b201a8cfa2  # v7
+        with:
+          platform: ${{ matrix.platform }}
+          ruby-versions: "3.1,3.2,3.3,3.4"
+          directory: crates/fulgur-ruby
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: crates/fulgur-ruby/pkg/*.gem
+          if-no-files-found: error
+
+  smoke-test:
+    name: Smoke test (${{ matrix.platform }} / Ruby ${{ matrix.ruby }})
+    needs: [build-precompiled]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-latest
+            ruby: "3.1"
+          - platform: x86_64-linux
+            runner: ubuntu-latest
+            ruby: "3.4"
+          - platform: aarch64-linux
+            runner: ubuntu-24.04-arm
+            ruby: "3.3"
+          - platform: x86_64-darwin
+            runner: macos-15-intel
+            ruby: "3.3"
+          - platform: arm64-darwin
+            runner: macos-latest
+            ruby: "3.3"
+          - platform: x64-mingw-ucrt
+            runner: windows-latest
+            ruby: "3.3"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a  # v1.302.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: pkg
+      - name: Install gem (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          shopt -s failglob
+          gem install --local pkg/*.gem
+      - name: Install gem (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gem = Get-ChildItem pkg/*.gem | Select-Object -First 1
+          if (-not $gem) { throw "No gem found in pkg/" }
+          gem install --local $gem.FullName
+      - name: Smoke test
+        shell: bash
+        run: |
+          ruby -e '
+            require "fulgur"
+            engine = Fulgur::Engine.new
+            pdf = engine.render_html("<p>hi</p>")
+            raise "not a Fulgur::Pdf: #{pdf.class}" unless pdf.is_a?(Fulgur::Pdf)
+            raise "too short: #{pdf.bytesize}" unless pdf.bytesize > 100
+            s = pdf.to_s
+            raise "bad header: #{s[0, 5].inspect}" unless s[0, 5] == "%PDF-".b
+            puts "OK: #{pdf.bytesize} bytes"
+          '
+
+  smoke-test-musl:
+    # musl native loader / packaging の破損を検出する。Alpine container に隔離して
+    # 実行することで glibc 前提の actions 側と衝突しない (actions/download-artifact
+    # はホスト側、gem install + smoke test のみ alpine 内)。
+    name: Smoke test musl (${{ matrix.platform }})
+    needs: [build-precompiled]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux-musl
+            runner: ubuntu-latest
+          - platform: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: pkg
+      - name: Smoke test in Alpine (${{ matrix.platform }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/pkg:/pkg:ro" ruby:3.3-alpine sh -c '
+            set -eu
+            for gem in /pkg/*.gem; do
+              echo "Installing $gem"
+              gem install --local "$gem" --no-document
+            done
+            ruby -e "
+              require \"fulgur\"
+              engine = Fulgur::Engine.new
+              pdf = engine.render_html(\"<p>hi</p>\")
+              raise \"not a Fulgur::Pdf: #{pdf.class}\" unless pdf.is_a?(Fulgur::Pdf)
+              raise \"too short: #{pdf.bytesize}\" unless pdf.bytesize > 100
+              s = pdf.to_s
+              raise \"bad header: #{s[0, 5].inspect}\" unless s[0, 5] == \"%PDF-\".b
+              puts \"OK: #{pdf.bytesize} bytes\"
+            "
+          '
+
+  # NOTE: RubyGems publish は release イベント (release.yml がタグから発火) のみ。
+  # workflow_dispatch からは任意の ref を push できないようにする (security)。
+  # RubyGems には TestPyPI 相当が無いため、workflow_dispatch は build + smoke
+  # のみ実行し、OIDC / credential フローの実動作検証は初回本番リリースで行う。
+  # See docs/RELEASE_SETUP.md.
+  publish:
+    name: Publish to RubyGems
+    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      id-token: write
+    steps:
+      - uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a  # v1.302.0
+        with:
+          ruby-version: "3.3"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Uses RubyGems Trusted Publisher flow (default). The OIDC claim
+      # (repo + workflow + environment) is matched against the Trusted
+      # Publisher registered on rubygems.org/gems/fulgur/trusted_publishers.
+      # No role-to-assume needed. See docs/RELEASE_SETUP.md.
+      - uses: rubygems/configure-rubygems-credentials@6f94374a7eb4cdf600b093bbcd94079187872fac  # main
+      - name: List gems to publish
+        shell: bash
+        run: ls -la dist/*.gem
+      - name: Push gems
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          fail=0
+          for gem in dist/*.gem; do
+            echo "::group::Pushing $gem"
+            if output=$(gem push "$gem" 2>&1); then
+              echo "$output"
+              echo "::endgroup::"
+            else
+              echo "$output"
+              echo "::endgroup::"
+              # Treat "already pushed" as a skip (idempotent re-runs).
+              if printf '%s' "$output" | grep -qE 'Repushing of gem versions is not allowed|has already been pushed'; then
+                echo "::notice file=$gem::already published, skipping"
+              else
+                echo "::error file=$gem::push failed"
+                fail=1
+              fi
+            fi
+          done
+          exit "$fail"

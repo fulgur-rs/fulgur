@@ -24,7 +24,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
 
       - name: Install git-cliff
         env:
@@ -64,9 +66,20 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # Rust core
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur/Cargo.toml
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-cli/Cargo.toml
           sed -i "s/fulgur = { version = \"[^\"]*\", path/fulgur = { version = \"$VERSION\", path/" crates/fulgur-cli/Cargo.toml
+
+          # pyfulgur (Python binding)
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/pyfulgur/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/pyfulgur/pyproject.toml
+
+          # fulgur-ruby (Ruby binding)
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-ruby/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-ruby/ext/fulgur/Cargo.toml
+          sed -i "s/VERSION = \".*\"/VERSION = \"$VERSION\"/" crates/fulgur-ruby/lib/fulgur/version.rb
+
           cargo check --workspace
 
       - name: Regenerate example PDFs

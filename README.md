@@ -172,6 +172,11 @@ cargo test
 cargo run -p fulgur-cli -- render -o output.pdf input.html
 ```
 
+## Release
+
+See [docs/RELEASE_SETUP.md](docs/RELEASE_SETUP.md) for PyPI / RubyGems
+Trusted Publisher setup and release steps.
+
 ## Determinism and fonts
 
 Fulgur aims for byte-identical PDF output from identical input. The core pipeline
