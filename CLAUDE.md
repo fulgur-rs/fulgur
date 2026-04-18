@@ -87,12 +87,29 @@ callers don't get this guarantee by default — see the tracking issue
   `docs/plans/2026-04-11-blitz-thread-safety-investigation.md` for the full
   root-cause analysis.
 - **Blitz prints html5ever parse errors via `println!` to stdout** during
-  `TreeSink::finish`. This is noise from dependencies, not fulgur. Library
-  callers that need clean stdout must redirect fd 1 at their own call site —
-  `fulgur-cli` does this via `StdoutIsolator` for the render command so the
-  `-o -` mode does not corrupt PDF output. Multi-threaded callers must not
-  manipulate fd 1 process-wide; there is no thread-safe way to suppress
-  blitz's output in-process short of an upstream patch.
+  `TreeSink::finish`. This is noise from dependencies, not fulgur.
+  Policy by crate:
+  - **`crates/fulgur` (core library)** must not touch fd 1 under any
+    circumstance. `blitz_adapter::suppress_stdout` was removed for this
+    reason (see
+    `docs/plans/2026-04-11-blitz-thread-safety-investigation.md`).
+  - **`crates/fulgur-cli`** is single-threaded during render and may
+    manipulate fd 1 via `StdoutIsolator` — this is required for
+    correctness (`-o -` writes PDF bytes to stdout; any noise corrupts
+    the stream).
+  - **`crates/pyfulgur`, `crates/fulgur-ruby`** are multi-threaded
+    bindings. They must not manipulate fd 1 either: a global suppress
+    mutex still races with `suppress=false` callers on the same process,
+    and PDF bytes are returned via the function return value (not
+    stdout), so noise is cosmetic, not a correctness issue. The
+    canonical workaround for binding users is redirection at their own
+    call site (e.g. `os.dup2` / `contextlib.redirect_stdout`) or running
+    renders in a subprocess (`multiprocessing`). A future wrapper-style
+    package that shells out to the CLI is on the roadmap for users who
+    want clean stdout without doing this themselves.
+  - Short version: **touch fd 1 only from a crate that can guarantee
+    single-threaded semantics**. That's CLI today; bindings are
+    multi-threaded by design and must leave fd 1 alone.
 - Use `BTreeMap` (not `HashMap`) for iteration that affects PDF output (determinism)
 - Blitz: `!important` unreliable, `padding-top` on inline roots ignored (use `margin-top`)
 - `cargo fmt --check` enforced by CI

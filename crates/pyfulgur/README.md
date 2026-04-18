@@ -57,6 +57,20 @@ engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 - `Margin`: `Margin(top, right, bottom, left)`, `Margin.uniform(pt)`, `Margin.symmetric(v, h)`, `Margin.uniform_mm(mm)`
 - Exceptions: `FileNotFoundError`, `ValueError`, `pyfulgur.RenderError`
 
+## Known limitation: blitz parse-error noise on stdout
+
+The underlying `blitz-dom` parser writes non-fatal html5ever parse errors directly to the process's stdout via `println!` — even for well-formed HTML. In Jupyter notebooks or test output, those lines appear as `ERROR: ...` noise alongside your own output. The PDF bytes returned by `render_html` are **not** affected; only the caller's terminal is polluted.
+
+pyfulgur intentionally does **not** redirect fd 1 from inside the binding: process-wide fd manipulation in a multi-threaded library context races with concurrent `render_html` calls from other threads (mixed suppress / non-suppress callers would silently lose stdout during a suppressed window). Correctness and parallelism take priority over cosmetic stdout cleanliness.
+
+If you need clean stdout:
+
+- **Redirect at the caller side** with a Python `contextlib.redirect_stdout` for Python-level writes, or `os.dup2` for fd-level writes. This keeps the fd manipulation scoped to your own call site where you can guarantee single-threaded use.
+- **Run renders in a subprocess** via `multiprocessing` (each worker has its own fd 1).
+- **Use the `fulgur` CLI** (which handles stdout isolation internally) invoked via `subprocess.run` when cold-start cost is acceptable.
+
+A wrapper-style Python package that shells out to the `fulgur` CLI (clean stdout, parallel via process isolation, no native build required) is on the roadmap as a complement to this native binding.
+
 ## Links
 
 - [fulgur on GitHub](https://github.com/mitsuru/fulgur)
