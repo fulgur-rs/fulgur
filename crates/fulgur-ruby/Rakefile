@@ -1,12 +1,18 @@
 # frozen_string_literal: true
 
 require "bundler/gem_tasks"
-require "rake/extensiontask"
+require "rb_sys/extensiontask"
 require "rspec/core/rake_task"
 
 RSpec::Core::RakeTask.new(:spec)
 
-Rake::ExtensionTask.new("fulgur") do |ext|
+gemspec = Gem::Specification.load("fulgur.gemspec")
+
+# RbSys::ExtensionTask extends Rake::ExtensionTask with rb-sys-dock integration.
+# cross_compile / cross_platform は RUBY_TARGET 環境変数から自動設定される
+# (oxidize-rb/cross-gem-action が rake-compiler-dock 内で設定する)。
+# これにより `rake native:<platform>` タスクが動的に生成される。
+RbSys::ExtensionTask.new("fulgur", gemspec) do |ext|
   ext.lib_dir = "lib/fulgur"
   ext.source_pattern = "*.{rs,toml}"
 end
