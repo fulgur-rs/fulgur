@@ -48,11 +48,25 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $VERSION"
 
+      # tag が指す commit に .github/workflows/*.yml の変更が含まれると、
+      # GITHUB_TOKEN では push が拒否される (workflows permission が無いため)。
+      # release bot App token は `Workflows: Read and write` 権限を持つ
+      # 前提で発行されるので、そちらを使う (docs/RELEASE_SETUP.md 参照)。
+      - name: Generate App token for tag push
+        id: app-token-tag
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Tag release
+        env:
+          GH_TOKEN: ${{ steps.app-token-tag.outputs.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git tag "v$VERSION" || true
           git push origin "v$VERSION" --force
 
