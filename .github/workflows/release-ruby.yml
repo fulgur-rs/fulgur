@@ -92,11 +92,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # oxidize-rb/actions/cross-gem@v1 は Gemfile.lock の rb_sys バージョンを
-      # 自動検出して対応する rb-sys-dock container image を pull する。
-      # 旧 oxidize-rb/cross-gem-action@v7 は image tag が 0.9.34 固定で
-      # Ruby 3.3/3.4 未対応のため使わない。
-      # Ruby/bundler 環境は action 内で setup されるので事前 setup は不要。
+      # oxidize-rb/actions/cross-gem@v1 は `gem install rb_sys` を host 上で
+      # 直接実行するので、user-writable な gem directory を持つ Ruby が必要。
+      # 事前に ruby/setup-ruby で runner owned の Ruby を入れておく。
+      - uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a  # v1.302.0
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: crates/fulgur-ruby
+      # v1 は Gemfile.lock から rb_sys version (0.9.126) を自動検出して対応
+      # image を pull する。旧 cross-gem-action@v7 の image tag 0.9.34 hardcode
+      # は Ruby 3.3/3.4 未対応のため使わない。
       - uses: oxidize-rb/actions/cross-gem@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
         with:
           platform: ${{ matrix.platform }}
