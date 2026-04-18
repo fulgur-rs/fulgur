@@ -16,6 +16,9 @@ jobs:
     name: Publish to crates.io
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-latest
+    # tag push / crates.io publish は irreversible なので required_reviewers で gate する。
+    # Environment `release` に reviewers を設定すること (docs/RELEASE_SETUP.md)。
+    environment: release
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -135,9 +138,20 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # GITHUB_TOKEN で発火した release:published は別 workflow を起動しない
+      # (無限ループ防止仕様)。release-python.yml / release-ruby.yml を連鎖発火
+      # させるため、App token で publish する。
+      # 手順は docs/RELEASE_SETUP.md を参照。
+      - name: Generate App token for release publish
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Upload binaries and publish release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERSION="${{ needs.publish.outputs.version }}"
           REPO="${{ github.repository }}"
@@ -149,6 +163,7 @@ jobs:
               --draft \
               --repo "$REPO"
           fi
-          # Upload binaries and publish
-          gh release upload "v$VERSION" artifacts/* --repo "$REPO"
+          # Upload binaries and publish (App token → release:published が連鎖発火)
+          # --clobber: approval gate reject 等での re-run 時に同名 asset を上書き
+          gh release upload "v$VERSION" artifacts/* --clobber --repo "$REPO"
           gh release edit "v$VERSION" --draft=false --repo "$REPO"
