@@ -65,13 +65,35 @@ OIDC claim (repo + workflow + environment) で自動照合されるため、`rol
 
 ## GitHub Environments
 
-以下の 3 つの Environment を作成:
+以下の Environment を作成:
 
-- `pypi`
+- `release` — crates.io / GitHub Release publish を gate する
+- `pypi` — PyPI publish を gate する
 - `testpypi` (dry-run 用)
-- `rubygems`
+- `rubygems` — RubyGems publish を gate する
 
-保護ルール不要 (OIDC claim で scope されるため)。
+### Required reviewers (approval gate)
+
+release は irreversible 操作が多いため、`release` / `pypi` / `rubygems` の
+3 環境すべてで **Required reviewers** を設定する (`testpypi` は dry-run のため不要)。
+
+各 Environment の設定画面 (Settings → Environments → `<name>`) で:
+
+- "Required reviewers" にチェック
+- reviewer として自分 (および必要ならリリース権限を持つ共同メンテナ) を追加
+
+3 段ゲートになるため、release flow で:
+
+1. PR merge → `release.yml` の `publish` job が `release` env で pause → 承認
+2. crates.io + tag push + GitHub Release publish が完走 (App token で `release:published` 発火)
+3. `release-python.yml` の `publish` job が `pypi` env で pause → 承認
+4. `release-ruby.yml` の `publish` job が `rubygems` env で pause → 承認
+5. PyPI / RubyGems へ反映
+
+途中で publish job が失敗した際の re-run も承認を経由する。
+
+OIDC claim による scope (repo + workflow + environment) は reviewer 設定と独立して
+機能するため、両方併用してよい。
 
 ## GitHub App (release publisher)
 

@@ -16,6 +16,9 @@ jobs:
     name: Publish to crates.io
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-latest
+    # tag push / crates.io publish は irreversible なので required_reviewers で gate する。
+    # Environment `release` に reviewers を設定すること (docs/RELEASE_SETUP.md)。
+    environment: release
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
