@@ -21,7 +21,7 @@ extension-module = ["dep:pyo3", "pyo3/extension-module"]
 
 [dependencies]
 fulgur = { path = "../fulgur" }
-pyo3 = { version = "0.22", optional = true, features = ["abi3-py39"] }
+pyo3 = { version = "0.28", optional = true, features = ["abi3-py39"] }
 
 [dev-dependencies]
 static_assertions = "1.1"

@@ -1,7 +1,7 @@
 use fulgur::PageSize;
 use pyo3::prelude::*;
 
-#[pyclass(name = "PageSize", module = "pyfulgur", frozen)]
+#[pyclass(name = "PageSize", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyPageSize {
     pub(crate) inner: PageSize,

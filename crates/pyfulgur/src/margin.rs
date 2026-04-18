@@ -1,7 +1,7 @@
 use fulgur::Margin;
 use pyo3::prelude::*;
 
-#[pyclass(name = "Margin", module = "pyfulgur", frozen)]
+#[pyclass(name = "Margin", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyMargin {
     pub(crate) inner: Margin,

@@ -22,6 +22,6 @@ pub fn map_fulgur_error(err: FulgurError) -> PyErr {
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("RenderError", m.py().get_type_bound::<RenderError>())?;
+    m.add("RenderError", m.py().get_type::<RenderError>())?;
     Ok(())
 }
