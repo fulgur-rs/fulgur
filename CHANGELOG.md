@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-04-18
+
+### CI
+
+- publish GitHub Release with App token
+- gate publish jobs with environment approvals
+- add --clobber to gh release upload for re-run idempotency
+
+### Documentation
+
+- clarify fd 1 policy per crate, document stdout noise in pyfulgur
+- clarify blitz noise fires on recoverable parse errors
+
 ## [0.5.0] - 2026-04-18
 
 ### Bug Fixes
@@ -99,10 +112,15 @@ All notable changes to this project will be documented in this file.
 - add oracle tests for layout unit semantics (RED) (fulgur-9ul)
 - regenerate goldens after pt/px unit fix (fulgur-9ul)
 - update transform integration test + regenerate example PDFs (fulgur-9ul)
+- sync __version__ assertion to pyproject.toml dynamically
 
 ### Build
 
 - switch to maturin, add smoke test
+
+### Release
+
+- v0.5.0
 
 ## [0.4.5] - 2026-04-16
 

@@ -28,6 +28,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         include:
@@ -51,6 +54,9 @@ jobs:
       - name: Install cargo-llvm-cov
         if: matrix.coverage
         uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
+      - name: Install cargo-nextest
+        if: matrix.coverage
+        uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
       - name: Build tests
         if: ${{ !matrix.coverage }}
         run: cargo test --workspace --exclude fulgur-vrt --no-run
@@ -59,7 +65,7 @@ jobs:
         run: cargo test --workspace --exclude fulgur-vrt
       - name: Run tests with coverage
         if: matrix.coverage
-        run: cargo llvm-cov --workspace --exclude fulgur-vrt --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
         uses: actions/upload-artifact@v4
@@ -67,6 +73,20 @@ jobs:
           name: lcov
           path: lcov.info
           if-no-files-found: error
+      - name: Upload coverage to Codecov
+        if: matrix.coverage
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          files: lcov.info
+          use_oidc: true
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ matrix.coverage && !cancelled() }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
+        with:
+          files: target/nextest/ci/junit.xml
+          use_oidc: true
+          fail_ci_if_error: false
 
   vrt:
     name: Visual Regression Tests
