@@ -19,6 +19,12 @@ jobs:
     # tag push / crates.io publish は irreversible なので required_reviewers で gate する。
     # Environment `release` に reviewers を設定すること (docs/RELEASE_SETUP.md)。
     environment: release
+    # id-token: write は rust-lang/crates-io-auth-action が OIDC token を
+    # 取得するために必要 (crates.io Trusted Publisher フロー)。contents: write
+    # はトップレベル permissions を job 側で override すると消えるので再指定する。
+    permissions:
+      contents: write
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -42,22 +48,43 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $VERSION"
 
+      # tag が指す commit に .github/workflows/*.yml の変更が含まれると、
+      # GITHUB_TOKEN では push が拒否される (workflows permission が無いため)。
+      # release bot App token は `Workflows: Read and write` 権限を持つ
+      # 前提で発行されるので、そちらを使う (docs/RELEASE_SETUP.md 参照)。
+      - name: Generate App token for tag push
+        id: app-token-tag
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Tag release
+        env:
+          GH_TOKEN: ${{ steps.app-token-tag.outputs.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git tag "v$VERSION" || true
           git push origin "v$VERSION" --force
 
+      # crates.io Trusted Publishing: rust-lang/crates-io-auth-action が OIDC
+      # claim (repo + workflow + environment) を crates.io に提示して短命 token
+      # を発行する。長期 PAT (CARGO_REGISTRY_TOKEN) を secrets に持たなくてよい。
+      - name: Authenticate to crates.io
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish fulgur (lib)
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish -p fulgur
 
       - name: Publish fulgur-cli (with retry)
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: |
           for i in 1 2 3 4 5 6 7 8; do
             echo "Attempt $i: publishing fulgur-cli..."
