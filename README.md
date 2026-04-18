@@ -1,5 +1,6 @@
 # Fulgur
 
+[![codecov](https://codecov.io/gh/fulgur-rs/fulgur/graph/badge.svg)](https://codecov.io/gh/fulgur-rs/fulgur)
 [![Coverage](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/coverage.svg)](https://github.com/mitsuru/octocovs)
 [![Code to Test Ratio](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/ratio.svg)](https://github.com/mitsuru/octocovs)
 [![Test Execution Time](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/time.svg)](https://github.com/mitsuru/octocovs)
