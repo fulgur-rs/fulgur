@@ -31,6 +31,19 @@ Rake::ExtensionTask.new("fulgur", fulgur_gemspec) do |ext|
   ext.source_pattern = "*.{rs,toml}"
   ext.cross_compile = ENV.key?("RUBY_TARGET")
   ext.cross_platform = [ENV["RUBY_TARGET"]].compact
+
+  # Precompiled (native) gem では rb_sys は不要 (compile-time dep のみ)。
+  # 宣言したままだと `gem install --local fulgur-*.gem` が registry 無しで
+  # rb_sys を解決できず失敗する。RbSys::ExtensionTask が内部で同じ処理を
+  # しているのを移植。*.rs / Cargo.toml / Cargo.lock / extconf.rb は
+  # native gem に含めない (user は build 済みバイナリしか使わない)。
+  ext.cross_compiling do |native_spec|
+    native_spec.dependencies.reject! { |d| d.name == "rb_sys" }
+    native_spec.files.reject! { |f| f.end_with?(".rs") }
+    native_spec.files.reject! { |f| f.match?(/Cargo\.(toml|lock)\z/) }
+    native_spec.files.reject! { |f| f.end_with?("extconf.rb") }
+    native_spec.extensions.reject! { |f| f.end_with?("Cargo.toml") || f.end_with?("extconf.rb") }
+  end
 end
 
 # spec タスクは rspec guard と連動して条件付きで default に含める。
