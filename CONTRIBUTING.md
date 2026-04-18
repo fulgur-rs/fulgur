@@ -119,7 +119,16 @@ version:
 - **Deterministic**: Same input must produce same output.
 - **Adapter isolation**: Blitz API changes must stay contained in
   `blitz_adapter.rs`.
-- **No fd 1 writes from the library crate**: See the fd 1 policy in `CLAUDE.md`.
+- **No ad-hoc workarounds or proprietary CSS**: When a feature doesn't
+  work, fix it per the CSS spec rather than adding fulgur-specific
+  properties or escape-hatch flags. Users write standard HTML/CSS;
+  Fulgur renders it as specified.
+- **Pagination robustness across layout models**: Grid, Multi-column,
+  Table, and Flexbox must all survive page breaks. None of them is an
+  "advanced" or "optional" path.
+- **Programmatic control first**: Prefer explicit CLI flags and library
+  parameters over implicit HTML `<meta>` auto-extraction, so that AI
+  agents and language bindings can drive Fulgur deterministically.
 
 ## Reporting bugs
 
