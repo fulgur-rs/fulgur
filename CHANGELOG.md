@@ -2,15 +2,107 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-04-18
 
-### Added
+### Bug Fixes
 
-- **pyfulgur**: Python bindings for fulgur via PyO3 + maturin. Provides `Engine`, `EngineBuilder`, `AssetBundle`, `PageSize`, `Margin`, and `RenderError`. GIL is released during `render_html` / `render_html_to_file`. Ships as a manylinux/macOS/Windows wheel (v0.0.2).
+- use license table syntax for PyPI compatibility
+- address AI review feedback on placeholder packages
+- address coderabbit review feedback
+- convert viewport input from pt to CSS px (fulgur-9ul)
+- convert Taffy layout output from CSS px to pt (fulgur-9ul)
+- convert border/padding layout values from CSS px to pt (fulgur-9ul)
+- convert get_body_child_dimension to pt (fulgur-9ul)
+- close remaining pt/px boundary gaps from AI review
+- address Task 1 review feedback
+- address AI review feedback (coderabbit + devin + gemini)
+- address CodeRabbit re-review
+- use RbSys::ExtensionTask for cross-compile
+- make cross-compile work in cross-gem-action mount
+- single-platform cross_platform + gemspec injection
+- use fulgur::asset::AssetBundle full path
+- address CodeRabbit/Devin review feedback on PR #103
+- defer Windows precompile, fix source gem smoke
+- strip rb_sys dep from native gem spec
 
-### Fixed
+### CI
 
-- **Breaking (visual):** Layout geometry now uses the correct CSS px → PDF pt ratio (1 px = 0.75 pt). Previously the Blitz viewport input was labeled as pt but consumed as CSS px, and Taffy's layout output was used as-is without conversion. The two bugs cancelled out for pure-px content but skewed absolute units (cm, in) and relative units (%, vw, vh) by 4/3×. After this fix, `width:360px` renders at 270 pt instead of 360 pt, `width:10cm` at 283.46 pt, `width:1in` at 72 pt, and `width:100%` fills the content area exactly — all matching Chrome, WeasyPrint, and Prince. Existing VRT goldens and example PDFs have been regenerated. (tracked as `fulgur-9ul`; supersedes PR #90)
+- sync pyfulgur and fulgur-ruby versions
+- add release-python.yml for PyPI OIDC publish
+- fix critical boolean input and harden install steps
+- add release-ruby.yml for RubyGems OIDC publish
+- restore Ruby 3.1 and 3.4 smoke-test coverage
+- switch to RubyGems Trusted Publishers (no role-to-assume)
+- address CodeRabbit review on release workflows
+- fix missed fromJSON(inputs.dry_run) on publish job
+- smoke-test sdist and source gem before publish
+- address CodeRabbit review (round 3) — supply chain + musl + ref scoping
+- smoke-test sdist/source-gem on minimum supported versions
+- migrate to oxidize-rb/actions/cross-gem@v1
+- restore ruby/setup-ruby for cross-gem action
+
+### Documentation
+
+- add not-available note above planned API examples
+- update README for MVP release and CHANGELOG
+- add pyfulgur binding MVP implementation plan
+- add viewport pt/px fix plan (fulgur-9ul)
+- add entry for pt/px unit fix (fulgur-9ul)
+- fix broken placeholder link in pt/px entry
+- add README + CHANGELOG
+- clarify write_to_path description (no binmode concept)
+- flag placeholder and dry_run limitation inline
+- add RELEASE_SETUP.md for Trusted Publisher config
+- link release setup guide
+- record PyPI/RubyGems publish CI implementation plan
+
+### Features
+
+- wire PyO3 extension crate into workspace
+- add PageSize class with A4/LETTER/A3 + custom/landscape
+- add Margin class with uniform/symmetric/uniform_mm
+- add AssetBundle with css/font/image registration
+- add RenderError and map_fulgur_error helper
+- add EngineBuilder with chainable config methods
+- add Engine.render_html with GIL release
+- add Engine.render_html_to_file
+- add Engine(**kwargs) Pythonic constructor
+- add __version__ and integration tests
+- scaffold gem + crate skeleton
+- add error mapping (Fulgur::{Error,RenderError,AssetError} + Errno::ENOENT)
+- add PageSize wrapper (A4/LETTER/A3 + custom + landscape)
+- add Margin wrapper (positional + kwargs + factory)
+- add AssetBundle wrapper + long/short aliases
+- add Engine + EngineBuilder (kwargs + chain)
+- add Pdf result object (to_s/bytesize/to_base64/to_data_uri) + render_html
+- add Pdf#write_to_path + #write_to_io (64KB chunked, binmode)
+- release GVL during render_html
+- add render_html_to_file + integration specs
+- enable abi3-py39 for single wheel across Python 3.9+
+
+### Miscellaneous
+
+- add placeholder packages for PyPI (pyfulgur) and RubyGems (fulgur)
+- fix fmt + silence pyo3 0.22 macro lints
+- regenerate example PDFs
+- loosen required_ruby_version to 3.1.0
+
+### Refactor
+
+- add layout_in_pt helper (no behavior change) (fulgur-9ul)
+- remove dead viewport fields from PassContext (fulgur-9ul)
+- simplify code after review
+
+### Testing
+
+- scaffold unit semantics integration tests (fulgur-9ul)
+- add oracle tests for layout unit semantics (RED) (fulgur-9ul)
+- regenerate goldens after pt/px unit fix (fulgur-9ul)
+- update transform integration test + regenerate example PDFs (fulgur-9ul)
+
+### Build
+
+- switch to maturin, add smoke test
 
 ## [0.4.5] - 2026-04-16
 
@@ -160,6 +252,10 @@ All notable changes to this project will be documented in this file.
 ### Deps
 
 - add woff2-patched crate and error variants for WOFF support
+
+### Release
+
+- v0.4.5
 
 ## [0.4.4] - 2026-04-12
 
