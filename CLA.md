@@ -97,8 +97,8 @@ Contribution available under that license.
 ### 2.4 Moral Rights
 
 If moral rights apply to the Contribution, to the maximum extent permitted by law,
-You waive and agree not to assert such moral rights against Us or our successors in
-interest, or any of our licensees, either direct or indirect.
+You agree not to assert such moral rights against Us or our successors in interest,
+or any of our licensees, either direct or indirect.
 
 ### 2.5 Our Rights
 
