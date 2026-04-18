@@ -164,5 +164,6 @@ jobs:
               --repo "$REPO"
           fi
           # Upload binaries and publish (App token → release:published が連鎖発火)
-          gh release upload "v$VERSION" artifacts/* --repo "$REPO"
+          # --clobber: approval gate reject 等での re-run 時に同名 asset を上書き
+          gh release upload "v$VERSION" artifacts/* --clobber --repo "$REPO"
           gh release edit "v$VERSION" --draft=false --repo "$REPO"
