@@ -1,6 +1,6 @@
 # fulgur
 
-Ruby bindings for [fulgur](https://github.com/mitsuru/fulgur) — an offline,
+Ruby bindings for [fulgur](https://github.com/fulgur-rs/fulgur) — an offline,
 deterministic HTML/CSS to PDF conversion library written in Rust.
 
 ## Status
@@ -225,7 +225,7 @@ under `lib/`, and Rust sources under `src/`.
 
 ## Links
 
-- [fulgur on GitHub](https://github.com/mitsuru/fulgur)
+- [fulgur on GitHub](https://github.com/fulgur-rs/fulgur)
 - [fulgur on crates.io](https://crates.io/crates/fulgur)
 
 ## License

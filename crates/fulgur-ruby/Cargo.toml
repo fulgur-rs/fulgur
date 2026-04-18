@@ -8,8 +8,8 @@ version = "0.5.0"
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mitsuru/fulgur"
-homepage = "https://github.com/mitsuru/fulgur"
+repository = "https://github.com/fulgur-rs/fulgur"
+homepage = "https://github.com/fulgur-rs/fulgur"
 description = "Ruby bindings for fulgur — offline HTML/CSS to PDF conversion"
 publish = false
 

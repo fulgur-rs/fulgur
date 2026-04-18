@@ -1,6 +1,6 @@
 # pyfulgur
 
-Python bindings for [fulgur](https://github.com/mitsuru/fulgur) — an offline, deterministic HTML/CSS to PDF conversion library written in Rust.
+Python bindings for [fulgur](https://github.com/fulgur-rs/fulgur) — an offline, deterministic HTML/CSS to PDF conversion library written in Rust.
 
 ## Status
 
@@ -73,7 +73,7 @@ A wrapper-style Python package that shells out to the `fulgur` CLI (clean stdout
 
 ## Links
 
-- [fulgur on GitHub](https://github.com/mitsuru/fulgur)
+- [fulgur on GitHub](https://github.com/fulgur-rs/fulgur)
 - [fulgur on crates.io](https://crates.io/crates/fulgur)
 
 ## License

@@ -1,8 +1,8 @@
 # Fulgur
 
-[![Coverage](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/coverage.svg)](https://github.com/mitsuru/octocovs)
-[![Code to Test Ratio](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/ratio.svg)](https://github.com/mitsuru/octocovs)
-[![Test Execution Time](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/mitsuru/fulgur/time.svg)](https://github.com/mitsuru/octocovs)
+[![Coverage](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/fulgur-rs/fulgur/coverage.svg)](https://github.com/mitsuru/octocovs)
+[![Code to Test Ratio](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/fulgur-rs/fulgur/ratio.svg)](https://github.com/mitsuru/octocovs)
+[![Test Execution Time](https://raw.githubusercontent.com/mitsuru/octocovs/main/badges/fulgur-rs/fulgur/time.svg)](https://github.com/mitsuru/octocovs)
 
 A modern, lightweight alternative to wkhtmltopdf. Converts HTML/CSS to PDF without a browser engine.
 

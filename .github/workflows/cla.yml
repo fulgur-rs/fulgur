@@ -29,10 +29,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: '.github/cla-signatures.json'
-          path-to-document: 'https://github.com/mitsuru/fulgur/blob/main/CLA.md'
+          path-to-document: 'https://github.com/fulgur-rs/fulgur/blob/main/CLA.md'
           branch: 'main'
           allowlist: 'dependabot[bot],github-actions[bot],renovate[bot]'
-          remote-organization-name: 'mitsuru'
+          remote-organization-name: 'fulgur-rs'
           remote-repository-name: 'fulgur'
           custom-notsigned-prcomment: >
             Thank you for your pull request! Before we can merge this contribution,
@@ -40,7 +40,7 @@ jobs:
             one-time agreement that covers all your future contributions to
             **fulgur**.
 
-            You can read the full CLA here: https://github.com/mitsuru/fulgur/blob/main/CLA.md
+            You can read the full CLA here: https://github.com/fulgur-rs/fulgur/blob/main/CLA.md
 
             To sign, please reply to this pull request with the following comment
             on a single line:

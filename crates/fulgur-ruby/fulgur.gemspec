@@ -10,12 +10,12 @@ Gem::Specification.new do |spec|
 
   spec.summary = "Offline HTML/CSS → PDF conversion"
   spec.description = "Ruby bindings for fulgur, a deterministic HTML/CSS to PDF rendering engine."
-  spec.homepage = "https://github.com/mitsuru/fulgur"
+  spec.homepage = "https://github.com/fulgur-rs/fulgur"
   spec.licenses = ["Apache-2.0", "MIT"]
   spec.required_ruby_version = ">= 3.1.0"
 
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
-  spec.metadata["source_code_uri"] = "https://github.com/mitsuru/fulgur"
+  spec.metadata["source_code_uri"] = "https://github.com/fulgur-rs/fulgur"
 
   spec.files = Dir[
     "lib/**/*.rb",

@@ -27,9 +27,9 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/mitsuru/fulgur"
-Documentation = "https://github.com/mitsuru/fulgur"
-Changelog = "https://github.com/mitsuru/fulgur/blob/main/CHANGELOG.md"
+Repository = "https://github.com/fulgur-rs/fulgur"
+Documentation = "https://github.com/fulgur-rs/fulgur"
+Changelog = "https://github.com/fulgur-rs/fulgur/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
