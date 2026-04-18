@@ -2,30 +2,35 @@
 
 require "bundler/gem_tasks"
 require "rake/extensiontask"
-require "rspec/core/rake_task"
 
-RSpec::Core::RakeTask.new(:spec)
+# rb-sys-dock container には rspec 系 gem が入っていない場合があるため、
+# rspec が解決できない環境でも compile タスクが定義されるように guard する。
+begin
+  require "rspec/core/rake_task"
+  RSpec::Core::RakeTask.new(:spec)
+rescue LoadError
+  # rspec なし環境 (rb-sys-dock container など) では spec タスクを skip。
+end
 
-# Rake::ExtensionTask with explicit cross_compile + cross_platform.
+# Rake::ExtensionTask with dynamic cross_compile from RUBY_TARGET env var.
 # RbSys::ExtensionTask は cargo metadata inference が dual-Cargo.toml (ext/fulgur と
-# crates/fulgur-ruby で package 名が異なる) に合わず使えない。Rake::ExtensionTask は
-# metadata inference をせず、ext/fulgur/extconf.rb が生成する Makefile 経由で cargo を
-# 呼ぶ設計なので、cross-gem-action + rake-compiler-dock 環境下で native:<platform>
-# タスクが動く。
-# cross_platform は release-ruby.yml の build-precompiled マトリクスと一致させること。
-Rake::ExtensionTask.new("fulgur") do |ext|
+# crates/fulgur-ruby で package 名が異なる) に合わず使えないため、Rake::ExtensionTask
+# を使いつつ cross-compile 動作だけ RbSys 同等のパターンで再現する:
+# rb-sys-dock container は --platform で指定された 1 platform のみについて rbconfig
+# を持つため、cross_platform にそれ以外の platform を並べると rake-compiler が
+# rbconfig enumeration で失敗する (rbconfig-<plat>-<ruby> no configuration section)。
+# 対策として RbSys::ExtensionTask と同様に ENV["RUBY_TARGET"] (rb-sys-dock が
+# container 起動時に設定) から 1 platform のみを登録する。
+# rake-compiler の native:<platform> cross-compile task は @gem_spec が設定されて
+# いないと生成されないため、gemspec を明示的に load して渡す。
+# (bundler/gem_tasks は Rake::ExtensionTask に gemspec を注入しない)
+fulgur_gemspec = Gem::Specification.load("fulgur.gemspec")
+
+Rake::ExtensionTask.new("fulgur", fulgur_gemspec) do |ext|
   ext.lib_dir = "lib/fulgur"
   ext.source_pattern = "*.{rs,toml}"
-  ext.cross_compile = true
-  ext.cross_platform = %w[
-    x86_64-linux
-    x86_64-linux-musl
-    aarch64-linux
-    aarch64-linux-musl
-    x86_64-darwin
-    arm64-darwin
-    x64-mingw-ucrt
-  ]
+  ext.cross_compile = ENV.key?("RUBY_TARGET")
+  ext.cross_platform = [ENV["RUBY_TARGET"]].compact
 end
 
 task default: %i[compile spec]
