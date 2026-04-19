@@ -453,6 +453,83 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
     }
 }
 
+/// Resolved multicol container properties.
+///
+/// Only populated when at least one of `column-count` or `column-width` is
+/// non-auto, matching the CSS definition of a multicol container.
+///
+/// ## stylo engine caveat
+///
+/// `stylo 0.8.0` gates `column-rule-*` and `column-fill` to its gecko engine,
+/// and blitz uses the servo engine, so those properties are *not* exposed on
+/// `ComputedValues`. A future custom-CSS-parser layer (planned for phase A-4)
+/// will read them directly from the stylesheet source. This struct covers the
+/// engine-available subset only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MulticolProps {
+    /// `column-count: N` as `Some(N)`, `auto` as `None`.
+    pub column_count: Option<u32>,
+    /// `column-width` in CSS pixels, or `None` for `auto`.
+    pub column_width: Option<f32>,
+    /// `column-gap` in CSS pixels. `normal` resolves to `0.0`; the multicol
+    /// layer substitutes its own default (typically `1em`) when that happens.
+    pub column_gap: f32,
+}
+
+/// Extract multicol container properties from a node.
+///
+/// Returns `None` when the node is not a multicol container (i.e. both
+/// `column-count` and `column-width` are `auto`).
+pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
+    use style::values::computed::length::{
+        NonNegativeLengthOrAuto, NonNegativeLengthPercentageOrNormal,
+    };
+    use style::values::generics::column::ColumnCount;
+
+    let styles = node.primary_styles()?;
+    if !styles.is_multicol() {
+        return None;
+    }
+
+    let column_count = match styles.clone_column_count() {
+        ColumnCount::Integer(n) => Some(n.0.max(1) as u32),
+        ColumnCount::Auto => None,
+    };
+
+    let column_width = match styles.clone_column_width() {
+        NonNegativeLengthOrAuto::LengthPercentage(l) => Some(l.px()),
+        NonNegativeLengthOrAuto::Auto => None,
+    };
+
+    let column_gap = match styles.clone_column_gap() {
+        NonNegativeLengthPercentageOrNormal::LengthPercentage(lp) => {
+            lp.0.to_used_value(style::values::computed::Length::new(0.0).into())
+                .to_f32_px()
+        }
+        NonNegativeLengthPercentageOrNormal::Normal => 0.0,
+    };
+
+    Some(MulticolProps {
+        column_count,
+        column_width,
+        column_gap,
+    })
+}
+
+/// Returns true if this node carries `column-span: all`.
+///
+/// Used by the multicol converter to slice a multicol container into
+/// alternating column-group / span-all segments.
+pub fn has_column_span_all(node: &blitz_dom::Node) -> bool {
+    let Some(styles) = node.primary_styles() else {
+        return false;
+    };
+    matches!(
+        styles.clone_column_span(),
+        style::properties::longhands::column_span::computed_value::T::All
+    )
+}
+
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
     blitz_dom::QualName::new(
         None,
@@ -2192,6 +2269,53 @@ mod tests {
         // Should be "foo bar" (single space), not "foo  bar".
         assert_eq!(text.trim(), "foo bar");
         assert!(!text.contains("  "));
+    }
+
+    #[test]
+    fn multicol_props_absent_on_plain_block() {
+        let html = r#"<html><body><div id="p">plain</div></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        assert!(extract_multicol_props(doc.get_node(id).unwrap()).is_none());
+    }
+
+    #[test]
+    fn multicol_props_column_count() {
+        let html = r#"<html><body>
+            <div id="m" style="column-count: 3; column-gap: 12px;">a</div>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
+        assert_eq!(props.column_count, Some(3));
+        assert_eq!(props.column_width, None);
+        assert!((props.column_gap - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn multicol_props_column_width() {
+        let html = r#"<html><body>
+            <div id="m" style="column-width: 180px;">a</div>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
+        assert_eq!(props.column_count, None);
+        assert_eq!(props.column_width, Some(180.0));
+        assert_eq!(props.column_gap, 0.0, "column-gap: normal → 0.0");
+    }
+
+    #[test]
+    fn column_span_all_detected() {
+        let html = r#"<html><body>
+            <h1 style="column-span: all;">Big</h1>
+            <p>plain</p>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let h1 = find_element_by_local_name(&doc, "h1").expect("h1");
+        let p = find_element_by_local_name(&doc, "p").expect("p");
+        assert!(has_column_span_all(doc.get_node(h1).unwrap()));
+        assert!(!has_column_span_all(doc.get_node(p).unwrap()));
     }
 }
 

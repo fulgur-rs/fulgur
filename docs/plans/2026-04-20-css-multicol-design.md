@@ -37,11 +37,35 @@ reviewable and to derisk the pagination interaction.
 
 - `taffy 0.9.2` has no multicol `Display` type; its `column_count` APIs are for
   CSS Grid tracks, not multicol.
-- `stylo 0.8.0` parses the `column-*` properties but `blitz-dom 0.2.4` does
+- `stylo 0.8.0` parses most `column-*` properties but `blitz-dom 0.2.4` does
   not lay them out — a multicol container is treated as a regular block.
 - So fulgur must own the column layout between Blitz (which gives us the
   container's content box) and Krilla (which gets the final positioned
   fragments).
+
+### stylo engine gating (A-0 finding, 2026-04-20)
+
+`stylo 0.8.0` uses engine-gated property definitions (see
+`properties/longhands/column.mako.rs`). Blitz inherits stylo's default feature
+`servo`, so these are available on `ComputedValues`:
+
+- `column-width`, `column-count`, `column-gap`, `column-span`
+
+But these are **gecko-only** and therefore inaccessible via blitz:
+
+- `column-fill`
+- `column-rule-width`, `column-rule-style`, `column-rule-color`
+
+Impact on the plan:
+
+- Phase A only supports `column-fill: auto`, which is our hardcoded behaviour
+  anyway — no impact.
+- Phase A-4 (`column-rule-*`) cannot pull values from stylo. Decision: add a
+  thin custom CSS parser to A-4 that sniffs `column-rule-*` declarations from
+  inline `style="…"` and from top-level stylesheet rules using a minimal
+  selector matcher (tag / class / id). Full cascade reimplementation is
+  out-of-scope; richer selector support is a follow-up. The `cssparser` crate
+  is already a direct dep via `crates/fulgur/src/gcpm/parser.rs`.
 
 ## Architecture
 
