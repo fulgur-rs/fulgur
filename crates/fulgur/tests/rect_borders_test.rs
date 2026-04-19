@@ -54,7 +54,13 @@ fn table_header_uses_rect_for_uniform_borders() {
 }
 
 #[test]
-fn dashed_uniform_border_uses_rect() {
+fn dashed_uniform_border_keeps_per_edge_phase() {
+    // Dashed/dotted borders MUST stay on the 4-line fallback so each edge's
+    // dash phase starts from the edge origin (per-edge symmetry, matching
+    // browsers). Collapsing to a single closed rect path would let dash
+    // phase run continuously around the perimeter, breaking corner
+    // symmetry. See VRT basic/borders.html and plan Task 4 for the revert
+    // rationale.
     let html = r#"
         <html><head><style>
             .b { width: 200px; height: 100px; border: 3px dashed #333; }
@@ -69,17 +75,10 @@ fn dashed_uniform_border_uses_rect() {
         return;
     };
 
-    // A single dashed box should produce ONE rect path (m + 3l + h + S),
-    // not four dashed line segments. Assert l==3 (the three non-opening
-    // edges of the rect) and m==1 (one moveto for the whole path).
-    assert_eq!(
-        counts.m, 1,
-        "expected m == 1, got m={} l={}",
-        counts.m, counts.l
-    );
-    assert_eq!(
-        counts.l, 3,
-        "expected l == 3, got m={} l={}",
-        counts.m, counts.l
+    assert!(
+        counts.m >= 4 && counts.l >= 4,
+        "dashed borders must stay on 4-line path for CSS per-edge phase conformance, got m={} l={}",
+        counts.m,
+        counts.l,
     );
 }

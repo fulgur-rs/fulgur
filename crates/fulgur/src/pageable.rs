@@ -1429,10 +1429,7 @@ fn draw_block_border(
     } else if !style.has_radius()
         && uniform_width
         && uniform_style
-        && matches!(
-            st,
-            BorderStyleValue::Solid | BorderStyleValue::Dashed | BorderStyleValue::Dotted
-        )
+        && matches!(st, BorderStyleValue::Solid)
     {
         let opacity = krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
             .unwrap_or(krilla::num::NormalizedF32::ONE);

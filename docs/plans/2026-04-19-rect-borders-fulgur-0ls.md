@@ -4,7 +4,7 @@
 
 **Goal:** Consolidate 4-line per-cell border strokes into a single stroked rectangle when borders are uniform and there is no `border-radius`. Target: `m + l` 1,492 → ~680 on `examples/table-header/` (54% reduction). krilla 0.7 does not emit the PDF `re` operator from `PathBuilder::push_rect`; the win comes from fewer strokes per cell, not from rect-op emission. (A krilla upstream PR to expose `Content::rect` would push this further — tracked separately.)
 
-**Architecture:** Add a new branch in `pageable.rs::draw_block_border` that triggers on `uniform_width && uniform_style && !has_radius() && style != None`. Use krilla 0.7's `PathBuilder::push_rect` to emit a single closed-rectangle subpath, stroked once. Solid/Dashed/Dotted styles collapse to one rect stroke; Double collapses to two concentric rect strokes; 3D styles (Groove/Ridge/Inset/Outset) keep the 4-line path because their colors vary per side.
+**Architecture:** Add a new branch in `pageable.rs::draw_block_border` that triggers on `uniform_width && uniform_style && !has_radius() && style == Solid`. Use krilla 0.7's `PathBuilder::push_rect` to emit a single closed-rectangle subpath, stroked once. **Only `Solid` collapses to a single rect stroke.** `Dashed`/`Dotted` stay on the 4-line fallback to preserve per-edge dash phase (browsers stroke each edge separately, so phase restarts at each corner — collapsing to one closed path would run dash phase continuously around the perimeter and break corner symmetry; see Task 4 course correction). `Double` collapses to two concentric rect strokes (no dash phase involved). 3D styles (Groove/Ridge/Inset/Outset) keep the 4-line path because their colors vary per side.
 
 **Tech Stack:** Rust, krilla 0.7 (`geom::PathBuilder::push_rect`, `geom::Rect::from_xywh`), qpdf (content-stream introspection in tests), cargo.
 
@@ -314,11 +314,7 @@ if style.has_radius() && uniform_width && uniform_style && st != BorderStyleValu
 } else if !style.has_radius()
     && uniform_width
     && uniform_style
-    && st != BorderStyleValue::None
-    && matches!(
-        st,
-        BorderStyleValue::Solid | BorderStyleValue::Dashed | BorderStyleValue::Dotted
-    )
+    && matches!(st, BorderStyleValue::Solid)
 {
     // Single rect stroke (re + S). inset by width/2 so the stroked
     // rectangle's outer edge sits at (x, y, w, h).
@@ -343,13 +339,7 @@ if style.has_radius() && uniform_width && uniform_style && st != BorderStyleValu
 }
 ```
 
-Restrict the `matches!` to `Solid` only in this task — remove `Dashed | Dotted` for now:
-
-```rust
-    && matches!(st, BorderStyleValue::Solid)
-```
-
-We add the other styles in Task 4 and 5.
+Only `Solid` is handled in this branch. `Dashed`/`Dotted` remain on the 4-line fallback (see Task 4 for the rationale — browser-compatible per-edge dash phase); `Double` is handled by its own sub-branch added in Task 5.
 
 **Step 2: Run the regression test — expect PASS**
 
@@ -381,77 +371,58 @@ uniform width, uniform style (Solid), and no border-radius."
 
 ---
 
-## Task 4: Extend the new branch to Dashed/Dotted
+## Task 4: Course correction — keep Dashed/Dotted on 4-line fallback
 
-**Goal:** Include `Dashed` and `Dotted` in the consolidated path. Confirm visual and content-stream behavior.
+**History:**
 
-**Note on assertions:** krilla 0.7 does not emit the PDF `re` operator
-(see Task 3 note). For single-rect cases the produced PDF has exactly
-one `m + 3l + h` subpath per stroke call. When writing assertions for
-this task, prefer `counts.m <= 1` (single rectangle path) over
-`counts.re >= 1`.
+- 2026-04-19: commit `6cfc2f8` broadened the Task 3 `matches!` guard to
+  `Solid | Dashed | Dotted`, betting that collapsing dashed/dotted
+  uniform borders into a single closed rect path would reduce `m + l`
+  further. A conformance test (`dashed_uniform_border_uses_rect`) pinned
+  the collapsed behavior (`m == 1`, `l == 3`).
+- VRT re-run revealed a CSS conformance regression on
+  `crates/fulgur-vrt/goldens/basic/borders.html`: browsers stroke each
+  edge independently, so dash phase restarts at every corner. Folding
+  the perimeter into one closed rect path (`m + 3l + h + S`) lets dash
+  phase run continuously around the box, shifting the phase of the
+  right, bottom, and left edges relative to the top. Corner symmetry
+  the golden encoded was broken.
+- User decision (Option B): revert to Solid-only. Dashed/Dotted stay on
+  the 4-line fallback. Fulgur's positioning is "CSS = WeasyPrint超え
+  目標 (Prince肉薄)", and per-edge dash phase is a visible, user-facing
+  conformance property — perf wins cannot compromise it.
 
-**Files:**
+**Action taken:**
 
-- Modify: `crates/fulgur/src/pageable.rs::draw_block_border` (the `matches!` guard)
+1. Narrowed the guard in `crates/fulgur/src/pageable.rs::draw_block_border`
+   back to `matches!(st, BorderStyleValue::Solid)`.
+2. Replaced `dashed_uniform_border_uses_rect` in
+   `crates/fulgur/tests/rect_borders_test.rs` with
+   `dashed_uniform_border_keeps_per_edge_phase`, which now asserts
+   `m >= 4 && l >= 4`. This pins the conformance property so a future
+   drive-by "perf fix" cannot silently regress it again.
+3. Re-ran VRT; `basic/borders.html` matches its pre-Task-4 golden.
 
-**Step 1: Write a failing test**
+**Deferred work (not scheduled):**
 
-Add to `crates/fulgur/tests/rect_borders_test.rs`:
+A future task could batch the 4 edges into one `PathBuilder` with
+explicit per-edge `move_to` + `line_to` (no `close_path` /
+auto-connect), so each edge keeps its own dash origin while collapsing
+to a single `draw_path` call. That would save `set_stroke`/draw-path
+overhead without changing phase. Tracked informally — not part of this
+plan.
 
-```rust
-#[test]
-fn dashed_uniform_border_uses_rect() {
-    use fulgur::asset::AssetBundle;
-    use fulgur::config::PageSize;
-    use fulgur::engine::Engine;
+**Files touched:**
 
-    let html = r#"
-        <html><head><style>
-            .b { width: 200px; height: 100px; border: 3px dashed #333; }
-        </style></head><body><div class="b"></div></body></html>
-    "#;
+- `crates/fulgur/src/pageable.rs` (guard narrowed)
+- `crates/fulgur/tests/rect_borders_test.rs` (test renamed + flipped)
+- `docs/plans/2026-04-19-rect-borders-fulgur-0ls.md` (this section)
 
-    let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).unwrap();
-
-    let Some(counts) = count_ops(&pdf) else { return; };
-
-    // One re (the div's border), zero unnecessary lineto.
-    assert!(counts.re >= 1, "expected re >= 1, got re={}", counts.re);
-    assert!(counts.l == 0, "expected l == 0, got l={}", counts.l);
-}
-```
-
-Run: `cargo test -p fulgur --test rect_borders_test dashed_uniform_border_uses_rect -- --nocapture`
-Expected: FAIL on current code (Dashed still takes 4-line path).
-
-**Step 2: Broaden the branch guard**
-
-Change the guard in `draw_block_border`:
-
-```rust
-    && matches!(
-        st,
-        BorderStyleValue::Solid | BorderStyleValue::Dashed | BorderStyleValue::Dotted
-    )
-```
-
-**Step 3: Run the new test — expect PASS**
-
-Run: `cargo test -p fulgur --test rect_borders_test -- --nocapture`
-Expected: PASS.
-
-**Step 4: Re-run all unit tests**
-
-Run: `cargo test -p fulgur --lib`
-Expected: 445 passed.
-
-**Step 5: Commit**
+**Commit:**
 
 ```bash
-git add crates/fulgur/src/pageable.rs crates/fulgur/tests/rect_borders_test.rs
-git commit -m "perf(fulgur): consolidate dashed/dotted uniform borders into rect stroke (fulgur-0ls)"
+git add crates/fulgur/src/pageable.rs crates/fulgur/tests/rect_borders_test.rs docs/plans/2026-04-19-rect-borders-fulgur-0ls.md
+git commit -m "revert(fulgur): keep dashed/dotted on per-edge path for CSS conformance (fulgur-0ls)"
 ```
 
 ---
@@ -459,6 +430,8 @@ git commit -m "perf(fulgur): consolidate dashed/dotted uniform borders into rect
 ## Task 5: Handle Double style with 2 concentric rects
 
 **Goal:** `border-style: double` should emit 2 stroked rectangles (outer + inner ring) instead of 8 line strokes. Each rect is one `m + 3l + h` subpath (krilla 0.7 does not emit the PDF `re` operator — see Task 3 note), so assert `counts.m == 2` and `counts.l == 6` rather than `counts.re == 2`.
+
+**Note:** Double is static concentric rings with no dash phase, so the Task 4 per-edge-phase concern does not apply. Rect-collapse is safe here.
 
 **Files:**
 
@@ -499,10 +472,7 @@ Add a sub-match on `Double`:
     && uniform_style
     && matches!(
         st,
-        BorderStyleValue::Solid
-            | BorderStyleValue::Dashed
-            | BorderStyleValue::Dotted
-            | BorderStyleValue::Double
+        BorderStyleValue::Solid | BorderStyleValue::Double
     )
 {
     let opacity = krilla::num::NormalizedF32::new(bc[3] as f32 / 255.0)
@@ -571,7 +541,7 @@ git commit -m "perf(fulgur): consolidate double borders into 2 rect strokes (ful
 
 ## Task 6: VRT full run + update goldens if intentionally changed
 
-**Goal:** Confirm no visual regression across the full VRT suite, accept minor expected differences around dash phase/stroke join.
+**Goal:** Confirm no visual regression across the full VRT suite. After the Task 4 revert, dashed/dotted borders take the 4-line fallback, so per-edge dash phase is preserved and no golden change is expected for those fixtures. Only Solid (and Double from Task 5) change code path.
 
 **Files:**
 
@@ -584,20 +554,21 @@ Expected: 0 failed. If any fixture fails, inspect the diff image.
 
 **Step 2: If visual diffs appear**
 
-Likely suspects:
-- `table-header`: dash phase along each edge may shift (previously 4 separate dash origins, now 1 ring); for solid tables this shouldn't show
-- `border-*` fixtures: check stroke join at corners
+Likely suspects (Solid / Double only — dashed/dotted are no longer in the rect branch):
+
+- `border-*` fixtures with solid borders: check stroke join at corners (miter vs. abutting line-cap).
+- `basic/borders.html`: the fixture that caught the Task 4 regression; after the revert it should match its pre-Task-4 golden with no diff.
 
 For each affected fixture:
 
 1. Visually inspect `crates/fulgur-vrt/diff_out/*.png` (the rendered diff)
-2. If the new rendering is correct (dash continuous around the rectangle instead of restarting per edge), regenerate the golden:
+1. If the new rendering is correct (e.g. cleaner solid corners), regenerate the golden:
 
 ```bash
 UPDATE_GOLDENS=1 cargo test -p fulgur-vrt <fixture_name>
 ```
 
-3. If the new rendering is *wrong* (e.g. miter spike at corner when it should be square), revert: narrow the `matches!` guard to exclude the problematic style for now, and file a follow-up issue.
+1. If the new rendering is *wrong* (e.g. miter spike at corner when it should be square, or any dashed/dotted phase shift), revert: narrow the `matches!` guard to exclude the problematic style for now, and file a follow-up issue. (Task 4 is the template: conformance first, perf second.)
 
 **Step 3: Commit golden updates (only if changes were intentional)**
 
@@ -621,6 +592,15 @@ the improvement via `m` (moveto count), `l` (lineto count), combined
 `m + l` (total line-segment ops), and raw PDF byte size. Do not assert
 on `counts.re` — it will be 0 regardless of how many rect paths we
 emit.
+
+**Scope of the improvement:** numbers reported here reflect Solid
+uniform borders only (Task 3) plus Double (Task 5). `examples/table-header/`
+is all-Solid, so the table-header `m`/`l` drop captures the full win
+available from this plan. Dashed/Dotted borders remain on the 4-line
+fallback (Task 4) and must not be claimed as part of the metric
+improvement — document-average reductions on content heavy in
+dashed/dotted borders will be proportionally smaller than table-header
+shows.
 
 **Step 1: Capture the new numbers**
 
@@ -711,6 +691,10 @@ Note: krilla 0.7 does not emit the PDF \`re\` operator from
 saving comes from fewer strokes per cell (one \`draw_path\` replaces
 4 abutting \`stroke_line\` calls), not from rect-op emission. A krilla
 upstream PR exposing \`Content::rect\` would unlock further savings.
+
+Scope: figures cover Solid (Task 3) + Double (Task 5). Dashed/Dotted
+borders retain the 4-line fallback per Task 4 (per-edge dash phase
+conformance) and are not represented in these numbers.
 "
 ```
 
