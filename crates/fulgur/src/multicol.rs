@@ -107,6 +107,11 @@ pub struct MulticolPageable {
     pub resolved_count: u32,
     /// Resolved column width in Pt. Filled by `wrap()`; `0.0` before that.
     pub resolved_col_w: Pt,
+    /// Post-distribution size computed by `wrap()`. Used by
+    /// [`MulticolPageable::height`] so parents position siblings
+    /// against the balanced layout height (matching what `draw()`
+    /// actually renders) rather than the single-column total.
+    pub cached_size: Option<Size>,
     /// Taffy-computed size for this container. Used as the explicit column
     /// budget when present (e.g. `<div style="column-count:2;height:200pt">`);
     /// see [`MulticolPageable::effective_column_budget`].
@@ -140,6 +145,7 @@ impl Clone for MulticolPageable {
             id: self.id.clone(),
             resolved_count: self.resolved_count,
             resolved_col_w: self.resolved_col_w,
+            cached_size: self.cached_size,
             layout_size: self.layout_size,
             fallback: self.fallback.clone(),
         }
@@ -173,6 +179,7 @@ impl MulticolPageable {
             id,
             resolved_count: 1,
             resolved_col_w: 0.0,
+            cached_size: None,
             layout_size: None,
             fallback: Box::new(fallback),
         }
@@ -466,7 +473,7 @@ pub fn resolve_column_layout(
 
 impl Pageable for MulticolPageable {
     fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        let (n, col_w, _gap) = self.resolved_col_params(avail_width);
+        let (n, col_w, gap) = self.resolved_col_params(avail_width);
         self.resolved_count = n;
         self.resolved_col_w = col_w;
 
@@ -487,26 +494,30 @@ impl Pageable for MulticolPageable {
             }
         }
 
-        let total_body_h: Pt = self
-            .segments
+        // Report the post-distribution height (balanced or auto), not the
+        // raw single-column total. Parent blocks use this to position
+        // siblings; mis-reporting here leaves the next sibling overlapping
+        // with overflowing column content.
+        let children = self.column_flow_children();
+        let budget = self.effective_column_budget(avail_height);
+        let (placed, _overflow) =
+            Self::distribute_with_fill(&children, n, col_w, gap, budget, self.fill);
+        let content_height = placed
             .iter()
-            .map(|seg| match seg {
-                Segment::ColumnGroup(children) => children.iter().map(|c| c.height()).sum(),
-                Segment::SpanAll(c) => c.height(),
-            })
-            .sum();
-        // column-fill: auto — with N columns, the container's reported
-        // height caps at the available page height once content spans
-        // across columns. Shorter content just uses col 0's height.
-        let height = if total_body_h > avail_height {
-            avail_height
-        } else {
-            total_body_h
-        };
-        Size {
+            .map(|pc| pc.y + pc.child.height())
+            .fold(0.0f32, f32::max);
+        let border_box_h = content_height
+            + self.style.border_widths[0]
+            + self.style.border_widths[2]
+            + self.style.padding[0]
+            + self.style.padding[2];
+        let height = border_box_h.min(avail_height);
+        let size = Size {
             width: avail_width,
             height,
-        }
+        };
+        self.cached_size = Some(size);
+        size
     }
 
     fn split(
@@ -550,6 +561,7 @@ impl Pageable for MulticolPageable {
             id: self.id.clone(),
             resolved_count: self.resolved_count,
             resolved_col_w: self.resolved_col_w,
+            cached_size: None,
             layout_size: self.layout_size,
             fallback: self.fallback.clone(),
         };
@@ -591,15 +603,20 @@ impl Pageable for MulticolPageable {
     }
 
     fn height(&self) -> Pt {
-        // Prefer the measured total-body height so paginate knows whether
-        // a split is required. Zero when wrap() has not been called yet.
-        self.segments
-            .iter()
-            .map(|seg| match seg {
-                Segment::ColumnGroup(children) => children.iter().map(|c| c.height()).sum(),
-                Segment::SpanAll(c) => c.height(),
-            })
-            .sum()
+        // `wrap()` runs a full distribution and stores the balanced height
+        // here; we return that so parent blocks position siblings against
+        // the height actually rendered by `draw()`. Fall back to summed
+        // child heights when `wrap()` has not run yet (shouldn't happen
+        // in the normal paginate flow).
+        self.cached_size.map(|s| s.height).unwrap_or_else(|| {
+            self.segments
+                .iter()
+                .map(|seg| match seg {
+                    Segment::ColumnGroup(children) => children.iter().map(|c| c.height()).sum(),
+                    Segment::SpanAll(c) => c.height(),
+                })
+                .sum()
+        })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
