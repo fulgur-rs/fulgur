@@ -1,5 +1,7 @@
 [tools]
 rust = "latest"
+python = "3.12"
+uv = "latest"
 
 [tasks.update-examples]
 description = "Regenerate all example PDFs"
@@ -30,3 +32,20 @@ for dir in examples/*/; do
   target/release/fulgur render "$html" "${args[@]}" -o "$pdf"
 done
 """
+
+[tasks."docs:install"]
+description = "Install website Python deps via uv"
+dir = "website"
+run = "uv sync"
+
+[tasks."docs:serve"]
+description = "Run MkDocs dev server (http://127.0.0.1:8000)"
+dir = "website"
+depends = ["docs:install"]
+run = "uv run mkdocs serve"
+
+[tasks."docs:build"]
+description = "Build static site to website/site/"
+dir = "website"
+depends = ["docs:install"]
+run = "uv run mkdocs build --strict"

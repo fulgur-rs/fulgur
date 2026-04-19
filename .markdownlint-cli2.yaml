@@ -6,6 +6,9 @@ config:
     siblings_only: true
   # インラインHTMLを許可
   MD033: false
+  # MkDocs admonition (`!!! tip`) のインデント本文を code block と
+  # 誤判定するため無効化
+  MD046: false
   # テーブルのコンパクトスタイルを許可
   MD060: false
 
@@ -15,4 +18,6 @@ ignores:
   - ".worktrees/**"
   - ".git/**"
   - ".beads/**"
+  - "**/.venv/**"
+  - "website/site/**"
   - "CHANGELOG.md"

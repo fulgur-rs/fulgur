@@ -4,3 +4,5 @@
 .beads/issues.jsonl
 **/.env
 **/.env.*
+website/site
+website/.venv
