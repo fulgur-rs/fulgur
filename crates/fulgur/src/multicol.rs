@@ -78,11 +78,27 @@ pub struct ColumnRule {
     pub color: [u8; 4],
 }
 
+/// Column-fill mode.
+///
+/// `column-fill: balance` is the CSS default and distributes content into
+/// roughly equal columns. `column-fill: auto` fills the first column
+/// completely before moving on. Phase A-2 ships balance as the default;
+/// auto is the fallback used when content overflows the balance budget and
+/// will be user-selectable once the A-4 custom CSS parser lands (stylo's
+/// servo engine does not expose `column-fill`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnFill {
+    #[default]
+    Balance,
+    Auto,
+}
+
 /// Multi-column container Pageable.
 pub struct MulticolPageable {
     pub props: MulticolProps,
     pub segments: Vec<Segment>,
     pub column_rule: Option<ColumnRule>,
+    pub fill: ColumnFill,
     pub style: BlockStyle,
     pub opacity: f32,
     pub visible: bool,
@@ -91,6 +107,10 @@ pub struct MulticolPageable {
     pub resolved_count: u32,
     /// Resolved column width in Pt. Filled by `wrap()`; `0.0` before that.
     pub resolved_col_w: Pt,
+    /// Taffy-computed size for this container. Used as the explicit column
+    /// budget when present (e.g. `<div style="column-count:2;height:200pt">`);
+    /// see [`MulticolPageable::effective_column_budget`].
+    pub layout_size: Option<Size>,
     /// Phase A-1 fallback. Phase A-2 replaces this with a real column layout.
     pub(crate) fallback: Box<BlockPageable>,
 }
@@ -113,12 +133,14 @@ impl Clone for MulticolPageable {
             props: self.props,
             segments: self.segments.clone(),
             column_rule: self.column_rule,
+            fill: self.fill,
             style: self.style.clone(),
             opacity: self.opacity,
             visible: self.visible,
             id: self.id.clone(),
             resolved_count: self.resolved_count,
             resolved_col_w: self.resolved_col_w,
+            layout_size: self.layout_size,
             fallback: self.fallback.clone(),
         }
     }
@@ -144,22 +166,132 @@ impl MulticolPageable {
             props,
             segments,
             column_rule: None,
+            fill: ColumnFill::default(),
             style,
             opacity,
             visible,
             id,
             resolved_count: 1,
             resolved_col_w: 0.0,
+            layout_size: None,
             fallback: Box::new(fallback),
         }
     }
 
-    /// Greedy `column-fill: auto` distribution.
+    /// Attach Taffy's computed size so the column-fill heuristics can use
+    /// the explicit CSS `height` as a column budget. Without this, short
+    /// multicol containers fall back to the page's available height which
+    /// is usually much larger than the author intended.
+    pub fn with_layout_size(mut self, size: Size) -> Self {
+        self.layout_size = Some(size);
+        self
+    }
+
+    /// Override the column-fill mode. Defaults to balance.
+    pub fn with_fill(mut self, fill: ColumnFill) -> Self {
+        self.fill = fill;
+        self
+    }
+
+    /// Per-column height budget.
     ///
-    /// Takes a queue of children (already measured at `col_w`) and places
-    /// them into `n` columns of height `avail_h`, splitting mid-child where
-    /// supported. Returns the placed children with absolute column offsets
-    /// plus whatever did not fit.
+    /// We originally tried to respect `layout_size.height` (Taffy's
+    /// computed box height) here so explicit `height: Xpt` on a multicol
+    /// container would cap the column. The trouble is that Taffy sizes
+    /// the box at *pre-reshape* single-column content height, which is
+    /// typically smaller than the post-reshape total. Using that as the
+    /// budget forces balance to fall back to auto and drop overflow on
+    /// the floor. Until we can distinguish author-set `height` from
+    /// Taffy's fit-content fallback, prefer the page budget and let
+    /// balance find a per-column height that fits. A future A-4 stylesheet
+    /// parse can flip this back when it knows the author set `height`.
+    fn effective_column_budget(&self, avail_h: Pt) -> Pt {
+        avail_h
+    }
+
+    /// Layout children into columns with the configured fill mode.
+    ///
+    /// `avail_h` is the per-column hard upper bound (page / container
+    /// budget). For `ColumnFill::Balance`, the chosen per-column budget
+    /// never exceeds `avail_h` but may be smaller so that all content fits
+    /// in `n` roughly-equal columns. For `ColumnFill::Auto`, columns fill
+    /// to `avail_h` in order.
+    fn distribute_with_fill(
+        children_source: &[Box<dyn Pageable>],
+        n: u32,
+        col_w: Pt,
+        col_gap: Pt,
+        avail_h: Pt,
+        fill: ColumnFill,
+    ) -> (Vec<PositionedChild>, Vec<Box<dyn Pageable>>) {
+        // Reshape + measure children at col_w once up front; distribute
+        // iterations below operate on clones and re-read heights but do
+        // not re-shape.
+        let mut measured: Vec<Box<dyn Pageable>> = children_source
+            .iter()
+            .map(|c| {
+                let mut c = c.clone_box();
+                c.reshape_for_width(col_w);
+                c.wrap(col_w, 10000.0);
+                c
+            })
+            .collect();
+
+        let total: Pt = measured.iter().map(|c| c.height()).sum();
+
+        let budget = match fill {
+            ColumnFill::Auto => avail_h,
+            ColumnFill::Balance => {
+                // When content overflows `avail_h * n` the column-fill
+                // spec lets us behave like auto; otherwise start at the
+                // ideal `total / n` and grow until content fits in `n`
+                // columns without overflow.
+                if total >= avail_h * n as f32 {
+                    avail_h
+                } else {
+                    Self::balanced_budget(&measured, n, col_w, col_gap, avail_h, total)
+                }
+            }
+        };
+        // Take ownership back to avoid re-cloning: distribute_children
+        // clones again inside, but the helper takes `&[Box<dyn Pageable>]`
+        // and we no longer need `measured` after this call.
+        let children_refs = std::mem::take(&mut measured);
+        Self::distribute_children(&children_refs, n, col_w, col_gap, budget)
+    }
+
+    /// Search for the smallest per-column budget (within `[total/n, avail_h]`)
+    /// that keeps the greedy distribution to `n` columns with no overflow.
+    /// Linear scan at 5% of `avail_h` increments; cheap in practice (≤20
+    /// iterations) and stable vs floating-point edge cases.
+    fn balanced_budget(
+        children: &[Box<dyn Pageable>],
+        n: u32,
+        col_w: Pt,
+        col_gap: Pt,
+        avail_h: Pt,
+        total_h: Pt,
+    ) -> Pt {
+        let ideal = (total_h / n as f32).ceil().max(1.0);
+        let step = (avail_h / 20.0).max(1.0);
+        let mut budget = ideal;
+        while budget <= avail_h {
+            let (_, overflow) = Self::distribute_children(children, n, col_w, col_gap, budget);
+            if overflow.is_empty() {
+                return budget;
+            }
+            budget += step;
+        }
+        avail_h
+    }
+
+    /// Greedy `column-fill: auto` distribution primitive used by both the
+    /// auto path directly and as the inner iteration step for balance.
+    ///
+    /// Takes children *already reshaped / measured at `col_w`* and places
+    /// them into `n` columns of height `avail_h`, splitting mid-child
+    /// where supported. Returns the placed children with absolute column
+    /// offsets plus whatever did not fit.
     fn distribute_children(
         children_source: &[Box<dyn Pageable>],
         n: u32,
@@ -169,18 +301,24 @@ impl MulticolPageable {
     ) -> (Vec<PositionedChild>, Vec<Box<dyn Pageable>>) {
         let mut queue: VecDeque<Box<dyn Pageable>> =
             children_source.iter().map(|c| c.clone_box()).collect();
-        // Reshape + re-measure every child at column width up front so
-        // subsequent height() / split() calls operate against col_w.
-        for child in queue.iter_mut() {
-            child.reshape_for_width(col_w);
+
+        // After a split, the remainder has no cached_size / layout_size
+        // (BlockPageable::split returns fresh children). Re-wrap at col_w
+        // before placing so the fragment draws its background at the
+        // column width, not the container width.
+        let rewrap_at_col = |child: &mut Box<dyn Pageable>| {
             child.wrap(col_w, 10000.0);
-        }
+        };
 
         let mut placed: Vec<PositionedChild> = Vec::new();
         for col_idx in 0..n {
             let col_x = col_idx as f32 * (col_w + col_gap);
             let mut col_y: Pt = 0.0;
-            while let Some(child) = queue.pop_front() {
+            while let Some(mut child) = queue.pop_front() {
+                // Ensure child has cached_size at col_w so its background /
+                // border draw at the column width (split fragments come in
+                // with no size info).
+                rewrap_at_col(&mut child);
                 let h = child.height();
                 if col_y + h <= avail_h {
                     placed.push(PositionedChild {
@@ -193,7 +331,9 @@ impl MulticolPageable {
                 }
                 let budget = (avail_h - col_y).max(0.0);
                 if budget > 0.0 {
-                    if let Some((first, rest)) = child.split(col_w, budget) {
+                    if let Some((mut first, mut rest)) = child.split(col_w, budget) {
+                        rewrap_at_col(&mut first);
+                        rewrap_at_col(&mut rest);
                         placed.push(PositionedChild {
                             child: first,
                             x: col_x,
@@ -239,10 +379,29 @@ impl MulticolPageable {
         out
     }
 
+    /// Horizontal border+padding inset (left + right) applied to the
+    /// border-box so column widths use the actual content box.
+    fn horizontal_inset(&self) -> Pt {
+        self.style.border_widths[1]
+            + self.style.border_widths[3]
+            + self.style.padding[1]
+            + self.style.padding[3]
+    }
+
     fn resolved_col_params(&self, avail_w: Pt) -> (u32, Pt, Pt) {
+        // Prefer the container's own width (from Taffy via `layout_size`)
+        // when available. `layout_size.width` is the border box, so we
+        // subtract padding + border to get the content box that columns
+        // are laid out inside.
+        let border_box_w = self
+            .layout_size
+            .map(|s| s.width)
+            .filter(|w| *w > 0.0)
+            .unwrap_or(avail_w);
+        let content_w = (border_box_w - self.horizontal_inset()).max(0.0);
         let gap = self.props.column_gap.max(0.0);
         let (n, col_w) = resolve_column_layout(
-            avail_w,
+            content_w,
             self.props.column_count,
             self.props.column_width,
             gap,
@@ -356,11 +515,20 @@ impl Pageable for MulticolPageable {
         avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
         let (n, col_w, gap) = self.resolved_col_params(avail_width);
+        let budget = self.effective_column_budget(avail_height);
         let children = self.column_flow_children();
-        let (placed, overflow) = Self::distribute_children(&children, n, col_w, gap, avail_height);
+        let (mut placed, overflow) =
+            Self::distribute_with_fill(&children, n, col_w, gap, budget, self.fill);
         if overflow.is_empty() {
             // Everything fits — `draw()` will re-run the distribution.
             return None;
+        }
+        // Shift columns into the content box so the fragment's style can
+        // paint border/padding around them.
+        let (inset_x, inset_y) = self.style.content_inset();
+        for pc in &mut placed {
+            pc.x += inset_x;
+            pc.y += inset_y;
         }
         // First fragment: styled BlockPageable with column-positioned
         // children for the current page.
@@ -375,12 +543,14 @@ impl Pageable for MulticolPageable {
             props: self.props,
             segments: vec![Segment::ColumnGroup(overflow)],
             column_rule: self.column_rule,
+            fill: self.fill,
             style: self.style.clone(),
             opacity: self.opacity,
             visible: self.visible,
             id: self.id.clone(),
             resolved_count: self.resolved_count,
             resolved_col_w: self.resolved_col_w,
+            layout_size: self.layout_size,
             fallback: self.fallback.clone(),
         };
         Some((Box::new(fragment), Box::new(remainder)))
@@ -395,8 +565,16 @@ impl Pageable for MulticolPageable {
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         let (n, col_w, gap) = self.resolved_col_params(avail_width);
+        let budget = self.effective_column_budget(avail_height);
         let children = self.column_flow_children();
-        let (placed, _overflow) = Self::distribute_children(&children, n, col_w, gap, avail_height);
+        let (mut placed, _overflow) =
+            Self::distribute_with_fill(&children, n, col_w, gap, budget, self.fill);
+        // Shift columns inside the content box (past border + padding).
+        let (inset_x, inset_y) = self.style.content_inset();
+        for pc in &mut placed {
+            pc.x += inset_x;
+            pc.y += inset_y;
+        }
         // Render via a throwaway BlockPageable so we inherit background /
         // border / opacity handling without duplicating that code here.
         let mut frame = BlockPageable::with_positioned_children(placed)

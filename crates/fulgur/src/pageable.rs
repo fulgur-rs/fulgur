@@ -1804,7 +1804,13 @@ impl Pageable for BlockPageable {
         // currently the only caller and it passes the column's content
         // width — anything narrower than that should ideally be tracked
         // here, but for the A-2 spike we keep the simple pass-through.
+        //
+        // `layout_size` came from Taffy's pre-reshape layout and locks
+        // `height()` to that stale value; clear it so the post-reshape
+        // `cached_size` wins. Multicol is the only caller today, so the
+        // wider implication of losing CSS-box sizing is limited.
         self.cached_size = None;
+        self.layout_size = None;
         for pc in &mut self.children {
             pc.child.reshape_for_width(avail_width);
         }

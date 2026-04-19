@@ -1034,7 +1034,8 @@ fn convert_node_inner(
             visible,
             block_id,
             fallback,
-        );
+        )
+        .with_layout_size(Size { width, height });
         mc.wrap(width, 10000.0);
         return Box::new(mc);
     }
