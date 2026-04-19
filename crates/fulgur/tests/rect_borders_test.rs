@@ -52,3 +52,34 @@ fn table_header_uses_rect_for_uniform_borders() {
         counts.l,
     );
 }
+
+#[test]
+fn dashed_uniform_border_uses_rect() {
+    let html = r#"
+        <html><head><style>
+            .b { width: 200px; height: 100px; border: 3px dashed #333; }
+        </style></head><body><div class="b"></div></body></html>
+    "#;
+
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let pdf = engine.render_html(html).unwrap();
+
+    let Some(counts) = count_ops(&pdf) else {
+        eprintln!("qpdf not installed — skipping");
+        return;
+    };
+
+    // A single dashed box should produce ONE rect path (m + 3l + h + S),
+    // not four dashed line segments. Assert l==3 (the three non-opening
+    // edges of the rect) and m==1 (one moveto for the whole path).
+    assert_eq!(
+        counts.m, 1,
+        "expected m == 1, got m={} l={}",
+        counts.m, counts.l
+    );
+    assert_eq!(
+        counts.l, 3,
+        "expected l == 3, got m={} l={}",
+        counts.m, counts.l
+    );
+}
