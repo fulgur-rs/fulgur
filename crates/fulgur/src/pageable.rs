@@ -537,6 +537,20 @@ pub trait Pageable: Send + Sync {
     /// Downcast support for tests.
     fn as_any(&self) -> &dyn std::any::Any;
 
+    /// Re-break inline content for a new available width.
+    ///
+    /// fulgur normally caches shaped text from Blitz's single layout pass,
+    /// which is run at the outer container's width. Multi-column layout
+    /// needs the same paragraph broken at the narrower column width. This
+    /// method gives a Pageable the chance to regenerate its cached state
+    /// for a different width.
+    ///
+    /// Default: no-op — most Pageables do not depend on the width beyond
+    /// what Taffy already encoded. Containers override this to recurse into
+    /// their children; [`crate::paragraph::ParagraphPageable`] overrides
+    /// it to re-break its stored parley layout.
+    fn reshape_for_width(&mut self, _avail_width: Pt) {}
+
     /// Walk this Pageable and record any block-level `id` anchors into
     /// `registry`, in page-local coordinates.
     ///
@@ -1781,6 +1795,19 @@ impl Pageable for BlockPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn reshape_for_width(&mut self, avail_width: Pt) {
+        // Invalidate and recurse; each child reshapes at the same width
+        // (ignoring this block's own padding/border because re-breaking is
+        // only meaningful at the innermost paragraph level). Multicol is
+        // currently the only caller and it passes the column's content
+        // width — anything narrower than that should ideally be tracked
+        // here, but for the A-2 spike we keep the simple pass-through.
+        self.cached_size = None;
+        for pc in &mut self.children {
+            pc.child.reshape_for_width(avail_width);
+        }
     }
 
     fn collect_ids(

@@ -145,6 +145,47 @@ pub struct ShapedLine {
     pub items: Vec<LineItem>,
 }
 
+/// Style metadata attached to a parley brush (= node id) at construction
+/// time, so reshape can rebuild glyph-run metadata without re-querying the DOM.
+#[derive(Clone, Debug, Default)]
+pub struct BrushStyle {
+    pub color: [u8; 4],
+    pub decoration: TextDecoration,
+    pub link: Option<Arc<LinkSpan>>,
+}
+
+/// Cached parley layout source for inline-root paragraphs. When present,
+/// [`ParagraphPageable::reshape_at`] can re-break the layout at a new width,
+/// regenerating `lines` with the column-appropriate line boundaries.
+///
+/// Stored behind `Arc` so split fragments share the source rather than
+/// cloning the underlying parley layout.
+#[derive(Clone)]
+pub struct ParleyReshapeSource {
+    /// Original parley layout, clone-on-reshape.
+    pub layout: parley::layout::Layout<blitz_dom::node::TextBrush>,
+    pub alignment: parley::Alignment,
+    /// Font data keyed by `(data_ptr, index)` matching
+    /// `ConvertContext::get_or_insert_font`.
+    pub fonts: std::collections::BTreeMap<(usize, u32), Arc<Vec<u8>>>,
+    /// Brush → style lookup for glyph runs (color/decoration/link).
+    pub brush_styles: std::collections::BTreeMap<usize, BrushStyle>,
+    /// CSS-px → PDF-pt conversion factor recorded so reshape keeps the
+    /// same scale regardless of caller.
+    pub px_to_pt: f32,
+}
+
+impl std::fmt::Debug for ParleyReshapeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParleyReshapeSource")
+            .field("alignment", &self.alignment)
+            .field("font_count", &self.fonts.len())
+            .field("brush_count", &self.brush_styles.len())
+            .field("px_to_pt", &self.px_to_pt)
+            .finish()
+    }
+}
+
 /// Paragraph element that renders shaped text.
 #[derive(Clone)]
 pub struct ParagraphPageable {
@@ -158,6 +199,11 @@ pub struct ParagraphPageable {
     /// links targeting headings (`<h1 id=..>`) and similar inline-root
     /// elements that do not gain a `BlockPageable` wrapper.
     pub id: Option<Arc<String>>,
+    /// Present when we captured enough parley state at construction to
+    /// re-break lines at a different width later (see multi-column flow in
+    /// [`crate::multicol`]). `None` for synthetic paragraphs that do not
+    /// originate from an inline-root parley layout.
+    pub reshape_source: Option<Arc<ParleyReshapeSource>>,
 }
 
 impl ParagraphPageable {
@@ -170,12 +216,20 @@ impl ParagraphPageable {
             opacity: 1.0,
             visible: true,
             id: None,
+            reshape_source: None,
         }
     }
 
     /// Attach an `id` anchor to this paragraph. Chain after `new()`.
     pub fn with_id(mut self, id: Option<Arc<String>>) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Attach a parley reshape source so this paragraph can be re-broken at
+    /// a different width (used by the multicol flow).
+    pub fn with_reshape_source(mut self, source: Arc<ParleyReshapeSource>) -> Self {
+        self.reshape_source = Some(source);
         self
     }
 }
@@ -821,6 +875,10 @@ impl Pageable for ParagraphPageable {
         self
     }
 
+    fn reshape_for_width(&mut self, avail_width: Pt) {
+        self.reshape_at(avail_width);
+    }
+
     fn collect_ids(
         &self,
         x: Pt,
@@ -835,6 +893,100 @@ impl Pageable for ParagraphPageable {
             registry.record(id, x, y);
         }
         // No child recursion: paragraph lines are glyph data, not Pageables.
+    }
+}
+
+impl ParagraphPageable {
+    /// Re-break this paragraph at a new available width, regenerating
+    /// `self.lines` from the stored parley layout. No-op when
+    /// `reshape_source` is `None` (the paragraph was constructed without
+    /// a captured parley source — typically synthetic inline content).
+    ///
+    /// This is the core of the multicol text-reshape spike: parley's
+    /// `break_all_lines(Some(width))` redistributes the pre-shaped glyphs
+    /// into a new sequence of lines without re-doing the shaping work.
+    pub fn reshape_at(&mut self, avail_width: Pt) {
+        let Some(source) = self.reshape_source.clone() else {
+            return;
+        };
+        // Convert pt → CSS px for parley (parley works in CSS px).
+        let width_px = if source.px_to_pt > 0.0 {
+            avail_width / source.px_to_pt
+        } else {
+            avail_width
+        };
+        let mut layout = source.layout.clone();
+        layout.break_all_lines(Some(width_px));
+        layout.align(
+            Some(width_px),
+            source.alignment,
+            parley::AlignmentOptions {
+                align_when_overflowing: false,
+            },
+        );
+
+        // Re-extract ShapedLine items from the re-broken layout. Uses the
+        // same glyph/run walk as `convert::extract_paragraph` but looks up
+        // font / brush data from the captured maps instead of the DOM.
+        let mut new_lines = Vec::new();
+        for line in layout.lines() {
+            let metrics = line.metrics();
+            let mut items = Vec::new();
+            for item in line.items() {
+                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let run = glyph_run.run();
+                let font_ref = run.font();
+                let font_size = run.font_size();
+                let brush = &glyph_run.style().brush;
+                let font_key = (font_ref.data.data().as_ptr() as usize, font_ref.index);
+                let font_arc = match source.fonts.get(&font_key) {
+                    Some(arc) => Arc::clone(arc),
+                    None => continue, // unknown font; drop this run (shouldn't happen)
+                };
+                let style = source
+                    .brush_styles
+                    .get(&brush.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let text_len = 0; // reshape does not track text ranges yet
+                let mut glyphs = Vec::new();
+                for g in glyph_run.glyphs() {
+                    glyphs.push(ShapedGlyph {
+                        id: g.id,
+                        x_advance: g.advance / font_size,
+                        x_offset: g.x / font_size,
+                        y_offset: g.y / font_size,
+                        text_range: 0..text_len,
+                    });
+                }
+                if glyphs.is_empty() {
+                    continue;
+                }
+                items.push(LineItem::Text(ShapedGlyphRun {
+                    font_data: font_arc,
+                    font_index: font_ref.index,
+                    font_size,
+                    color: style.color,
+                    decoration: style.decoration,
+                    glyphs,
+                    text: String::new(),
+                    x_offset: glyph_run.offset(),
+                    link: style.link,
+                }));
+            }
+            new_lines.push(ShapedLine {
+                height: metrics.line_height,
+                baseline: metrics.baseline,
+                items,
+            });
+        }
+
+        if !new_lines.is_empty() {
+            self.lines = new_lines;
+            self.cached_height = self.lines.iter().map(|l| l.height).sum();
+        }
     }
 }
 

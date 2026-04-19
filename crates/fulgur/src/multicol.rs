@@ -10,18 +10,22 @@
 //! `column-rule-*`, `break-inside: avoid`); `column-fill: balance` and
 //! `break-before`/`break-after` land in Phase B.
 //!
-//! ## This file in Phase A-1
+//! ## Phase A-2 spike status
 //!
-//! Contains the type scaffolding and `resolve_column_layout`. The `Pageable`
-//! impl currently delegates to an inner `BlockPageable` fallback so that HTML
-//! with `column-count` keeps rendering as a normal block (matching pre-feature
-//! behaviour). Phase A-2 replaces the delegation with the real column-fill:
-//! auto implementation.
+//! `wrap` / `split` / `draw` now implement real `column-fill: auto` layout:
+//! children are reshaped and re-wrapped at the resolved column width, then
+//! greedily distributed across N columns against the available page height.
+//! Text is re-broken through
+//! [`crate::paragraph::ParagraphPageable::reshape_at`] so multicol content
+//! flows within the narrower column boundary instead of inheriting the
+//! container's Parley layout.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::pageable::{
-    BlockPageable, BlockStyle, Canvas, DestinationRegistry, Pageable, Pt, Size, SplitResult,
+    BlockPageable, BlockStyle, Canvas, DestinationRegistry, Pageable, PositionedChild, Pt, Size,
+    SplitResult,
 };
 
 /// Resolved multicol container properties.
@@ -123,10 +127,10 @@ impl Clone for MulticolPageable {
 impl MulticolPageable {
     /// Construct a new multicol container.
     ///
-    /// `fallback` is the plain-block rendition of the container; Phase A-1
-    /// delegates `Pageable` methods to it. Phase A-2 will take over wrap /
-    /// split / draw and leave `fallback` unused (retaining it for
-    /// debug / regression safety during the transition).
+    /// `fallback` is retained for compatibility with A-1 call sites but no
+    /// longer participates in rendering — A-2 lays out the segments
+    /// directly. It stays around as a measurement aid (Taffy-reported
+    /// natural size) until the convert path is tidied up in a follow-up.
     pub fn new(
         props: MulticolProps,
         segments: Vec<Segment>,
@@ -148,6 +152,102 @@ impl MulticolPageable {
             resolved_col_w: 0.0,
             fallback: Box::new(fallback),
         }
+    }
+
+    /// Greedy `column-fill: auto` distribution.
+    ///
+    /// Takes a queue of children (already measured at `col_w`) and places
+    /// them into `n` columns of height `avail_h`, splitting mid-child where
+    /// supported. Returns the placed children with absolute column offsets
+    /// plus whatever did not fit.
+    fn distribute_children(
+        children_source: &[Box<dyn Pageable>],
+        n: u32,
+        col_w: Pt,
+        col_gap: Pt,
+        avail_h: Pt,
+    ) -> (Vec<PositionedChild>, Vec<Box<dyn Pageable>>) {
+        let mut queue: VecDeque<Box<dyn Pageable>> =
+            children_source.iter().map(|c| c.clone_box()).collect();
+        // Reshape + re-measure every child at column width up front so
+        // subsequent height() / split() calls operate against col_w.
+        for child in queue.iter_mut() {
+            child.reshape_for_width(col_w);
+            child.wrap(col_w, 10000.0);
+        }
+
+        let mut placed: Vec<PositionedChild> = Vec::new();
+        for col_idx in 0..n {
+            let col_x = col_idx as f32 * (col_w + col_gap);
+            let mut col_y: Pt = 0.0;
+            while let Some(child) = queue.pop_front() {
+                let h = child.height();
+                if col_y + h <= avail_h {
+                    placed.push(PositionedChild {
+                        child,
+                        x: col_x,
+                        y: col_y,
+                    });
+                    col_y += h;
+                    continue;
+                }
+                let budget = (avail_h - col_y).max(0.0);
+                if budget > 0.0 {
+                    if let Some((first, rest)) = child.split(col_w, budget) {
+                        placed.push(PositionedChild {
+                            child: first,
+                            x: col_x,
+                            y: col_y,
+                        });
+                        queue.push_front(rest);
+                        break; // column full, advance
+                    }
+                }
+                // Can't split — at col_y=0 we place the oversized child to
+                // avoid losing content; otherwise push back and advance.
+                if col_y == 0.0 {
+                    placed.push(PositionedChild {
+                        child,
+                        x: col_x,
+                        y: col_y,
+                    });
+                    break;
+                }
+                queue.push_front(child);
+                break;
+            }
+            if queue.is_empty() {
+                break;
+            }
+        }
+
+        (placed, queue.into_iter().collect())
+    }
+
+    /// Gather the set of children currently owned by ColumnGroup segments.
+    /// In Phase A-2 this is a single segment; A-3 concatenates across
+    /// multiple segments (interleaving SpanAll which is not flowed).
+    fn column_flow_children(&self) -> Vec<Box<dyn Pageable>> {
+        let mut out = Vec::new();
+        for seg in &self.segments {
+            if let Segment::ColumnGroup(children) = seg {
+                for c in children {
+                    out.push(c.clone_box());
+                }
+            }
+        }
+        out
+    }
+
+    fn resolved_col_params(&self, avail_w: Pt) -> (u32, Pt, Pt) {
+        let gap = self.props.column_gap.max(0.0);
+        let (n, col_w) = resolve_column_layout(
+            avail_w,
+            self.props.column_count,
+            self.props.column_width,
+            gap,
+        );
+        (n, col_w, gap)
     }
 }
 
@@ -207,21 +307,47 @@ pub fn resolve_column_layout(
 
 impl Pageable for MulticolPageable {
     fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        let gap = if self.props.column_gap > 0.0 {
-            self.props.column_gap
-        } else {
-            0.0
-        };
-        let (n, col_w) = resolve_column_layout(
-            avail_width,
-            self.props.column_count,
-            self.props.column_width,
-            gap,
-        );
+        let (n, col_w, _gap) = self.resolved_col_params(avail_width);
         self.resolved_count = n;
         self.resolved_col_w = col_w;
-        // Phase A-1: delegate measurement to the block-shaped fallback.
-        self.fallback.wrap(avail_width, avail_height)
+
+        // Reshape + re-wrap children inside segments at col_w so their
+        // cached heights reflect the narrow column measurement used below.
+        for seg in &mut self.segments {
+            match seg {
+                Segment::ColumnGroup(children) => {
+                    for child in children {
+                        child.reshape_for_width(col_w);
+                        child.wrap(col_w, 10000.0);
+                    }
+                }
+                Segment::SpanAll(child) => {
+                    child.reshape_for_width(avail_width);
+                    child.wrap(avail_width, 10000.0);
+                }
+            }
+        }
+
+        let total_body_h: Pt = self
+            .segments
+            .iter()
+            .map(|seg| match seg {
+                Segment::ColumnGroup(children) => children.iter().map(|c| c.height()).sum(),
+                Segment::SpanAll(c) => c.height(),
+            })
+            .sum();
+        // column-fill: auto — with N columns, the container's reported
+        // height caps at the available page height once content spans
+        // across columns. Shorter content just uses col 0's height.
+        let height = if total_body_h > avail_height {
+            avail_height
+        } else {
+            total_body_h
+        };
+        Size {
+            width: avail_width,
+            height,
+        }
     }
 
     fn split(
@@ -229,22 +355,57 @@ impl Pageable for MulticolPageable {
         avail_width: Pt,
         avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Phase A-1: delegate to fallback. Phase A-2 implements column-fill: auto.
-        self.fallback.split(avail_width, avail_height)
+        let (n, col_w, gap) = self.resolved_col_params(avail_width);
+        let children = self.column_flow_children();
+        let (placed, overflow) = Self::distribute_children(&children, n, col_w, gap, avail_height);
+        if overflow.is_empty() {
+            // Everything fits — `draw()` will re-run the distribution.
+            return None;
+        }
+        // First fragment: styled BlockPageable with column-positioned
+        // children for the current page.
+        let mut fragment = BlockPageable::with_positioned_children(placed)
+            .with_style(self.style.clone())
+            .with_opacity(self.opacity)
+            .with_visible(self.visible)
+            .with_id(self.id.clone());
+        fragment.wrap(avail_width, avail_height);
+        // Remainder: new multicol container carrying the unplaced flow.
+        let remainder = MulticolPageable {
+            props: self.props,
+            segments: vec![Segment::ColumnGroup(overflow)],
+            column_rule: self.column_rule,
+            style: self.style.clone(),
+            opacity: self.opacity,
+            visible: self.visible,
+            id: self.id.clone(),
+            resolved_count: self.resolved_count,
+            resolved_col_w: self.resolved_col_w,
+            fallback: self.fallback.clone(),
+        };
+        Some((Box::new(fragment), Box::new(remainder)))
     }
 
     fn split_boxed(self: Box<Self>, avail_width: Pt, avail_height: Pt) -> SplitResult {
-        // Avoid cloning the segments when delegating; take the fallback.
-        match self.fallback.split(avail_width, avail_height) {
+        match self.split(avail_width, avail_height) {
             Some(pair) => Ok(pair),
             None => Err(self.clone_box()),
         }
     }
 
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
-        // Phase A-1: delegate to fallback. Phase A-2 positions columns and
-        // draws column-rule lines.
-        self.fallback.draw(canvas, x, y, avail_width, avail_height);
+        let (n, col_w, gap) = self.resolved_col_params(avail_width);
+        let children = self.column_flow_children();
+        let (placed, _overflow) = Self::distribute_children(&children, n, col_w, gap, avail_height);
+        // Render via a throwaway BlockPageable so we inherit background /
+        // border / opacity handling without duplicating that code here.
+        let mut frame = BlockPageable::with_positioned_children(placed)
+            .with_style(self.style.clone())
+            .with_opacity(self.opacity)
+            .with_visible(self.visible)
+            .with_id(self.id.clone());
+        frame.wrap(avail_width, avail_height);
+        frame.draw(canvas, x, y, avail_width, avail_height);
     }
 
     fn clone_box(&self) -> Box<dyn Pageable> {
@@ -252,11 +413,24 @@ impl Pageable for MulticolPageable {
     }
 
     fn height(&self) -> Pt {
-        self.fallback.height()
+        // Prefer the measured total-body height so paginate knows whether
+        // a split is required. Zero when wrap() has not been called yet.
+        self.segments
+            .iter()
+            .map(|seg| match seg {
+                Segment::ColumnGroup(children) => children.iter().map(|c| c.height()).sum(),
+                Segment::SpanAll(c) => c.height(),
+            })
+            .sum()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn reshape_for_width(&mut self, _avail_width: Pt) {
+        // Multicol re-derives column width from its own props on every
+        // wrap() call, so no-op here.
     }
 
     fn collect_ids(
@@ -267,8 +441,25 @@ impl Pageable for MulticolPageable {
         avail_height: Pt,
         registry: &mut DestinationRegistry,
     ) {
-        self.fallback
-            .collect_ids(x, y, avail_width, avail_height, registry);
+        if let Some(id) = &self.id
+            && !id.is_empty()
+        {
+            registry.record(id, x, y);
+        }
+        // Anchor resolution still walks the undistributed tree — good
+        // enough for A-2. A follow-up can record per-column positions.
+        for seg in &self.segments {
+            match seg {
+                Segment::ColumnGroup(children) => {
+                    for c in children {
+                        c.collect_ids(x, y, avail_width, avail_height, registry);
+                    }
+                }
+                Segment::SpanAll(c) => {
+                    c.collect_ids(x, y, avail_width, avail_height, registry);
+                }
+            }
+        }
     }
 }
 
@@ -378,5 +569,90 @@ mod tests {
         let (n, w) = resolve_column_layout(300.0, None, Some(0.0), 10.0);
         assert_eq!(n, 1);
         assert_eq!(w, 300.0);
+    }
+
+    // ── A-2 spike: end-to-end text reshape through multicol ─────────
+    //
+    // The spike proves that inline-root paragraph content can be
+    // re-broken at the column width when a MulticolPageable wraps it.
+    // We render the same text with and without a multicol container and
+    // assert the multicol version has strictly more lines (because
+    // col_w < container_w forces more line breaks).
+
+    fn count_paragraph_lines(tree: &dyn Pageable) -> Option<usize> {
+        use crate::paragraph::ParagraphPageable;
+        if let Some(pg) = tree.as_any().downcast_ref::<ParagraphPageable>() {
+            return Some(pg.lines.len());
+        }
+        if let Some(b) = tree.as_any().downcast_ref::<BlockPageable>() {
+            for pc in &b.children {
+                if let Some(n) = count_paragraph_lines(&*pc.child) {
+                    return Some(n);
+                }
+            }
+        }
+        if let Some(mc) = tree.as_any().downcast_ref::<MulticolPageable>() {
+            for seg in &mc.segments {
+                if let Segment::ColumnGroup(children) = seg {
+                    for c in children {
+                        if let Some(n) = count_paragraph_lines(&**c) {
+                            return Some(n);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn render_tree(html: &str) -> Box<dyn Pageable> {
+        use crate::convert::ConvertContext;
+        use crate::gcpm::running::RunningElementStore;
+        use std::collections::HashMap;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+        };
+        crate::convert::dom_to_pageable(&doc, &mut ctx)
+    }
+
+    const LOREM: &str = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
+
+    #[test]
+    fn multicol_text_reshape_produces_more_lines_at_narrower_column() {
+        let without_mc = format!(
+            r#"<!doctype html><html><body style="font-family: serif;">
+                <div><p>{LOREM}</p></div>
+            </body></html>"#
+        );
+        let with_mc = format!(
+            r#"<!doctype html><html><body style="font-family: serif;">
+                <div style="column-count: 2; column-gap: 0;"><p>{LOREM}</p></div>
+            </body></html>"#
+        );
+        let tree_no_mc = render_tree(&without_mc);
+        let tree_mc = render_tree(&with_mc);
+
+        let lines_no_mc = count_paragraph_lines(&*tree_no_mc).expect("paragraph found");
+        let lines_mc = count_paragraph_lines(&*tree_mc).expect("paragraph found");
+
+        assert!(
+            lines_mc > lines_no_mc,
+            "text inside multicol should re-break at column width: \
+             container_lines={lines_no_mc}, col_lines={lines_mc}"
+        );
+        // Sanity: roughly double (2 columns means col_w ≈ half), allowing
+        // slack because break points are not linear in width.
+        assert!(
+            lines_mc as f32 >= lines_no_mc as f32 * 1.5,
+            "expected ~2x line count at col_w, got {lines_no_mc} → {lines_mc}"
+        );
     }
 }

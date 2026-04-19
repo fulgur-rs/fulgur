@@ -2001,6 +2001,12 @@ fn extract_paragraph(
 
     let mut shaped_lines = Vec::new();
     let mut link_cache = LinkCache::default();
+    // Per-brush cache populated alongside extraction so the reshape source
+    // (captured at the bottom) does not have to re-query the DOM.
+    let mut brush_styles: std::collections::BTreeMap<usize, crate::paragraph::BrushStyle> =
+        std::collections::BTreeMap::new();
+    let mut fonts: std::collections::BTreeMap<(usize, u32), Arc<Vec<u8>>> =
+        std::collections::BTreeMap::new();
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
@@ -2012,6 +2018,9 @@ fn extract_paragraph(
                 let font_ref = run.font();
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
+                fonts
+                    .entry((font_ref.data.data().as_ptr() as usize, font_index))
+                    .or_insert_with(|| Arc::clone(&font_arc));
                 let font_size = run.font_size();
 
                 // Get text color from the brush (node ID) → computed styles
@@ -2019,6 +2028,13 @@ fn extract_paragraph(
                 let color = get_text_color(doc, brush.id);
                 let decoration = get_text_decoration(doc, brush.id);
                 let link = link_cache.lookup(doc, brush.id);
+                brush_styles
+                    .entry(brush.id)
+                    .or_insert_with(|| crate::paragraph::BrushStyle {
+                        color,
+                        decoration,
+                        link: link.clone(),
+                    });
 
                 // Extract raw glyphs (relative offsets, not absolute positions)
                 let text_len = text.len();
@@ -2062,11 +2078,44 @@ fn extract_paragraph(
         return None;
     }
 
+    // Capture enough parley state for `ParagraphPageable::reshape_at` to
+    // re-break the layout at a different width (multicol flow).
+    let alignment = node
+        .primary_styles()
+        .map(|s| {
+            use parley::layout::Alignment;
+            use style::values::specified::TextAlignKeyword;
+            match s.clone_text_align() {
+                TextAlignKeyword::Start => Alignment::Start,
+                TextAlignKeyword::Left => Alignment::Left,
+                TextAlignKeyword::Right => Alignment::Right,
+                TextAlignKeyword::Center => Alignment::Center,
+                TextAlignKeyword::Justify => Alignment::Justify,
+                TextAlignKeyword::End => Alignment::End,
+                TextAlignKeyword::MozCenter => Alignment::Center,
+                TextAlignKeyword::MozLeft => Alignment::Left,
+                TextAlignKeyword::MozRight => Alignment::Right,
+            }
+        })
+        .unwrap_or(parley::layout::Alignment::Start);
+
+    let reshape_source = Arc::new(crate::paragraph::ParleyReshapeSource {
+        layout: parley_layout.clone(),
+        alignment,
+        fonts,
+        brush_styles,
+        px_to_pt: PX_TO_PT,
+    });
+
     // Propagate the inline-root `id` so headings like `<h1 id="top">` that
     // end up as plain `ParagraphPageable` (no block wrapper triggered by the
     // default style) still register with `DestinationRegistry` for
     // `href="#top"` resolution.
-    Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
+    Some(
+        ParagraphPageable::new(shaped_lines)
+            .with_id(extract_block_id(node))
+            .with_reshape_source(reshape_source),
+    )
 }
 
 /// Extract visual style (background, borders, padding, background-image) from a node.
