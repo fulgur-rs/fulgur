@@ -14,6 +14,61 @@ use taffy::{
     RequestedAxis, RoundTree, RunMode, Size, SizingMode, TraversePartialTree, TraverseTree,
 };
 
+/// One top-level slice of a multicol container's flattened child list.
+///
+/// Children are partitioned by `column-span: all` **on direct children
+/// only** — nested descendants with `column-span: all` deep inside a
+/// non-span child are ignored (CSS Multi-column Level 1).
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by compute_multicol_layout in task 2
+pub(crate) enum Segment {
+    /// Children that participate in the balanced column grid.
+    ColumnGroup(Vec<NodeId>),
+    /// A single child that spans the full container width.
+    SpanAll(NodeId),
+}
+
+/// Walk the direct children of `container_id`, grouping runs of non-span
+/// children into `Segment::ColumnGroup` and emitting `Segment::SpanAll`
+/// for each direct child carrying `column-span: all`.
+#[allow(dead_code)] // consumed by compute_multicol_layout in task 2
+pub(crate) fn partition_children_into_segments(
+    doc: &BaseDocument,
+    container_id: usize,
+) -> Vec<Segment> {
+    let children: Vec<usize> = doc
+        .get_node(container_id)
+        .map(|n| n.children.clone())
+        .unwrap_or_default();
+
+    let mut out: Vec<Segment> = Vec::new();
+    let mut group: Vec<NodeId> = Vec::new();
+    for child_id in children {
+        // Skip non-element children (whitespace text nodes, comments): they
+        // can't carry `column-span` style and aren't what CSS means by
+        // "direct children" in the spec.
+        let Some(child_node) = doc.get_node(child_id) else {
+            continue;
+        };
+        if child_node.element_data().is_none() {
+            continue;
+        }
+        let is_span = crate::blitz_adapter::has_column_span_all(child_node);
+        if is_span {
+            if !group.is_empty() {
+                out.push(Segment::ColumnGroup(std::mem::take(&mut group)));
+            }
+            out.push(Segment::SpanAll(NodeId::from(child_id)));
+        } else {
+            group.push(NodeId::from(child_id));
+        }
+    }
+    if !group.is_empty() {
+        out.push(Segment::ColumnGroup(group));
+    }
+    out
+}
+
 /// Taffy tree wrapper around a `BaseDocument` that intercepts multicol
 /// containers and routes them through fulgur's own layout.
 pub struct FulgurLayoutTree<'a> {
@@ -931,6 +986,122 @@ mod tests {
             (before_y_pre - before_y_post).abs() < 0.01,
             "earlier sibling y should not move: pre={before_y_pre}, post={before_y_post}"
         );
+    }
+
+    // ── partition_children_into_segments ────────────────────────────
+
+    fn parse_multicol(html: &str) -> (blitz_dom::BaseDocument, usize) {
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let doc: blitz_dom::BaseDocument = doc.into();
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        (doc, mc_id)
+    }
+
+    #[test]
+    fn partition_all_children_are_columnar() {
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <p>a</p><p>b</p><p>c</p>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            Segment::ColumnGroup(ids) => assert_eq!(ids.len(), 3),
+            _ => panic!("expected ColumnGroup"),
+        }
+    }
+
+    #[test]
+    fn partition_span_at_top() {
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <h1 style="column-span: all;">title</h1>
+              <p>a</p><p>b</p>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(&segments[0], Segment::SpanAll(_)));
+        match &segments[1] {
+            Segment::ColumnGroup(ids) => assert_eq!(ids.len(), 2),
+            _ => panic!("expected ColumnGroup"),
+        }
+    }
+
+    #[test]
+    fn partition_span_in_middle() {
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <p>a</p>
+              <h1 style="column-span: all;">title</h1>
+              <p>b</p>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(&segments[0], Segment::ColumnGroup(_)));
+        assert!(matches!(&segments[1], Segment::SpanAll(_)));
+        assert!(matches!(&segments[2], Segment::ColumnGroup(_)));
+    }
+
+    #[test]
+    fn partition_span_at_end() {
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <p>a</p><p>b</p>
+              <h1 style="column-span: all;">title</h1>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 2);
+        match &segments[0] {
+            Segment::ColumnGroup(ids) => assert_eq!(ids.len(), 2),
+            _ => panic!("expected ColumnGroup"),
+        }
+        assert!(matches!(&segments[1], Segment::SpanAll(_)));
+    }
+
+    #[test]
+    fn partition_two_consecutive_spans() {
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <h1 style="column-span: all;">t1</h1>
+              <h2 style="column-span: all;">t2</h2>
+              <p>a</p>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(&segments[0], Segment::SpanAll(_)));
+        assert!(matches!(&segments[1], Segment::SpanAll(_)));
+        assert!(matches!(&segments[2], Segment::ColumnGroup(_)));
+    }
+
+    #[test]
+    fn partition_nested_span_is_ignored() {
+        // column-span: all is evaluated only on direct children of the
+        // multicol container. A <span style="column-span: all"> buried inside
+        // a non-span <p> must NOT split the ColumnGroup.
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;">
+              <p>a <span style="column-span: all;">inline</span> tail</p>
+              <p>b</p>
+            </div>
+        </body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            Segment::ColumnGroup(ids) => assert_eq!(ids.len(), 2),
+            _ => panic!("expected ColumnGroup"),
+        }
     }
 
     #[test]
