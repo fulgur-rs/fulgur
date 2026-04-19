@@ -453,10 +453,22 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
     }
 }
 
-/// Resolved multicol container properties.
+/// Resolved multicol container properties, in **PDF points** (Pt).
 ///
 /// Only populated when at least one of `column-count` or `column-width` is
 /// non-auto, matching the CSS definition of a multicol container.
+///
+/// ## Unit convention
+///
+/// All lengths in this struct are pre-converted from CSS px to PDF pt (the
+/// fulgur-wide `0.75` factor). Consumers work in pt, so doing the conversion
+/// here avoids every call site repeating it.
+///
+/// ## `column-gap: normal` resolution
+///
+/// CSS Multi-column Level 1 resolves `normal` to `1em`. `extract_multicol_props`
+/// returns that resolved value using the element's computed font-size (also
+/// in pt). Callers never see the `Normal` keyword.
 ///
 /// ## stylo engine caveat
 ///
@@ -469,10 +481,9 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
 pub struct MulticolProps {
     /// `column-count: N` as `Some(N)`, `auto` as `None`.
     pub column_count: Option<u32>,
-    /// `column-width` in CSS pixels, or `None` for `auto`.
+    /// `column-width` in PDF points, or `None` for `auto`.
     pub column_width: Option<f32>,
-    /// `column-gap` in CSS pixels. `normal` resolves to `0.0`; the multicol
-    /// layer substitutes its own default (typically `1em`) when that happens.
+    /// `column-gap` in PDF points. Spec-default `normal` is resolved to `1em`.
     pub column_gap: f32,
 }
 
@@ -486,10 +497,15 @@ pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
     };
     use style::values::generics::column::ColumnCount;
 
+    // CSS px → PDF pt. Kept in sync with `crate::convert::PX_TO_PT`.
+    const PX_TO_PT: f32 = 0.75;
+
     let styles = node.primary_styles()?;
     if !styles.is_multicol() {
         return None;
     }
+
+    let font_size_pt = styles.clone_font_size().used_size().px() * PX_TO_PT;
 
     let column_count = match styles.clone_column_count() {
         ColumnCount::Integer(n) => Some(n.0.max(1) as u32),
@@ -497,7 +513,7 @@ pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
     };
 
     let column_width = match styles.clone_column_width() {
-        NonNegativeLengthOrAuto::LengthPercentage(l) => Some(l.px()),
+        NonNegativeLengthOrAuto::LengthPercentage(l) => Some(l.px() * PX_TO_PT),
         NonNegativeLengthOrAuto::Auto => None,
     };
 
@@ -505,8 +521,10 @@ pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
         NonNegativeLengthPercentageOrNormal::LengthPercentage(lp) => {
             lp.0.to_used_value(style::values::computed::Length::new(0.0).into())
                 .to_f32_px()
+                * PX_TO_PT
         }
-        NonNegativeLengthPercentageOrNormal::Normal => 0.0,
+        // Spec: `normal` used value is 1em.
+        NonNegativeLengthPercentageOrNormal::Normal => font_size_pt,
     };
 
     Some(MulticolProps {
@@ -2289,7 +2307,12 @@ mod tests {
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, Some(3));
         assert_eq!(props.column_width, None);
-        assert!((props.column_gap - 12.0).abs() < 0.01);
+        // 12px × 0.75 = 9pt
+        assert!(
+            (props.column_gap - 9.0).abs() < 0.01,
+            "got {}",
+            props.column_gap
+        );
     }
 
     #[test]
@@ -2301,8 +2324,14 @@ mod tests {
         let id = find_element_by_local_name(&doc, "div").expect("div");
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, None);
-        assert_eq!(props.column_width, Some(180.0));
-        assert_eq!(props.column_gap, 0.0, "column-gap: normal → 0.0");
+        // 180px × 0.75 = 135pt
+        assert_eq!(props.column_width, Some(135.0));
+        // column-gap: normal → 1em → default 16px font-size → 16 × 0.75 = 12pt
+        assert!(
+            (props.column_gap - 12.0).abs() < 0.01,
+            "column-gap: normal must resolve to 1em (12pt at 16px default), got {}",
+            props.column_gap
+        );
     }
 
     #[test]

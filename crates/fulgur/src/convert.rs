@@ -4,6 +4,7 @@ use crate::asset::AssetBundle;
 use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
+use crate::multicol::{MulticolPageable, Segment as MulticolSegment};
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockPageable, BlockStyle, BorderStyleValue, CounterOpMarkerPageable, CounterOpWrapperPageable,
@@ -1003,11 +1004,46 @@ fn convert_node_inner(
 
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
+    let block_id = extract_block_id(node);
+
+    // Multicol detection (fulgur-qkg / Phase A-1). When the node carries
+    // `column-count` or `column-width`, wrap the block in a MulticolPageable so
+    // Phase A-2 can replace the rendering. In A-1 the container still
+    // delegates back to the fallback BlockPageable, so visual output matches
+    // pre-feature behaviour. Segment decomposition for `column-span: all`
+    // lands in A-3.
+    if let Some(props) = crate::blitz_adapter::extract_multicol_props(node) {
+        let segment_children: Vec<Box<dyn Pageable>> = positioned_children
+            .iter()
+            .map(|pc| pc.child.clone_box())
+            .collect();
+        let mut fallback = BlockPageable::with_positioned_children(positioned_children)
+            .with_style(style.clone())
+            .with_opacity(opacity)
+            .with_visible(visible)
+            .with_id(block_id.clone());
+        fallback.wrap(width, 10000.0);
+        if has_style {
+            fallback.layout_size = Some(Size { width, height });
+        }
+        let mut mc = MulticolPageable::new(
+            props,
+            vec![MulticolSegment::ColumnGroup(segment_children)],
+            style,
+            opacity,
+            visible,
+            block_id,
+            fallback,
+        );
+        mc.wrap(width, 10000.0);
+        return Box::new(mc);
+    }
+
     let mut block = BlockPageable::with_positioned_children(positioned_children)
         .with_style(style)
         .with_opacity(opacity)
         .with_visible(visible)
-        .with_id(extract_block_id(node));
+        .with_id(block_id);
     block.wrap(width, 10000.0);
     if has_style {
         block.layout_size = Some(Size { width, height });
@@ -4202,6 +4238,68 @@ mod tests {
         assert!(
             find_marker_text_in_tree(&*tree, "1."),
             "inside marker '1.' should be injected into <li><p>hello</p></li> in <ol>"
+        );
+    }
+
+    fn find_multicol_in_tree(p: &dyn Pageable) -> bool {
+        if p.as_any().is::<crate::multicol::MulticolPageable>() {
+            return true;
+        }
+        if let Some(block) = p.as_any().downcast_ref::<BlockPageable>() {
+            for pc in &block.children {
+                if find_multicol_in_tree(&*pc.child) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn multicol_container_emits_multicol_pageable() {
+        let html = r#"<html><body>
+            <div style="column-count: 3; column-gap: 10px;">
+              <p>a</p><p>b</p><p>c</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+        assert!(
+            find_multicol_in_tree(&*tree),
+            "expected a MulticolPageable in the tree"
+        );
+    }
+
+    #[test]
+    fn non_multicol_block_does_not_emit_multicol_pageable() {
+        let html = r#"<html><body>
+            <div><p>a</p><p>b</p></div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+        };
+        let tree = super::dom_to_pageable(&doc, &mut ctx);
+        assert!(
+            !find_multicol_in_tree(&*tree),
+            "plain div must not produce a MulticolPageable"
         );
     }
 }
