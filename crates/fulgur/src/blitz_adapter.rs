@@ -447,7 +447,14 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
                 // to_percentage() returns None and we resolve with basis=0,
                 // which drops the percentage component. This is a known
                 // limitation — calc() in vertical-align is extremely rare.
-                VerticalAlign::Length(lp.resolve(style::values::computed::Length::new(0.0)).px())
+                //
+                // `.resolve(Length::new(0.0)).px()` returns a CSS-px scalar;
+                // multiply by `PX_TO_PT` because paragraph.rs consumes this
+                // value against pt-denominated baselines/metrics (the whole
+                // Pageable tree is in pt since PR #101).
+                const PX_TO_PT: f32 = 0.75;
+                let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
+                VerticalAlign::Length(px * PX_TO_PT)
             }
         }
     }
@@ -2303,6 +2310,42 @@ mod tests {
         assert_eq!(props.column_count, None);
         assert_eq!(props.column_width, Some(180.0));
         assert_eq!(props.column_gap, 0.0, "column-gap: normal → 0.0");
+    }
+
+    #[test]
+    fn vertical_align_length_returns_pt_not_px() {
+        use crate::paragraph::VerticalAlign;
+        // vertical-align: 8px → 8 × 0.75 = 6pt. Prior to the fix this
+        // returned 8.0 (CSS px), which then got subtracted from pt-denominated
+        // baselines in paragraph.rs, producing a 4/3-off visual shift. Guards
+        // against regression of the PR #101 unit-consolidation.
+        let html = r#"<html><body><img style="vertical-align: 8px;" src=""></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "img").expect("img");
+        let va = extract_vertical_align(doc.get_node(id).unwrap());
+        match va {
+            VerticalAlign::Length(v) => {
+                assert!((v - 6.0).abs() < 0.01, "expected 6pt (8px × 0.75), got {v}");
+            }
+            other => panic!("expected VerticalAlign::Length(6.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vertical_align_percent_is_unit_agnostic_ratio() {
+        use crate::paragraph::VerticalAlign;
+        // `vertical-align: 50%` still returns a unitless ratio — the px→pt
+        // fix on the Length branch must not touch Percent semantics.
+        let html = r#"<html><body><img style="vertical-align: 50%;" src=""></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "img").expect("img");
+        let va = extract_vertical_align(doc.get_node(id).unwrap());
+        match va {
+            VerticalAlign::Percent(p) => {
+                assert!((p - 0.5).abs() < 1e-4, "expected 0.5, got {p}");
+            }
+            other => panic!("expected VerticalAlign::Percent(0.5), got {other:?}"),
+        }
     }
 
     #[test]
