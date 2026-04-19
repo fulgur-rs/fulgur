@@ -27,8 +27,8 @@ use std::cell::Cell;
 
 use blitz_dom::BaseDocument;
 use taffy::{
-    AvailableSpace, CacheTree, LayoutPartialTree, NodeId, RoundTree, Size, TraversePartialTree,
-    TraverseTree,
+    AvailableSpace, CacheTree, CollapsibleMarginSet, LayoutPartialTree, Line, NodeId, Point,
+    RequestedAxis, RoundTree, RunMode, Size, SizingMode, TraversePartialTree, TraverseTree,
 };
 
 type Atom = style::Atom;
@@ -54,23 +54,24 @@ impl<'a> FulgurLayoutTree<'a> {
     ///
     /// Intended to be called after blitz's `resolve()` has produced an
     /// initial (block-shaped) layout. We walk the tree to find every
-    /// multicol container and, for each one, invoke
-    /// [`taffy::compute_root_layout`] on the container's subtree through
-    /// our wrapper — that makes the multicol node the Taffy root for its
-    /// own layout pass, so our `compute_child_layout` sees it first and
-    /// dispatches to [`compute_multicol_layout`]. Ancestors' layouts are
-    /// left alone in this scaffold; a follow-up step propagates height
-    /// deltas up the tree.
+    /// multicol container and, for each one:
+    ///
+    /// 1. Invoke [`taffy::compute_root_layout`] on the container's subtree
+    ///    through our wrapper. That makes the multicol node the Taffy root
+    ///    for its own layout pass, so our `compute_child_layout` sees it
+    ///    first and dispatches to [`compute_multicol_layout`].
+    /// 2. Compare the new container height against the blitz-assigned one
+    ///    and propagate the delta up the ancestor chain so siblings
+    ///    positioned after the multicol move with it.
+    ///
+    /// Inside-out order: nested multicol resolves before its outer
+    /// container, so the outer pass sees post-inner sizes.
     ///
     /// Returns the number of multicol subtrees laid out.
     pub fn layout_multicol_subtrees(&mut self) -> usize {
         let multicol_ids = collect_multicol_node_ids(self.doc);
-        // Layout children-first so nested multicol (when we add support)
-        // resolves inside-out.
         for id in multicol_ids.iter().rev() {
             let node_id = NodeId::from(*id);
-            // Size the subtree at whatever Taffy previously gave it; our
-            // custom compute will revise as needed.
             let prior = self.doc.get_unrounded_layout(node_id).size;
             let available_space = taffy::Size {
                 width: AvailableSpace::Definite(prior.width),
@@ -78,6 +79,12 @@ impl<'a> FulgurLayoutTree<'a> {
             };
             taffy::compute_root_layout(self, node_id, available_space);
             taffy::round_layout(self, node_id);
+
+            let new_h = self.doc.get_unrounded_layout(node_id).size.height;
+            let delta = new_h - prior.height;
+            if delta.abs() > 0.01 {
+                propagate_height_delta(self.doc, *id, delta);
+            }
         }
         multicol_ids.len()
     }
@@ -200,20 +207,268 @@ impl RoundTree for FulgurLayoutTree<'_> {
     }
 }
 
-/// Multicol layout computation stub.
+/// Resolve the CSS `column-count` / `column-width` pair into a concrete
+/// `(used_count, used_column_width)` for the given content width.
 ///
-/// Phase A-1b only records interception and delegates sizing back to blitz
-/// so existing test fixtures continue to render. Phase A-2b replaces this
-/// body with the real column-fill-balance distribution.
+/// Spec reference: <https://drafts.csswg.org/css-multicol/#cw>.
+pub fn resolve_column_layout(
+    content_w: f32,
+    count: Option<u32>,
+    width: Option<f32>,
+    gap: f32,
+) -> (u32, f32) {
+    let capped = |raw_n: u32, total_w: f32, gap: f32| -> (u32, f32) {
+        let n = raw_n.max(1);
+        let col_w = (total_w - gap * (n as f32 - 1.0)) / n as f32;
+        (n, col_w.max(0.0))
+    };
+    let width = width.filter(|&w| w > 0.0);
+    match (count, width) {
+        (Some(n), None) => capped(n, content_w, gap),
+        (None, Some(w)) => {
+            let denom = w + gap;
+            let raw = if denom > 0.0 {
+                ((content_w + gap) / denom).floor() as u32
+            } else {
+                1
+            };
+            capped(raw, content_w, gap)
+        }
+        (Some(n), Some(w)) => {
+            let denom = w + gap;
+            let cap = if denom > 0.0 {
+                ((content_w + gap) / denom).floor() as u32
+            } else {
+                1
+            };
+            let used = n.min(cap.max(1));
+            capped(used, content_w, gap)
+        }
+        (None, None) => (1, content_w.max(0.0)),
+    }
+}
+
+/// Main multicol layout entry.
+///
+/// Pipeline:
+///
+/// 1. Read `column-count` / `column-width` / `column-gap` from the node.
+/// 2. Derive `(n, col_w)` from the container width.
+/// 3. Ask Taffy to lay out every child at `known_width = col_w`. Because
+///    the recursion runs through `FulgurLayoutTree::compute_child_layout`,
+///    blitz's inline layout re-breaks Parley lines at the new width
+///    naturally — no ad-hoc reshape plumbing needed.
+/// 4. Greedy `column-fill: balance` over the measured child sizes, with
+///    auto fallback if the content would exceed the available height × N.
+/// 5. Write each child's column-local `(x, y)` back via
+///    `set_unrounded_layout`.
+/// 6. Return the container's balanced size.
 pub fn compute_multicol_layout(
     tree: &mut FulgurLayoutTree<'_>,
     node_id: NodeId,
     inputs: taffy::tree::LayoutInput,
 ) -> taffy::LayoutOutput {
     tree.multicol_hits.set(tree.multicol_hits.get() + 1);
-    // For now, lay out as a normal block so siblings still position
-    // correctly. A-2b swaps in the real multicol compute.
-    tree.doc.compute_child_layout(node_id, inputs)
+
+    // 1. MulticolProps
+    let Some(props) = tree
+        .doc
+        .get_node(usize::from(node_id))
+        .and_then(crate::blitz_adapter::extract_multicol_props)
+    else {
+        // Dispatcher already matched, but be defensive.
+        return tree.doc.compute_child_layout(node_id, inputs);
+    };
+
+    // 2. Container content width. Prefer the width Taffy fixed for us;
+    //    fall back to available_space.
+    let container_w = inputs
+        .known_dimensions
+        .width
+        .or(match inputs.available_space.width {
+            AvailableSpace::Definite(w) => Some(w),
+            _ => None,
+        })
+        .unwrap_or(0.0);
+
+    let gap = props.column_gap.max(0.0);
+    let (n, col_w) =
+        resolve_column_layout(container_w, props.column_count, props.column_width, gap);
+
+    // 3. Measure every child at col_w via Taffy. Re-using inputs.run_mode
+    //    so sizing passes stay consistent.
+    let children: Vec<NodeId> = (0..tree.child_count(node_id))
+        .map(|i| tree.get_child_id(node_id, i))
+        .collect();
+
+    let child_inputs = taffy::tree::LayoutInput {
+        run_mode: RunMode::PerformLayout,
+        sizing_mode: SizingMode::InherentSize,
+        axis: RequestedAxis::Both,
+        known_dimensions: Size {
+            width: Some(col_w),
+            height: None,
+        },
+        parent_size: Size {
+            width: Some(col_w),
+            height: inputs.parent_size.height,
+        },
+        available_space: Size {
+            width: AvailableSpace::Definite(col_w),
+            height: AvailableSpace::MaxContent,
+        },
+        vertical_margins_are_collapsible: Line::FALSE,
+    };
+
+    let mut measured: Vec<(NodeId, Size<f32>)> = Vec::with_capacity(children.len());
+    for &child in &children {
+        let output = tree.compute_child_layout(child, child_inputs);
+        measured.push((child, output.size));
+    }
+
+    // 4. column-fill: balance
+    let avail_h = match inputs.available_space.height {
+        AvailableSpace::Definite(h) => h,
+        _ => f32::INFINITY,
+    };
+    let total_h: f32 = measured.iter().map(|(_, s)| s.height).sum();
+    let budget = if total_h <= 0.0 {
+        0.0
+    } else if total_h >= avail_h * n as f32 {
+        // Content overflows → auto: fill columns to avail_h
+        avail_h
+    } else {
+        balance_budget(&measured, n, avail_h, total_h)
+    };
+
+    // Distribute into columns. Children that are taller than the budget
+    // stay as a single block (no Taffy-level splitting here; page-break
+    // handling still lives in paginate.rs).
+    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::with_capacity(children.len());
+    let mut col_idx: u32 = 0;
+    let mut col_y: f32 = 0.0;
+    for (child_id, size) in &measured {
+        let col_x = col_idx as f32 * (col_w + gap);
+        if col_y > 0.0 && col_y + size.height > budget && col_idx + 1 < n {
+            col_idx += 1;
+            col_y = 0.0;
+        }
+        placements.push((*child_id, Point { x: col_x, y: col_y }, *size));
+        col_y += size.height;
+    }
+
+    // 5. Write child positions back into Taffy's storage.
+    for (child_id, location, size) in &placements {
+        let layout = taffy::Layout {
+            order: 0,
+            location: *location,
+            size: Size {
+                width: col_w,
+                height: size.height,
+            },
+            content_size: *size,
+            scrollbar_size: Size::ZERO,
+            border: taffy::Rect::zero(),
+            padding: taffy::Rect::zero(),
+            margin: taffy::Rect::zero(),
+        };
+        tree.set_unrounded_layout(*child_id, &layout);
+    }
+
+    // 6. Container size = width × max(column_bottom).
+    let column_bottoms = placements
+        .iter()
+        .map(|(_, loc, sz)| loc.y + sz.height)
+        .fold(0.0f32, f32::max);
+    let container_h = column_bottoms.max(0.0);
+
+    taffy::LayoutOutput {
+        size: Size {
+            width: container_w,
+            height: container_h,
+        },
+        content_size: Size {
+            width: container_w,
+            height: container_h,
+        },
+        first_baselines: Point::NONE,
+        top_margin: CollapsibleMarginSet::ZERO,
+        bottom_margin: CollapsibleMarginSet::ZERO,
+        margins_can_collapse_through: false,
+    }
+}
+
+/// Linear search for the smallest per-column budget (starting from `total / n`
+/// and growing in `avail_h / 20` increments) that fits all children in `n`
+/// columns with no overflow. Bounded to ≤ 20 iterations.
+fn balance_budget(measured: &[(NodeId, Size<f32>)], n: u32, avail_h: f32, total_h: f32) -> f32 {
+    let ideal = (total_h / n as f32).ceil().max(1.0);
+    let step = (avail_h / 20.0).max(1.0);
+    let mut budget = ideal;
+    while budget <= avail_h {
+        if fits_in_n_columns(measured, n, budget) {
+            return budget;
+        }
+        budget += step;
+    }
+    avail_h
+}
+
+/// Greedy pack: returns true when all children fit into `n` columns of the
+/// given per-column budget. Mirrors the placement loop in
+/// `compute_multicol_layout` but without writing back.
+fn fits_in_n_columns(measured: &[(NodeId, Size<f32>)], n: u32, budget: f32) -> bool {
+    let mut col_idx: u32 = 0;
+    let mut col_y: f32 = 0.0;
+    for (_, size) in measured {
+        if col_y > 0.0 && col_y + size.height > budget {
+            if col_idx + 1 >= n {
+                return false;
+            }
+            col_idx += 1;
+            col_y = 0.0;
+        }
+        col_y += size.height;
+    }
+    true
+}
+
+/// After a multicol subtree has been re-laid-out with a new height,
+/// walk up the ancestor chain and keep the tree's geometry consistent:
+///
+/// - shift every sibling that comes *after* the multicol (in its
+///   parent's child list) downward by the height delta
+/// - grow (or shrink) each ancestor's `size.height` by the same delta
+///
+/// Updates both `unrounded_layout` and `final_layout` so the downstream
+/// `convert.rs` reader (which goes through `final_layout`) sees the
+/// corrected positions.
+fn propagate_height_delta(doc: &mut BaseDocument, node_id: usize, delta: f32) {
+    let mut current = node_id;
+    while let Some(parent_id) = doc.get_node(current).and_then(|n| n.parent) {
+        // Collect siblings that come after `current` in the parent's
+        // layout children list.
+        let Some(parent_node) = doc.get_node(parent_id) else {
+            break;
+        };
+        let children: Vec<usize> = parent_node.children.clone();
+        let Some(idx) = children.iter().position(|&c| c == current) else {
+            break;
+        };
+        let siblings_after: Vec<usize> = children[idx + 1..].to_vec();
+        for sibling in siblings_after {
+            if let Some(node) = doc.get_node_mut(sibling) {
+                node.unrounded_layout.location.y += delta;
+                node.final_layout.location.y += delta;
+            }
+        }
+        // Grow the parent's size to match.
+        if let Some(node) = doc.get_node_mut(parent_id) {
+            node.unrounded_layout.size.height += delta;
+            node.final_layout.size.height += delta;
+        }
+        current = parent_id;
+    }
 }
 
 /// Walk the tree from the document root collecting every node id whose
@@ -276,6 +531,156 @@ mod tests {
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 0);
         assert_eq!(tree.multicol_hits.get(), 0);
+    }
+
+    #[test]
+    fn multicol_children_laid_out_in_columns() {
+        // After the hook runs, children should be placed in multiple
+        // columns. For 4 identical children at column-count=2, we expect
+        // 2 children per column (roughly).
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0;">
+              <p>alpha alpha alpha alpha alpha</p>
+              <p>beta beta beta beta beta</p>
+              <p>gamma gamma gamma gamma gamma</p>
+              <p>delta delta delta delta delta</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let laid_out = tree.layout_multicol_subtrees();
+        assert_eq!(laid_out, 1);
+        assert!(tree.multicol_hits.get() >= 1);
+
+        // Read back child positions from Taffy storage.
+        let mc_ids = collect_multicol_node_ids(&doc);
+        let mc_id = NodeId::from(mc_ids[0]);
+        let child_count = doc.child_count(mc_id);
+        let mut xs_by_child: Vec<f32> = Vec::new();
+        for i in 0..child_count {
+            let child_id = doc.get_child_id(mc_id, i);
+            let layout = doc.get_unrounded_layout(child_id);
+            xs_by_child.push(layout.location.x);
+        }
+        // At least two distinct x positions should appear (one per column).
+        let mut unique_xs: Vec<f32> = xs_by_child.clone();
+        unique_xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        unique_xs.dedup_by(|a, b| (*a - *b).abs() < 0.1);
+        assert!(
+            unique_xs.len() >= 2,
+            "expected children across ≥2 column x positions, got {:?}",
+            xs_by_child
+        );
+    }
+
+    #[test]
+    fn multicol_reports_balanced_height_not_single_column_total() {
+        // Balance: total content of ~4 lines × 20pt = 80pt. At n=2, budget
+        // ≈ 40pt so balanced container ≈ 40pt. We just assert the container
+        // shrinks compared to the pre-hook (blitz-assigned) height.
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0;">
+              <p>alpha</p>
+              <p>beta</p>
+              <p>gamma</p>
+              <p>delta</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mc_id_raw = collect_multicol_node_ids(&doc)[0];
+        let mc_node_id = NodeId::from(mc_id_raw);
+        let pre_hook_height = doc.get_unrounded_layout(mc_node_id).size.height;
+
+        let mut tree = FulgurLayoutTree::new(&mut doc);
+        tree.layout_multicol_subtrees();
+
+        let post_hook_height = doc.get_unrounded_layout(mc_node_id).size.height;
+        assert!(
+            post_hook_height < pre_hook_height,
+            "balanced height ({post_hook_height}) should be smaller than blitz's single-column total ({pre_hook_height})"
+        );
+    }
+
+    #[test]
+    fn siblings_after_multicol_get_repositioned_by_height_delta() {
+        // Sanity check for the structural fix that v1 couldn't solve: the
+        // "after" paragraph should sit BELOW the balanced multicol box,
+        // not overlap its columns. The multicol balances shorter than
+        // blitz's single-column estimate, so the delta is negative and
+        // siblings move up.
+        let html = r#"<!doctype html><html><body>
+            <p id="before">before</p>
+            <div id="mc" style="column-count: 2; column-gap: 0;">
+              <p>alpha alpha alpha alpha</p>
+              <p>beta beta beta beta</p>
+              <p>gamma gamma gamma gamma</p>
+              <p>delta delta delta delta</p>
+            </div>
+            <p id="after">after</p>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        // Find nodes by element id for readability in the assertion.
+        fn find_by_id(doc: &BaseDocument, id: &str) -> Option<usize> {
+            fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
+                let node = doc.get_node(node_id)?;
+                if let Some(ed) = node.element_data() {
+                    if let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                    {
+                        if attr_id.value.as_str() == target {
+                            return Some(node_id);
+                        }
+                    }
+                }
+                for &child in &node.children {
+                    if let Some(found) = walk(doc, child, target) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, id)
+        }
+
+        let mc_id = find_by_id(&doc, "mc").expect("multicol node");
+        let after_id = find_by_id(&doc, "after").expect("after paragraph");
+
+        let mc_y_before = doc.get_node(mc_id).unwrap().unrounded_layout.location.y;
+        let mc_h_before = doc.get_node(mc_id).unwrap().unrounded_layout.size.height;
+        let mc_bottom_before = mc_y_before + mc_h_before;
+        let after_y_before = doc.get_node(after_id).unwrap().unrounded_layout.location.y;
+        // Assert blitz stacked them in order with no overlap. CSS margins
+        // can widen the gap, so just require `after` to start at or below
+        // multicol's bottom.
+        assert!(
+            after_y_before >= mc_bottom_before - 0.5,
+            "sanity: after must not overlap multicol (y={after_y_before}, mc_bottom={mc_bottom_before})"
+        );
+
+        let mut tree = FulgurLayoutTree::new(&mut doc);
+        tree.layout_multicol_subtrees();
+
+        let mc_h_after = doc.get_node(mc_id).unwrap().unrounded_layout.size.height;
+        let mc_bottom_after = doc.get_node(mc_id).unwrap().unrounded_layout.location.y + mc_h_after;
+        let after_y_after = doc.get_node(after_id).unwrap().unrounded_layout.location.y;
+
+        // After balance, the multicol is shorter and the sibling below
+        // it has moved up by the same delta (propagate_height_delta).
+        assert!(
+            mc_h_after < mc_h_before,
+            "multicol height should shrink after balance: before={mc_h_before}, after={mc_h_after}"
+        );
+        let delta_h = mc_h_after - mc_h_before; // negative when multicol shrinks
+        let expected_after_y = after_y_before + delta_h;
+        assert!(
+            (after_y_after - expected_after_y).abs() < 0.5,
+            "propagation: after_y expected {expected_after_y}, got {after_y_after} (mc_bottom_after={mc_bottom_after})"
+        );
     }
 
     #[test]
