@@ -26,14 +26,17 @@ pub fn count_ops(pdf_bytes: &[u8]) -> Option<OpCounts> {
         return None;
     }
 
-    let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-    let out = tempfile::NamedTempFile::new().expect("create tempfile");
-    std::fs::write(tmp.path(), pdf_bytes).expect("write tmp pdf");
+    // tempdir + plain paths: NamedTempFile keeps an open handle, which on
+    // Windows can block qpdf from writing to the output path.
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let tmp = dir.path().join("input.pdf");
+    let out = dir.path().join("output.qdf.pdf");
+    std::fs::write(&tmp, pdf_bytes).expect("write tmp pdf");
 
     let status = Command::new("qpdf")
         .args(["--qdf", "--object-streams=disable"])
-        .arg(tmp.path())
-        .arg(out.path())
+        .arg(&tmp)
+        .arg(&out)
         .status()
         .expect("spawn qpdf");
     assert!(status.success(), "qpdf --qdf failed: {:?}", status);
@@ -42,7 +45,7 @@ pub fn count_ops(pdf_bytes: &[u8]) -> Option<OpCounts> {
     // images, etc.), so the output is not valid UTF-8. Scan bytes
     // directly — PDF operators we care about are ASCII-only and sit at
     // the end of a line, so suffix matching on byte slices works.
-    let qdf = std::fs::read(out.path()).expect("read qdf output");
+    let qdf = std::fs::read(&out).expect("read qdf output");
     let mut c = OpCounts::default();
     for raw in qdf.split(|&b| b == b'\n') {
         // Strip trailing \r on CRLF lines.
