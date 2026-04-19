@@ -500,18 +500,12 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
             if let Some(pct) = lp.to_percentage() {
                 VerticalAlign::Percent(pct.0)
             } else {
-                // Note: for calc() mixed values like `calc(10px + 50%)`,
-                // to_percentage() returns None and we resolve with basis=0,
-                // which drops the percentage component. This is a known
-                // limitation — calc() in vertical-align is extremely rare.
-                //
-                // `.resolve(Length::new(0.0)).px()` returns a CSS-px scalar;
-                // multiply by `PX_TO_PT` because paragraph.rs consumes this
-                // value against pt-denominated baselines/metrics (the whole
-                // Pageable tree is in pt since PR #101).
-                const PX_TO_PT: f32 = 0.75;
+                // `.px()` here is parley/stylo's CSS-px scalar. The Pageable
+                // tree is in pt, so convert. For calc() with percentage
+                // components the basis-0 resolve silently drops them —
+                // acceptable because calc() on vertical-align is rare.
                 let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
-                VerticalAlign::Length(px * PX_TO_PT)
+                VerticalAlign::Length(crate::convert::px_to_pt(px))
             }
         }
     }
@@ -544,6 +538,18 @@ pub struct MulticolProps {
 ///
 /// Returns `None` when the node is not a multicol container (i.e. both
 /// `column-count` and `column-width` are `auto`).
+/// Cheap check: is this node a multicol container?
+///
+/// Uses stylo's `ComputedValues::is_multicol` (`column-width` or
+/// `column-count` non-auto). Prefer this over `extract_multicol_props` when
+/// only the bool is needed — it avoids the `clone_column_*` calls used to
+/// build the struct.
+pub fn is_multicol_container(node: &blitz_dom::Node) -> bool {
+    node.primary_styles()
+        .map(|s| s.is_multicol())
+        .unwrap_or(false)
+}
+
 pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
     use style::values::computed::length::{
         NonNegativeLengthOrAuto, NonNegativeLengthPercentageOrNormal,

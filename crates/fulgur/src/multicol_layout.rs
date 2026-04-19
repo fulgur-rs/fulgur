@@ -1,29 +1,12 @@
 //! Taffy custom layout hook for CSS Multi-column Layout.
 //!
-//! ## Why a wrapper
-//!
-//! `taffy 0.9.2` has no multicol display mode and `blitz-dom 0.2.4` treats
-//! multicol containers as plain blocks. To give multicol containers their own
-//! layout semantics without forking either crate, fulgur interposes a
-//! [`FulgurLayoutTree`] wrapper between Taffy and the `BaseDocument`. Taffy
-//! sees our wrapper as the `LayoutPartialTree` and recurses through it; the
-//! wrapper intercepts multicol containers and runs
-//! [`compute_multicol_layout`] on them, delegating everything else to
-//! `BaseDocument`'s built-in dispatch.
-//!
-//! This follows the same pattern as blitz's own
-//! [`blitz_dom::BaseDocument::compute_inline_layout`], which is plugged into
-//! Taffy via `compute_leaf_layout` for inline-root elements. fulgur reuses
-//! that mechanism one level up for multicol.
-//!
-//! ## Scaffold scope (A-1b)
-//!
-//! This file delivers only the wiring: a wrapper that delegates to blitz and
-//! a custom-compute stub that records interception so tests can prove Taffy
-//! recurses through fulgur when a multicol container is encountered. Phase
-//! A-2b replaces the stub with the real column-fill-balance distribution.
-
-use std::cell::Cell;
+//! [`FulgurLayoutTree`] wraps a [`blitz_dom::BaseDocument`] as a Taffy
+//! `LayoutPartialTree`, intercepts multicol containers, and routes them
+//! through [`compute_multicol_layout`]. Everything else delegates to
+//! `BaseDocument`'s built-in dispatch. The pattern follows blitz's own
+//! [`blitz_dom::BaseDocument::compute_inline_layout`], where Parley is wired
+//! into Taffy via `compute_leaf_layout`; multicol uses the same mechanism
+//! one layer up.
 
 use blitz_dom::BaseDocument;
 use taffy::{
@@ -31,23 +14,21 @@ use taffy::{
     RequestedAxis, RoundTree, RunMode, Size, SizingMode, TraversePartialTree, TraverseTree,
 };
 
-type Atom = style::Atom;
-
 /// Taffy tree wrapper around a `BaseDocument` that intercepts multicol
 /// containers and routes them through fulgur's own layout.
 pub struct FulgurLayoutTree<'a> {
-    pub doc: &'a mut BaseDocument,
-    /// Count of multicol nodes the wrapper has laid out this run. Used by
-    /// integration tests to verify the hook fires.
-    pub multicol_hits: Cell<u32>,
+    pub(crate) doc: &'a mut BaseDocument,
+}
+
+/// One-shot entry used by the render pipeline after `blitz_adapter::resolve`.
+/// Runs the multicol Taffy hook on every multicol subtree in the document.
+pub fn run_pass(doc: &mut BaseDocument) {
+    FulgurLayoutTree::new(doc).layout_multicol_subtrees();
 }
 
 impl<'a> FulgurLayoutTree<'a> {
     pub fn new(doc: &'a mut BaseDocument) -> Self {
-        Self {
-            doc,
-            multicol_hits: Cell::new(0),
-        }
+        Self { doc }
     }
 
     /// Re-run Taffy layout for each multicol container in the tree.
@@ -105,16 +86,10 @@ impl<'a> FulgurLayoutTree<'a> {
         multicol_ids.len()
     }
 
-    /// True when the node carries non-default `column-count` or
-    /// `column-width`, i.e. it is a multicol container per CSS spec.
-    pub fn is_multicol(&self, node_id: NodeId) -> bool {
-        let Some(node) = self.doc.get_node(usize::from(node_id)) else {
-            return false;
-        };
-        // stylo exposes `is_multicol()` on ComputedValues for the servo
-        // engine (both column-count and column-width are engine:servo);
-        // see crates/fulgur/src/blitz_adapter.rs.
-        crate::blitz_adapter::extract_multicol_props(node).is_some()
+    fn is_multicol(&self, node_id: NodeId) -> bool {
+        self.doc
+            .get_node(usize::from(node_id))
+            .is_some_and(crate::blitz_adapter::is_multicol_container)
     }
 }
 
@@ -177,11 +152,11 @@ impl CacheTree for FulgurLayoutTree<'_> {
 
 impl LayoutPartialTree for FulgurLayoutTree<'_> {
     type CoreContainerStyle<'a>
-        = &'a taffy::Style<Atom>
+        = &'a taffy::Style<style::Atom>
     where
         Self: 'a;
 
-    type CustomIdent = Atom;
+    type CustomIdent = style::Atom;
 
     fn get_core_container_style(&self, node_id: NodeId) -> Self::CoreContainerStyle<'_> {
         self.doc.get_core_container_style(node_id)
@@ -233,33 +208,26 @@ pub fn resolve_column_layout(
     width: Option<f32>,
     gap: f32,
 ) -> (u32, f32) {
-    let capped = |raw_n: u32, total_w: f32, gap: f32| -> (u32, f32) {
-        let n = raw_n.max(1);
-        let col_w = (total_w - gap * (n as f32 - 1.0)) / n as f32;
-        (n, col_w.max(0.0))
+    // How many columns of width `w` (with `gap` between them) fit in `content_w`?
+    let fits_count = |w: f32| -> u32 {
+        let denom = w + gap;
+        if denom > 0.0 {
+            (((content_w + gap) / denom).floor() as u32).max(1)
+        } else {
+            1
+        }
     };
+    let capped = |n: u32| -> (u32, f32) {
+        let n = n.max(1);
+        let col_w = ((content_w - gap * (n as f32 - 1.0)) / n as f32).max(0.0);
+        (n, col_w)
+    };
+
     let width = width.filter(|&w| w > 0.0);
     match (count, width) {
-        (Some(n), None) => capped(n, content_w, gap),
-        (None, Some(w)) => {
-            let denom = w + gap;
-            let raw = if denom > 0.0 {
-                ((content_w + gap) / denom).floor() as u32
-            } else {
-                1
-            };
-            capped(raw, content_w, gap)
-        }
-        (Some(n), Some(w)) => {
-            let denom = w + gap;
-            let cap = if denom > 0.0 {
-                ((content_w + gap) / denom).floor() as u32
-            } else {
-                1
-            };
-            let used = n.min(cap.max(1));
-            capped(used, content_w, gap)
-        }
+        (Some(n), None) => capped(n),
+        (None, Some(w)) => capped(fits_count(w)),
+        (Some(n), Some(w)) => capped(n.min(fits_count(w))),
         (None, None) => (1, content_w.max(0.0)),
     }
 }
@@ -284,8 +252,6 @@ pub fn compute_multicol_layout(
     node_id: NodeId,
     inputs: taffy::tree::LayoutInput,
 ) -> taffy::LayoutOutput {
-    tree.multicol_hits.set(tree.multicol_hits.get() + 1);
-
     // 1. MulticolProps
     let Some(props) = tree
         .doc
@@ -465,26 +431,28 @@ fn fits_in_n_columns(measured: &[(NodeId, Size<f32>)], n: u32, budget: f32) -> b
 fn propagate_height_delta(doc: &mut BaseDocument, node_id: usize, delta: f32) {
     let mut current = node_id;
     while let Some(parent_id) = doc.get_node(current).and_then(|n| n.parent) {
-        // Collect siblings that come after `current` in the parent's
-        // layout children list.
-        let Some(parent_node) = doc.get_node(parent_id) else {
-            break;
+        let siblings_after: Vec<usize> = {
+            let Some(parent_node) = doc.get_node(parent_id) else {
+                break;
+            };
+            let Some(idx) = parent_node.children.iter().position(|&c| c == current) else {
+                break;
+            };
+            parent_node.children[idx + 1..].to_vec()
         };
-        let children: Vec<usize> = parent_node.children.clone();
-        let Some(idx) = children.iter().position(|&c| c == current) else {
-            break;
-        };
-        let siblings_after: Vec<usize> = children[idx + 1..].to_vec();
         for sibling in siblings_after {
             if let Some(node) = doc.get_node_mut(sibling) {
                 node.unrounded_layout.location.y += delta;
                 node.final_layout.location.y += delta;
             }
         }
-        // Grow the parent's size to match.
         if let Some(node) = doc.get_node_mut(parent_id) {
             node.unrounded_layout.size.height += delta;
             node.final_layout.size.height += delta;
+            // Invalidate Taffy's cached layout output for this ancestor;
+            // we just mutated its size, so a later layout pass must
+            // recompute rather than trust the pre-propagation entry.
+            node.cache.clear();
         }
         current = parent_id;
     }
@@ -497,7 +465,7 @@ fn collect_multicol_node_ids(doc: &BaseDocument) -> Vec<usize> {
         let Some(node) = doc.get_node(id) else {
             return;
         };
-        if crate::blitz_adapter::extract_multicol_props(node).is_some() {
+        if crate::blitz_adapter::is_multicol_container(node) {
             out.push(id);
         }
         for &child in &node.children {
@@ -530,11 +498,6 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 1, "one multicol container expected");
-        assert!(
-            tree.multicol_hits.get() >= 1,
-            "compute_multicol_layout should have been called, hits={}",
-            tree.multicol_hits.get()
-        );
     }
 
     #[test]
@@ -549,7 +512,6 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 0);
-        assert_eq!(tree.multicol_hits.get(), 0);
     }
 
     #[test]
@@ -571,7 +533,6 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 1);
-        assert!(tree.multicol_hits.get() >= 1);
 
         // Read back child positions from Taffy storage.
         let mc_ids = collect_multicol_node_ids(&doc);
@@ -719,10 +680,5 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 2);
-        assert!(
-            tree.multicol_hits.get() >= 2,
-            "both outer and inner multicol should fire, hits={}",
-            tree.multicol_hits.get()
-        );
     }
 }

@@ -169,16 +169,10 @@ impl Engine {
         }
 
         crate::blitz_adapter::resolve(&mut doc);
-
-        // CSS Multi-column Layout: re-run Taffy layout on multicol
-        // subtrees via fulgur's custom hook. Blitz treats multicol
-        // containers as plain blocks; this pass produces the balanced
-        // column layout and shifts siblings-after-multicol in lockstep.
-        // See docs/plans/2026-04-20-css-multicol-design.md.
-        {
-            let mut tree = crate::multicol_layout::FulgurLayoutTree::new(doc.deref_mut());
-            tree.layout_multicol_subtrees();
-        }
+        // Blitz treats multicol containers as plain blocks; route them
+        // through fulgur's Taffy hook so columns balance and siblings
+        // shift in lockstep. See docs/plans/2026-04-20-css-multicol-design.md.
+        crate::multicol_layout::run_pass(doc.deref_mut());
 
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
@@ -281,12 +275,7 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         crate::blitz_adapter::resolve(&mut doc);
-
-        // Multi-column layout pass (see render_html comment above).
-        {
-            let mut tree = crate::multicol_layout::FulgurLayoutTree::new(doc.deref_mut());
-            tree.layout_multicol_subtrees();
-        }
+        crate::multicol_layout::run_pass(doc.deref_mut());
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
