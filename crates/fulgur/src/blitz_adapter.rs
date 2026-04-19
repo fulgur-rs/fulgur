@@ -529,8 +529,9 @@ pub struct MulticolProps {
     pub column_count: Option<u32>,
     /// `column-width` in CSS pixels, or `None` for `auto`.
     pub column_width: Option<f32>,
-    /// `column-gap` in CSS pixels. `normal` resolves to `0.0`; the multicol
-    /// layer substitutes its own default (typically `1em`) when that happens.
+    /// `column-gap` in CSS pixels. The CSS default `normal` is resolved to
+    /// `1em` here per CSS Multi-column Level 1, so callers never see 0 for
+    /// an unset property.
     pub column_gap: f32,
 }
 
@@ -576,7 +577,10 @@ pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
             lp.0.to_used_value(style::values::computed::Length::new(0.0).into())
                 .to_f32_px()
         }
-        NonNegativeLengthPercentageOrNormal::Normal => 0.0,
+        // CSS Multi-column Level 1 `§4 column-gap`: used value of `normal`
+        // is `1em`. Resolve against the element's computed font-size so a
+        // column-gap-less multicol still has visual separation.
+        NonNegativeLengthPercentageOrNormal::Normal => styles.clone_font_size().used_size().px(),
     };
 
     Some(MulticolProps {
@@ -2415,7 +2419,13 @@ mod tests {
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, None);
         assert_eq!(props.column_width, Some(180.0));
-        assert_eq!(props.column_gap, 0.0, "column-gap: normal → 0.0");
+        // CSS Multi-column Level 1: `column-gap: normal` is `1em`. At the
+        // body's default 16px font-size, that lands at 16.
+        assert!(
+            (props.column_gap - 16.0).abs() < 0.01,
+            "column-gap: normal should resolve to 1em (16px at default font), got {}",
+            props.column_gap
+        );
     }
 
     #[test]
