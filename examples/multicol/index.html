@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Multi-column Layout</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>CSS Multi-column Layout</h1>
+  <p class="lead">
+    fulgur の multicol spike による段組みレイアウトのデモ。Parley の
+    <code>break_all_lines</code> を再呼び出しすることで、ブロック外幅ではなく
+    列幅で行分割されているかを視覚的に確認できる。
+  </p>
+
+  <h2>2 columns, balance (CSS default)</h2>
+  <div class="mc mc-2">
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>
+  </div>
+
+  <h2>3 columns, narrow gap</h2>
+  <div class="mc mc-3">
+    <p>新聞や雑誌で馴染みのある段組みレイアウトは、長い本文を読みやすい幅に分割し、ページ内の情報密度を高めるために使われる。ブラウザは <code>column-count</code> や <code>column-width</code> の指定に従い、要素内のコンテンツをバランスよく複数のカラムへ流し込む。fulgur もこの動きを再現すべく、Parley のレイアウト結果を列幅で再ブレイクしてから PDF へ描画する。</p>
+  </div>
+
+  <h2>column-width driven</h2>
+  <div class="mc mc-w">
+    <p>When <code>column-width</code> is specified instead of <code>column-count</code>, the browser derives the column count from the container width using <code>floor((content + gap) / (width + gap))</code>. The declared width acts as a target; actual columns are slightly wider so they tile perfectly. Narrow viewports gracefully fall back to a single column.</p>
+  </div>
+</body>
+</html>

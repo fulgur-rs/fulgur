@@ -909,7 +909,14 @@ impl ParagraphPageable {
         let Some(source) = self.reshape_source.clone() else {
             return;
         };
-        // Convert pt → CSS px for parley (parley works in CSS px).
+        // Parley is unit-agnostic — it operates on whatever scalar width we
+        // feed it. The source layout was originally built by Blitz at
+        // viewport scale = 1.0 with widths in CSS px, and its glyph
+        // advances / offsets are denominated in that same px scale. To
+        // avoid a unit mismatch when the re-broken offsets are later
+        // added to pt-based Pageable positions, convert avail_width
+        // (pt) → px before breaking, then scale resulting offsets back
+        // to pt when rebuilding the ShapedLines.
         let width_px = if source.px_to_pt > 0.0 {
             avail_width / source.px_to_pt
         } else {
@@ -972,6 +979,10 @@ impl ParagraphPageable {
                     decoration: style.decoration,
                     glyphs,
                     text: String::new(),
+                    // Keep parity with `convert::extract_paragraph`: store
+                    // parley's offset raw (draw_shaped_lines adds it to
+                    // a pt-based x; whatever unit parley uses flows
+                    // through unchanged for both code paths).
                     x_offset: glyph_run.offset(),
                     link: style.link,
                 }));
