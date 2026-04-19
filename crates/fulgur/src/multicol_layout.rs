@@ -277,8 +277,11 @@ pub fn compute_multicol_layout(
     let (n, col_w) =
         resolve_column_layout(container_w, props.column_count, props.column_width, gap);
 
-    // 3. Measure every child at col_w via Taffy. Re-using inputs.run_mode
-    //    so sizing passes stay consistent.
+    // 3. Measure every child at col_w via Taffy. We force
+    //    `PerformLayout` here regardless of `inputs.run_mode`: even when
+    //    our parent is merely sizing us (`ComputeSize`), we need real
+    //    child heights to run the balance distribution — without a
+    //    completed layout the per-column budget can't be decided.
     let children: Vec<NodeId> = (0..tree.child_count(node_id))
         .map(|i| tree.get_child_id(node_id, i))
         .collect();
