@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file.
 ### Release
 
 - v0.5.3
+- v0.5.4
 
 ## [0.5.2] - 2026-04-18
 
