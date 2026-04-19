@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "mitsuru",
+      "id": 10877,
+      "comment_id": 4275480647,
+      "created_at": "2026-04-19T08:07:12Z",
+      "repoId": 1184542356,
+      "pullRequestNo": 121
+    }
+  ]
 }
