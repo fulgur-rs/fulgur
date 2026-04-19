@@ -12,6 +12,7 @@ pub mod error;
 pub mod gcpm;
 pub mod image;
 pub(crate) mod link;
+pub mod multicol_layout;
 pub(crate) mod net;
 pub mod outline;
 pub mod pageable;
