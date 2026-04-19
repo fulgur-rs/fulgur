@@ -1,8 +1,8 @@
 # CSS Multi-column Layout Design
 
-**Date**: 2026-04-20
+**Date**: 2026-04-20 (revised after Phase A-2 spike)
 **Epic**: fulgur-qkg
-**Status**: Design approved, Phase A starting
+**Status**: Design v2 — Taffy custom-layout-hook direction
 
 ## Goal
 
@@ -15,7 +15,8 @@ reviewable and to derisk the pagination interaction.
 ### Phase A (MVP)
 
 - `column-count`, `column-width`, `column-gap`
-- `column-fill: auto` (fill the first column fully before advancing)
+- `column-fill: balance` (CSS default) — short content balanced across columns
+- `column-fill: auto` — fills first column completely before advancing
 - `column-span: all`
 - Page-spanning: a multicol container larger than one page keeps flowing across
   subsequent pages
@@ -24,8 +25,8 @@ reviewable and to derisk the pagination interaction.
 
 ### Phase B
 
-- `column-fill: balance` (CSS default; balance column heights)
 - `break-before`, `break-after` with `column | page | avoid`
+- Inline images, borders, and padding inside the column flow
 
 ### Phase C (follow-up epics)
 
@@ -35,13 +36,13 @@ reviewable and to derisk the pagination interaction.
 
 ## Why fulgur implements this itself
 
-- `taffy 0.9.2` has no multicol `Display` type; its `column_count` APIs are for
+- `taffy 0.9.2` has no multicol display mode; its `column_count` APIs are for
   CSS Grid tracks, not multicol.
 - `stylo 0.8.0` parses most `column-*` properties but `blitz-dom 0.2.4` does
   not lay them out — a multicol container is treated as a regular block.
 - So fulgur must own the column layout between Blitz (which gives us the
-  container's content box) and Krilla (which gets the final positioned
-  fragments).
+  styles + Parley-shaped inline content) and Krilla (which gets the final
+  positioned fragments).
 
 ### stylo engine gating (A-0 finding, 2026-04-20)
 
@@ -58,263 +59,163 @@ But these are **gecko-only** and therefore inaccessible via blitz:
 
 Impact on the plan:
 
-- Phase A only supports `column-fill: auto`, which is our hardcoded behaviour
-  anyway — no impact.
-- Phase A-4 (`column-rule-*`) cannot pull values from stylo. Decision: add a
-  thin custom CSS parser to A-4 that sniffs `column-rule-*` declarations from
-  inline `style="…"` and from top-level stylesheet rules using a minimal
-  selector matcher (tag / class / id). Full cascade reimplementation is
-  out-of-scope; richer selector support is a follow-up. The `cssparser` crate
-  is already a direct dep via `crates/fulgur/src/gcpm/parser.rs`.
+- `column-fill`: Phase A defaults to balance (CSS default). A thin stylesheet
+  parser lands alongside `column-rule-*` (A-4) and exposes an explicit
+  `auto` opt-out at the same time.
+- `column-rule-*`: A-4 adds a small custom CSS parser using `cssparser`
+  (already a dep via `crates/fulgur/src/gcpm/parser.rs`) that sniffs these
+  declarations from inline `style="…"` and top-level stylesheet rules with
+  a minimal tag / class / id selector matcher. Full cascade re-implementation
+  is out-of-scope.
 
-## Architecture
+## Architecture — Taffy custom layout hook
+
+After the v1 spike (see *Spike retrospective* below) exposed structural issues
+with the "reshape-after-Taffy" approach, the design pivots to integrating
+multicol **into** the layout pass itself. The direction mirrors Blitz's own
+solution for inline content, where Parley is wired into Taffy via a custom
+per-node layout function: fulgur registers a layout hook for multicol
+containers so Taffy sees the balanced column height as the container's
+intrinsic size and positions surrounding siblings accordingly.
 
 ```text
 HTML
-  ↓ Blitz (parse/style/layout)
-Styled DOM        ← column-* parsed by stylo, ignored by taffy
-  ↓ convert.rs
-Pageable tree     ← NEW: MulticolPageable
-  ↓ paginate.rs   (unchanged)
-Paginated fragments
-  ↓ render.rs
+  ↓ Blitz (parse + stylo styles + Parley shaping)
+Style-resolved DOM
+  ↓ fulgur layout pass (wraps blitz's BaseDocument as a Taffy tree with a
+  │                     custom multicol compute)
+Taffy layout output (includes correctly-sized multicol containers)
+  ↓ convert.rs (reads Taffy positions, builds Pageable tree)
+Pageable tree
+  ↓ paginate.rs (unchanged)
+  ↓ render.rs  (unchanged)
 Krilla PDF
 ```
 
-`paginate.rs` is not modified. `MulticolPageable` honours the existing
-`Pageable` trait contract (`wrap → split → draw`), so pagination treats it like
-any other block.
+Key property: **no post-pass reshape or dynamic height adjustment**. Taffy
+owns the single source of truth for every element's final layout, and
+multicol is just one more display mode it knows how to compute.
 
-## Types
+## Integration constraints
 
-```rust
-enum Segment {
-    ColumnGroup(Vec<Box<dyn Pageable>>),  // flows across N columns
-    SpanAll(Box<dyn Pageable>),           // full-width strip
-}
+- **No blitz fork.** fulgur ships to crates.io; forking blitz would block
+  publishing (transitive fork of stylo/taffy). All integration happens at
+  fulgur's boundary with blitz.
+- **Re-use blitz's inline shaping.** Parley is expensive; we must not re-shape
+  text that blitz already shaped. The custom multicol compute re-*breaks*
+  lines at `col_w` on the existing parley `Layout` clone (the same technique
+  the Phase A-2 spike validated).
+- **Taffy 0.9.2 as-is.** No taffy fork. Use `LayoutPartialTree` /
+  `compute_*_layout` public APIs only.
+- **Deterministic output.** Layout must be idempotent; the multicol compute
+  function must not rely on global state.
 
-struct ColumnRule {
-    width: f32,                           // pt
-    style: BorderStyle,                   // solid | dashed | dotted in Phase A
-    color: Color,
-}
+## Implementation plan
 
-struct MulticolPageable {
-    // Declared properties
-    column_count: Option<u32>,
-    column_width: Option<f32>,
-    column_gap: f32,
-    column_rule: Option<ColumnRule>,
-    segments: Vec<Segment>,
-    // Filled by wrap()
-    resolved_count: u32,
-    resolved_col_w: f32,
-    measured: Option<MeasuredSegments>,
-}
-```
+### Step 1 — Hook surface (spike)
 
-### Convert-time decomposition
+Prove the Taffy hook pattern works end-to-end:
 
-`convert.rs` detects a multicol container (any block with `column-count` or
-`column-width` set) and walks its subtree. Children are grouped into
-`ColumnGroup` segments, split at descendants that carry `column-span: all` —
-those become their own `SpanAll` segment.
+- Identify how Blitz dispatches per-node layout inside `BaseDocument::resolve`.
+- Determine the cheapest way for fulgur to inject a custom compute for
+  multicol containers without editing blitz:
+  - Option a. Re-run Taffy on multicol subtrees using our own
+    `LayoutPartialTree` wrapper, writing results back into blitz's tree.
+  - Option b. Wrap `BaseDocument` entirely; fulgur drives Taffy, delegating
+    non-multicol layout to blitz's built-in code paths.
+- Build a minimum `compute_multicol_layout(tree, node_id, inputs)` that
+  re-breaks inline content at `col_w` and returns a `LayoutOutput` with the
+  correct size. Exercise it on a single fixture.
 
-Rules:
+Deliverable: working 2-column block with text that doesn't overlap
+siblings and respects the container's natural balanced height.
 
-- Nested `column-span: all` inside a `SpanAll` subtree is ignored (per spec,
-  span resolves against the outermost multicol only).
-- Empty `ColumnGroup` segments (e.g. when the first child is span-all) are not
-  emitted.
-- Child Pageables are constructed here but not measured. Measurement happens
-  in `MulticolPageable::wrap()` once the column width is known.
+### Step 2 — Port A-1 / A-2 semantics
 
-### Column sizing
+- Column-count / column-width / column-gap → the `resolve_column_layout`
+  function from the v1 spike (already unit-tested) ports over unchanged.
+- Reshape via `ParleyReshapeSource` — the mechanism works and can be lifted.
+  Instead of caching on `ParagraphPageable`, the hook invokes it inline when
+  Taffy asks for the multicol's size.
+- `column-fill: balance` — run `distribute_with_fill` inside the hook,
+  matching the v1 spike's budget search. Because Taffy sees the balanced
+  height directly, the parent-sibling-overflow issue from v1 disappears.
 
-```rust
-fn resolve_column_layout(
-    container_content_w: f32,
-    count: Option<u32>,
-    width: Option<f32>,
-    gap: f32,
-) -> (u32, f32) {
-    match (count, width) {
-        (Some(n), None) => (n, (container_content_w - gap * (n as f32 - 1.0)) / n as f32),
-        (None, Some(w)) => {
-            let n = ((container_content_w + gap) / (w + gap)).floor().max(1.0) as u32;
-            (n, (container_content_w - gap * (n as f32 - 1.0)) / n as f32)
-        }
-        (Some(n), Some(w)) => {
-            let n_cap = ((container_content_w + gap) / (w + gap)).floor().max(1.0) as u32;
-            let used = n.min(n_cap);
-            (used, (container_content_w - gap * (used as f32 - 1.0)) / used as f32)
-        }
-        (None, None) => unreachable!("caller filters non-multicol blocks"),
-    }
-}
-```
+### Step 3 — A-3: column-span: all
 
-`.floor()` is used explicitly to keep the computation deterministic and
-platform-independent.
+At layout time, a descendant with `column-span: all` truncates the current
+column-group, lays itself out at the container's full content width, then
+starts a new column-group below. The custom compute walks the flattened
+children list and dispatches per-segment.
 
-## Pageable trait semantics
+### Step 4 — A-4: column-rule + custom CSS parser
 
-### `wrap(content_width) -> Size`
+Parse `column-rule-*` and `column-fill` from the stylesheet into a side-table
+keyed by DOM node id. The multicol compute consults the side-table at layout
+time and emits rule geometry alongside the positioned columns, which the
+render pass paints between adjacent non-empty columns.
 
-1. Resolve `(n, col_w)` from `resolve_column_layout`.
-2. For each `ColumnGroup`, call `child.wrap(col_w)` on every child and sum to
-   get the group's natural height. The wrap-reported height is approximated as
-   `ceil(natural_h / n)`.
-3. For each `SpanAll`, call `child.wrap(content_width)` (full width).
-4. Return `Size { width: content_width, height: sum(segment heights) }`.
+### Step 5 — A-5: break-inside: avoid
 
-The returned height is the theoretical minimum; actual placement is decided by
-`split`.
+Children flagged with `break-inside: avoid` are promoted to the next column
+(or the next page at the last column) when they don't fit the current
+column budget. Integrates cleanly with the hook's distribute step.
 
-### `split(available_height) -> (Fragment, Option<Self>)`
+### Step 6 — A-6: fixtures + VRT + examples
 
-Greedy `column-fill: auto`:
+Integration tests per `crates/fulgur/tests/multicol_integration.rs` plus VRT
+goldens in `crates/fulgur-vrt`:
 
-1. Walk segments in order.
-2. `SpanAll`: defer to `child.split(available_height)`. If the child returns a
-   remainder, emit a new `MulticolPageable` with that remainder + all
-   subsequent segments.
-3. `ColumnGroup`:
-   - Start at column 1 with budget `available_height`.
-   - For each child:
-     - If it fits: place it, decrement budget.
-     - If not and `child.avoid_break_inside()` is true and `col_idx < n - 1`:
-       advance to the next column, retry.
-     - If not and we can split it: `child.split(budget)` → place the filled
-       part, carry the remainder into the next column.
-     - If we run out of columns with content remaining: emit the remainder as
-       a new `MulticolPageable` for the next page.
-4. Degenerate case: if `avoid_break_inside` cannot be honoured anywhere
-   (natural height > full page), fall back to a normal split. This is
-   spec-conformant and avoids infinite loops.
+- `multicol-basic-2col`
+- `multicol-rule-solid`
+- `multicol-span-all`
+- `multicol-page-spanning`
+- `multicol-break-inside-avoid`
+- `multicol-column-width-resolution`
+- `multicol-balance`
 
-### `draw(surface, fragment)`
+Add a headline example under `examples/multicol/`.
 
-- For each column, draw its pieces at `(col_idx * (col_w + gap), piece.y)`.
-- For each `SpanAll` strip, draw at `x = 0` with full width.
-- Draw column rules between adjacent columns where **both** have content. The
-  rule spans `[max(top_i-1, top_i), min(bot_i-1, bot_i)]` (i.e. the shorter of
-  the two column content extents).
+## Spike retrospective — why v1 (reshape-after-Taffy) was shelved
 
-## Page-spanning
+The v1 design (see the commit history on `feature/fulgur-qkg-multicol-phase-a`
+and PR #123) introduced a `MulticolPageable` that re-broke inline content at
+`col_w` *after* Taffy laid out the tree, then distributed across columns at
+the Pageable layer. The spike proved three things:
 
-Page-spanning falls out for free from `split`'s remainder contract:
+1. **Reshape works.** Parley's `Layout::break_all_lines(Some(width))` does
+   produce correctly-widthed lines without re-shaping glyphs. A round-trip
+   test confirmed ≥1.5× line count at column width vs container width.
+2. **`column-fill: balance` is tractable.** A greedy budget-search
+   distribution converges in ≤20 iterations and visually balances.
+3. **Taffy-level layout is non-negotiable.** The blocker is structural:
+   Taffy positions siblings after a multicol using the pre-reshape single-
+   column height, and there is no safe way to re-flow them afterwards. A
+   naive "recompute parent `pc.y` from cumulative heights" pass broke
+   unrelated paginate tests that intentionally pack children at duplicate y
+   positions. Correctly propagating a post-layout height change requires a
+   second Taffy pass, which is effectively what this v2 design does up-front.
 
-```text
-Page 1 (800pt budget)           Page 2 (800pt budget)
-┌──┬──┬──┐                      ┌──┬──┬──┐
-│A │A │B │  ← split(800)        │C │C │D │  ← remainder.split(800)
-│  │  │B │     fragment            │  │  │     fragment
-│  │  │  │     remainder = {C,D}   │  │  │     remainder = None
-└──┴──┴──┘                      └──┴──┴──┘
-```
+Artifacts to carry forward from the spike:
 
-The `remainder` reuses `resolved_count` / `resolved_col_w`; it does not
-re-wrap. This assumes page width is constant across the document, which is
-currently a fulgur-wide invariant. A docstring on the remainder path records
-this so future per-page-size support knows where to trigger re-wrapping.
+- `blitz_adapter::extract_multicol_props` — already on this branch (A-0).
+- `blitz_adapter::has_column_span_all` — already on this branch.
+- `extract_vertical_align` px → pt fix — unrelated drive-by from the spike,
+  already on this branch.
+- Design ideas about `ParleyReshapeSource`, `resolve_column_layout`,
+  `distribute_with_fill`, and balance search — re-implemented inside the
+  Taffy hook.
 
-## column-rule rendering
-
-Per CSS spec, the rule is drawn in the centre of the gap, **only between
-columns that both carry content**, and its vertical extent is the shorter of
-the two adjacent column content heights.
-
-```rust
-fn draw_column_rules(&self, surface: &mut Surface, frag: &MulticolFragment) {
-    let Some(rule) = &self.column_rule else { return };
-    for i in 1..frag.columns.len() {
-        if !frag.columns[i - 1].has_content || !frag.columns[i].has_content {
-            continue;
-        }
-        let x = frag.col_x(i) - self.column_gap / 2.0;
-        let y_top = frag.columns[i - 1].content_top.max(frag.columns[i].content_top);
-        let y_bot = frag.columns[i - 1].content_bot.min(frag.columns[i].content_bot);
-        draw_border_line(surface, x, y_top, y_bot, rule.width, rule.style, rule.color);
-    }
-}
-```
-
-Phase A supports `solid` / `dashed` / `dotted`. Other border styles are
-deferred.
-
-## Edge cases
-
-- `column-count: 1` → behaves as a regular block. Phase A accepts it without a
-  dedicated fast path.
-- Empty multicol → returns zero height, draws nothing.
-- Nested multicol → **not supported in Phase A**. An inner multicol container
-  is laid out as a plain block (its `column-*` props are ignored) with a log
-  warning. Re-evaluated in a follow-up epic.
-- `column-width: W` with `W > content_w` → clamp to 1 column, width =
-  `content_w`.
-
-## Testing
-
-### Unit tests
-
-- `resolve_column_layout`: nine combinations of (count, width, gap) plus
-  edge cases (`content_w < col_w`, `gap > content_w`).
-- `MulticolPageable::wrap`: basic / with SpanAll / empty segments.
-- `split` branches: fits in one column / splits mid-child / break-inside
-  avoid promotes to next column / promotes to next page / SpanAll remainder.
-- `draw_column_rules`: both-have-content / one empty / SpanAll-adjacent.
-
-### Integration tests
-
-`crates/fulgur/tests/multicol_integration.rs`, mirroring
-`gcpm_integration.rs`:
-
-- basic 2-column, basic 3-column
-- `column-width` driven
-- with `column-span: all`
-- with `break-inside: avoid`
-- multi-page spanning
-
-### VRT
-
-`crates/fulgur-vrt` with at least six fixtures for Phase A:
-
-1. `multicol-basic-2col`
-2. `multicol-rule-solid`
-3. `multicol-span-all`
-4. `multicol-page-spanning`
-5. `multicol-break-inside-avoid`
-6. `multicol-column-width-resolution`
-
-Rendered via `pdftocairo -png -r 100 -f 1 -l 1`, snapshotted and diffed.
-
-## Determinism
-
-Column sizing is pure arithmetic with `.floor()`. All per-segment data lives
-in `Vec`/`BTreeMap` (no `HashMap` for iteration-order-sensitive state). The
-font-fallback caveat documented in `CLAUDE.md` still applies.
-
-## Phase A work breakdown
-
-Will be filed as sub-issues under epic fulgur-qkg:
+## Phase A work breakdown (v2)
 
 | Seq | Title | Type |
 |---|---|---|
-| A-0 | multicol: verify stylo parsing + thread column-* through blitz_adapter | task |
-| A-1 | multicol: `MulticolPageable` scaffold + `resolve_column_layout` + convert integration | feature |
-| A-2 | multicol: `wrap` / `split` / `draw` for `column-fill: auto` | feature |
-| A-3 | multicol: `column-span: all` segment decomposition + page-spanning | feature |
-| A-4 | multicol: `column-rule-*` rendering | feature |
-| A-5 | multicol: `break-inside: avoid` handling | feature |
+| A-0 | multicol: verify stylo parsing + thread column-* through blitz_adapter | task (closed) |
+| A-1b | multicol: Taffy-hook scaffold — integrate custom compute for multicol containers | feature |
+| A-2b | multicol: column-fill: balance + auto inside the Taffy hook | feature |
+| A-3 | multicol: `column-span: all` | feature |
+| A-4 | multicol: `column-rule-*` + custom stylesheet parser | feature |
+| A-5 | multicol: `break-inside: avoid` | feature |
 | A-6 | multicol: VRT fixtures + integration tests + examples | task |
 
-Dependencies: `A-0 → A-1 → A-2 → {A-3, A-4, A-5}` (parallelisable) `→ A-6`.
-
-## Phase B work breakdown (draft — to be refined after Phase A lands)
-
-| Seq | Title | Type |
-|---|---|---|
-| B-1 | multicol: `column-fill: balance` | feature |
-| B-2 | multicol: `break-before` / `break-after` (`column`, `page`, `avoid`) | feature |
-| B-3 | multicol: Phase B VRT fixtures | task |
+Dependency chain: `A-0 → A-1b → A-2b → {A-3, A-4, A-5}` (parallelisable) `→ A-6`.
