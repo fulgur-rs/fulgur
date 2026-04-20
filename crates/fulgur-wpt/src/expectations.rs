@@ -12,6 +12,10 @@
 //! Blank lines and lines starting with `#` are ignored. An inline `#`
 //! starts a trailing comment that is captured but does not affect
 //! parsing. Duplicate entries for the same path are rejected.
+//!
+//! Note: `#` anywhere inside a line begins an inline comment. WPT test
+//! paths do not contain `#`, so splitting on the first `#` is safe in
+//! practice.
 
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
@@ -32,7 +36,8 @@ pub struct ExpectationFile {
 #[derive(Debug, Clone)]
 struct Entry {
     expectation: Expectation,
-    #[allow(dead_code)] // comment is informational; kept for future reporting
+    /// Optional trailing `# ...` comment. Exposed via
+    /// [`ExpectationFile::comment`] for report output.
     comment: Option<String>,
 }
 
@@ -83,6 +88,15 @@ impl ExpectationFile {
         self.entries.get(test_path).map(|e| e.expectation)
     }
 
+    /// Return the comment associated with an entry, if any.
+    /// Useful for human-readable report output explaining why a test is
+    /// marked FAIL or SKIP.
+    pub fn comment(&self, test_path: &str) -> Option<&str> {
+        self.entries
+            .get(test_path)
+            .and_then(|e| e.comment.as_deref())
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -102,14 +116,28 @@ pub enum Verdict {
 }
 
 /// Compare the declared expectation with the observed result.
-pub fn judge(declared: Option<Expectation>, observed: Option<Expectation>) -> Verdict {
+///
+/// `observed` is not optional because the harness always produces a
+/// concrete outcome (or errors before calling `judge`). Keeping it
+/// non-Optional makes the match exhaustive and prevents an accidental
+/// `None` from collapsing into the catch-all `Ok` arm.
+pub fn judge(declared: Option<Expectation>, observed: Expectation) -> Verdict {
+    use Expectation::{Fail, Pass, Skip};
     match (declared, observed) {
-        (Some(Expectation::Skip), _) => Verdict::Skipped,
-        (Some(d), Some(o)) if d == o => Verdict::Ok,
-        (Some(Expectation::Pass), Some(Expectation::Fail)) => Verdict::Regression,
-        (Some(Expectation::Fail), Some(Expectation::Pass)) => Verdict::Promotion,
+        // Declared SKIP wins over whatever we observed.
+        (Some(Skip), _) => Verdict::Skipped,
+        // No entry in the expectations file → unknown test.
         (None, _) => Verdict::UnknownTest,
-        _ => Verdict::Ok,
+        // Matches.
+        (Some(Pass), Pass) => Verdict::Ok,
+        (Some(Fail), Fail) => Verdict::Ok,
+        // Mismatches.
+        (Some(Pass), Fail) => Verdict::Regression,
+        (Some(Fail), Pass) => Verdict::Promotion,
+        // Declared PASS/FAIL + observed SKIP: treated as Ok. The harness
+        // opted out of running the test for some reason; not a regression.
+        (Some(Pass), Skip) => Verdict::Ok,
+        (Some(Fail), Skip) => Verdict::Ok,
     }
 }
 
@@ -154,7 +182,7 @@ SKIP css/css-page/c.html  # manual
     #[test]
     fn judge_pass_pass_is_ok() {
         assert_eq!(
-            judge(Some(Expectation::Pass), Some(Expectation::Pass)),
+            judge(Some(Expectation::Pass), Expectation::Pass),
             Verdict::Ok
         );
     }
@@ -162,7 +190,7 @@ SKIP css/css-page/c.html  # manual
     #[test]
     fn judge_pass_fail_is_regression() {
         assert_eq!(
-            judge(Some(Expectation::Pass), Some(Expectation::Fail)),
+            judge(Some(Expectation::Pass), Expectation::Fail),
             Verdict::Regression
         );
     }
@@ -170,7 +198,7 @@ SKIP css/css-page/c.html  # manual
     #[test]
     fn judge_fail_pass_is_promotion() {
         assert_eq!(
-            judge(Some(Expectation::Fail), Some(Expectation::Pass)),
+            judge(Some(Expectation::Fail), Expectation::Pass),
             Verdict::Promotion
         );
     }
@@ -178,14 +206,14 @@ SKIP css/css-page/c.html  # manual
     #[test]
     fn judge_skip_wins() {
         assert_eq!(
-            judge(Some(Expectation::Skip), Some(Expectation::Pass)),
+            judge(Some(Expectation::Skip), Expectation::Pass),
             Verdict::Skipped
         );
     }
 
     #[test]
     fn judge_unknown_declared() {
-        assert_eq!(judge(None, Some(Expectation::Pass)), Verdict::UnknownTest);
+        assert_eq!(judge(None, Expectation::Pass), Verdict::UnknownTest);
     }
 
     // ---- Extra coverage ----------------------------------------------------
@@ -219,13 +247,24 @@ SKIP css/css-page/c.html  # manual
     }
 
     // Current contract: "declared PASS, observed SKIP" is not a regression.
-    // It falls into the catch-all OK arm. Pinning the behaviour so any
-    // future tightening of the rule is deliberate rather than accidental.
+    // It is pinned explicitly by the match so any future tightening of
+    // the rule is deliberate rather than accidental.
     #[test]
     fn judge_pass_declared_skip_observed_is_ok() {
         assert_eq!(
-            judge(Some(Expectation::Pass), Some(Expectation::Skip)),
+            judge(Some(Expectation::Pass), Expectation::Skip),
             Verdict::Ok
         );
+    }
+
+    #[test]
+    fn comment_is_exposed_per_entry() {
+        let src =
+            "PASS a.html  # all good\nFAIL b.html\nSKIP c.html  # manual interaction needed\n";
+        let f = ExpectationFile::parse(src).unwrap();
+        assert_eq!(f.comment("a.html"), Some("all good"));
+        assert_eq!(f.comment("b.html"), None);
+        assert_eq!(f.comment("c.html"), Some("manual interaction needed"));
+        assert_eq!(f.comment("nonexistent.html"), None);
     }
 }
