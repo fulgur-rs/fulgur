@@ -85,6 +85,13 @@ pub struct ConvertContext<'a> {
     /// defaults for `h1`-`h6` come from `FULGUR_UA_CSS` applied by the
     /// engine before `BookmarkPass` runs.
     pub bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo>,
+    /// Phase A `column-*` side-table harvested by
+    /// [`crate::blitz_adapter::extract_column_style_table`]. Task 5 reads
+    /// `rule` properties from here when wrapping multicol containers in
+    /// `MulticolRulePageable`. `BTreeMap` keeps iteration deterministic
+    /// — which matters because the wrapper draws rule segments in table
+    /// iteration order and drives PDF output.
+    pub column_styles: crate::column_css::ColumnStyleTable,
 }
 
 impl ConvertContext<'_> {
@@ -3196,6 +3203,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3239,6 +3247,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3286,6 +3295,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3341,6 +3351,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3387,6 +3398,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3649,6 +3661,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3679,6 +3692,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3712,6 +3726,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3772,6 +3787,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node,
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -3817,6 +3833,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node,
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -3878,6 +3895,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node,
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -3942,6 +3960,7 @@ mod tests {
                 string_set_by_node: HashMap::new(),
                 counter_ops_by_node: HashMap::new(),
                 bookmark_by_node: HashMap::new(),
+                column_styles: crate::column_css::ColumnStyleTable::new(),
             }
         }};
     }
@@ -4166,6 +4185,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         assert!(
@@ -4188,6 +4208,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         // Empty <li> with no AssetBundle fonts: marker may not render if no
@@ -4210,6 +4231,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         assert!(

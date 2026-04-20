@@ -24,11 +24,12 @@
 //!   canonical CSS factor `72 / 96`. `em`, `rem`, and `%` are deliberately
 //!   treated as invalid for Phase A.
 
-// Task 2 (blitz_adapter harvester) and Task 5 (convert.rs wrapper) are the
-// first callers. Until they land, every public item here looks dead to
-// rustc — silence the warnings at module scope rather than sprinkling
-// individual attributes. Remove this attribute when Task 2 ships.
-#![allow(dead_code)]
+// Task 2 wires the production callers of `extract_column_style_table` /
+// `parse_stylesheet` / `build_column_style_table`; Task 5 will consume the
+// `ColumnStyleProps` / `ColumnRuleSpec` / `ColumnFill` fields to wrap
+// multicol containers with `MulticolRulePageable`. Per-item `dead_code`
+// allows live below for surfaces that Task 5 reaches but Task 2 only
+// populates.
 
 use std::collections::BTreeMap;
 

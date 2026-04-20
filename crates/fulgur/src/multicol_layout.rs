@@ -83,19 +83,42 @@ pub(crate) fn partition_children_into_segments(
 
 /// Taffy tree wrapper around a `BaseDocument` that intercepts multicol
 /// containers and routes them through fulgur's own layout.
+///
+/// `column_styles` carries the Phase A `column-*` side-table harvested by
+/// [`crate::blitz_adapter::extract_column_style_table`] — the multicol
+/// layout branch will read `column-fill` from it to switch between balanced
+/// and greedy ("auto") column filling. It is borrowed (rather than owned)
+/// because the tree lives for a single layout pass; the engine keeps the
+/// owning `ColumnStyleTable` alive across both this pass and the subsequent
+/// convert pass.
 pub struct FulgurLayoutTree<'a> {
     pub(crate) doc: &'a mut BaseDocument,
+    // Task 3 will read this field from `compute_multicol_layout` /
+    // `layout_column_group` to branch on `ColumnFill::Auto`; until that lands,
+    // the field is populated but never consulted, so silence the warning
+    // locally rather than leaving `#![allow(dead_code)]` at module scope.
+    #[allow(dead_code)]
+    pub(crate) column_styles: &'a crate::column_css::ColumnStyleTable,
 }
 
 /// One-shot entry used by the render pipeline after `blitz_adapter::resolve`.
 /// Runs the multicol Taffy hook on every multicol subtree in the document.
-pub fn run_pass(doc: &mut BaseDocument) {
-    FulgurLayoutTree::new(doc).layout_multicol_subtrees();
+///
+/// `column_styles` is the Phase A side-table harvested by
+/// [`crate::blitz_adapter::extract_column_style_table`]. Callers that do not
+/// need `column-fill` / `column-rule` resolution can pass an empty table
+/// (e.g. test helpers — see the `FulgurLayoutTree::new` call sites in the
+/// unit-test modules below).
+pub fn run_pass(doc: &mut BaseDocument, column_styles: &crate::column_css::ColumnStyleTable) {
+    FulgurLayoutTree::new(doc, column_styles).layout_multicol_subtrees();
 }
 
 impl<'a> FulgurLayoutTree<'a> {
-    pub fn new(doc: &'a mut BaseDocument) -> Self {
-        Self { doc }
+    pub fn new(
+        doc: &'a mut BaseDocument,
+        column_styles: &'a crate::column_css::ColumnStyleTable,
+    ) -> Self {
+        Self { doc, column_styles }
     }
 
     /// Re-run Taffy layout for each multicol container in the tree.
@@ -710,7 +733,8 @@ mod tests {
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 1, "one multicol container expected");
     }
@@ -724,7 +748,8 @@ mod tests {
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 0);
     }
@@ -745,7 +770,8 @@ mod tests {
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 1);
 
@@ -790,7 +816,8 @@ mod tests {
         let mc_node_id = NodeId::from(mc_id_raw);
         let pre_hook_height = doc.get_unrounded_layout(mc_node_id).size.height;
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let post_hook_height = doc.get_unrounded_layout(mc_node_id).size.height;
@@ -857,7 +884,8 @@ mod tests {
             "sanity: after must not overlap multicol (y={after_y_before}, mc_bottom={mc_bottom_before})"
         );
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let mc_h_after = doc.get_node(mc_id).unwrap().unrounded_layout.size.height;
@@ -892,7 +920,8 @@ mod tests {
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         let laid_out = tree.layout_multicol_subtrees();
         assert_eq!(laid_out, 2);
     }
@@ -1135,7 +1164,8 @@ mod tests {
 
         let before_y_pre = doc.get_node(before_id).unwrap().unrounded_layout.location.y;
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let before_y_post = doc.get_node(before_id).unwrap().unrounded_layout.location.y;
@@ -1325,7 +1355,8 @@ mod tests {
 
         let outer_h_pre = doc.get_node(outer_id).unwrap().unrounded_layout.size.height;
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let outer_h_post = doc.get_node(outer_id).unwrap().unrounded_layout.size.height;
@@ -1352,7 +1383,8 @@ mod tests {
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
 
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         // Sanity: two distinct x positions exist after the refactor.
@@ -1407,7 +1439,8 @@ mod tests {
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let mc_w = layout_of_id(&doc, "mc").size.width;
@@ -1439,7 +1472,8 @@ mod tests {
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let before = layout_of_id(&doc, "before");
@@ -1471,7 +1505,8 @@ mod tests {
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let title = layout_of_id(&doc, "title");
@@ -1501,7 +1536,8 @@ mod tests {
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let a = layout_of_id(&doc, "a");
@@ -1528,7 +1564,8 @@ mod tests {
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         crate::blitz_adapter::resolve(&mut doc);
-        let mut tree = FulgurLayoutTree::new(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
         let a = layout_of_id(&doc, "a");

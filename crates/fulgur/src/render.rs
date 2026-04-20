@@ -522,6 +522,7 @@ pub fn render_to_pdf_with_gcpm(
                     string_set_by_node: HashMap::new(),
                     counter_ops_by_node: HashMap::new(),
                     bookmark_by_node: HashMap::new(),
+                    column_styles: crate::column_css::ColumnStyleTable::new(),
                 };
                 let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
                 render_cache.insert(cache_key.clone(), pageable);

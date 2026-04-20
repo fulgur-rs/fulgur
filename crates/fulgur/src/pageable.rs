@@ -3356,6 +3356,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
@@ -3405,6 +3406,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
@@ -3448,6 +3450,7 @@ mod tests {
             string_set_by_node: HashMap::new(),
             counter_ops_by_node: HashMap::new(),
             bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
