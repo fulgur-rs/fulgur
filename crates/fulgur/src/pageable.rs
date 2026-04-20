@@ -1226,6 +1226,9 @@ fn apply_border_style(
             }),
             ..stroke
         }),
+        // NOTE: `Double` here is the solid-stroke fallback used by
+        // draw_border_line / draw_block_border when width < 3 (CSS Backgrounds L3).
+        // Returning `None` for Double would silently break that fallback.
         BorderStyleValue::Double
         | BorderStyleValue::Groove
         | BorderStyleValue::Ridge
