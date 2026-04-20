@@ -1,0 +1,7 @@
+{
+  "last_failure": "2026-04-20T18:12:51.101064894+09:00",
+  "failure_count": 2,
+  "backoff_until": "2026-04-20T18:13:51.101065145+09:00",
+  "needs_manual_sync": false,
+  "failure_reason": "failed to pull from sync branch: git fetch failed in worktree: signal: killed\nfatal: unable to access 'https://github.com/fulgur-rs/fulgur.git/': SSL connection timeout\n"
+}
