@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuzzyTolerance {
@@ -122,6 +122,121 @@ fn parse_range(src: &str, default_lo: u32, default_hi: u32) -> Result<(u32, u32)
             Ok((lo, hi))
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reftest {
+    pub test: PathBuf,
+    pub classification: ReftestKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReftestKind {
+    /// Single rel=match + optional fuzzy tolerance. Phase 1 target.
+    Match {
+        ref_path: PathBuf,
+        fuzzy: FuzzyTolerance,
+    },
+    /// Skipped: out-of-scope reftest variant.
+    Skip { reason: SkipReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    Mismatch,
+    MultipleMatches,
+    NoMatch,
+    ChainedReference,
+}
+
+/// Inspect the test HTML at `test_path` and classify it for Phase 1.
+/// File I/O only — does not render.
+pub fn classify(test_path: &Path) -> Result<Reftest> {
+    let html = std::fs::read_to_string(test_path)?;
+    let doc = scraper::Html::parse_document(&html);
+
+    let link_sel = scraper::Selector::parse("link[rel]").unwrap();
+    let mut matches: Vec<PathBuf> = Vec::new();
+    let mut has_mismatch = false;
+
+    for el in doc.select(&link_sel) {
+        let rel = el.value().attr("rel").unwrap_or("").to_ascii_lowercase();
+        match rel.as_str() {
+            "match" => {
+                if let Some(href) = el.value().attr("href") {
+                    matches.push(PathBuf::from(href));
+                }
+            }
+            "mismatch" => {
+                has_mismatch = true;
+            }
+            _ => {}
+        }
+    }
+
+    if has_mismatch {
+        return Ok(Reftest {
+            test: test_path.to_path_buf(),
+            classification: ReftestKind::Skip {
+                reason: SkipReason::Mismatch,
+            },
+        });
+    }
+    let ref_path = match matches.as_slice() {
+        [] => {
+            return Ok(Reftest {
+                test: test_path.to_path_buf(),
+                classification: ReftestKind::Skip {
+                    reason: SkipReason::NoMatch,
+                },
+            });
+        }
+        [one] => one.clone(),
+        _ => {
+            return Ok(Reftest {
+                test: test_path.to_path_buf(),
+                classification: ReftestKind::Skip {
+                    reason: SkipReason::MultipleMatches,
+                },
+            });
+        }
+    };
+
+    // Collect fuzzy metas. Selection policy:
+    // - If any meta has `url == ref_path`, that wins (authoritative, break).
+    // - Otherwise the last unscoped (no url) meta wins.
+    // - Prefix-scoped metas whose url differs from our ref are ignored.
+    let meta_sel = scraper::Selector::parse(r#"meta[name="fuzzy"]"#).unwrap();
+    let mut chosen = FuzzyTolerance::any();
+    for el in doc.select(&meta_sel) {
+        let Some(content) = el.value().attr("content") else {
+            continue;
+        };
+        let parsed = match parse_fuzzy(content) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        match &parsed.url {
+            Some(u) if u == &ref_path => {
+                chosen = parsed;
+                break; // URL-scoped match is authoritative
+            }
+            None => {
+                // Unscoped: accept, but keep iterating in case a scoped
+                // match for our ref appears later (last-wins for unscoped).
+                chosen = parsed;
+            }
+            _ => {} // different url prefix: ignore
+        }
+    }
+
+    Ok(Reftest {
+        test: test_path.to_path_buf(),
+        classification: ReftestKind::Match {
+            ref_path,
+            fuzzy: chosen,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -266,5 +381,132 @@ mod fuzzy_tests {
         assert_eq!(a.url, None);
         assert_eq!(a.max_diff, 0..=255);
         assert_eq!(a.total_pixels, 0..=u32::MAX);
+    }
+}
+
+#[cfg(test)]
+mod reftest_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_tmp(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn single_match_no_fuzzy() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="match" href="t-ref.html"><body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        match r.classification {
+            ReftestKind::Match { ref_path, fuzzy } => {
+                assert_eq!(ref_path.file_name().unwrap(), "t-ref.html");
+                assert_eq!(fuzzy, FuzzyTolerance::any());
+            }
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_match_with_fuzzy() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="t-ref.html">
+<meta name="fuzzy" content="5-10;200-300">
+<body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        let fuzzy = match r.classification {
+            ReftestKind::Match { fuzzy, .. } => fuzzy,
+            _ => unreachable!(),
+        };
+        assert_eq!(fuzzy.max_diff, 5..=10);
+        assert_eq!(fuzzy.total_pixels, 200..=300);
+    }
+
+    #[test]
+    fn multiple_matches_skip() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="a.html">
+<link rel="match" href="b.html">
+<body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::MultipleMatches
+            }
+        ));
+    }
+
+    #[test]
+    fn mismatch_skip() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="mismatch" href="a.html"><body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::Mismatch
+            }
+        ));
+    }
+
+    #[test]
+    fn no_match_skip() {
+        let (_d, p) = write_tmp("t.html", r#"<!DOCTYPE html><body></body>"#);
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::NoMatch
+            }
+        ));
+    }
+
+    #[test]
+    fn fuzzy_url_prefix_matching_ref_is_used() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="t-ref.html">
+<meta name="fuzzy" content="t-ref.html:5-10;200-300">
+<body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        match r.classification {
+            ReftestKind::Match { fuzzy, .. } => {
+                assert_eq!(fuzzy.max_diff, 5..=10);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn fuzzy_url_prefix_mismatched_is_ignored() {
+        // Prefix points at a different ref → Phase 1 falls back to permissive
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="t-ref.html">
+<meta name="fuzzy" content="other.html:5-10;200-300">
+<body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        match r.classification {
+            ReftestKind::Match { fuzzy, .. } => {
+                assert_eq!(fuzzy, FuzzyTolerance::any());
+            }
+            _ => unreachable!(),
+        }
     }
 }
