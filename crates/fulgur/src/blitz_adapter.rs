@@ -215,6 +215,63 @@ pub fn resolve(doc: &mut HtmlDocument) {
     doc.resolve(0.0);
 }
 
+/// Walk the DOM for inline `<style>` elements and fold every stylesheet's
+/// GCPM context into one. This is the inline-HTML counterpart of the
+/// link-loaded context returned by [`parse_html_with_local_resources`].
+///
+/// Inline `<style>` blocks are normally consumed by stylo for regular
+/// CSS, but fulgur's [`crate::gcpm::parser::parse_gcpm`] is only wired to
+/// stylesheets fetched via the `NetProvider` path (`<link rel="stylesheet">`
+/// / `@import`). Without this helper, `@page`, margin-box, running-element,
+/// and counter rules placed directly in an inline `<style>` are lost
+/// (fulgur-mq5).
+///
+/// Synthetic `<style>` elements injected by [`apply_link_media_rewrites`]
+/// contain `@import url(...) media;` only, so `parse_gcpm` returns an empty
+/// context for them — harmless and intentionally not filtered.
+pub fn extract_gcpm_from_inline_styles(doc: &HtmlDocument) -> crate::gcpm::GcpmContext {
+    let mut out = crate::gcpm::GcpmContext::default();
+    let root = doc.root_element();
+    walk_for_inline_styles(doc, root.id, &mut out, 0);
+    out
+}
+
+fn walk_for_inline_styles(
+    doc: &HtmlDocument,
+    node_id: usize,
+    out: &mut crate::gcpm::GcpmContext,
+    depth: usize,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        let mut css = String::new();
+        for &child_id in &node.children {
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Text(t) = &child.data
+            {
+                css.push_str(&t.content);
+            }
+        }
+        if !css.is_empty() {
+            let ctx = crate::gcpm::parser::parse_gcpm(&css);
+            out.extend_from(ctx);
+        }
+        // `<style>` element children are text nodes only — no need to
+        // recurse into them.
+        return;
+    }
+    for &child_id in &node.children {
+        walk_for_inline_styles(doc, child_id, out, depth + 1);
+    }
+}
+
 use crate::MAX_DOM_DEPTH;
 
 /// Walk the DOM tree to find the first element with the given tag name.
@@ -2192,6 +2249,49 @@ mod tests {
         // Should be "foo bar" (single space), not "foo  bar".
         assert_eq!(text.trim(), "foo bar");
         assert!(!text.contains("  "));
+    }
+
+    // ── extract_gcpm_from_inline_styles (fulgur-mq5) ───────────────
+
+    #[test]
+    fn extract_gcpm_from_inline_styles_picks_up_at_page() {
+        let html = r#"<!doctype html><html><head>
+            <style>@page { size: A4 landscape; }</style>
+        </head><body>x</body></html>"#;
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let gcpm = extract_gcpm_from_inline_styles(&doc);
+        assert_eq!(
+            gcpm.page_settings.len(),
+            1,
+            "expected the @page rule to be extracted"
+        );
+    }
+
+    #[test]
+    fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
+        let html = r#"<!doctype html><html><body>x</body></html>"#;
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let gcpm = extract_gcpm_from_inline_styles(&doc);
+        assert!(gcpm.page_settings.is_empty());
+    }
+
+    #[test]
+    fn extract_gcpm_from_inline_styles_folds_multiple_style_blocks() {
+        // Two `@page` rules with `size` or `margin` declarations both
+        // produce PageSettingsRule entries (parser.rs:105 only emits a
+        // rule when at least one of size/margin is set). The second
+        // would be missed if the walker stopped after the first <style>.
+        let html = r#"<!doctype html><html><head>
+            <style>@page { size: A4 landscape; }</style>
+            <style>@page { margin: 2cm; }</style>
+        </head><body>x</body></html>"#;
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let gcpm = extract_gcpm_from_inline_styles(&doc);
+        assert_eq!(
+            gcpm.page_settings.len(),
+            2,
+            "expected both <style> blocks' @page rules to be folded"
+        );
     }
 }
 
