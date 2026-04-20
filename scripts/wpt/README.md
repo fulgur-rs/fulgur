@@ -16,6 +16,8 @@ scripts/wpt/fetch.sh
 Idempotent: re-running updates to the current pinned SHA. Override the remote
 URL with `WPT_REMOTE_URL=...` (useful for mirrors or CI cache warmup).
 
+The placeholder SHA (`DEADBEEF…`) intentionally fails `git fetch`; a real SHA is committed in the PR that seeds fulgur-2foo.8.
+
 ## Updating the pin
 
 1. Inspect upstream WPT `main` and pick a commit that is green on the
