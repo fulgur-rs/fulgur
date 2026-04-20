@@ -1440,7 +1440,8 @@ fn draw_block_border(
         let opacity = alpha_to_opacity(bc[3]);
         canvas.surface.set_fill(None);
 
-        if st == BorderStyleValue::Double {
+        // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
+        if st == BorderStyleValue::Double && bt >= 3.0 {
             // Double = 3 equal bands (border/gap/border): thin_w = bt/3.
             // Stroke centerlines: outer at bt/6, inner at bt*5/6.
             let thin_w = bt / 3.0;
