@@ -1,0 +1,53 @@
+body {
+  font-family: serif;
+  font-size: 11pt;
+  line-height: 1.45;
+  margin: 0;
+  color: #222;
+}
+
+h1 {
+  font-size: 20pt;
+  margin: 0 0 12pt 0;
+  border-bottom: 1pt solid #444;
+  padding-bottom: 4pt;
+}
+
+p.lead {
+  color: #555;
+  margin: 0 0 12pt 0;
+}
+
+code {
+  font-family: monospace;
+  background: #eef;
+  padding: 0 2pt;
+}
+
+.mc {
+  column-count: 2;
+  column-gap: 16pt;
+  background: #f6faff;
+  border: 1pt solid #c0c8d6;
+  padding: 8pt 10pt;
+}
+
+.mc p {
+  margin: 0 0 6pt 0;
+}
+
+h2.span {
+  column-span: all;
+  font-size: 13pt;
+  color: #335;
+  background: #eef2f9;
+  border-top: 1pt solid #c0c8d6;
+  border-bottom: 1pt solid #c0c8d6;
+  margin: 6pt 0;
+  padding: 4pt 6pt;
+}
+
+p.after {
+  margin: 10pt 0 0 0;
+  color: #555;
+}
