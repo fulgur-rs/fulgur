@@ -149,6 +149,8 @@ pub enum SkipReason {
     Mismatch,
     MultipleMatches,
     NoMatch,
+    /// Reserved for Phase 2: reftest chain (ref HTML points at another ref).
+    /// Not yet emitted by `classify()`.
     ChainedReference,
 }
 
@@ -166,9 +168,10 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
         let rel = el.value().attr("rel").unwrap_or("").to_ascii_lowercase();
         match rel.as_str() {
             "match" => {
-                if let Some(href) = el.value().attr("href") {
-                    matches.push(PathBuf::from(href));
-                }
+                let href = el.value().attr("href").ok_or_else(|| {
+                    anyhow::anyhow!("rel=match link without href in {}", test_path.display())
+                })?;
+                matches.push(PathBuf::from(href));
             }
             "mismatch" => {
                 has_mismatch = true;
@@ -511,5 +514,16 @@ mod reftest_tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn rel_match_without_href_is_error() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="match"><body></body>"#,
+        );
+        let err = classify(&p).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("rel=match"), "unexpected error: {msg}");
     }
 }

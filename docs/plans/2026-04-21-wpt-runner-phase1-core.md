@@ -1526,6 +1526,18 @@ npx markdownlint-cli2 'docs/plans/2026-04-21-wpt-runner-phase1-core.md' 'crates/
 
 ---
 
+## 実装時のプランからの差分
+
+- `FuzzyTolerance::any()` を `strict()` にリネームし、デフォルト値を `max_diff=0..=0, total_pixels=0..=0` に修正。WPT 仕様では fuzzy meta 無し = strict 一致のため。
+- `scraper` を 0.20 → 0.26 に bump（Task 4 直前）。API は後方互換。
+- `judge(observed: Option<Expectation>, ...)` を `judge(observed: Expectation, ...)` に締め付け、catch-all `_ => Ok` を排除して型で網羅性を強制。
+- `fulgur-vrt` を `[dev-dependencies]` → `[dependencies]` に昇格。harness.rs が src 配下から `fulgur_vrt::diff` を使うため必須。両 crate とも `publish = false` で publish 汚染はゼロ。
+- `render.rs` で `pdftocairo .status()` → `.output()` に変更し stderr をエラーに含める（2foo.8 triage 用）。
+- `render_test` で test HTML path を `canonicalize` してから parent を取る（bare filename 時の base_path 空落ちを防止）。
+- fetch.sh の remote URL 反映を毎回 `git remote set-url` で上書き（mirror override の冪等性）。
+- `page-break-after: always` が fulgur 本体で未配線のため、multi-page render の smoke test は natural overflow で書いた。`page-break-*` 配線は別 beads issue で追跡予定。
+- `rel=match` で href 欠落時はエラーに（final review 指摘、malformed reftest を silent NoMatch に落とさない）。
+
 ## Out of scope (別 PR で実装)
 
 - **fulgur-2foo.7** `wptreport.json` 出力 (report.rs) — runner コアが動いてから
