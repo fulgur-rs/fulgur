@@ -209,7 +209,7 @@ echo "WPT ready at $WPT_DIR (SHA: $SHA)"
 
 **Step 4: scripts/wpt/README.md を作成**
 
-```markdown
+````markdown
 # scripts/wpt/
 
 `fetch.sh` executes a sparse, shallow clone of the W3C web-platform-tests
@@ -235,7 +235,8 @@ URL with `WPT_REMOTE_URL=...` (useful for mirrors or CI cache warmup).
 2. Replace the SHA line in `pinned_sha.txt`.
 3. Re-run `scripts/wpt/fetch.sh` and `cargo test -p fulgur-wpt`.
 4. Commit both in one PR.
-```
+
+````
 
 **Step 5: .gitignore に target/wpt を追加**
 
