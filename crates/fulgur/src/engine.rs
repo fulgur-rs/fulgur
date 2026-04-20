@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::pageable::Pageable;
 use crate::render::render_to_pdf;
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 
 /// Reusable PDF generation engine.
@@ -168,6 +169,10 @@ impl Engine {
         }
 
         crate::blitz_adapter::resolve(&mut doc);
+        // Blitz treats multicol containers as plain blocks; route them
+        // through fulgur's Taffy hook so columns balance and siblings
+        // shift in lockstep. See docs/plans/2026-04-20-css-multicol-design.md.
+        crate::multicol_layout::run_pass(doc.deref_mut());
 
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
@@ -270,6 +275,7 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         crate::blitz_adapter::resolve(&mut doc);
+        crate::multicol_layout::run_pass(doc.deref_mut());
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {

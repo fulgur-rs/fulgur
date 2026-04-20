@@ -500,14 +500,108 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
             if let Some(pct) = lp.to_percentage() {
                 VerticalAlign::Percent(pct.0)
             } else {
-                // Note: for calc() mixed values like `calc(10px + 50%)`,
-                // to_percentage() returns None and we resolve with basis=0,
-                // which drops the percentage component. This is a known
-                // limitation — calc() in vertical-align is extremely rare.
-                VerticalAlign::Length(lp.resolve(style::values::computed::Length::new(0.0)).px())
+                // `.px()` here is parley/stylo's CSS-px scalar. The Pageable
+                // tree is in pt, so convert. For calc() with percentage
+                // components the basis-0 resolve silently drops them —
+                // acceptable because calc() on vertical-align is rare.
+                let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
+                VerticalAlign::Length(crate::convert::px_to_pt(px))
             }
         }
     }
+}
+
+/// Resolved multicol container properties.
+///
+/// Only populated when at least one of `column-count` or `column-width` is
+/// non-auto, matching the CSS definition of a multicol container.
+///
+/// ## stylo engine caveat
+///
+/// `stylo 0.8.0` gates `column-rule-*` and `column-fill` to its gecko engine,
+/// and blitz uses the servo engine, so those properties are *not* exposed on
+/// `ComputedValues`. A future custom-CSS-parser layer (planned for phase A-4)
+/// will read them directly from the stylesheet source. This struct covers the
+/// engine-available subset only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MulticolProps {
+    /// `column-count: N` as `Some(N)`, `auto` as `None`.
+    pub column_count: Option<u32>,
+    /// `column-width` in CSS pixels, or `None` for `auto`.
+    pub column_width: Option<f32>,
+    /// `column-gap` in CSS pixels. The CSS default `normal` is resolved to
+    /// `1em` here per CSS Multi-column Level 1, so callers never see 0 for
+    /// an unset property.
+    pub column_gap: f32,
+}
+
+/// Extract multicol container properties from a node.
+///
+/// Returns `None` when the node is not a multicol container (i.e. both
+/// `column-count` and `column-width` are `auto`).
+/// Cheap check: is this node a multicol container?
+///
+/// Uses stylo's `ComputedValues::is_multicol` (`column-width` or
+/// `column-count` non-auto). Prefer this over `extract_multicol_props` when
+/// only the bool is needed — it avoids the `clone_column_*` calls used to
+/// build the struct.
+pub fn is_multicol_container(node: &blitz_dom::Node) -> bool {
+    node.primary_styles()
+        .map(|s| s.is_multicol())
+        .unwrap_or(false)
+}
+
+pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
+    use style::values::computed::length::{
+        NonNegativeLengthOrAuto, NonNegativeLengthPercentageOrNormal,
+    };
+    use style::values::generics::column::ColumnCount;
+
+    let styles = node.primary_styles()?;
+    if !styles.is_multicol() {
+        return None;
+    }
+
+    let column_count = match styles.clone_column_count() {
+        ColumnCount::Integer(n) => Some(n.0.max(1) as u32),
+        ColumnCount::Auto => None,
+    };
+
+    let column_width = match styles.clone_column_width() {
+        NonNegativeLengthOrAuto::LengthPercentage(l) => Some(l.px()),
+        NonNegativeLengthOrAuto::Auto => None,
+    };
+
+    let column_gap = match styles.clone_column_gap() {
+        NonNegativeLengthPercentageOrNormal::LengthPercentage(lp) => {
+            lp.0.to_used_value(style::values::computed::Length::new(0.0).into())
+                .to_f32_px()
+        }
+        // CSS Multi-column Level 1 `§4 column-gap`: used value of `normal`
+        // is `1em`. Resolve against the element's computed font-size so a
+        // column-gap-less multicol still has visual separation.
+        NonNegativeLengthPercentageOrNormal::Normal => styles.clone_font_size().used_size().px(),
+    };
+
+    Some(MulticolProps {
+        column_count,
+        column_width,
+        column_gap,
+    })
+}
+
+/// Returns true if this node carries `column-span: all`.
+///
+/// Used by the multicol converter to slice a multicol container into
+/// alternating column-group / span-all segments.
+pub fn has_column_span_all(node: &blitz_dom::Node) -> bool {
+    let Some(styles) = node.primary_styles() else {
+        return false;
+    };
+    matches!(
+        styles.clone_column_span(),
+        style::properties::longhands::column_span::computed_value::T::All
+    )
 }
 
 fn make_qual_name(local: &str) -> blitz_dom::QualName {
@@ -2292,6 +2386,95 @@ mod tests {
             2,
             "expected both <style> blocks' @page rules to be folded"
         );
+    }
+
+    #[test]
+    fn multicol_props_absent_on_plain_block() {
+        let html = r#"<html><body><div id="p">plain</div></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        assert!(extract_multicol_props(doc.get_node(id).unwrap()).is_none());
+    }
+
+    #[test]
+    fn multicol_props_column_count() {
+        let html = r#"<html><body>
+            <div id="m" style="column-count: 3; column-gap: 12px;">a</div>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
+        assert_eq!(props.column_count, Some(3));
+        assert_eq!(props.column_width, None);
+        assert!((props.column_gap - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn multicol_props_column_width() {
+        let html = r#"<html><body>
+            <div id="m" style="column-width: 180px;">a</div>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "div").expect("div");
+        let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
+        assert_eq!(props.column_count, None);
+        assert_eq!(props.column_width, Some(180.0));
+        // CSS Multi-column Level 1: `column-gap: normal` is `1em`. At the
+        // body's default 16px font-size, that lands at 16.
+        assert!(
+            (props.column_gap - 16.0).abs() < 0.01,
+            "column-gap: normal should resolve to 1em (16px at default font), got {}",
+            props.column_gap
+        );
+    }
+
+    #[test]
+    fn vertical_align_length_returns_pt_not_px() {
+        use crate::paragraph::VerticalAlign;
+        // vertical-align: 8px → 8 × 0.75 = 6pt. Prior to the fix this
+        // returned 8.0 (CSS px), which then got subtracted from pt-denominated
+        // baselines in paragraph.rs, producing a 4/3-off visual shift. Guards
+        // against regression of the PR #101 unit-consolidation.
+        let html = r#"<html><body><img style="vertical-align: 8px;" src=""></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "img").expect("img");
+        let va = extract_vertical_align(doc.get_node(id).unwrap());
+        match va {
+            VerticalAlign::Length(v) => {
+                assert!((v - 6.0).abs() < 0.01, "expected 6pt (8px × 0.75), got {v}");
+            }
+            other => panic!("expected VerticalAlign::Length(6.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vertical_align_percent_is_unit_agnostic_ratio() {
+        use crate::paragraph::VerticalAlign;
+        // `vertical-align: 50%` still returns a unitless ratio — the px→pt
+        // fix on the Length branch must not touch Percent semantics.
+        let html = r#"<html><body><img style="vertical-align: 50%;" src=""></body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let id = find_element_by_local_name(&doc, "img").expect("img");
+        let va = extract_vertical_align(doc.get_node(id).unwrap());
+        match va {
+            VerticalAlign::Percent(p) => {
+                assert!((p - 0.5).abs() < 1e-4, "expected 0.5, got {p}");
+            }
+            other => panic!("expected VerticalAlign::Percent(0.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn column_span_all_detected() {
+        let html = r#"<html><body>
+            <h1 style="column-span: all;">Big</h1>
+            <p>plain</p>
+        </body></html>"#;
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let h1 = find_element_by_local_name(&doc, "h1").expect("h1");
+        let p = find_element_by_local_name(&doc, "p").expect("p");
+        assert!(has_column_span_all(doc.get_node(h1).unwrap()));
+        assert!(!has_column_span_all(doc.get_node(p).unwrap()));
     }
 }
 

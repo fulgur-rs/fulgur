@@ -1976,7 +1976,14 @@ fn extract_paragraph(
                 let font_ref = run.font();
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
-                let font_size = run.font_size();
+                // Parley (wired through blitz at scale=1.0) reports font
+                // size in CSS px. The Pageable tree works in PDF pt, and
+                // krilla's `draw_glyphs` also wants pt. Convert here so
+                // every downstream computation (glyph advances,
+                // decoration widths, link rects) naturally lands in pt.
+                // `glyph.advance / font_size` stays a unitless ratio.
+                let font_size_parley = run.font_size();
+                let font_size = px_to_pt(font_size_parley);
 
                 // Get text color from the brush (node ID) → computed styles
                 let brush = &glyph_run.style().brush;
@@ -1990,16 +1997,17 @@ fn extract_paragraph(
                 for g in glyph_run.glyphs() {
                     glyphs.push(ShapedGlyph {
                         id: g.id,
-                        x_advance: g.advance / font_size,
-                        x_offset: g.x / font_size,
-                        y_offset: g.y / font_size,
+                        x_advance: g.advance / font_size_parley,
+                        x_offset: g.x / font_size_parley,
+                        y_offset: g.y / font_size_parley,
                         text_range: 0..text_len,
                     });
                 }
 
                 if !glyphs.is_empty() {
                     let run_text = text.clone();
-
+                    // Run-level x_offset is also in parley px; convert.
+                    let run_x_offset = px_to_pt(glyph_run.offset());
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
@@ -2008,7 +2016,7 @@ fn extract_paragraph(
                         decoration,
                         glyphs,
                         text: run_text,
-                        x_offset: glyph_run.offset(),
+                        x_offset: run_x_offset,
                         link,
                     }));
                 }
@@ -2016,8 +2024,8 @@ fn extract_paragraph(
         }
 
         shaped_lines.push(ShapedLine {
-            height: metrics.line_height,
-            baseline: metrics.baseline,
+            height: px_to_pt(metrics.line_height),
+            baseline: px_to_pt(metrics.baseline),
             items,
         });
     }
@@ -2568,7 +2576,7 @@ fn extract_marker_lines(
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         if line_height_pt == 0.0 {
-            line_height_pt = metrics.line_height;
+            line_height_pt = px_to_pt(metrics.line_height);
         }
         let mut items = Vec::new();
         let mut line_width: f32 = 0.0;
@@ -2579,7 +2587,12 @@ fn extract_marker_lines(
                 let font_ref = run.font();
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
-                let font_size = run.font_size();
+                // Parley reports font size in CSS px; the Pageable tree is
+                // in pt. See `extract_paragraph` for the matching
+                // conversion. Glyph ratios stay unitless by dividing by
+                // the original parley value.
+                let font_size_parley = run.font_size();
+                let font_size = px_to_pt(font_size_parley);
 
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, brush.id);
@@ -2587,12 +2600,12 @@ fn extract_marker_lines(
                 let text_len = marker_text.len();
                 let mut glyphs = Vec::new();
                 for g in glyph_run.glyphs() {
-                    line_width += g.advance;
+                    line_width += px_to_pt(g.advance);
                     glyphs.push(ShapedGlyph {
                         id: g.id,
-                        x_advance: g.advance / font_size,
-                        x_offset: g.x / font_size,
-                        y_offset: g.y / font_size,
+                        x_advance: g.advance / font_size_parley,
+                        x_offset: g.x / font_size_parley,
+                        y_offset: g.y / font_size_parley,
                         text_range: 0..text_len,
                     });
                 }
@@ -2606,7 +2619,7 @@ fn extract_marker_lines(
                         decoration: Default::default(),
                         glyphs,
                         text: marker_text.clone(),
-                        x_offset: glyph_run.offset(),
+                        x_offset: px_to_pt(glyph_run.offset()),
                         link: None,
                     }));
                 }
@@ -2615,8 +2628,8 @@ fn extract_marker_lines(
 
         max_width = max_width.max(line_width);
         shaped_lines.push(ShapedLine {
-            height: metrics.line_height,
-            baseline: metrics.baseline,
+            height: px_to_pt(metrics.line_height),
+            baseline: px_to_pt(metrics.baseline),
             items,
         });
     }

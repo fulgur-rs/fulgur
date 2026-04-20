@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Multi-column Layout</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>CSS Multi-column Layout</h1>
+  <p class="lead">
+    fulgur routes CSS multicol containers through a custom Taffy layout
+    hook. Taffy sees the balanced column height as the container's
+    intrinsic size, so surrounding siblings flow naturally around it —
+    no post-pass reshape, no sibling overlap.
+  </p>
+
+  <h2>Two columns, four paragraphs</h2>
+  <div class="mc mc-2">
+    <p>Alpha paragraph. Each child block is measured at the column
+       width and then packed into balanced columns.</p>
+    <p>Beta paragraph. The balance algorithm searches for the
+       smallest per-column budget that fits all children without
+       overflow.</p>
+    <p>Gamma paragraph. When the multicol grows or shrinks relative
+       to Taffy's initial pass, siblings after it are shifted to
+       match.</p>
+    <p>Delta paragraph. Two-column layout is the canonical case for
+       this hook design.</p>
+  </div>
+
+  <h2>Three columns</h2>
+  <div class="mc mc-3">
+    <p>First column entry.</p>
+    <p>Second column entry, slightly longer so it exercises the
+       balance budget search.</p>
+    <p>Third column entry.</p>
+    <p>Fourth paragraph.</p>
+    <p>Fifth paragraph in the mix.</p>
+    <p>Sixth paragraph to fill out the third column.</p>
+  </div>
+
+  <h2>After the multicol</h2>
+  <p>
+    Because the hook updates Taffy's layout directly, this paragraph
+    sits at the correct y — directly below the balanced
+    multicol container, not overlapping with its columns.
+  </p>
+</body>
+</html>

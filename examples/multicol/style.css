@@ -1,0 +1,45 @@
+body {
+  font-family: serif;
+  font-size: 11pt;
+  line-height: 1.45;
+  margin: 0;
+  color: #222;
+}
+
+h1 {
+  font-size: 20pt;
+  margin: 0 0 12pt 0;
+  border-bottom: 1pt solid #444;
+  padding-bottom: 4pt;
+}
+
+h2 {
+  font-size: 13pt;
+  margin: 14pt 0 6pt 0;
+  color: #335;
+}
+
+p.lead {
+  color: #555;
+  margin: 0 0 12pt 0;
+}
+
+p {
+  margin: 0 0 6pt 0;
+}
+
+.mc {
+  background: #f6faff;
+  border: 1pt solid #c0c8d6;
+  padding: 6pt 10pt;
+}
+
+.mc-2 {
+  column-count: 2;
+  column-gap: 16pt;
+}
+
+.mc-3 {
+  column-count: 3;
+  column-gap: 12pt;
+}
