@@ -2556,11 +2556,12 @@ impl Pageable for RunningElementWrapperPageable {
 ///   half unchanged.
 /// - Groups with `y_offset >= cutoff` move to the second half with
 ///   `y_offset -= cutoff`.
-/// - Groups straddling the boundary stay on the first half with their
-///   `col_heights` clamped to `cutoff - y_offset`. This is an
-///   approximation — cross-page pagination of a single `ColumnGroup` is a
-///   known gap (fulgur-6q5 / fulgur-wfd) and the rule on the second half
-///   of a straddling group is currently dropped.
+/// - Groups straddling the boundary are split across halves: the first
+///   half keeps `col_heights` clamped to `cutoff - y_offset`, and the
+///   continuation half carries `col_heights - remaining` at `y_offset =
+///   0`. Cross-page pagination of a `ColumnGroup`'s *content* is still
+///   approximate (fulgur-6q5 / fulgur-wfd), but the rule geometry paints
+///   on both pages.
 ///
 /// Task 5 wires this wrapper into `convert.rs` so multicol containers carry
 /// their parsed rule spec + per-`ColumnGroup` geometry into the draw pass.
@@ -2785,19 +2786,29 @@ fn partition_groups_at_cutoff(
             shifted.y_offset -= cutoff;
             second.push(shifted);
         } else {
-            // Straddles the page break. Phase A approximation: keep the
-            // group on the first half with heights clamped to the space
-            // available before the cutoff. The second half drops the rule
-            // for this group — cross-page ColumnGroup pagination is tracked
-            // as a known gap (fulgur-6q5 / fulgur-wfd).
+            // Straddles the page break. Split the geometry so the rule
+            // paints on BOTH fragments: the first half clamps each column
+            // to what fits above the cutoff, and the second half carries
+            // the remainder at y_offset=0 (page-local). Cross-page column
+            // *content* pagination is still approximate (fulgur-6q5 /
+            // fulgur-wfd); this fix only closes the rule-disappears-on-
+            // page-2 bug flagged in PR #133 review.
             let remaining = (cutoff - g.y_offset).max(0.0);
-            let mut clamped = g.clone();
-            for h in &mut clamped.col_heights {
-                if *h > remaining {
-                    *h = remaining;
-                }
+            let mut first_half = g.clone();
+            let mut second_half = g.clone();
+
+            for (first_h, original_h) in first_half.col_heights.iter_mut().zip(&g.col_heights) {
+                *first_h = original_h.min(remaining);
             }
-            first.push(clamped);
+            second_half.y_offset = 0.0;
+            for (second_h, original_h) in second_half.col_heights.iter_mut().zip(&g.col_heights) {
+                *second_h = (original_h - remaining).max(0.0);
+            }
+
+            first.push(first_half);
+            if second_half.col_heights.iter().any(|&h| h > 0.0) {
+                second.push(second_half);
+            }
         }
     }
     (first, second)
@@ -4749,15 +4760,36 @@ mod multicol_rule_tests {
     }
 
     #[test]
-    fn partition_groups_straddling_cutoff_clamps_to_first_half() {
-        // Group spans y=50..250; cutoff at 200 keeps it on the first half
-        // with heights clamped to remaining = 200 - 50 = 150.
+    fn partition_groups_straddling_cutoff_splits_between_halves() {
+        // Group spans y=50..250; cutoff at 200. Remaining above cutoff is
+        // 200 - 50 = 150pt, so:
+        //   first  : col_heights = [min(200,150), min(180,150)] = [150, 150]
+        //   second : col_heights = [max(200-150,0), max(180-150,0)] = [50, 30]
+        //   second : y_offset    = 0 (continuation page starts at top)
         let groups = vec![make_group(50.0, vec![200.0, 180.0])];
         let (first, second) = partition_groups_at_cutoff(&groups, 200.0);
         assert_eq!(first.len(), 1);
-        assert!(second.is_empty());
+        assert_eq!(second.len(), 1);
         assert!((first[0].col_heights[0] - 150.0).abs() < 1e-3);
         assert!((first[0].col_heights[1] - 150.0).abs() < 1e-3);
+        assert!((second[0].y_offset - 0.0).abs() < 1e-3);
+        assert!((second[0].col_heights[0] - 50.0).abs() < 1e-3);
+        assert!((second[0].col_heights[1] - 30.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn partition_groups_straddling_with_zero_remainder_drops_second_half() {
+        // Group spans y=50..200; cutoff at 200. Remaining above cutoff is
+        // 150, which exceeds every col_height, so nothing spills to page 2.
+        let groups = vec![make_group(50.0, vec![100.0, 80.0])];
+        let (first, second) = partition_groups_at_cutoff(&groups, 200.0);
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "no overflow expected when every column fits before cutoff"
+        );
+        assert!((first[0].col_heights[0] - 100.0).abs() < 1e-3);
+        assert!((first[0].col_heights[1] - 80.0).abs() < 1e-3);
     }
 
     #[test]

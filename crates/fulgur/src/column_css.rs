@@ -154,14 +154,27 @@ pub struct CompoundSelector {
 // Length and colour helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a CSS length token to PDF points. Accepts only `pt` and `px` for
-/// Phase A; everything else (`em`, `rem`, `%`, `mm`, etc.) is rejected so
-/// the rule silently drops to `None` without falsely measuring.
+/// Default font-size basis used to resolve `em` / `rem` lengths when we
+/// don't have a live cascade to consult. CSS default is `1rem == 16px`;
+/// Phase A does not thread a real computed basis through this parser, so
+/// accepting the default keeps common stylesheets (`column-rule-width:
+/// 0.25rem`) from silently dropping. Phase B will replace this with the
+/// container's resolved font-size.
+const DEFAULT_EM_PX: f32 = 16.0;
+
+/// Convert a CSS length token to PDF points. Accepts `pt` and `px` natively;
+/// `em` and `rem` are resolved against a fixed 16px basis so rule widths
+/// authored in ems don't silently drop. `%`, `mm`, `cm`, `in`, `vh`, `vw`
+/// remain rejected — none of them make sense as a sub-point border width
+/// without consulting the surrounding box, which Phase A does not expose.
 fn length_to_pt(value: f32, unit: &str) -> Option<f32> {
     if unit.eq_ignore_ascii_case("pt") {
         Some(value)
     } else if unit.eq_ignore_ascii_case("px") {
         Some(value * 72.0 / 96.0)
+    } else if unit.eq_ignore_ascii_case("em") || unit.eq_ignore_ascii_case("rem") {
+        // em/rem → px via the default basis, then px → pt.
+        Some(value * DEFAULT_EM_PX * 72.0 / 96.0)
     } else {
         None
     }
@@ -169,9 +182,9 @@ fn length_to_pt(value: f32, unit: &str) -> Option<f32> {
 
 /// Parse a single `<length>` from `input`. Unlike the GCPM variant we reject
 /// `mm`/`cm`/`in` too — the column-rule spec is sub-point and designers use
-/// `px`/`pt` exclusively in practice; folding more units here would just
-/// give inconsistent renders between the multicol rule and the rest of the
-/// border model.
+/// `px`/`pt`/`em` exclusively in practice; folding more units here would
+/// just give inconsistent renders between the multicol rule and the rest
+/// of the border model.
 fn parse_length<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
     let token = input.next()?.clone();
     match token {
@@ -885,9 +898,47 @@ mod tests {
     }
 
     #[test]
-    fn em_length_is_invalid() {
+    fn em_length_resolves_against_default_basis() {
+        // `1em` at the 16px fallback basis == 12pt.
         let props = parse_declaration_block("column-rule-width: 1em;");
-        // Unrecognised unit: longhand drops, nothing set.
+        let rule = props.rule.expect("rule");
+        assert!(
+            (rule.width - 12.0).abs() < 1e-3,
+            "1em expected 12pt (16px × 72/96), got {}",
+            rule.width
+        );
+    }
+
+    #[test]
+    fn rem_length_resolves_against_default_basis() {
+        // `0.25rem` == 4px at the 16px basis == 3pt.
+        let props = parse_declaration_block("column-rule-width: 0.25rem;");
+        let rule = props.rule.expect("rule");
+        assert!(
+            (rule.width - 3.0).abs() < 1e-3,
+            "0.25rem expected 3pt (4px × 72/96), got {}",
+            rule.width
+        );
+    }
+
+    #[test]
+    fn em_shorthand_resolves_against_default_basis() {
+        let props = parse_declaration_block("column-rule: 0.1em solid red;");
+        let rule = props.rule.expect("rule");
+        // 0.1em × 16 px × 72/96 = 1.2pt
+        assert!(
+            (rule.width - 1.2).abs() < 1e-3,
+            "0.1em expected 1.2pt, got {}",
+            rule.width
+        );
+        assert_eq!(rule.style, ColumnRuleStyle::Solid);
+        assert_eq!(rule.color, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn percent_length_still_drops() {
+        // `%` requires a containing-block basis we don't have here.
+        let props = parse_declaration_block("column-rule-width: 50%;");
         assert!(props.rule.is_none());
     }
 
@@ -904,7 +955,9 @@ mod tests {
 
     #[test]
     fn invalid_declaration_does_not_poison_siblings() {
-        let css = "column-rule-width: 1em; column-fill: auto;";
+        // `1vh` has no containing-block basis at parse time → drops the
+        // width declaration. Sibling `column-fill: auto` must still apply.
+        let css = "column-rule-width: 1vh; column-fill: auto;";
         let props = parse_declaration_block(css);
         assert!(props.rule.is_none());
         assert_eq!(props.fill, Some(ColumnFill::Auto));
