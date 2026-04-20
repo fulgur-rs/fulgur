@@ -48,16 +48,23 @@ pub(crate) fn partition_children_into_segments(
     let mut out: Vec<Segment> = Vec::new();
     let mut group: Vec<NodeId> = Vec::new();
     for child_id in children {
-        // Skip non-element children (whitespace text nodes, comments): they
-        // can't carry `column-span` style and aren't what CSS means by
-        // "direct children" in the spec.
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
         };
-        if child_node.element_data().is_none() {
+        // Skip text nodes that are entirely whitespace — they're HTML
+        // pretty-printing noise with no layout content. Non-whitespace
+        // text nodes (real inline content between block children) stay in
+        // the ColumnGroup so they are not silently dropped.
+        if let Some(text) = child_node.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
             continue;
         }
-        let is_span = crate::blitz_adapter::has_column_span_all(child_node);
+        // `column-span: all` only applies to element children; non-elements
+        // (text content, comments) flow through as ordinary members of the
+        // current ColumnGroup so their layout is preserved.
+        let is_span = child_node.element_data().is_some()
+            && crate::blitz_adapter::has_column_span_all(child_node);
         if is_span {
             if !group.is_empty() {
                 out.push(Segment::ColumnGroup(std::mem::take(&mut group)));
@@ -401,13 +408,15 @@ pub fn compute_multicol_layout(
     //    * `SpanAll` → measure the child at `container_w` and place it
     //      at `(0, cursor_y)`.
     //
-    //    Each segment's vertical extent accumulates into `cursor_y`, and
-    //    every placement carries the width it was laid out at
-    //    (`col_w` for columnar children, `container_w` for span-all ones).
+    //    Each segment's vertical extent accumulates into `cursor_y`. Track
+    //    widths (`col_w` / `container_w`) drive the segment's placement
+    //    math but are NOT forced onto the child's stored layout — we keep
+    //    the measured `size.width` so replaced / shrink-to-fit / explicitly
+    //    sized children are not stretched to the full track.
     let segments = partition_children_into_segments(tree.doc, usize::from(node_id));
 
     let mut cursor_y: f32 = 0.0;
-    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>, f32)> = Vec::new();
+    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::new();
     for segment in segments {
         match segment {
             Segment::ColumnGroup(children) => {
@@ -421,9 +430,7 @@ pub fn compute_multicol_layout(
                     cursor_y,
                     child_inputs,
                 );
-                for (child_id, location, size) in group_placements {
-                    placements.push((child_id, location, size, col_w));
-                }
+                placements.extend(group_placements);
                 cursor_y += seg_h;
             }
             Segment::SpanAll(child_id) => {
@@ -432,23 +439,21 @@ pub fn compute_multicol_layout(
                     x: 0.0,
                     y: cursor_y,
                 };
-                placements.push((child_id, location, output.size, container_w));
+                placements.push((child_id, location, output.size));
                 cursor_y += output.size.height;
             }
         }
     }
 
-    // 6. Write child positions back into Taffy's storage. Each placement
-    //    carries its own assigned width (col_w for columnar, container_w
-    //    for span-all).
-    for (child_id, location, size, width) in &placements {
+    // 6. Write child positions back into Taffy's storage. The measured
+    //    `size.width` is preserved so intrinsically narrower children
+    //    (images, shrink-to-fit blocks, inline-level content) keep their
+    //    real width rather than being stretched to the track width.
+    for (child_id, location, size) in &placements {
         let layout = taffy::Layout {
             order: 0,
             location: *location,
-            size: Size {
-                width: *width,
-                height: size.height,
-            },
+            size: *size,
             content_size: *size,
             scrollbar_size: Size::ZERO,
             border: taffy::Rect::zero(),
@@ -1202,6 +1207,29 @@ mod tests {
         assert_eq!(segments.len(), 1);
         match &segments[0] {
             Segment::ColumnGroup(ids) => assert_eq!(ids.len(), 2),
+            _ => panic!("expected ColumnGroup"),
+        }
+    }
+
+    #[test]
+    fn partition_keeps_direct_inline_content_in_column_group() {
+        // Regression for CodeRabbit review on PR #125: direct non-element
+        // children (inline text + inline elements) must not be silently
+        // dropped from segmentation. Pure HTML-formatting whitespace text
+        // is filtered, but real content text and inline elements stay in
+        // the ColumnGroup so their layout is preserved.
+        let html = r#"<!doctype html><html><body><div style="column-count:2">hello <span>world</span></div></body></html>"#;
+        let (doc, mc_id) = parse_multicol(html);
+        let segments = partition_children_into_segments(&doc, mc_id);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            Segment::ColumnGroup(ids) => {
+                assert_eq!(
+                    ids.len(),
+                    2,
+                    "expected the 'hello ' text node AND the <span> to survive partition"
+                );
+            }
             _ => panic!("expected ColumnGroup"),
         }
     }
