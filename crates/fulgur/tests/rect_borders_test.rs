@@ -107,3 +107,31 @@ fn double_uniform_border_uses_two_rects() {
         counts.re,
     );
 }
+
+#[test]
+fn double_uniform_border_below_3px_falls_back_to_solid() {
+    // CSS Backgrounds L3: computed border-width < 3 の double は solid で描く。
+    // rect fast path (draw_block_border の Double 分岐) が < 3px のとき
+    // 2 本の hairline を emit せず、solid と同じ 1 本の rect 経路になるかを確認する。
+    let html = r#"
+        <html><head><style>
+            .b { width: 200px; height: 100px; border: 2px double #444; }
+        </style></head><body><div class="b"></div></body></html>
+    "#;
+
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let pdf = engine.render_html(html).unwrap();
+
+    let Some(counts) = count_ops(&pdf) else {
+        eprintln!("qpdf not installed — skipping");
+        return;
+    };
+
+    // Solid と同じく 1 本の rect subpath のみ許容。2 本なら未修正。
+    assert!(
+        counts.m + counts.re <= 1,
+        "double < 3px should collapse to single solid rect, got m={} re={}",
+        counts.m,
+        counts.re,
+    );
+}
