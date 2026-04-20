@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Multi-column — column-span: all</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>column-span: all</h1>
+  <p class="lead">
+    A descendant with <code>column-span: all</code> cuts the current
+    column group, occupies the container's full content width, and
+    starts a fresh column group below. fulgur handles this inside the
+    Taffy multicol hook by partitioning direct element children into
+    alternating ColumnGroup / SpanAll segments and stacking them
+    vertically.
+  </p>
+
+  <div class="mc">
+    <p>Alpha paragraph sits in the left column of the first column
+       group. The balance algorithm measures every child at the column
+       width and packs them into the smallest per-column budget that
+       still fits.</p>
+    <p>Beta paragraph follows alpha and may flow to the second column
+       depending on the balance search. Both participate in the same
+       ColumnGroup segment.</p>
+    <p>Gamma paragraph rounds out the first column group before the
+       heading below interrupts it.</p>
+
+    <h2 class="span">Full-width heading spans all columns</h2>
+
+    <p>Delta paragraph begins a new column group below the heading.
+       It is measured at the column width again, independent of the
+       previous column group.</p>
+    <p>Epsilon paragraph continues the second column group. Balance
+       runs separately for each ColumnGroup segment, so the heights
+       above and below the span need not match.</p>
+    <p>Zeta paragraph completes the lower column group. The container
+       height is the sum of all segment heights — two column groups
+       plus the spanning heading.</p>
+  </div>
+
+  <p class="after">
+    This paragraph sits directly below the multicol container. The
+    Taffy hook writes the post-layout size back into the document, so
+    siblings after the multicol are positioned correctly without any
+    reshape pass.
+  </p>
+</body>
+</html>
