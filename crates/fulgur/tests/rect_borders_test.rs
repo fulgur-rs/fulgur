@@ -135,3 +135,44 @@ fn double_uniform_border_below_3px_falls_back_to_solid() {
         counts.re,
     );
 }
+
+#[test]
+fn double_per_edge_below_3px_falls_back_to_solid() {
+    // non-uniform 境界（幅不一致）で rect fast path を避け、
+    // draw_border_line の Double arm を通す経路。
+    // < 3px のとき hairline 2 本ではなく単一 solid stroke になるか検証する。
+    let html = r#"
+        <html><head><style>
+            .b {
+                width: 200px;
+                height: 100px;
+                border-style: double;
+                border-top-width: 2px;
+                border-right-width: 4px;
+                border-bottom-width: 2px;
+                border-left-width: 4px;
+                border-color: #444;
+            }
+        </style></head><body><div class="b"></div></body></html>
+    "#;
+
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let pdf = engine.render_html(html).unwrap();
+
+    let Some(counts) = count_ops(&pdf) else {
+        eprintln!("qpdf not installed — skipping");
+        return;
+    };
+
+    // 修正前: 4 辺とも double で 2 本ずつ = 8 本の線 (m=8)。
+    // 修正後: top/bottom (2px) は solid fallback で 1 本ずつ = 2 本、
+    //         left/right (4px) は double のまま 2 本ずつ = 4 本、合計 6 本。
+    // m <= 6 で未修正状態と区別できる。
+    eprintln!("per-edge double: m={} l={}", counts.m, counts.l);
+    assert!(
+        counts.m <= 6,
+        "double < 3px per-edge should reduce stroke count, got m={} l={}",
+        counts.m,
+        counts.l,
+    );
+}
