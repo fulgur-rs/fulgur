@@ -268,10 +268,24 @@ fn maybe_wrap_multicol_rule(
     let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
         return child;
     };
+    // `ColumnGroupGeometry` is recorded by the Taffy hook in CSS pixels
+    // (Taffy's native unit). Every other Pageable consumes pt, so convert
+    // at the wrapper boundary: the downstream `MulticolRulePageable::draw`
+    // and `split_boxed` can then mix these values with pt-valued `x`/`y`
+    // and pt-valued `cutoff` without a unit mismatch. See `px_to_pt`.
+    let groups_pt: Vec<crate::multicol_layout::ColumnGroupGeometry> = geometry
+        .groups
+        .iter()
+        .map(|g| crate::multicol_layout::ColumnGroupGeometry {
+            y_offset: px_to_pt(g.y_offset),
+            col_w: px_to_pt(g.col_w),
+            gap: px_to_pt(g.gap),
+            n: g.n,
+            col_heights: g.col_heights.iter().copied().map(px_to_pt).collect(),
+        })
+        .collect();
     Box::new(crate::pageable::MulticolRulePageable::new(
-        child,
-        rule,
-        geometry.groups.clone(),
+        child, rule, groups_pt,
     ))
 }
 
