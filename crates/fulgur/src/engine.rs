@@ -90,6 +90,14 @@ impl Engine {
         );
         gcpm.extend_from(link_gcpm);
 
+        // Inline `<style>` blocks in the HTML are parsed by stylo for
+        // regular CSS but never passed through `parse_gcpm`. Walk the
+        // DOM to collect any `@page`, margin-box, running-element, and
+        // counter constructs declared inline so they are honored
+        // alongside the AssetBundle / link-loaded contexts (fulgur-mq5).
+        let inline_gcpm = crate::blitz_adapter::extract_gcpm_from_inline_styles(&doc);
+        gcpm.extend_from(inline_gcpm);
+
         // Prepend UA CSS bookmark mappings so author-CSS rules (appearing
         // later in `bookmark_mappings`) override them via last-match
         // cascade. Skipped when bookmarks are disabled to avoid unnecessary
