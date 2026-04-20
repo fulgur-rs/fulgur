@@ -11,7 +11,7 @@ description = "W3C web-platform-tests runner for fulgur (dev-only, not published
 fulgur = { path = "../fulgur" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"
-scraper = "0.20"
+scraper = "0.26"
 
 [dev-dependencies]
 fulgur-vrt = { path = "../fulgur-vrt" }
