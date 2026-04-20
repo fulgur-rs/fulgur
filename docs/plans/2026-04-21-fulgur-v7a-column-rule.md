@@ -523,7 +523,9 @@ git commit -m "chore(fulgur-v7a): clippy + fmt polish"
 - Column-rule styles beyond `solid | dashed | dotted` (double/groove/ridge/inset/outset).
 - Cross-page pagination of a `ColumnGroup` — rule geometry is approximated when a group straddles a page. File as part of the existing Phase B gap (fulgur-6q5 / fulgur-wfd).
 - `break-inside` — reserved for fulgur-ftp, which re-uses the parser from this PR.
-- `em` length unit — parsed as "invalid" today; Phase B can resolve against the container's font-size.
+- `em` / `rem` length units — resolved against a fixed 16px default (`DEFAULT_EM_PX` in `column_css.rs`), not the container's computed font-size. Phase B will thread the real basis through the parser so authored sizes honour inherited `font-size`.
+- Linked stylesheets (`<link rel="stylesheet">`) — the column side-table is populated from inline `style="..."` attributes and top-level `<style>` blocks only. External CSS still drives stylo but never reaches the sniffer; tracked as fulgur-s5ro.
+- `<style media="screen">` and other non-print media queries — sheets with a media attribute that excludes `all` / `print` are skipped by the harvester. Full media-query evaluation (size ranges, logical operators) is deferred.
 
 ## Acceptance checklist
 

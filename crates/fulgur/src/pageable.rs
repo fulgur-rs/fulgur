@@ -2610,10 +2610,14 @@ impl MulticolRulePageable {
                 }),
                 ..base
             },
-            // `[width, width]` per Task 4 spec.
+            // `line_cap: Round` + `[0, w*2]` — zero-length dashes
+            // rendered as round caps become actual dots, matching the
+            // dotted-border treatment used elsewhere in fulgur. Without
+            // the round cap this would paint as square dash segments.
             ColumnRuleStyle::Dotted => krilla::paint::Stroke {
+                line_cap: krilla::paint::LineCap::Round,
                 dash: Some(krilla::paint::StrokeDash {
-                    array: vec![w, w],
+                    array: vec![0.0, w * 2.0],
                     offset: 0.0,
                 }),
                 ..base

@@ -11,9 +11,12 @@
 //! Scope and trade-offs:
 //!
 //! - Only inline `style="..."` attributes and top-level `<style>` blocks are
-//!   scanned. External stylesheets loaded via `<link rel=stylesheet>` are
-//!   already parsed by Blitz for the properties Blitz supports — we do not
-//!   duplicate that path.
+//!   scanned. External stylesheets loaded via `<link rel=stylesheet>` reach
+//!   stylo/blitz for the properties they support but do **not** currently
+//!   populate this side-table — tracked as fulgur-s5ro.
+//! - `<style media="...">` blocks whose media excludes `all` / `print` are
+//!   skipped by the harvester (`extract_column_style_table` in
+//!   `blitz_adapter.rs`). Full CSS media-query evaluation is deferred.
 //! - The selector grammar is intentionally tiny: type (`div`), class
 //!   (`.foo`), id (`#bar`), universal (`*`), compound (`div.foo#bar`) and
 //!   comma-separated lists. Unsupported combinators or pseudo-classes cause
@@ -21,8 +24,11 @@
 //! - Source order wins (no specificity, no `!important`). Inline style is
 //!   folded last so it beats stylesheet rules.
 //! - Length units: `pt` passes through, `px` is converted to `pt` using the
-//!   canonical CSS factor `72 / 96`. `em`, `rem`, and `%` are deliberately
-//!   treated as invalid for Phase A.
+//!   canonical CSS factor `72 / 96`. `em` and `rem` resolve against a fixed
+//!   `DEFAULT_EM_PX = 16.0` basis (Phase B will replace this with the
+//!   container's computed font-size). `%`, `vh`, `vw`, `mm`, `cm`, `in`
+//!   remain invalid — none of them make sense as a sub-point border width
+//!   without consulting the surrounding box.
 
 // Task 2 wires the production callers of `extract_column_style_table` /
 // `parse_stylesheet` / `build_column_style_table`; Task 5 will consume the

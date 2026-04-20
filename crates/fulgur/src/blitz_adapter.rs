@@ -317,6 +317,24 @@ fn walk_for_column_styles(doc: &HtmlDocument, node_id: usize, out: &mut String, 
     if let Some(el) = node.element_data()
         && el.name.local.as_ref() == "style"
     {
+        // Honour `<style media="...">`: skip sheets whose media query
+        // excludes the PDF render target. Phase A uses a simple token scan
+        // that accepts the attribute when absent, empty, or contains `all`
+        // / `print`. `screen` / `speech` / anything else means "don't fold
+        // these rules into the column side-table". Full media-query
+        // evaluation (size ranges, logical operators, etc.) is deferred —
+        // the common author intent of `media="screen"` vs `media="print"`
+        // is what we need to get right here.
+        if let Some(media) = el.attr(blitz_dom::LocalName::from("media")) {
+            let lower = media.to_ascii_lowercase();
+            let applies = lower.split(',').any(|tok| {
+                let t = tok.trim();
+                t.is_empty() || t == "all" || t.contains("print")
+            });
+            if !applies {
+                return;
+            }
+        }
         for &child_id in &node.children {
             if let Some(child) = doc.get_node(child_id)
                 && let blitz_dom::node::NodeData::Text(t) = &child.data
@@ -2574,6 +2592,58 @@ mod tests {
         // Inline `column-rule` overrides only the rule field — `column-fill`
         // is still populated from the stylesheet.
         assert_eq!(b_props.fill, Some(crate::column_css::ColumnFill::Auto));
+    }
+
+    #[test]
+    fn extract_column_style_table_respects_media_attribute() {
+        // `<style media="screen">` must not feed the column side-table —
+        // the PDF render path is the `print` medium. `<style media="print">`
+        // and `<style media="all">` (or absent) must apply.
+        let html = r#"<html><head>
+            <style media="screen">
+                .screen-only { column-rule: 1pt solid red; }
+            </style>
+            <style media="print">
+                .print-only { column-rule: 2pt solid blue; }
+            </style>
+            <style media="all">
+                .always { column-fill: auto; }
+            </style>
+            <style>
+                .no-media { column-rule: 3pt solid green; }
+            </style>
+        </head><body>
+            <div class="screen-only" id="s"></div>
+            <div class="print-only" id="p"></div>
+            <div class="always" id="a"></div>
+            <div class="no-media" id="n"></div>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        use std::ops::Deref;
+        let s = find_element_by_attr_id(doc.deref(), "s");
+        let p = find_element_by_attr_id(doc.deref(), "p");
+        let a = find_element_by_attr_id(doc.deref(), "a");
+        let n = find_element_by_attr_id(doc.deref(), "n");
+
+        let table = extract_column_style_table(&doc);
+
+        // `screen` media: rule must NOT appear in the table.
+        assert!(
+            !table.contains_key(&s),
+            "media=screen rule leaked into side-table"
+        );
+        // `print` media: rule applies.
+        let p_rule = table.get(&p).and_then(|props| props.rule).expect("p rule");
+        assert_eq!(p_rule.color, [0, 0, 255, 255]);
+        // `all` media: fill applies.
+        assert_eq!(
+            table.get(&a).and_then(|props| props.fill),
+            Some(crate::column_css::ColumnFill::Auto)
+        );
+        // No media attribute: rule applies (default = all).
+        let n_rule = table.get(&n).and_then(|props| props.rule).expect("n rule");
+        assert_eq!(n_rule.color, [0, 128, 0, 255]);
     }
 }
 
