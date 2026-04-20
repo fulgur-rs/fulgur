@@ -1226,6 +1226,9 @@ fn apply_border_style(
             }),
             ..stroke
         }),
+        // NOTE: `Double` here is the solid-stroke fallback used by
+        // draw_border_line / draw_block_border when width < 3 (CSS Backgrounds L3).
+        // Returning `None` for Double would silently break that fallback.
         BorderStyleValue::Double
         | BorderStyleValue::Groove
         | BorderStyleValue::Ridge
@@ -1325,7 +1328,8 @@ fn draw_border_line(
     }
 
     match style {
-        BorderStyleValue::Double => {
+        // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
+        BorderStyleValue::Double if width >= 3.0 => {
             let gap = width / 3.0;
             let dx = x2 - x1;
             let dy = y2 - y1;
@@ -1440,7 +1444,8 @@ fn draw_block_border(
         let opacity = alpha_to_opacity(bc[3]);
         canvas.surface.set_fill(None);
 
-        if st == BorderStyleValue::Double {
+        // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
+        if st == BorderStyleValue::Double && bt >= 3.0 {
             // Double = 3 equal bands (border/gap/border): thin_w = bt/3.
             // Stroke centerlines: outer at bt/6, inner at bt*5/6.
             let thin_w = bt / 3.0;
