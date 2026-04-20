@@ -10,13 +10,16 @@ pub struct FuzzyTolerance {
 }
 
 impl FuzzyTolerance {
-    /// Permissive tolerance (max_diff 0-255, total_pixels 0-u32::MAX).
-    /// Used when a test declares no fuzzy meta.
-    pub fn any() -> Self {
+    /// Strict tolerance (exact pixel match required).
+    ///
+    /// Used when a test declares no `<meta name=fuzzy>`. Per WPT reftest
+    /// spec, absence of fuzzy metadata means the rendering must match
+    /// the reference byte-for-byte at the rasterized resolution.
+    pub fn strict() -> Self {
         Self {
             url: None,
-            max_diff: 0..=255,
-            total_pixels: 0..=u32::MAX,
+            max_diff: 0..=0,
+            total_pixels: 0..=0,
         }
     }
 }
@@ -207,7 +210,7 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
     // - Otherwise the last unscoped (no url) meta wins.
     // - Prefix-scoped metas whose url differs from our ref are ignored.
     let meta_sel = scraper::Selector::parse(r#"meta[name="fuzzy"]"#).unwrap();
-    let mut chosen = FuzzyTolerance::any();
+    let mut chosen = FuzzyTolerance::strict();
     for el in doc.select(&meta_sel) {
         let Some(content) = el.value().attr("content") else {
             continue;
@@ -374,13 +377,13 @@ mod fuzzy_tests {
         assert!(parse_fuzzy("10;20;30").is_err());
     }
 
-    /// `any()` constructor must span full u8 / u32 range so it never rejects a diff.
+    /// `strict()` constructor must be zero/zero so it enforces exact match.
     #[test]
-    fn any_is_fully_permissive() {
-        let a = FuzzyTolerance::any();
-        assert_eq!(a.url, None);
-        assert_eq!(a.max_diff, 0..=255);
-        assert_eq!(a.total_pixels, 0..=u32::MAX);
+    fn strict_is_zero_zero() {
+        let t = FuzzyTolerance::strict();
+        assert_eq!(t.url, None);
+        assert_eq!(t.max_diff, 0..=0);
+        assert_eq!(t.total_pixels, 0..=0);
     }
 }
 
@@ -407,7 +410,7 @@ mod reftest_tests {
         match r.classification {
             ReftestKind::Match { ref_path, fuzzy } => {
                 assert_eq!(ref_path.file_name().unwrap(), "t-ref.html");
-                assert_eq!(fuzzy, FuzzyTolerance::any());
+                assert_eq!(fuzzy, FuzzyTolerance::strict());
             }
             other => panic!("expected Match, got {other:?}"),
         }
@@ -493,7 +496,7 @@ mod reftest_tests {
 
     #[test]
     fn fuzzy_url_prefix_mismatched_is_ignored() {
-        // Prefix points at a different ref → Phase 1 falls back to permissive
+        // Prefix points at a different ref → Phase 1 falls back to strict
         let (_d, p) = write_tmp(
             "t.html",
             r#"<!DOCTYPE html>
@@ -504,7 +507,7 @@ mod reftest_tests {
         let r = classify(&p).unwrap();
         match r.classification {
             ReftestKind::Match { fuzzy, .. } => {
-                assert_eq!(fuzzy, FuzzyTolerance::any());
+                assert_eq!(fuzzy, FuzzyTolerance::strict());
             }
             _ => unreachable!(),
         }

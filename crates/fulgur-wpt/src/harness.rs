@@ -18,7 +18,10 @@ pub struct RunOutcome {
 ///
 /// - `test_html_path`: path to the test HTML; its parent is passed to
 ///   `render_test` as the base_path, and the rel=match href is resolved
-///   relative to the same parent.
+///   relative to the same parent. Prefer an absolute path. Ref resolution
+///   uses `test_html_path.parent().join(ref_href)`; if the test is a bare
+///   filename, `parent()` is empty and `render_test` will canonicalize
+///   against the current working directory.
 /// - `work_dir`: scratch dir for PDFs/PNGs. `test/` and `ref/` subdirs
 ///   will be created under it.
 /// - `diff_out_dir`: where to dump per-page diff PNGs on failure.
@@ -76,6 +79,10 @@ pub fn run_one(
     let mut first_failure: Option<String> = None;
     for (idx, (t, r)) in test_out.pages.iter().zip(ref_out.pages.iter()).enumerate() {
         let total = u64::from(t.width()) * u64::from(t.height());
+        // Note: ratio_limit may legitimately exceed 1.0 when the test's fuzzy
+        // pixel cap is larger than the page area — fulgur-vrt's compare()
+        // clamps to [0, 1] internally, so a >1 limit simply means "unbounded"
+        // under WPT's upper-bound semantics.
         let ratio_limit = if total == 0 {
             0.0f32
         } else {
