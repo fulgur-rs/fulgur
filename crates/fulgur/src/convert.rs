@@ -505,6 +505,7 @@ fn build_list_item_body(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
+                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -550,6 +551,7 @@ fn build_list_item_body(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
+                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -573,6 +575,7 @@ fn build_list_item_body(
                 positioned_children,
             );
             let mut block = BlockPageable::with_positioned_children(positioned_children)
+                .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_visible(visible)
                 .with_id(extract_block_id(node));
@@ -591,6 +594,7 @@ fn build_list_item_body(
             positioned_children,
         );
         let mut block = BlockPageable::with_positioned_children(positioned_children)
+            .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_visible(visible)
             .with_id(extract_block_id(node));
@@ -798,6 +802,7 @@ fn convert_node_inner(
                 );
                 let needs_wrapper = style.needs_block_wrapper();
                 let mut block = BlockPageable::with_positioned_children(positioned_children)
+                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -854,6 +859,7 @@ fn convert_node_inner(
             );
             let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
+                .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -873,13 +879,13 @@ fn convert_node_inner(
             return convert_table(doc, node, ctx, depth);
         }
         if tag == "img" {
-            if let Some(img) = convert_image(node, ctx.assets) {
+            if let Some(img) = convert_image(ctx, node, ctx.assets) {
                 return img;
             }
             // Fall through to generic handling below to preserve Taffy-computed dimensions
         }
         if tag == "svg" {
-            if let Some(svg) = convert_svg(node, ctx.assets) {
+            if let Some(svg) = convert_svg(ctx, node, ctx.assets) {
                 return svg;
             }
             // Fall through — e.g., ImageData::None (parse failure upstream)
@@ -891,7 +897,7 @@ fn convert_node_inner(
     // in layout, so we read the computed value and build an ImagePageable.
     // Early return skips pseudo-element processing (spec-correct: replaced
     // elements do not generate ::before/::after).
-    if let Some(img) = convert_content_url(node, ctx.assets) {
+    if let Some(img) = convert_content_url(ctx, node, ctx.assets) {
         return img;
     }
 
@@ -986,6 +992,7 @@ fn convert_node_inner(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
+                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1036,6 +1043,7 @@ fn convert_node_inner(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
+                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1065,6 +1073,7 @@ fn convert_node_inner(
             let positioned_children =
                 wrap_with_block_pseudo_images(before_pseudo, after_pseudo, content_box, Vec::new());
             let mut block = BlockPageable::with_positioned_children(positioned_children)
+                .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -1095,6 +1104,7 @@ fn convert_node_inner(
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
+        .with_pagination(extract_pagination_from_column_css(ctx, node))
         .with_style(style)
         .with_opacity(opacity)
         .with_visible(visible)
@@ -1240,6 +1250,27 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
     }
 }
 
+/// Build a [`Pagination`] for `node` from the fulgur-ftp column_css sniffer.
+///
+/// Only `break-inside` flows through today — `break-before` / `break-after` /
+/// `orphans` / `widows` stay at their defaults (see
+/// [`Pagination::default`]). Absence of the node from `ctx.column_styles`
+/// collapses cleanly to [`BreakInside::Auto`], so every
+/// `BlockPageable::with_positioned_children` site can call this
+/// unconditionally without regressing the baseline behaviour that the
+/// existing test suite depends on.
+fn extract_pagination_from_column_css(
+    ctx: &ConvertContext<'_>,
+    node: &Node,
+) -> crate::pageable::Pagination {
+    use crate::pageable::{BreakInside, Pagination};
+    let props = ctx.column_styles.get(&node.id).copied().unwrap_or_default();
+    Pagination {
+        break_inside: props.break_inside.unwrap_or(BreakInside::Auto),
+        ..Pagination::default()
+    }
+}
+
 /// Wrap an atomic replaced element (image, svg) in a styled `BlockPageable`
 /// when the node has visual styling, or return the inner Pageable directly.
 ///
@@ -1249,6 +1280,7 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
 /// and the dimensions are the content-box, not the border-box. In the unstyled
 /// branch the inner receives the node's own opacity/visibility and full size.
 fn wrap_replaced_in_block_style<F>(
+    ctx: &ConvertContext<'_>,
     node: &Node,
     assets: Option<&AssetBundle>,
     build_inner: F,
@@ -1278,6 +1310,7 @@ where
             y: cy,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_opacity(opacity)
             .with_visible(visible)
@@ -1762,7 +1795,11 @@ fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) 
 /// Returns `None` when the element has no `content: url()`, the asset is
 /// missing, or the format is unsupported — callers fall through to the
 /// standard conversion path.
-fn convert_content_url(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+fn convert_content_url(
+    ctx: &ConvertContext<'_>,
+    node: &Node,
+    assets: Option<&AssetBundle>,
+) -> Option<Box<dyn Pageable>> {
     let raw_url = crate::blitz_adapter::extract_content_image_url(node)?;
     let asset_name = extract_asset_name(&raw_url);
     let bundle = assets?;
@@ -1770,6 +1807,7 @@ fn convert_content_url(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<
     let format = ImagePageable::detect_format(&data)?;
 
     Some(wrap_replaced_in_block_style(
+        ctx,
         node,
         assets,
         move |w, h, opacity, visible| {
@@ -1780,7 +1818,11 @@ fn convert_content_url(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<
 }
 
 /// Convert an `<img>` element into an `ImagePageable`, wrapped in `BlockPageable` if styled.
-fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+fn convert_image(
+    ctx: &ConvertContext<'_>,
+    node: &Node,
+    assets: Option<&AssetBundle>,
+) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
     let src = get_attr(elem, "src")?;
     let bundle = assets?;
@@ -1788,6 +1830,7 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
     let format = ImagePageable::detect_format(&data)?;
 
     Some(wrap_replaced_in_block_style(
+        ctx,
         node,
         assets,
         move |w, h, opacity, visible| {
@@ -1807,11 +1850,16 @@ fn convert_image(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pa
 /// Blitz parses the inline SVG into a `usvg::Tree` during DOM construction;
 /// `blitz_adapter::extract_inline_svg_tree` retrieves it without exposing
 /// blitz-internal types here.
-fn convert_svg(node: &Node, assets: Option<&AssetBundle>) -> Option<Box<dyn Pageable>> {
+fn convert_svg(
+    ctx: &ConvertContext<'_>,
+    node: &Node,
+    assets: Option<&AssetBundle>,
+) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
     let tree = extract_inline_svg_tree(elem)?;
 
     Some(wrap_replaced_in_block_style(
+        ctx,
         node,
         assets,
         move |w, h, opacity, visible| {
