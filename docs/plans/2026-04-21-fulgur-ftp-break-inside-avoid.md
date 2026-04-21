@@ -449,22 +449,17 @@ fn extract_column_style_table_populates_break_inside() {
     </style></head><body>
       <div class="k" id="k"></div>
     </body></html>"#;
-    let mut doc = parse(html).expect("parse");
-    resolve(&mut doc, None);
+    let mut doc = parse(html, 400.0, &[]);
+    resolve(&mut doc);
+    use std::ops::Deref;
+    let keep_id = find_element_by_attr_id(doc.deref(), "k");
     let table = extract_column_style_table(&doc);
-
-    let keep_id = doc
-        .tree()
-        .iter()
-        .find(|n| n.attr(local_name!("id")) == Some("k"))
-        .expect("keep node")
-        .id;
-    let props = table.get(&keep_id).copied().unwrap_or_default();
+    let props = table.get(&keep_id).expect("keep node in table");
     assert_eq!(props.break_inside, Some(crate::pageable::BreakInside::Avoid));
 }
 ```
 
-> **Note:** 周辺の test の parse/resolve 呼び方と揃える（line 2580 の既存 test を参考）。`doc.tree().iter().find(...)` の API が異なれば置換。
+> **Note:** 周辺の test の parse/resolve 呼び方と揃える（line 2580 の既存 test を参考）。`find_element_by_attr_id(doc.deref(), "k")` は sibling test (`extract_column_style_table_picks_up_inline_and_stylesheet`) と同じ helper パターン。
 
 **Step 2: Run**
 
@@ -501,7 +496,7 @@ Expected: fulgur / fulgur-cli / fulgur-vrt すべて green。
 
 **Step 4: Markdown lint**
 
-Run: `npx markdownlint-cli2 'docs/plans/2026-04-21-fulgur-ftp-break-inside-avoid.md'`
+Run: `npx markdownlint-cli2 '**/*.md'`
 Expected: No errors。
 
 **Step 5: Final commit（fmt / clippy が動かしたもの）**
