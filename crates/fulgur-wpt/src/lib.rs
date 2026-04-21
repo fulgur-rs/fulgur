@@ -5,3 +5,4 @@ pub mod harness;
 pub mod reftest;
 pub mod render;
 pub mod report;
+pub mod runner;

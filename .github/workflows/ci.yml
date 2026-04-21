@@ -60,6 +60,13 @@ jobs:
       - name: Install cargo-nextest
         if: matrix.coverage
         uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
+      # NOTE: fulgur-wpt integration tests (wpt_css_page, wpt_css_multicol)
+      # silently skip here because target/wpt is not fetched in the coverage
+      # cell — fetching + running all phases would add ~4-5 min to PR CI.
+      # That leaves `crates/fulgur-wpt/src/runner.rs` under-reported in
+      # Codecov. The WPT coverage surface is exercised by the `wpt` matrix
+      # job (in this same workflow) and by nightly; Codecov numbers here
+      # only reflect unit-test coverage.
       - name: Build tests
         if: ${{ !matrix.coverage }}
         run: cargo test --workspace --exclude fulgur-vrt --no-run
@@ -124,9 +131,20 @@ jobs:
           name: lcov
       - uses: k1LoW/octocov-action@73d561f65d59e66899ed5c87e4621a913b5d5c20 # v1
 
-  wpt-css-page:
-    name: wpt / css-page
+  wpt:
+    name: wpt / ${{ matrix.phase }}
     runs-on: ubuntu-latest
+    # WPT reftests are a reporting channel, not a blocker on PRs.
+    # Regressions surface via the step summary and target/wpt-report artifacts.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - phase: css-page
+            test: wpt_css_page
+          - phase: css-multicol
+            test: wpt_css_multicol
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,5 +153,27 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Fetch WPT subset
         run: scripts/wpt/fetch.sh
-      - name: Run css-page reftests against expectations
-        run: cargo test -p fulgur-wpt --test wpt_css_page -- --nocapture
+      - name: Run ${{ matrix.phase }} reftests
+        env:
+          FULGUR_REVISION: ${{ github.sha }}
+          # Tells the integration test to panic (rather than silently skip)
+          # if run_phase returns None — this job IS the WPT job, so missing
+          # prerequisites are a real bug here.
+          FULGUR_WPT_REQUIRED: "1"
+        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- --nocapture
+      - name: Append step summary
+        if: always()
+        run: |
+          summary="target/wpt-report/${{ matrix.phase }}/summary.md"
+          if [ -f "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no summary for ${{ matrix.phase }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wpt-${{ matrix.phase }}-report
+          path: target/wpt-report/${{ matrix.phase }}
+          if-no-files-found: warn

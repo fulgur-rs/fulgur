@@ -11,8 +11,17 @@ permissions:
   issues: write
 
 jobs:
-  wpt-full:
+  wpt:
+    name: wpt / ${{ matrix.phase }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - phase: css-page
+            test: wpt_css_page
+          - phase: css-multicol
+            test: wpt_css_multicol
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,40 +30,78 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Fetch WPT subset
         run: scripts/wpt/fetch.sh
-      - name: Run css-page reftests
-        id: run
-        continue-on-error: true
+      - name: Run ${{ matrix.phase }} reftests
+        env:
+          FULGUR_REVISION: ${{ github.sha }}
+          # Panic instead of silent skip if run_phase returns None — this
+          # job IS the WPT job, missing prereqs are a real bug.
+          FULGUR_WPT_REQUIRED: "1"
+        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- --nocapture
+      - name: Append step summary
+        if: always()
         run: |
-          mkdir -p target
-          cargo test -p fulgur-wpt --test wpt_css_page -- --nocapture 2>&1 | tee target/wpt-css-page.log
-      - name: Upload logs and diffs
+          summary="target/wpt-report/${{ matrix.phase }}/summary.md"
+          if [ -f "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wpt-logs
-          path: |
-            target/wpt-css-page.log
-            target/wpt-run/**/diff/*.png
-          if-no-files-found: ignore
+          name: wpt-${{ matrix.phase }}-nightly
+          path: target/wpt-report/${{ matrix.phase }}
+          if-no-files-found: warn
       - name: File regression issue
-        if: steps.run.outcome == 'failure'
+        # Only when the run itself succeeded — test exits 0 even with
+        # regressions (reporting-only model), so this fires on legitimate
+        # regression data. Infra failures (fetch/build/runner crash) leave
+        # no regressions.json anyway and are surfaced by the nightly job
+        # failing, not by issue spam.
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          BODY="Nightly WPT run detected regressions on css-page. See run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          regressions="target/wpt-report/${{ matrix.phase }}/regressions.json"
+          if [ ! -f "$regressions" ]; then
+            echo "no regressions.json — skipping"
+            exit 0
+          fi
+          count=$(jq 'length' "$regressions")
+          if [ "$count" = "0" ]; then
+            echo "no regressions — skipping"
+            exit 0
+          fi
 
-          Download the \`wpt-logs\` artifact from the run for the full log and diff images."
-          # Try with the conventional label; fall back to unlabeled so a
-          # missing label never silently swallows a real regression.
+          # Avoid spamming a fresh issue every night when the same regression
+          # persists: look for an open issue whose title starts with the phase
+          # prefix. If found, add a comment linking this run and exit.
+          title_prefix="WPT nightly regression: ${{ matrix.phase }}"
+          existing=$(gh issue list \
+            --state open \
+            --search "\"$title_prefix\" in:title" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')
+
+          BODY="Nightly WPT ${{ matrix.phase }} detected $count regression(s). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Download the \`wpt-${{ matrix.phase }}-nightly\` artifact for details."
+
+          if [ -n "$existing" ]; then
+            echo "open regression issue #$existing already exists for ${{ matrix.phase }} — commenting"
+            gh issue comment "$existing" --body "$BODY"
+            exit 0
+          fi
+
           if gh label list --search "wpt-nightly-regression" --limit 1 \
                | grep -q "^wpt-nightly-regression"; then
             gh issue create \
-              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --title "$title_prefix $(date -u +%Y-%m-%d)" \
               --body "$BODY" \
               --label "wpt-nightly-regression"
           else
             gh issue create \
-              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --title "$title_prefix $(date -u +%Y-%m-%d)" \
               --body "$BODY"
           fi
