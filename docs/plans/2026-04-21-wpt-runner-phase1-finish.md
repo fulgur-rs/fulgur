@@ -221,7 +221,7 @@ git commit -m "feat(fulgur-wpt): add wptreport.json emitter (2foo.7)"
 **Files:**
 
 - Modify: `scripts/wpt/pinned_sha.txt`
-- Modify: `scripts/wpt/README.md` (plcaholder 文言を削除)
+- Modify: `scripts/wpt/README.md` (placeholder 文言を削除)
 
 **Step 1: pinned_sha.txt 更新**
 

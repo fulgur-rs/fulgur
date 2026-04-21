@@ -7,6 +7,7 @@
 
 use fulgur_wpt::expectations::{Expectation, ExpectationFile, Verdict, judge};
 use fulgur_wpt::harness::run_one;
+use fulgur_wpt::reftest::collect_reftest_files;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -52,18 +53,11 @@ fn wpt_css_page_expectations_hold() {
     let declared = ExpectationFile::load(&expect_path)
         .unwrap_or_else(|e| panic!("load {}: {e}", expect_path.display()));
 
-    let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            name.ends_with(".html")
-                && !name.ends_with("-ref.html")
-                && !name.ends_with("-notref.html")
-        })
-        .collect();
-    tests.sort();
+    // Recursive walk via the shared helper — picks up nested subdirectories
+    // (tentative/, margin-boxes/, cssom/, ...) and correctly excludes
+    // `-ref.tentative.html` ref files that a suffix-only filter misses.
+    let tests = collect_reftest_files(&dir)
+        .unwrap_or_else(|e| panic!("collect reftest files in {}: {e}", dir.display()));
 
     let mut regressions: Vec<(String, String)> = Vec::new();
     let mut promotions: Vec<String> = Vec::new();

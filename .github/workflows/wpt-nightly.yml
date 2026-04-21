@@ -41,9 +41,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create \
-            --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
-            --body "Nightly WPT run detected regressions on css-page. See run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          set -euo pipefail
+          BODY="Nightly WPT run detected regressions on css-page. See run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
 
-          Download the \`wpt-logs\` artifact from the run for the full log and diff images." \
-            --label "wpt-nightly-regression" || true
+          Download the \`wpt-logs\` artifact from the run for the full log and diff images."
+          # Try with the conventional label; fall back to unlabeled so a
+          # missing label never silently swallows a real regression.
+          if gh label list --search "wpt-nightly-regression" --limit 1 \
+               | grep -q "^wpt-nightly-regression"; then
+            gh issue create \
+              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --body "$BODY" \
+              --label "wpt-nightly-regression"
+          else
+            gh issue create \
+              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --body "$BODY"
+          fi

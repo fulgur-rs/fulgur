@@ -255,6 +255,54 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
     })
 }
 
+/// Recursively collect candidate reftest HTML files under `root`.
+///
+/// Applies WPT conventions:
+/// - Only `.html` files are returned.
+/// - Files whose stem (before any `.tentative`/`.whatever` segment) ends with
+///   `-ref` or `-notref` are excluded (they are reference files, not tests).
+/// - Subdirectories named `reference`, `resources`, or `support` are skipped
+///   entirely — they contain only support assets by WPT convention.
+///
+/// Output is sorted lexicographically for deterministic iteration.
+pub fn collect_reftest_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    const SKIP_DIRS: &[&str] = &["reference", "resources", "support"];
+
+    fn is_reftest_name(name: &str) -> bool {
+        if !name.ends_with(".html") {
+            return false;
+        }
+        let stem = name.strip_suffix(".html").unwrap_or(name);
+        let base = stem.split('.').next().unwrap_or(stem);
+        !base.ends_with("-ref") && !base.ends_with("-notref")
+    }
+
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if SKIP_DIRS.contains(&name) {
+                    continue;
+                }
+                walk(&path, out)?;
+                continue;
+            }
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if is_reftest_name(name) {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    walk(root, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod fuzzy_tests {
     use super::*;
@@ -563,5 +611,50 @@ mod reftest_tests {
         let err = classify(&p).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("fuzzy"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn collect_reftest_files_recurses_and_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Top-level test + matching ref
+        std::fs::write(root.join("test-001-print.html"), "").unwrap();
+        std::fs::write(root.join("test-001-print-ref.html"), "").unwrap();
+        // `-ref.tentative.html` leaks through a naive `ends_with("-ref.html")` filter
+        std::fs::write(root.join("test-002-ref.tentative.html"), "").unwrap();
+        // `-notref` also excluded
+        std::fs::write(root.join("test-003-notref.html"), "").unwrap();
+
+        // Nested test (must be picked up by recursion)
+        std::fs::create_dir_all(root.join("tentative")).unwrap();
+        std::fs::write(root.join("tentative/nested-test.html"), "").unwrap();
+
+        // Skipped directories: contents never returned
+        for skip in ["reference", "resources", "support"] {
+            let sd = root.join(skip);
+            std::fs::create_dir_all(&sd).unwrap();
+            std::fs::write(sd.join("should-not-appear.html"), "").unwrap();
+        }
+
+        let files = collect_reftest_files(root).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "tentative/nested-test.html".to_string(),
+                "test-001-print.html".to_string(),
+            ],
+            "got {names:?}"
+        );
     }
 }

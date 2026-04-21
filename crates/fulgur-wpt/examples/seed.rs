@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, bail};
 use fulgur_wpt::expectations::Expectation;
 use fulgur_wpt::harness::run_one;
+use fulgur_wpt::reftest::collect_reftest_files;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -42,18 +43,10 @@ fn main() -> Result<()> {
     let dir = wpt_root.join("css").join(&subdir);
     anyhow::ensure!(dir.is_dir(), "not a directory: {}", dir.display());
 
-    // Test HTMLs: files ending in .html, excluding *-ref.html / *-notref.html.
-    let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            name.ends_with(".html")
-                && !name.ends_with("-ref.html")
-                && !name.ends_with("-notref.html")
-        })
-        .collect();
-    tests.sort();
+    // Recursive walk via the shared helper — handles nested subdirectories
+    // (tentative/, margin-boxes/, cssom/, ...) and the `-ref.tentative.html`
+    // edge case that a suffix-only filter misses.
+    let tests = collect_reftest_files(&dir).context("collect reftest files")?;
 
     let mut results: BTreeMap<String, (Expectation, Option<String>)> = BTreeMap::new();
     let total = tests.len();
