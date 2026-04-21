@@ -35,9 +35,15 @@ pub fn run_one(
     use fulgur_vrt::diff::{compare, write_diff_image};
     use fulgur_vrt::manifest::Tolerance;
 
+    enum Kind {
+        Match,
+        Mismatch,
+    }
+
     let reftest = classify(test_html_path)?;
-    let (ref_rel, fuzzy) = match reftest.classification {
-        ReftestKind::Match { ref_path, fuzzy } => (ref_path, fuzzy),
+    let (kind, ref_rel, fuzzy) = match reftest.classification {
+        ReftestKind::Match { ref_path, fuzzy } => (Kind::Match, ref_path, fuzzy),
+        ReftestKind::Mismatch { ref_path, fuzzy } => (Kind::Mismatch, ref_path, fuzzy),
         ReftestKind::Skip { reason } => {
             return Ok(RunOutcome {
                 observed: Expectation::Skip,
@@ -58,14 +64,22 @@ pub fn run_one(
     let ref_out = render_test(&ref_abs, &ref_work, dpi)?;
 
     if test_out.pages.len() != ref_out.pages.len() {
-        return Ok(RunOutcome {
-            observed: Expectation::Fail,
-            reason: Some(format!(
-                "page count mismatch: test={} ref={}",
-                test_out.pages.len(),
-                ref_out.pages.len(),
-            )),
-            diff_dir: None,
+        let msg = format!(
+            "page count mismatch: test={} ref={}",
+            test_out.pages.len(),
+            ref_out.pages.len(),
+        );
+        return Ok(match kind {
+            Kind::Match => RunOutcome {
+                observed: Expectation::Fail,
+                reason: Some(msg),
+                diff_dir: None,
+            },
+            Kind::Mismatch => RunOutcome {
+                observed: Expectation::Pass,
+                reason: None,
+                diff_dir: None,
+            },
         });
     }
 
@@ -76,7 +90,7 @@ pub fn run_one(
     let max_ch = *fuzzy.max_diff.end();
     let max_total = *fuzzy.total_pixels.end();
 
-    let mut first_failure: Option<String> = None;
+    let mut first_over_threshold: Option<String> = None;
     for (idx, (t, r)) in test_out.pages.iter().zip(ref_out.pages.iter()).enumerate() {
         let total = u64::from(t.width()) * u64::from(t.height());
         // Note: ratio_limit may legitimately exceed 1.0 when the test's fuzzy
@@ -94,11 +108,8 @@ pub fn run_one(
         };
         let report = compare(r, t, tol);
         if !report.pass {
-            std::fs::create_dir_all(diff_out_dir)?;
-            let out_path = diff_out_dir.join(format!("page{}.diff.png", idx + 1));
-            write_diff_image(r, t, tol, &out_path)?;
-            if first_failure.is_none() {
-                first_failure = Some(format!(
+            if first_over_threshold.is_none() {
+                first_over_threshold = Some(format!(
                     "page {} diff: {}/{} pixels exceed tol (max_ch={})",
                     idx + 1,
                     report.diff_pixels,
@@ -106,18 +117,35 @@ pub fn run_one(
                     report.max_channel_diff,
                 ));
             }
+            // Only Match cares about diff images — Mismatch differences are
+            // expected, so no actionable artifact.
+            if matches!(kind, Kind::Match) {
+                std::fs::create_dir_all(diff_out_dir)?;
+                let out_path = diff_out_dir.join(format!("page{}.diff.png", idx + 1));
+                write_diff_image(r, t, tol, &out_path)?;
+            }
         }
     }
 
-    Ok(match first_failure {
-        Some(reason) => RunOutcome {
+    Ok(match (kind, first_over_threshold) {
+        (Kind::Match, Some(reason)) => RunOutcome {
             observed: Expectation::Fail,
             reason: Some(reason),
             diff_dir: Some(diff_out_dir.to_path_buf()),
         },
-        None => RunOutcome {
+        (Kind::Match, None) => RunOutcome {
             observed: Expectation::Pass,
             reason: None,
+            diff_dir: None,
+        },
+        (Kind::Mismatch, Some(_)) => RunOutcome {
+            observed: Expectation::Pass,
+            reason: None,
+            diff_dir: None,
+        },
+        (Kind::Mismatch, None) => RunOutcome {
+            observed: Expectation::Fail,
+            reason: Some("mismatch expected but test matches ref within tolerance".to_string()),
             diff_dir: None,
         },
     })

@@ -135,8 +135,14 @@ pub struct Reftest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReftestKind {
-    /// Single rel=match + optional fuzzy tolerance. Phase 1 target.
+    /// Single rel=match + optional fuzzy tolerance.
     Match {
+        ref_path: PathBuf,
+        fuzzy: FuzzyTolerance,
+    },
+    /// Single rel=mismatch + optional fuzzy tolerance. The test PASSes
+    /// when test and ref renders *differ* beyond the fuzzy threshold.
+    Mismatch {
         ref_path: PathBuf,
         fuzzy: FuzzyTolerance,
     },
@@ -146,15 +152,21 @@ pub enum ReftestKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
+    /// Legacy: retained so older expectations comments (`# Mismatch`)
+    /// remain parseable. `classify()` no longer emits this for single
+    /// mismatch — that path now returns `ReftestKind::Mismatch` instead.
     Mismatch,
     MultipleMatches,
+    MultipleMismatches,
+    MixedMatchAndMismatch,
     NoMatch,
     /// Reserved for Phase 2: reftest chain (ref HTML points at another ref).
     /// Not yet emitted by `classify()`.
     ChainedReference,
 }
 
-/// Inspect the test HTML at `test_path` and classify it for Phase 1.
+/// Inspect the test HTML at `test_path` and classify it (Phase 1 runner:
+/// rel=match / rel=mismatch).
 /// File I/O only — does not render.
 pub fn classify(test_path: &Path) -> Result<Reftest> {
     let html = std::fs::read_to_string(test_path)?;
@@ -162,11 +174,9 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
 
     let link_sel = scraper::Selector::parse("link[rel]").unwrap();
     let mut matches: Vec<PathBuf> = Vec::new();
-    let mut has_mismatch = false;
+    let mut mismatches: Vec<PathBuf> = Vec::new();
 
     for el in doc.select(&link_sel) {
-        // `rel` is a whitespace-separated token list per HTML spec, so
-        // `rel="match alternate"` must still trigger the match branch.
         for token in el
             .value()
             .attr("rel")
@@ -178,39 +188,67 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
                     let href = el.value().attr("href").ok_or_else(|| {
                         anyhow::anyhow!("rel=match link without href in {}", test_path.display())
                     })?;
+                    if href.starts_with('/') {
+                        // Root-relative WPT hrefs need wpt_root context; skip.
+                        continue;
+                    }
                     matches.push(PathBuf::from(href));
                 }
                 "mismatch" => {
-                    has_mismatch = true;
+                    let href = el.value().attr("href").ok_or_else(|| {
+                        anyhow::anyhow!("rel=mismatch link without href in {}", test_path.display())
+                    })?;
+                    if href.starts_with('/') {
+                        // Root-relative WPT hrefs need wpt_root context; skip.
+                        continue;
+                    }
+                    mismatches.push(PathBuf::from(href));
                 }
                 _ => {}
             }
         }
     }
 
-    if has_mismatch {
-        return Ok(Reftest {
-            test: test_path.to_path_buf(),
-            classification: ReftestKind::Skip {
-                reason: SkipReason::Mismatch,
-            },
-        });
-    }
-    let ref_path = match matches.as_slice() {
-        [] => {
-            return Ok(Reftest {
-                test: test_path.to_path_buf(),
-                classification: ReftestKind::Skip {
-                    reason: SkipReason::NoMatch,
-                },
-            });
-        }
-        [one] => one.clone(),
-        _ => {
+    // Decision table:
+    //   matches=N, mismatches=M
+    //   N≥2              → MultipleMatches
+    //   M≥2              → MultipleMismatches
+    //   N=1, M≥1         → MixedMatchAndMismatch
+    //   N=1, M=0         → Match
+    //   N=0, M=1         → Mismatch
+    //   N=0, M=0         → NoMatch
+    let (is_mismatch, ref_path) = match (matches.len(), mismatches.len()) {
+        (n, _) if n >= 2 => {
             return Ok(Reftest {
                 test: test_path.to_path_buf(),
                 classification: ReftestKind::Skip {
                     reason: SkipReason::MultipleMatches,
+                },
+            });
+        }
+        (_, m) if m >= 2 => {
+            return Ok(Reftest {
+                test: test_path.to_path_buf(),
+                classification: ReftestKind::Skip {
+                    reason: SkipReason::MultipleMismatches,
+                },
+            });
+        }
+        (1, 1) => {
+            return Ok(Reftest {
+                test: test_path.to_path_buf(),
+                classification: ReftestKind::Skip {
+                    reason: SkipReason::MixedMatchAndMismatch,
+                },
+            });
+        }
+        (1, 0) => (false, matches.into_iter().next().unwrap()),
+        (0, 1) => (true, mismatches.into_iter().next().unwrap()),
+        _ => {
+            return Ok(Reftest {
+                test: test_path.to_path_buf(),
+                classification: ReftestKind::Skip {
+                    reason: SkipReason::NoMatch,
                 },
             });
         }
@@ -246,12 +284,20 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
         }
     }
 
-    Ok(Reftest {
-        test: test_path.to_path_buf(),
-        classification: ReftestKind::Match {
+    let classification = if is_mismatch {
+        ReftestKind::Mismatch {
             ref_path,
             fuzzy: chosen,
-        },
+        }
+    } else {
+        ReftestKind::Match {
+            ref_path,
+            fuzzy: chosen,
+        }
+    };
+    Ok(Reftest {
+        test: test_path.to_path_buf(),
+        classification,
     })
 }
 
@@ -513,20 +559,6 @@ mod reftest_tests {
     }
 
     #[test]
-    fn mismatch_skip() {
-        let (_d, p) = write_tmp(
-            "t.html",
-            r#"<!DOCTYPE html><link rel="mismatch" href="a.html"><body></body>"#,
-        );
-        assert!(matches!(
-            classify(&p).unwrap().classification,
-            ReftestKind::Skip {
-                reason: SkipReason::Mismatch
-            }
-        ));
-    }
-
-    #[test]
     fn no_match_skip() {
         let (_d, p) = write_tmp("t.html", r#"<!DOCTYPE html><body></body>"#);
         assert!(matches!(
@@ -557,7 +589,7 @@ mod reftest_tests {
 
     #[test]
     fn fuzzy_url_prefix_mismatched_is_ignored() {
-        // Prefix points at a different ref → Phase 1 falls back to strict
+        // Prefix points at a different ref → the classifier falls back to strict
         let (_d, p) = write_tmp(
             "t.html",
             r#"<!DOCTYPE html>
@@ -656,5 +688,103 @@ mod reftest_tests {
             ],
             "got {names:?}"
         );
+    }
+
+    #[test]
+    fn single_mismatch_classified_as_mismatch() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="mismatch" href="t-notref.html"><body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        match r.classification {
+            ReftestKind::Mismatch { ref_path, fuzzy } => {
+                assert_eq!(ref_path.file_name().unwrap(), "t-notref.html");
+                assert_eq!(fuzzy, FuzzyTolerance::strict());
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mismatch_with_fuzzy_meta() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="mismatch" href="t-notref.html">
+<meta name="fuzzy" content="5-10;200-300">
+<body></body>"#,
+        );
+        match classify(&p).unwrap().classification {
+            ReftestKind::Mismatch { fuzzy, .. } => {
+                assert_eq!(fuzzy.max_diff, 5..=10);
+                assert_eq!(fuzzy.total_pixels, 200..=300);
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_mismatches_skip() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="mismatch" href="a.html">
+<link rel="mismatch" href="b.html">
+<body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::MultipleMismatches
+            }
+        ));
+    }
+
+    #[test]
+    fn mixed_match_and_mismatch_skip() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="a.html">
+<link rel="mismatch" href="b.html">
+<body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::MixedMatchAndMismatch
+            }
+        ));
+    }
+
+    #[test]
+    fn root_relative_match_href_is_skipped_to_no_match() {
+        // Root-relative hrefs (e.g. /css/reference/foo.html) cannot be resolved
+        // without wpt_root context; classify() skips them → NoMatch.
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="match" href="/css/reference/foo.html"><body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::NoMatch
+            }
+        ));
+    }
+
+    #[test]
+    fn root_relative_mismatch_href_is_skipped_to_no_match() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="mismatch" href="/css/reference/foo.html"><body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::NoMatch
+            }
+        ));
     }
 }
