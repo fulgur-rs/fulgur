@@ -99,6 +99,15 @@ pub struct ConvertContext<'a> {
     /// Keyed by container `usize` NodeId — same convention as
     /// `column_styles`.
     pub multicol_geometry: crate::multicol_layout::MulticolGeometryTable,
+    /// Anchor (`<a href>`) resolution cache shared across the entire
+    /// conversion. Lifted out of `extract_paragraph` because inline-box
+    /// extraction recurses through `convert_node → extract_paragraph`, and a
+    /// per-paragraph cache would hand back two distinct `Arc<LinkSpan>` for
+    /// the same anchor — one for the outer inline-box rect and one for the
+    /// glyphs inside the box — producing duplicate `/Link` annotations in
+    /// the emitted PDF (LinkCollector dedupes by `Arc::ptr_eq`). A single
+    /// long-lived cache guarantees pointer identity across the whole tree.
+    pub(crate) link_cache: LinkCache,
 }
 
 impl ConvertContext<'_> {
@@ -444,7 +453,7 @@ fn build_list_item_body(
     depth: usize,
 ) -> Box<dyn Pageable> {
     if node.flags.is_inline_root() {
-        let paragraph_opt = extract_paragraph(doc, node, ctx);
+        let paragraph_opt = extract_paragraph(doc, node, ctx, depth);
 
         // Inline pseudo images for list item body
         let before_inline = node
@@ -888,7 +897,7 @@ fn convert_node_inner(
 
     // Check if this is an inline root (contains text layout)
     if node.flags.is_inline_root() {
-        let paragraph_opt = extract_paragraph(doc, node, ctx);
+        let paragraph_opt = extract_paragraph(doc, node, ctx, depth);
         let style = extract_block_style(node, ctx.assets);
         let (opacity, visible) = extract_opacity_visible(node);
         let content_box = compute_content_box(node, &style);
@@ -943,6 +952,7 @@ fn convert_node_inner(
                         match item {
                             LineItem::Text(run) => run.x_offset += shift,
                             LineItem::Image(i) => i.x_offset += shift,
+                            LineItem::InlineBox(ib) => ib.x_offset += shift,
                         }
                     }
                     paragraph.lines[0]
@@ -1604,6 +1614,7 @@ fn inject_inline_pseudo_images(
                 match item {
                     LineItem::Text(run) => run.x_offset += shift,
                     LineItem::Image(i) => i.x_offset += shift,
+                    LineItem::InlineBox(ib) => ib.x_offset += shift,
                 }
             }
             img.x_offset = 0.0;
@@ -1625,6 +1636,7 @@ fn inject_inline_pseudo_images(
                                 .sum::<f32>()
                     }
                     LineItem::Image(i) => i.x_offset + i.width,
+                    LineItem::InlineBox(ib) => ib.x_offset + ib.width,
                 })
                 .fold(0.0_f32, f32::max);
             img.x_offset = last_end;
@@ -1648,6 +1660,7 @@ fn metrics_from_line(line: &ShapedLine) -> LineFontMetrics {
         let run = match item {
             LineItem::Text(r) => r,
             LineItem::Image(_) => continue,
+            LineItem::InlineBox(_) => continue,
         };
         if let Ok(font_ref) = skrifa::FontRef::from_index(&run.font_data, run.font_index) {
             let metrics = font_ref.metrics(
@@ -2003,13 +2016,17 @@ fn resolve_enclosing_anchor(
 /// SAME `Arc<LinkSpan>` (verified via `Arc::ptr_eq`), which is required for
 /// correct quad_points deduplication during PDF /Link emission.
 #[derive(Default)]
-struct LinkCache {
+pub(crate) struct LinkCache {
     by_start: HashMap<usize, Option<usize>>,
     by_anchor: HashMap<usize, Arc<LinkSpan>>,
 }
 
 impl LinkCache {
-    fn lookup(&mut self, doc: &blitz_dom::BaseDocument, start_id: usize) -> Option<Arc<LinkSpan>> {
+    pub(crate) fn lookup(
+        &mut self,
+        doc: &blitz_dom::BaseDocument,
+        start_id: usize,
+    ) -> Option<Arc<LinkSpan>> {
         if let Some(cached) = self.by_start.get(&start_id) {
             let anchor_id = (*cached)?;
             return self.by_anchor.get(&anchor_id).cloned();
@@ -2032,12 +2049,33 @@ impl LinkCache {
     }
 }
 
+/// Recursively convert the Blitz node referenced by a Parley `InlineBox.id`
+/// and return the resulting `Pageable` as the inline-box content.
+///
+/// `InlineBoxContent` is `Box<dyn Pageable>`, so any wrapper chain emitted
+/// by `convert_node` (Transform / StringSet / CounterOp / BookmarkMarker /
+/// RunningElement) survives verbatim and its side effects apply around the
+/// inner Block / Paragraph when the inline-box is drawn. `MAX_DOM_DEPTH`
+/// is already enforced inside `convert_node`, so a depth-exhausted node
+/// returning a `SpacerPageable` flows through as a zero-height content
+/// rather than dropping the inline-box.
+fn convert_inline_box_node(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Option<crate::paragraph::InlineBoxContent> {
+    Some(convert_node(doc, node_id, ctx, depth + 1))
+}
+
 /// Extract a ParagraphPageable from an inline root node.
 fn extract_paragraph(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
+    depth: usize,
 ) -> Option<ParagraphPageable> {
+    use crate::paragraph::InlineBoxItem;
     let elem_data = node.element_data()?;
     let text_layout = elem_data.inline_layout_data.as_ref()?;
 
@@ -2045,70 +2083,120 @@ fn extract_paragraph(
     let text = &text_layout.text;
 
     let mut shaped_lines = Vec::new();
-    let mut link_cache = LinkCache::default();
+    // Running total of line heights seen so far (pt). Parley reports
+    // `PositionedInlineBox.y` in paragraph-relative coordinates, but
+    // `InlineBoxItem.computed_y` is expected to be line-relative; subtract
+    // `accumulated_line_top` when building the item.
+    let mut accumulated_line_top: f32 = 0.0;
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         let mut items = Vec::new();
 
         for item in line.items() {
-            if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
-                let run = glyph_run.run();
-                let font_ref = run.font();
-                let font_index = font_ref.index;
-                let font_arc = ctx.get_or_insert_font(font_ref);
-                // Parley (wired through blitz at scale=1.0) reports font
-                // size in CSS px. The Pageable tree works in PDF pt, and
-                // krilla's `draw_glyphs` also wants pt. Convert here so
-                // every downstream computation (glyph advances,
-                // decoration widths, link rects) naturally lands in pt.
-                // `glyph.advance / font_size` stays a unitless ratio.
-                let font_size_parley = run.font_size();
-                let font_size = px_to_pt(font_size_parley);
+            match item {
+                parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
+                    let run = glyph_run.run();
+                    let font_ref = run.font();
+                    let font_index = font_ref.index;
+                    let font_arc = ctx.get_or_insert_font(font_ref);
+                    // Parley (wired through blitz at scale=1.0) reports font
+                    // size in CSS px. The Pageable tree works in PDF pt, and
+                    // krilla's `draw_glyphs` also wants pt. Convert here so
+                    // every downstream computation (glyph advances,
+                    // decoration widths, link rects) naturally lands in pt.
+                    // `glyph.advance / font_size` stays a unitless ratio.
+                    let font_size_parley = run.font_size();
+                    let font_size = px_to_pt(font_size_parley);
 
-                // Get text color from the brush (node ID) → computed styles
-                let brush = &glyph_run.style().brush;
-                let color = get_text_color(doc, brush.id);
-                let decoration = get_text_decoration(doc, brush.id);
-                let link = link_cache.lookup(doc, brush.id);
+                    // Get text color from the brush (node ID) → computed styles
+                    let brush = &glyph_run.style().brush;
+                    let color = get_text_color(doc, brush.id);
+                    let decoration = get_text_decoration(doc, brush.id);
+                    let link = ctx.link_cache.lookup(doc, brush.id);
 
-                // Extract raw glyphs (relative offsets, not absolute positions)
-                let text_len = text.len();
-                let mut glyphs = Vec::new();
-                for g in glyph_run.glyphs() {
-                    glyphs.push(ShapedGlyph {
-                        id: g.id,
-                        x_advance: g.advance / font_size_parley,
-                        x_offset: g.x / font_size_parley,
-                        y_offset: g.y / font_size_parley,
-                        text_range: 0..text_len,
-                    });
+                    // Extract raw glyphs (relative offsets, not absolute positions)
+                    let text_len = text.len();
+                    let mut glyphs = Vec::new();
+                    for g in glyph_run.glyphs() {
+                        glyphs.push(ShapedGlyph {
+                            id: g.id,
+                            x_advance: g.advance / font_size_parley,
+                            x_offset: g.x / font_size_parley,
+                            y_offset: g.y / font_size_parley,
+                            text_range: 0..text_len,
+                        });
+                    }
+
+                    if !glyphs.is_empty() {
+                        let run_text = text.clone();
+                        // Run-level x_offset is also in parley px; convert.
+                        let run_x_offset = px_to_pt(glyph_run.offset());
+                        items.push(LineItem::Text(ShapedGlyphRun {
+                            font_data: font_arc,
+                            font_index,
+                            font_size,
+                            color,
+                            decoration,
+                            glyphs,
+                            text: run_text,
+                            x_offset: run_x_offset,
+                            link,
+                        }));
+                    }
                 }
-
-                if !glyphs.is_empty() {
-                    let run_text = text.clone();
-                    // Run-level x_offset is also in parley px; convert.
-                    let run_x_offset = px_to_pt(glyph_run.offset());
-                    items.push(LineItem::Text(ShapedGlyphRun {
-                        font_data: font_arc,
-                        font_index,
-                        font_size,
-                        color,
-                        decoration,
-                        glyphs,
-                        text: run_text,
-                        x_offset: run_x_offset,
+                parley::PositionedLayoutItem::InlineBox(positioned) => {
+                    let node_id = positioned.id as usize;
+                    let Some(content) = convert_inline_box_node(doc, node_id, ctx, depth) else {
+                        continue;
+                    };
+                    let link = ctx.link_cache.lookup(doc, node_id);
+                    // Parley's `PositionedInlineBox` has no baseline field
+                    // (Parley 0.6), so it defaults `y` so that the box's
+                    // bottom edge sits on the surrounding text baseline
+                    // (`y + height = surrounding_baseline`). CSS 2.1
+                    // §10.8.1 instead wants the box's *inner* last-line
+                    // baseline to coincide with the surrounding baseline.
+                    // Shift the box down by `height - inner_baseline_offset`
+                    // to realize that. When the box has no in-flow baseline
+                    // (empty, overflow clipped, flex/grid without text),
+                    // fall back to Parley's default — which is the CSS
+                    // bottom-edge fallback described in the same clause.
+                    let height_pt = px_to_pt(positioned.height);
+                    let baseline_shift =
+                        crate::paragraph::inline_box_baseline_offset(content.as_ref())
+                            .map(|bo| height_pt - bo)
+                            .unwrap_or(0.0);
+                    let computed_y = px_to_pt(positioned.y) - accumulated_line_top + baseline_shift;
+                    // Propagate `visibility: hidden` from the inner pageable
+                    // (set by `extract_block_style`) so the inline-box is
+                    // treated as invisible at draw time — link rect emission
+                    // is then also suppressed by the `!ib.visible` guard in
+                    // `draw_shaped_lines`. `Pageable::is_visible()` walks
+                    // wrappers for us so a `visibility: hidden` inline-block
+                    // keeps that state through a transform / marker chain.
+                    let visible = content.is_visible();
+                    items.push(LineItem::InlineBox(InlineBoxItem {
+                        content,
+                        width: px_to_pt(positioned.width),
+                        height: height_pt,
+                        x_offset: px_to_pt(positioned.x),
+                        computed_y,
                         link,
+                        opacity: 1.0,
+                        visible,
                     }));
                 }
             }
         }
 
+        let line_height_pt = px_to_pt(metrics.line_height);
         shaped_lines.push(ShapedLine {
-            height: px_to_pt(metrics.line_height),
+            height: line_height_pt,
             baseline: px_to_pt(metrics.baseline),
             items,
         });
+        accumulated_line_top += line_height_pt;
     }
 
     if shaped_lines.is_empty() {
@@ -2876,6 +2964,7 @@ fn inject_inside_marker_item_into_children(
     let marker_width: f32 = match &marker_item {
         LineItem::Text(run) => run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum(),
         LineItem::Image(img) => img.width,
+        LineItem::InlineBox(ib) => ib.width,
     };
 
     // Direct ParagraphPageable child
@@ -2886,6 +2975,7 @@ fn inject_inside_marker_item_into_children(
             let line_height = match &marker_item {
                 LineItem::Text(run) => run.font_size * DEFAULT_LINE_HEIGHT_RATIO,
                 LineItem::Image(img) => img.height,
+                LineItem::InlineBox(ib) => ib.height,
             };
             para_clone.lines.push(ShapedLine {
                 height: line_height,
@@ -2897,6 +2987,7 @@ fn inject_inside_marker_item_into_children(
                 match item {
                     LineItem::Text(run) => run.x_offset += marker_width,
                     LineItem::Image(i) => i.x_offset += marker_width,
+                    LineItem::InlineBox(ib) => ib.x_offset += marker_width,
                 }
             }
             para_clone.lines[0].items.insert(0, marker_item);
@@ -3279,6 +3370,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3324,6 +3416,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3373,6 +3466,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3430,6 +3524,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3478,6 +3573,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -3742,6 +3838,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3774,6 +3871,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3809,6 +3907,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
 
@@ -3871,6 +3970,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -3918,6 +4018,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -3981,6 +4082,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -4047,6 +4149,7 @@ mod tests {
                 bookmark_by_node: HashMap::new(),
                 column_styles: crate::column_css::ColumnStyleTable::new(),
                 multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+                link_cache: Default::default(),
             }
         }};
     }
@@ -4062,7 +4165,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         let mut found_external = false;
         for line in &para.lines {
@@ -4094,7 +4197,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         let mut found = false;
         for line in &para.lines {
@@ -4128,7 +4231,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         let mut links: Vec<Arc<LinkSpan>> = Vec::new();
         for line in &para.lines {
@@ -4164,7 +4267,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         for line in &para.lines {
             for item in &line.items {
@@ -4188,7 +4291,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         for line in &para.lines {
             for item in &line.items {
@@ -4212,7 +4315,7 @@ mod tests {
         let mut ctx = make_ctx!(store);
         let p_id = find_tag(&doc, "p").expect("p exists");
         let p_node = doc.get_node(p_id).expect("p node");
-        let para = extract_paragraph(doc.deref(), p_node, &mut ctx).expect("paragraph");
+        let para = extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
 
         let mut alt: Option<String> = None;
         for line in &para.lines {
@@ -4273,6 +4376,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         assert!(
@@ -4297,6 +4401,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         // Empty <li> with no AssetBundle fonts: marker may not render if no
@@ -4321,6 +4426,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let tree = super::dom_to_pageable(&doc, &mut ctx);
         assert!(
@@ -4394,5 +4500,214 @@ mod unit_oracle_tests {
     #[test]
     fn width_1in_is_72_pt() {
         assert_target_width("width:1in;height:0.1in", |_| 72.0);
+    }
+}
+
+#[cfg(test)]
+mod inline_box_extraction_tests {
+    use crate::engine::Engine;
+    use crate::pageable::{BlockPageable, Pageable, PositionedChild};
+    use crate::paragraph::{LineItem, ParagraphPageable};
+
+    fn find_paragraph(root: &dyn Pageable) -> Option<&ParagraphPageable> {
+        if let Some(p) = root.as_any().downcast_ref::<ParagraphPageable>() {
+            return Some(p);
+        }
+        if let Some(block) = root.as_any().downcast_ref::<BlockPageable>() {
+            for PositionedChild { child, .. } in &block.children {
+                if let Some(p) = find_paragraph(child.as_ref()) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    fn build_tree(html: &str) -> Box<dyn Pageable> {
+        Engine::builder()
+            .build()
+            .build_pageable_for_testing_no_gcpm(html)
+    }
+
+    #[test]
+    fn inline_block_becomes_line_item_inline_box() {
+        let html = r#"<!DOCTYPE html><html><body><p>before <span style="display:inline-block;width:40px;height:20px;background:red"></span> after</p></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        let found = para
+            .lines
+            .iter()
+            .flat_map(|l| l.items.iter())
+            .find(|it| matches!(it, LineItem::InlineBox(_)));
+        assert!(
+            found.is_some(),
+            "inline-block should appear as LineItem::InlineBox"
+        );
+
+        // Value assertions: the extracted InlineBox must carry the CSS
+        // sizes (40px × 20px → 30pt × 15pt), be visible at full opacity,
+        // and sit at a non-zero x offset because it comes after "before ".
+        let ib = match found.unwrap() {
+            LineItem::InlineBox(ib) => ib,
+            _ => unreachable!(),
+        };
+        let expected_w = super::px_to_pt(40.0);
+        let expected_h = super::px_to_pt(20.0);
+        assert!(
+            (ib.width - expected_w).abs() < 0.5,
+            "width: expected ~{expected_w}pt, got {}pt",
+            ib.width
+        );
+        assert!(
+            (ib.height - expected_h).abs() < 0.5,
+            "height: expected ~{expected_h}pt, got {}pt",
+            ib.height
+        );
+        assert_eq!(ib.opacity, 1.0, "opacity should default to 1.0");
+        assert!(ib.visible, "InlineBox should be visible by default");
+        assert!(
+            ib.x_offset > 0.0,
+            "x_offset should be non-zero (text precedes the inline-block), got {}",
+            ib.x_offset
+        );
+    }
+
+    #[test]
+    fn inline_block_with_block_child_has_block_content() {
+        // Note: `<p>` cannot contain `<div>` in HTML5 (auto-closes). Use a
+        // `<div>` inline root so the parser keeps the block-child shape.
+        let html = r#"<!DOCTYPE html><html><body><div>text <span style="display:inline-block;width:40px;height:20px"><div>inner</div></span> more</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        // Locate the line containing the InlineBox and the box itself,
+        // so we can also assert the line-relative `computed_y` invariant.
+        let (line, ib) = para
+            .lines
+            .iter()
+            .find_map(|l| {
+                l.items.iter().find_map(|it| match it {
+                    LineItem::InlineBox(ib) => Some((l, ib)),
+                    _ => None,
+                })
+            })
+            .expect("InlineBox expected");
+        assert!(
+            ib.content
+                .as_any()
+                .downcast_ref::<BlockPageable>()
+                .is_some(),
+            "inline-block content should surface as BlockPageable"
+        );
+
+        // `computed_y` is line-relative. It may be negative for
+        // baseline-aligned inline-blocks: an empty inline-block has its
+        // baseline at its bottom edge (CSS 2.1 §10.8), so a box taller
+        // than the line's ascent legitimately extends above line-top.
+        // The invariant we can assert without rejecting that case is
+        // that the box overlaps the line box — bottom below line-top,
+        // top above line-bottom. That still catches "paragraph-relative
+        // leak" on a multi-line paragraph (y would push the box out of
+        // the first line entirely) and unconverted Parley values.
+        assert!(
+            ib.computed_y + ib.height > 0.0 && ib.computed_y < line.height,
+            "computed_y should place the box overlapping the line, got y={} h={} line.height={}",
+            ib.computed_y,
+            ib.height,
+            line.height
+        );
+    }
+
+    #[test]
+    fn inline_block_with_transform_preserves_wrapper() {
+        // Addresses the CodeRabbit "wrapper semantics drop" finding that
+        // prompted the `Box<dyn Pageable>` refactor of `InlineBoxContent`:
+        // an inline-block with a CSS `transform` is wrapped by `convert_node`
+        // in `TransformWrapperPageable`, and now that wrapper survives at
+        // the top of `ib.content` (previously it was peeled and the
+        // transform effect lost).
+        let html = r#"<!DOCTYPE html><html><body><div>text <span style="display:inline-block;transform:rotate(2deg);width:40px;height:20px;background:red">x</span> more</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+        let ib = para
+            .lines
+            .iter()
+            .flat_map(|l| l.items.iter())
+            .find_map(|it| match it {
+                LineItem::InlineBox(ib) => Some(ib),
+                _ => None,
+            })
+            .expect("inline-block should appear as LineItem::InlineBox");
+        assert!(
+            ib.content
+                .as_any()
+                .downcast_ref::<crate::pageable::TransformWrapperPageable>()
+                .is_some(),
+            "transform should survive as TransformWrapperPageable at the top \
+             of the inline-box content"
+        );
+    }
+
+    #[test]
+    fn inline_block_inner_id_is_registered_with_destination_registry() {
+        use crate::pageable::DestinationRegistry;
+        // A `<span id="target">` placed as an inline-block inside a paragraph
+        // must still register with the destination registry so that
+        // `href="#target"` links can resolve. Before Fix 2 to
+        // `ParagraphPageable::collect_ids`, the registry walk stopped at the
+        // paragraph and ignored nested inline-box content.
+        let html = r#"<!DOCTYPE html><html><body><div>before <span id="target" style="display:inline-block;width:40px;height:20px;background:red">x</span> after</div></body></html>"#;
+        let tree = build_tree(html);
+        let mut reg = DestinationRegistry::default();
+        tree.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
+        assert!(
+            reg.get("target").is_some(),
+            "inline-block inner id should be registered with DestinationRegistry"
+        );
+    }
+
+    #[test]
+    fn inline_block_baseline_aligns_with_surrounding_text() {
+        // An inline-block with text "boxed" inside, surrounded by "before" /
+        // "after" text. Per CSS 2.1 §10.8.1, the inline-block's baseline is
+        // the baseline of its last inner line, which should coincide with
+        // the baseline of the surrounding text line.
+        let html = r#"<!DOCTYPE html><html><body><div>before <span style="display:inline-block;padding:6px 10px;border:2px solid #333;background:#def">boxed</span> after</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        // Locate the inline-box and the line it sits on.
+        let (ib, line) = para
+            .lines
+            .iter()
+            .find_map(|l| {
+                l.items.iter().find_map(|it| match it {
+                    LineItem::InlineBox(ib) => Some((ib, l)),
+                    _ => None,
+                })
+            })
+            .expect("InlineBox expected");
+
+        // Compute the inner baseline of the inline-box (offset from its
+        // top edge).
+        let inner_baseline = crate::paragraph::inline_box_baseline_offset(ib.content.as_ref())
+            .expect("inline-box with visible text should have an inner baseline");
+
+        // Fixture places the inline-box on the first (and only) line, so
+        // `line_top = 0`. `ib.computed_y` is line-relative, and
+        // `line.baseline` is paragraph-relative; with `line_top = 0` they
+        // share the same origin, so we can compare directly.
+        let line_top = 0.0_f32;
+        let box_inner_baseline_abs = line_top + ib.computed_y + inner_baseline;
+        let expected = line.baseline;
+        let delta = (box_inner_baseline_abs - expected).abs();
+        assert!(
+            delta < 0.5,
+            "inline-block inner baseline {} should align with surrounding line baseline {} (delta={})",
+            box_inner_baseline_abs,
+            expected,
+            delta
+        );
     }
 }

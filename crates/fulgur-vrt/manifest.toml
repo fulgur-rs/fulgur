@@ -32,6 +32,21 @@ path = "layout/overflow-hidden.html"
 path = "layout/overflow-hidden-rounded.html"
 
 [[fixture]]
+path = "layout/inline-block-basic.html"
+
+[[fixture]]
+path = "layout/inline-block-overflow-hidden.html"
+
+[[fixture]]
+path = "layout/inline-block-nested.html"
+
+[[fixture]]
+path = "layout/inline-flex-smoke.html"
+
+[[fixture]]
+path = "layout/inline-grid-smoke.html"
+
+[[fixture]]
 path = "paint/background-gradient.html"
 
 [[fixture]]

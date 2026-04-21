@@ -216,6 +216,7 @@ impl Engine {
             bookmark_by_node,
             column_styles,
             multicol_geometry,
+            link_cache: Default::default(),
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
@@ -302,6 +303,7 @@ impl Engine {
             bookmark_by_node: HashMap::new(),
             column_styles,
             multicol_geometry,
+            link_cache: Default::default(),
         };
         crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
     }

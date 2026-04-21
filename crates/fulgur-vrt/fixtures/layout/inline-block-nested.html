@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>VRT fixture: layout/inline-block-nested</title>
+<style>
+  html,body{margin:0;padding:0;font-family:sans-serif}
+  .wrap{padding:40px}
+  .outer{display:inline-block;padding:12px;background:#fee;border:2px solid #833}
+  .inner{display:inline-block;padding:6px;background:#eef;border:2px dashed #338}
+</style>
+</head><body>
+<div class="wrap">
+  <span class="outer">
+    outer text
+    <span class="inner">inner</span>
+    more outer
+  </span>
+</div>
+</body></html>

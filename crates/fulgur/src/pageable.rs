@@ -557,6 +557,18 @@ pub trait Pageable: Send + Sync {
         _registry: &mut DestinationRegistry,
     ) {
     }
+
+    /// Whether this pageable should be drawn. Defaults to `true`.
+    ///
+    /// Concrete types that track a `visibility: hidden` style (Block,
+    /// Paragraph, ListItem, Table) override this to return their internal
+    /// `visible` flag. Wrappers delegate to their inner pageable so the
+    /// visibility of an inline-box host element propagates through
+    /// `TransformWrapperPageable` / marker wrappers to the caller that
+    /// needs to gate rendering (see `InlineBoxItem.visible`).
+    fn is_visible(&self) -> bool {
+        true
+    }
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -1811,6 +1823,10 @@ impl Pageable for BlockPageable {
                 .collect_ids(x + pc.x, y + pc.y, avail_width, pc.child.height(), registry);
         }
     }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
 }
 
 // ─── SpacerPageable ──────────────────────────────────────
@@ -2027,6 +2043,10 @@ impl Pageable for BookmarkMarkerWrapperPageable {
     ) {
         self.child
             .collect_ids(x, y, avail_width, avail_height, registry);
+    }
+
+    fn is_visible(&self) -> bool {
+        self.child.is_visible()
     }
 }
 
@@ -2263,6 +2283,10 @@ impl Pageable for CounterOpWrapperPageable {
         self.child
             .collect_ids(x, y, avail_width, avail_height, registry);
     }
+
+    fn is_visible(&self) -> bool {
+        self.child.is_visible()
+    }
 }
 
 // ─── TransformWrapperPageable ──────────────────────────────
@@ -2374,6 +2398,10 @@ impl Pageable for TransformWrapperPageable {
             .collect_ids(x, y, avail_width, avail_height, registry);
         registry.pop_transform();
     }
+
+    fn is_visible(&self) -> bool {
+        self.inner.is_visible()
+    }
 }
 
 // ─── StringSetWrapperPageable ──────────────────────────────
@@ -2450,6 +2478,10 @@ impl Pageable for StringSetWrapperPageable {
     ) {
         self.child
             .collect_ids(x, y, avail_width, avail_height, registry);
+    }
+
+    fn is_visible(&self) -> bool {
+        self.child.is_visible()
     }
 }
 
@@ -2529,6 +2561,10 @@ impl Pageable for RunningElementWrapperPageable {
     ) {
         self.child
             .collect_ids(x, y, avail_width, avail_height, registry);
+    }
+
+    fn is_visible(&self) -> bool {
+        self.child.is_visible()
     }
 }
 
@@ -3654,6 +3690,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
@@ -3705,6 +3742,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
@@ -3750,6 +3788,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
