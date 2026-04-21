@@ -8,9 +8,11 @@
 <body>
   <h1>break-inside</h1>
   <p class="lead">
-    A block with <code>break-inside: avoid</code> is never split across
-    a page boundary. If it would straddle the bottom of a page, fulgur
-    promotes the whole block to the next page instead.
+    A block with <code>break-inside: avoid</code> is kept whole across
+    page boundaries wherever possible. If it would straddle the bottom of
+    a page, fulgur promotes the whole block to the next page instead. If
+    the block is taller than a page it will be split normally as a
+    fallback.
   </p>
 
   <p>
