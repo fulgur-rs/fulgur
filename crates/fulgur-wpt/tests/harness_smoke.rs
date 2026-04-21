@@ -192,18 +192,19 @@ fn mismatch_test_different_page_count_is_pass() {
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // Test HTML forces 2 pages with explicit @page size + break-after.
+    // Test HTML forces 2 pages; page 1 is identical to the ref so only page
+    // count differs, exercising the page-count early-return branch.
     let test_html = r#"<!DOCTYPE html>
 <link rel="mismatch" href="pc-ref.html">
 <style>
 @page { size: 200px 200px; margin: 0; }
-div { height: 150px; break-after: page; }
+div { height: 50px; break-after: page; }
 </style>
-<body style="margin:0"><div style="background:red"></div><div style="background:blue"></div></body>"#;
-    // Ref renders a single page.
+<body style="margin:0"><div style="background:green"></div><div style="background:green"></div></body>"#;
+    // Ref renders a single page with the same content as test page 1.
     let ref_html = r#"<!DOCTYPE html>
 <style>@page { size: 200px 200px; margin: 0; }</style>
-<body style="margin:0"><div style="width:50px;height:50px;background:green"></div></body>"#;
+<body style="margin:0"><div style="width:200px;height:50px;background:green"></div></body>"#;
     std::fs::write(root.join("t.html"), test_html).unwrap();
     std::fs::write(root.join("pc-ref.html"), ref_html).unwrap();
 

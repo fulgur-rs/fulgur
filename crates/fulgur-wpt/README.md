@@ -21,7 +21,7 @@ diff ロジックは `fulgur-vrt::diff` を dev-dep 経由で再利用する (Ru
 - `rel=match` (単一) — 主要形式。fuzzy tolerance (`<meta name="fuzzy">`) を尊重。
 - `rel=mismatch` (単一) — negative reftest。test と ref の差分が fuzzy 閾値を **超えた** ときに PASS。完全一致 (tolerance 内) で FAIL。
 
-複数 `rel=match` / `rel=mismatch` の混在や chained reference は現状 SKIP 扱い。
+複数 `rel=match` / `rel=mismatch` の混在は `classify()` が SKIP を返す。chained reference（ref HTML 自体が別 ref を指す構造）は未検知 — ref HTML は再帰解析されず known limitation となっている（Phase 2 の実装対象）。root-relative な ref href（例: `href="/css/reference/..."`) も未サポートで、そのような link は classify() がスキップし NoMatch 扱いになる。
 
 ## Expectations の運用
 

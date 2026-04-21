@@ -188,12 +188,20 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
                     let href = el.value().attr("href").ok_or_else(|| {
                         anyhow::anyhow!("rel=match link without href in {}", test_path.display())
                     })?;
+                    if href.starts_with('/') {
+                        // Root-relative WPT hrefs need wpt_root context; skip.
+                        continue;
+                    }
                     matches.push(PathBuf::from(href));
                 }
                 "mismatch" => {
                     let href = el.value().attr("href").ok_or_else(|| {
                         anyhow::anyhow!("rel=mismatch link without href in {}", test_path.display())
                     })?;
+                    if href.starts_with('/') {
+                        // Root-relative WPT hrefs need wpt_root context; skip.
+                        continue;
+                    }
                     mismatches.push(PathBuf::from(href));
                 }
                 _ => {}
@@ -746,6 +754,36 @@ mod reftest_tests {
             classify(&p).unwrap().classification,
             ReftestKind::Skip {
                 reason: SkipReason::MixedMatchAndMismatch
+            }
+        ));
+    }
+
+    #[test]
+    fn root_relative_match_href_is_skipped_to_no_match() {
+        // Root-relative hrefs (e.g. /css/reference/foo.html) cannot be resolved
+        // without wpt_root context; classify() skips them → NoMatch.
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="match" href="/css/reference/foo.html"><body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::NoMatch
+            }
+        ));
+    }
+
+    #[test]
+    fn root_relative_mismatch_href_is_skipped_to_no_match() {
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="mismatch" href="/css/reference/foo.html"><body></body>"#,
+        );
+        assert!(matches!(
+            classify(&p).unwrap().classification,
+            ReftestKind::Skip {
+                reason: SkipReason::NoMatch
             }
         ));
     }
