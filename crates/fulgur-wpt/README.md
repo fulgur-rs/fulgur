@@ -43,6 +43,18 @@ cargo run -p fulgur-wpt --example seed -- \
 
 生成された `expectations/<subdir>.txt` をコミット。以降この PR が reference point になる。
 
+### CI との関係
+
+WPT reftest の結果は **CI を fail させません** (`continue-on-error: true`)。PR でテストが「赤」になっても merge はブロックされないので、fulgur に広範な変更を加えた直後でも feedback loop が早く回ります。
+
+カバレッジ推移は以下で観測します:
+
+- **PR CI step summary**: 各 phase の total / PASS / FAIL / SKIP と PASS 率が自動で表示される
+- **PR artifact**: `target/wpt-report/<phase>/report.json` (wptreport.json schema) / `regressions.json` / `summary.md` を `wpt-<phase>-report` として upload
+- **nightly**: 同じ構造で全 phase 実行、`regressions.json` に回帰があれば `wpt-nightly-regression` ラベルの issue を自動起票
+
+expectations は「宣言と実測が一致すればまだ退化していない」という baseline です。fulgur 改善で PASS 化したテストは **PR で expectations を編集して PASS に昇格** させ、次回以降の regression 検出の土俵に乗せます。
+
 ### PASS 昇格フロー
 
 fulgur を改善して新しいテストが通るようになったら:
