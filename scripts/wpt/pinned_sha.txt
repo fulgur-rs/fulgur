@@ -1,0 +1,5 @@
+# WPT upstream commit SHA pinned for fulgur-wpt reproducibility.
+# Update via PR. Current pin: 2026-04-21 (HEAD at pin time).
+# Verify before bumping: scripts/wpt/fetch.sh && cargo test -p fulgur-wpt
+# TBD: set actual SHA in the PR that first wires up Phase 1.
+DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF

@@ -1,0 +1,18 @@
+[package]
+name = "fulgur-wpt"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "W3C web-platform-tests runner for fulgur (dev-only, not published)"
+
+[dependencies]
+fulgur = { path = "../fulgur" }
+fulgur-vrt = { path = "../fulgur-vrt" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"
+scraper = "0.26"
+
+[dev-dependencies]
+tempfile = "3"

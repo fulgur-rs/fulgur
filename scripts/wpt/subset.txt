@@ -1,0 +1,11 @@
+# WPT subset needed for fulgur-wpt. Keep in sync with sparse-checkout.
+# Phase 1 targets css-page; later phases extend below.
+css/css-page
+css/css-break
+css/css-gcpm
+css/css-multicol
+css/support
+css/fonts
+css/CSS2/support
+fonts
+resources
