@@ -4,3 +4,4 @@ pub mod expectations;
 pub mod harness;
 pub mod reftest;
 pub mod render;
+pub mod report;

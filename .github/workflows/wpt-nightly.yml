@@ -1,0 +1,60 @@
+name: WPT nightly
+
+on:
+  schedule:
+    # 02:00 UTC daily (11:00 JST)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  wpt-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Fetch WPT subset
+        run: scripts/wpt/fetch.sh
+      - name: Run css-page reftests
+        id: run
+        continue-on-error: true
+        run: |
+          mkdir -p target
+          cargo test -p fulgur-wpt --test wpt_css_page -- --nocapture 2>&1 | tee target/wpt-css-page.log
+      - name: Upload logs and diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wpt-logs
+          path: |
+            target/wpt-css-page.log
+            target/wpt-run/**/diff/*.png
+          if-no-files-found: ignore
+      - name: File regression issue
+        if: steps.run.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BODY="Nightly WPT run detected regressions on css-page. See run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Download the \`wpt-logs\` artifact from the run for the full log and diff images."
+          # Try with the conventional label; fall back to unlabeled so a
+          # missing label never silently swallows a real regression.
+          if gh label list --search "wpt-nightly-regression" --limit 1 \
+               | grep -q "^wpt-nightly-regression"; then
+            gh issue create \
+              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --body "$BODY" \
+              --label "wpt-nightly-regression"
+          else
+            gh issue create \
+              --title "WPT nightly regression $(date -u +%Y-%m-%d)" \
+              --body "$BODY"
+          fi

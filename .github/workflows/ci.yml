@@ -123,3 +123,17 @@ jobs:
         with:
           name: lcov
       - uses: k1LoW/octocov-action@73d561f65d59e66899ed5c87e4621a913b5d5c20 # v1
+
+  wpt-css-page:
+    name: wpt / css-page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Fetch WPT subset
+        run: scripts/wpt/fetch.sh
+      - name: Run css-page reftests against expectations
+        run: cargo test -p fulgur-wpt --test wpt_css_page -- --nocapture

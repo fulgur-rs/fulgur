@@ -1230,6 +1230,8 @@ dependencies = [
  "fulgur-vrt",
  "image",
  "scraper",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
