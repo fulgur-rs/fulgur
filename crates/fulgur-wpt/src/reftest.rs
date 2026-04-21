@@ -165,7 +165,8 @@ pub enum SkipReason {
     ChainedReference,
 }
 
-/// Inspect the test HTML at `test_path` and classify it for Phase 1.
+/// Inspect the test HTML at `test_path` and classify it (Phase 1 runner:
+/// rel=match / rel=mismatch).
 /// File I/O only — does not render.
 pub fn classify(test_path: &Path) -> Result<Reftest> {
     let html = std::fs::read_to_string(test_path)?;
@@ -580,7 +581,7 @@ mod reftest_tests {
 
     #[test]
     fn fuzzy_url_prefix_mismatched_is_ignored() {
-        // Prefix points at a different ref → Phase 1 falls back to strict
+        // Prefix points at a different ref → the classifier falls back to strict
         let (_d, p) = write_tmp(
             "t.html",
             r#"<!DOCTYPE html>
