@@ -2645,6 +2645,32 @@ mod tests {
         let n_rule = table.get(&n).and_then(|props| props.rule).expect("n rule");
         assert_eq!(n_rule.color, [0, 128, 0, 255]);
     }
+
+    #[test]
+    fn extract_column_style_table_populates_break_inside() {
+        // Regression guard: `break-inside: avoid` declared in a <style> block
+        // must survive the parser → ColumnStyleTable roundtrip keyed by node
+        // id. column_css.rs is unit-tested directly; this test pins down the
+        // blitz-dom integration so the property cannot silently get dropped
+        // between parser and side-table.
+        let html = r#"<!doctype html><html><head><style>
+            .k { break-inside: avoid; }
+        </style></head><body>
+          <div class="k" id="k"></div>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        use std::ops::Deref;
+        let k = find_element_by_attr_id(doc.deref(), "k");
+
+        let table = extract_column_style_table(&doc);
+
+        let props = table.get(&k).expect("k in table");
+        assert_eq!(
+            props.break_inside,
+            Some(crate::pageable::BreakInside::Avoid)
+        );
+    }
 }
 
 #[cfg(test)]

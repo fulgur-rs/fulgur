@@ -2077,6 +2077,7 @@ mod tests {
             crate::column_css::ColumnStyleProps {
                 rule: None,
                 fill: Some(crate::column_css::ColumnFill::Auto),
+                ..Default::default()
             },
         );
 

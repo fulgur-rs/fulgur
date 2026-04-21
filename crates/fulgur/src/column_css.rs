@@ -5,8 +5,8 @@
 //!
 //! Phase A of fulgur-v7a needs `column-rule-*` and `column-fill` to render
 //! rules between adjacent columns and switch the multicol layout hook between
-//! "balance" and "auto" (greedy fill). The follow-up (`fulgur-ftp`) will
-//! extend this module with `break-inside` — deliberately out of scope here.
+//! "balance" and "auto" (greedy fill). The follow-up (`fulgur-ftp`) extends
+//! this module with `break-inside` (see [`ColumnStyleProps::break_inside`]).
 //!
 //! Scope and trade-offs:
 //!
@@ -44,6 +44,8 @@ use cssparser::{
     ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
     color::{parse_hash_color, parse_named_color},
 };
+
+use crate::pageable::BreakInside;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -100,6 +102,12 @@ pub enum ColumnFill {
 pub struct ColumnStyleProps {
     pub rule: Option<ColumnRuleSpec>,
     pub fill: Option<ColumnFill>,
+    /// `break-inside` as resolved by the fulgur-ftp sniffer. `None` means the
+    /// author did not set the property — consumers should treat that as the
+    /// initial value (`BreakInside::Auto`). Stored as `Option` for the same
+    /// reason as the other fields: a later rule overwrites only the
+    /// properties it declares (see [`merge`](Self::merge)).
+    pub break_inside: Option<BreakInside>,
 }
 
 impl ColumnStyleProps {
@@ -112,10 +120,13 @@ impl ColumnStyleProps {
         if other.fill.is_some() {
             self.fill = other.fill;
         }
+        if other.break_inside.is_some() {
+            self.break_inside = other.break_inside;
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.rule.is_none() && self.fill.is_none()
+        self.rule.is_none() && self.fill.is_none() && self.break_inside.is_none()
     }
 }
 
@@ -399,6 +410,21 @@ fn parse_column_fill_value<'i>(
     }
 }
 
+/// Parse the value side of `break-inside`. Accepts the three avoid flavours
+/// (`avoid`, `avoid-page`, `avoid-column`) as `BreakInside::Avoid`, and
+/// `auto` as `BreakInside::Auto`. Other idents (`avoid-region`,
+/// `left`, `right`, typos …) drop the declaration so siblings still apply.
+fn parse_break_inside_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BreakInside, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    match ident.as_ref().to_ascii_lowercase().as_str() {
+        "avoid" | "avoid-page" | "avoid-column" => Ok(BreakInside::Avoid),
+        "auto" => Ok(BreakInside::Auto),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Declaration block parser
 // ---------------------------------------------------------------------------
@@ -470,6 +496,17 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         } else if name.eq_ignore_ascii_case("column-fill") {
             if let Ok(fill) = input.parse_entirely(parse_column_fill_value) {
                 self.props.fill = Some(fill);
+            }
+        } else if name.eq_ignore_ascii_case("break-inside") {
+            // `break-inside` (CSS Fragmentation Level 3) maps
+            // `avoid-page` / `avoid-column` / `avoid` all onto
+            // [`BreakInside::Avoid`]: fulgur's fragmentation model only
+            // distinguishes "may split" from "atomic", so the three avoid
+            // flavours collapse into a single lattice point. `auto` is the
+            // initial value; unknown idents drop the declaration silently
+            // so siblings keep applying.
+            if let Ok(bi) = input.parse_entirely(parse_break_inside_value) {
+                self.props.break_inside = Some(bi);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -887,6 +924,41 @@ mod tests {
     fn parses_column_fill_balance() {
         let props = parse_declaration_block("column-fill: balance;");
         assert_eq!(props.fill, Some(ColumnFill::Balance));
+    }
+
+    // -------- break-inside (fulgur-ftp) --------
+
+    #[test]
+    fn parse_break_inside_avoid_inline() {
+        let props = parse_declaration_block("break-inside: avoid;");
+        assert_eq!(props.break_inside, Some(BreakInside::Avoid));
+    }
+
+    #[test]
+    fn parse_break_inside_avoid_page_and_column_collapse_to_avoid() {
+        let p1 = parse_declaration_block("break-inside: avoid-page;");
+        let p2 = parse_declaration_block("break-inside: avoid-column;");
+        assert_eq!(p1.break_inside, Some(BreakInside::Avoid));
+        assert_eq!(p2.break_inside, Some(BreakInside::Avoid));
+    }
+
+    #[test]
+    fn parse_break_inside_auto_is_auto_variant() {
+        let props = parse_declaration_block("break-inside: auto;");
+        assert_eq!(props.break_inside, Some(BreakInside::Auto));
+    }
+
+    #[test]
+    fn parse_break_inside_invalid_value_is_silently_dropped() {
+        let props = parse_declaration_block("break-inside: banana;");
+        assert_eq!(props.break_inside, None);
+    }
+
+    #[test]
+    fn parse_break_inside_via_selector() {
+        let rules = parse_stylesheet(".keep { break-inside: avoid; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].props.break_inside, Some(BreakInside::Avoid));
     }
 
     #[test]

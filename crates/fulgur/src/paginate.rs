@@ -26,6 +26,11 @@ pub fn paginate(
     page_height: Pt,
 ) -> Vec<Box<dyn Pageable>> {
     root.wrap(page_width, page_height);
+    // Propagate the true page budget so `break-inside: avoid` can detect
+    // "content taller than any possible page" and fall back to a normal
+    // split. wrap() can't carry this itself because BlockPageable::wrap
+    // probes children with avail_height=10000.0.
+    root.propagate_page_height(page_height);
 
     let mut pages = vec![];
     let mut remaining = root;
@@ -37,6 +42,7 @@ pub fn paginate(
                 remaining = rest;
                 // Re-wrap the remaining content
                 remaining.wrap(page_width, page_height);
+                remaining.propagate_page_height(page_height);
             }
             Err(unsplit) => {
                 pages.push(unsplit);
