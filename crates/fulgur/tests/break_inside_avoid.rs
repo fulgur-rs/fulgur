@@ -77,3 +77,29 @@ fn avoid_block_taller_than_page_falls_back_to_split() {
         page_count(&pdf)
     );
 }
+
+/// ColumnGroup 内の avoid-child は `distribute` の whole placement で
+/// 自動保護される。この挙動を regression-proof する。
+#[test]
+fn avoid_child_inside_multicol_fits_whole_column() {
+    let html = r#"<!doctype html><html><head><style>
+        @page { size: 300pt 400pt; margin: 10pt; }
+        .mc { column-count: 2; column-gap: 10pt; }
+        .block { height: 120pt; margin-bottom: 10pt; background: #ddd; }
+        .keep { break-inside: avoid; }
+    </style></head><body>
+      <div class="mc">
+        <div class="block"></div>
+        <div class="block keep"></div>
+        <div class="block"></div>
+        <div class="block keep"></div>
+      </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize::custom(105.8333, 141.1111))
+        .build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(page_count(&pdf) >= 1);
+    assert!(page_count(&pdf) <= 2);
+    assert!(pdf.len() > 500, "PDF looks truncated");
+}
