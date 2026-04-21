@@ -27,7 +27,6 @@ jobs:
         run: |
           mkdir -p target
           cargo test -p fulgur-wpt --test wpt_css_page -- --nocapture 2>&1 | tee target/wpt-css-page.log
-          echo "css_page_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
       - name: Upload logs and diffs
         if: always()
         uses: actions/upload-artifact@v4
@@ -38,7 +37,7 @@ jobs:
             target/wpt-run/**/diff/*.png
           if-no-files-found: ignore
       - name: File regression issue
-        if: steps.run.outputs.css_page_exit != '0'
+        if: steps.run.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
