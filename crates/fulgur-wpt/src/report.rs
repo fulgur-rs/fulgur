@@ -15,12 +15,12 @@ pub struct WptReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TestResult {
-    pub test: String,
-    pub status: &'static str,
+    pub(crate) test: String,
+    pub(crate) status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub subtests: Vec<serde_json::Value>,
-    pub duration: u64,
+    pub(crate) message: Option<String>,
+    pub(crate) subtests: Vec<serde_json::Value>,
+    pub(crate) duration: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -59,6 +59,24 @@ impl WptReport {
             message,
             subtests: Vec::new(),
             duration: duration_ms,
+        });
+    }
+
+    /// Record a harness-level error (runner crashed or could not execute the
+    /// test), distinct from a genuine visual FAIL. wpt.fyi surfaces ERROR as
+    /// a different bucket from FAIL.
+    pub fn push_error(
+        &mut self,
+        test: impl Into<String>,
+        message: impl Into<String>,
+        duration: Duration,
+    ) {
+        self.results.push(TestResult {
+            test: test.into(),
+            status: "ERROR",
+            message: Some(message.into()),
+            subtests: Vec::new(),
+            duration: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         });
     }
 
@@ -119,12 +137,23 @@ mod tests {
         );
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert!(v.is_object());
         assert_eq!(v["run_info"]["product"], "fulgur");
         assert_eq!(v["run_info"]["revision"], "abc123");
         assert_eq!(v["results"][0]["test"], "css/css-page/basic.html");
         assert_eq!(v["results"][0]["status"], "PASS");
         assert_eq!(v["results"][0]["duration"], 15);
         assert!(v["results"][0]["subtests"].is_array());
+    }
+
+    #[test]
+    fn push_error_emits_error_status() {
+        let mut r = WptReport::new(RunInfo::default());
+        r.push_error("a.html", "harness crash", Duration::from_millis(1));
+        assert_eq!(r.results[0].status, "ERROR");
+        assert_eq!(r.results[0].message.as_deref(), Some("harness crash"));
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"status\":\"ERROR\""), "actual: {s}");
     }
 
     #[test]
