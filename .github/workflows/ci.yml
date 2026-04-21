@@ -51,6 +51,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Install cargo-llvm-cov
         if: matrix.coverage
         uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
