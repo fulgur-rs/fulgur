@@ -165,18 +165,26 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
     let mut has_mismatch = false;
 
     for el in doc.select(&link_sel) {
-        let rel = el.value().attr("rel").unwrap_or("").to_ascii_lowercase();
-        match rel.as_str() {
-            "match" => {
-                let href = el.value().attr("href").ok_or_else(|| {
-                    anyhow::anyhow!("rel=match link without href in {}", test_path.display())
-                })?;
-                matches.push(PathBuf::from(href));
+        // `rel` is a whitespace-separated token list per HTML spec, so
+        // `rel="match alternate"` must still trigger the match branch.
+        for token in el
+            .value()
+            .attr("rel")
+            .unwrap_or("")
+            .split_ascii_whitespace()
+        {
+            match token.to_ascii_lowercase().as_str() {
+                "match" => {
+                    let href = el.value().attr("href").ok_or_else(|| {
+                        anyhow::anyhow!("rel=match link without href in {}", test_path.display())
+                    })?;
+                    matches.push(PathBuf::from(href));
+                }
+                "mismatch" => {
+                    has_mismatch = true;
+                }
+                _ => {}
             }
-            "mismatch" => {
-                has_mismatch = true;
-            }
-            _ => {}
         }
     }
 
@@ -218,10 +226,12 @@ pub fn classify(test_path: &Path) -> Result<Reftest> {
         let Some(content) = el.value().attr("content") else {
             continue;
         };
-        let parsed = match parse_fuzzy(content) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let parsed = parse_fuzzy(content).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid <meta name=\"fuzzy\"> in {}: {e}",
+                test_path.display()
+            )
+        })?;
         match &parsed.url {
             Some(u) if u == &ref_path => {
                 chosen = parsed;
@@ -525,5 +535,33 @@ mod reftest_tests {
         let err = classify(&p).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("rel=match"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn rel_tokenization_finds_match_with_extra_tokens() {
+        // HTML spec: rel is a whitespace-separated token list. "match alternate"
+        // must still be classified as a Match reftest.
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html><link rel="match alternate" href="t-ref.html"><body></body>"#,
+        );
+        let r = classify(&p).unwrap();
+        assert!(matches!(r.classification, ReftestKind::Match { .. }));
+    }
+
+    #[test]
+    fn malformed_fuzzy_meta_is_error() {
+        // Broken fuzzy metadata must surface as an error, not silently
+        // fall back to strict tolerance (which would hide bad test authoring).
+        let (_d, p) = write_tmp(
+            "t.html",
+            r#"<!DOCTYPE html>
+<link rel="match" href="t-ref.html">
+<meta name="fuzzy" content="not-a-valid-fuzzy-value">
+<body></body>"#,
+        );
+        let err = classify(&p).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("fuzzy"), "unexpected error: {msg}");
     }
 }

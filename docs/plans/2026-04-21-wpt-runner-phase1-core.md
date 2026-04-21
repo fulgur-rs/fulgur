@@ -1547,5 +1547,5 @@ npx markdownlint-cli2 'docs/plans/2026-04-21-wpt-runner-phase1-core.md' 'crates/
 ## Known risks
 
 1. **WPT 実ファイルを使わない smoke**: harness テストは自作 HTML で完結。実 WPT ファイルでの検証は 2foo.8 (seed) で行う
-2. **pdftocairo 出力ファイル名の 2桁 padding**: 10ページ以上だと `page-01.png` にならず `page-01.png`/`page-10.png` で sort 順が崩れる可能性 — `std::fs::read_dir` + 自然順 sort が必要かは実測後判断。Phase 1 smoke は 2 ページで事足りるため初版は lexical sort で OK
+2. **pdftocairo 出力ファイル名の桁数 padding**: 9ページ以下は `page-1.png` … `page-9.png` (padding なし)、10ページ以上は `page-01.png` … `page-10.png` (総ページ数の桁幅にゼロ padding) と、1 回の render 内では常に同じ padding 幅が使われる。そのため lexical sort は安全 (実測でも poppler 24.02 で確認済み)。`std::fs::read_dir` + 自然順 sort が必要になるのは将来別 renderer を追加した場合のみ
 3. **fulgur-vrt の Tolerance へのマッピング**: fuzzy range を単一閾値に丸めると false pass の余地 — WPT 公式 runner も likewise なので許容範囲。必要なら Phase 5 以降で再設計

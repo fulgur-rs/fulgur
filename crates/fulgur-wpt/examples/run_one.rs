@@ -23,6 +23,9 @@ fn main() -> Result<()> {
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--dpi needs a value"))?;
                 dpi = v.parse().context("parse --dpi value")?;
+                if dpi == 0 {
+                    bail!("--dpi must be greater than 0");
+                }
             }
             other => bail!("unknown flag: {other}"),
         }

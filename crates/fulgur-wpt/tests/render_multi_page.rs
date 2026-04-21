@@ -5,7 +5,8 @@ fn poppler_available() -> bool {
     std::process::Command::new("pdftocairo")
         .arg("-v")
         .output()
-        .is_ok()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 #[test]
