@@ -234,42 +234,35 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
         };
 
         if let Ok(res) = page_obj.get(b"Resources") {
-            if let Ok((_, resources_obj)) = doc.dereference(res) {
-                if let lopdf::Object::Dictionary(resources) = resources_obj {
-                    if let Ok(xo) = resources.get(b"XObject") {
-                        if let Ok((_, xobjects_obj)) = doc.dereference(xo) {
-                            if let lopdf::Object::Dictionary(xobjects) = xobjects_obj {
-                                for (name, obj_ref) in xobjects.iter() {
-                                    if let Ok((_, lopdf::Object::Stream(xobj))) =
-                                        doc.dereference(obj_ref)
-                                    {
-                                        let subtype = xobj
-                                            .dict
-                                            .get(b"Subtype")
-                                            .ok()
-                                            .and_then(|o| obj_as_name_str(o))
-                                            .unwrap_or_default();
-                                        if subtype == "Image" {
-                                            let fmt = detect_image_format(&xobj.dict);
-                                            let w_px = xobj
-                                                .dict
-                                                .get(b"Width")
-                                                .ok()
-                                                .and_then(|o| o.as_i64().ok())
-                                                .unwrap_or(0)
-                                                as u32;
-                                            let h_px = xobj
-                                                .dict
-                                                .get(b"Height")
-                                                .ok()
-                                                .and_then(|o| o.as_i64().ok())
-                                                .unwrap_or(0)
-                                                as u32;
-                                            let name_str =
-                                                String::from_utf8_lossy(name).into_owned();
-                                            image_xobjects.insert(name_str, (fmt, w_px, h_px));
-                                        }
-                                    }
+            if let Ok((_, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
+                if let Ok(xo) = resources.get(b"XObject") {
+                    if let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo) {
+                        for (name, obj_ref) in xobjects.iter() {
+                            if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
+                                let subtype = xobj
+                                    .dict
+                                    .get(b"Subtype")
+                                    .ok()
+                                    .and_then(|o| obj_as_name_str(o))
+                                    .unwrap_or_default();
+                                if subtype == "Image" {
+                                    let fmt = detect_image_format(&xobj.dict);
+                                    let w_px = xobj
+                                        .dict
+                                        .get(b"Width")
+                                        .ok()
+                                        .and_then(|o| o.as_i64().ok())
+                                        .unwrap_or(0)
+                                        as u32;
+                                    let h_px = xobj
+                                        .dict
+                                        .get(b"Height")
+                                        .ok()
+                                        .and_then(|o| o.as_i64().ok())
+                                        .unwrap_or(0)
+                                        as u32;
+                                    let name_str = String::from_utf8_lossy(name).into_owned();
+                                    image_xobjects.insert(name_str, (fmt, w_px, h_px));
                                 }
                             }
                         }
