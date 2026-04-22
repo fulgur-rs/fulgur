@@ -120,9 +120,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
             match operator.as_str() {
                 "Tf" => {
                     if let (Some(name_obj), Some(size)) = (operands.first(), operands.get(1)) {
-                        font_name = obj_as_name_str(name_obj)
-                            .unwrap_or("unknown")
-                            .to_string();
+                        font_name = obj_as_name_str(name_obj).unwrap_or("unknown").to_string();
                         font_size = obj_to_f32(size);
                     }
                 }
@@ -398,7 +396,10 @@ mod tests {
     fn inspect_text_item_fields() {
         let pdf = render_test_pdf("<html><body><p>Hello</p></body></html>");
         let result = inspect_bytes(&pdf);
-        let item = result.text_items.first().expect("text items should not be empty");
+        let item = result
+            .text_items
+            .first()
+            .expect("text items should not be empty");
         assert!(item.page >= 1);
         assert!(item.font_size > 0.0);
         assert!(!item.text.is_empty());

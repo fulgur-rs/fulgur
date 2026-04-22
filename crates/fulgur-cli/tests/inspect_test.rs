@@ -56,9 +56,15 @@ fn inspect_outputs_valid_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&json_str).expect("output is not valid JSON");
 
-    assert!(parsed["pages"].as_u64().unwrap_or(0) >= 1, "pages must be >= 1");
+    assert!(
+        parsed["pages"].as_u64().unwrap_or(0) >= 1,
+        "pages must be >= 1"
+    );
     assert!(parsed["metadata"].is_object(), "metadata must be an object");
-    assert!(parsed["text_items"].is_array(), "text_items must be an array");
+    assert!(
+        parsed["text_items"].is_array(),
+        "text_items must be an array"
+    );
     assert!(parsed["images"].is_array(), "images must be an array");
 }
 
