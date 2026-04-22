@@ -294,4 +294,12 @@ mod tests {
         assert!((size.width - 595.28).abs() < 0.2);
         assert!((size.height - 841.89).abs() < 0.2);
     }
+
+    #[test]
+    fn test_default_producer_has_no_version() {
+        let config = Config::default();
+        let producer = config.producer.as_deref().unwrap_or("");
+        assert_eq!(producer, "fulgur");
+        assert!(!producer.contains(env!("CARGO_PKG_VERSION")));
+    }
 }
