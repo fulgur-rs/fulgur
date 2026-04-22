@@ -124,10 +124,8 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                     let top = *ctm_stack.last().unwrap_or(&identity);
                     ctm_stack.push(top);
                 }
-                "Q" => {
-                    if ctm_stack.len() > 1 {
-                        ctm_stack.pop();
-                    }
+                "Q" if ctm_stack.len() > 1 => {
+                    ctm_stack.pop();
                 }
                 "cm" if operands.len() == 6 => {
                     let new_m = [
@@ -147,20 +145,16 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                         font_size = obj_to_f32(size);
                     }
                 }
-                "Tm" => {
-                    if operands.len() >= 6 {
-                        let text_e = obj_to_f32(&operands[4]);
-                        let text_f = obj_to_f32(&operands[5]);
-                        let ctm = ctm_stack.last().unwrap_or(&identity);
-                        tx = ctm[0] * text_e + ctm[2] * text_f + ctm[4];
-                        ty = ctm[1] * text_e + ctm[3] * text_f + ctm[5];
-                    }
+                "Tm" if operands.len() >= 6 => {
+                    let text_e = obj_to_f32(&operands[4]);
+                    let text_f = obj_to_f32(&operands[5]);
+                    let ctm = ctm_stack.last().unwrap_or(&identity);
+                    tx = ctm[0] * text_e + ctm[2] * text_f + ctm[4];
+                    ty = ctm[1] * text_e + ctm[3] * text_f + ctm[5];
                 }
-                "Td" | "TD" => {
-                    if operands.len() >= 2 {
-                        tx += obj_to_f32(&operands[0]);
-                        ty += obj_to_f32(&operands[1]);
-                    }
+                "Td" | "TD" if operands.len() >= 2 => {
+                    tx += obj_to_f32(&operands[0]);
+                    ty += obj_to_f32(&operands[1]);
                 }
                 "T*" => {
                     ty -= font_size;
@@ -293,10 +287,8 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                     let top = *ctm_stack.last().unwrap_or(&identity);
                     ctm_stack.push(top);
                 }
-                "Q" => {
-                    if ctm_stack.len() > 1 {
-                        ctm_stack.pop();
-                    }
+                "Q" if ctm_stack.len() > 1 => {
+                    ctm_stack.pop();
                 }
                 "cm" if op.operands.len() == 6 => {
                     let new_m = [
