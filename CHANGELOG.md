@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.7] - 2026-04-22
+
+### Bug Fixes
+
+- improve install.js error handling and Windows compat
+- make npm publish idempotent (skip already-published versions)
+- add Windows JS shim for bin/fulgur and meta package files field
+- filter release artifact download to fulgur-* only
+- cross-compile darwin-x64 on macos-latest instead of deprecated macos-13
+
+### CI
+
+- add darwin-x64 build and npm publish to release.yml
+- use npm Trusted Publishing (OIDC) instead of automation token
+
+### Documentation
+
+- add npm distribution implementation plan
+
+### Features
+
+- add landing page content (index.en.md + index.ja.md)
+- hero and header styling
+- add npm package scaffolding for @fulgur-rs/cli
+
+### Miscellaneous
+
+- disable MD041 for frontmatter+HTML landing pages
+
 ## [0.5.6] - 2026-04-21
 
 ### Bug Fixes
@@ -156,6 +185,10 @@ All notable changes to this project will be documented in this file.
 ### Examples
 
 - add break-inside example (avoid promoting callout to next page)
+
+### Release
+
+- v0.5.6
 
 ### Revert
 
