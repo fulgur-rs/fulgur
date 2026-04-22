@@ -269,7 +269,12 @@ jobs:
 
             cd "$pkg_dir"
             npm version "$VERSION" --no-git-tag-version --allow-same-version
-            npm publish --access public
+            PKG_NAME=$(node -p "require('./package.json').name")
+            if npm view "${PKG_NAME}@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+              echo "Already published ${PKG_NAME}@${VERSION}, skipping."
+            else
+              npm publish --access public
+            fi
             cd - > /dev/null
           done
 
@@ -288,4 +293,9 @@ jobs:
             }
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          npm publish --access public
+          PKG_NAME=$(node -p "require('./package.json').name")
+          if npm view "${PKG_NAME}@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+            echo "Already published ${PKG_NAME}@${VERSION}, skipping."
+          else
+            npm publish --access public
+          fi
