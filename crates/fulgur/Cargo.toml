@@ -28,6 +28,8 @@ thiserror = "2"
 minijinja = { version = "=2.19.0", features = ["unstable_machinery"] }
 serde_json = "1"
 log = "0.4"
+lopdf = "0.40.0"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
