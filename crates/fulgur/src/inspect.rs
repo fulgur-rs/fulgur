@@ -111,6 +111,8 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
             Err(_) => continue,
         };
 
+        let identity = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
         let mut tx: f32 = 0.0;
         let mut ty: f32 = 0.0;
         let mut font_name = String::from("unknown");
@@ -118,6 +120,27 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
 
         for Operation { operator, operands } in &content.operations {
             match operator.as_str() {
+                "q" => {
+                    let top = *ctm_stack.last().unwrap_or(&identity);
+                    ctm_stack.push(top);
+                }
+                "Q" => {
+                    if ctm_stack.len() > 1 {
+                        ctm_stack.pop();
+                    }
+                }
+                "cm" if operands.len() == 6 => {
+                    let new_m = [
+                        obj_to_f32(&operands[0]),
+                        obj_to_f32(&operands[1]),
+                        obj_to_f32(&operands[2]),
+                        obj_to_f32(&operands[3]),
+                        obj_to_f32(&operands[4]),
+                        obj_to_f32(&operands[5]),
+                    ];
+                    let current = *ctm_stack.last().unwrap_or(&identity);
+                    *ctm_stack.last_mut().unwrap() = concat_matrix(&current, &new_m);
+                }
                 "Tf" => {
                     if let (Some(name_obj), Some(size)) = (operands.first(), operands.get(1)) {
                         font_name = obj_as_name_str(name_obj).unwrap_or("unknown").to_string();
@@ -126,8 +149,11 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                 }
                 "Tm" => {
                     if operands.len() >= 6 {
-                        tx = obj_to_f32(&operands[4]);
-                        ty = obj_to_f32(&operands[5]);
+                        let text_e = obj_to_f32(&operands[4]);
+                        let text_f = obj_to_f32(&operands[5]);
+                        let ctm = ctm_stack.last().unwrap_or(&identity);
+                        tx = ctm[0] * text_e + ctm[2] * text_f + ctm[4];
+                        ty = ctm[1] * text_e + ctm[3] * text_f + ctm[5];
                     }
                 }
                 "Td" | "TD" => {
@@ -266,11 +292,21 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
             Err(_) => continue,
         };
 
-        let mut ctm = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let identity = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
         for op in &content.operations {
             match op.operator.as_str() {
+                "q" => {
+                    let top = *ctm_stack.last().unwrap_or(&identity);
+                    ctm_stack.push(top);
+                }
+                "Q" => {
+                    if ctm_stack.len() > 1 {
+                        ctm_stack.pop();
+                    }
+                }
                 "cm" if op.operands.len() == 6 => {
-                    ctm = [
+                    let new_m = [
                         obj_to_f32(&op.operands[0]),
                         obj_to_f32(&op.operands[1]),
                         obj_to_f32(&op.operands[2]),
@@ -278,11 +314,14 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                         obj_to_f32(&op.operands[4]),
                         obj_to_f32(&op.operands[5]),
                     ];
+                    let current = *ctm_stack.last().unwrap_or(&identity);
+                    *ctm_stack.last_mut().unwrap() = concat_matrix(&current, &new_m);
                 }
                 "Do" => {
                     if let Some(name_obj) = op.operands.first() {
                         if let Some(name) = obj_as_name_str(name_obj) {
                             if let Some((fmt, w_px, h_px)) = image_xobjects.get(name) {
+                                let ctm = ctm_stack.last().unwrap_or(&identity);
                                 items.push(ImageItem {
                                     page: page_num,
                                     x: ctm[4],
@@ -312,6 +351,40 @@ fn obj_to_f32(obj: &lopdf::Object) -> f32 {
     }
 }
 
+/// Concatenate two PDF transformation matrices.
+///
+/// PDF transformation matrices use the row-vector convention:
+/// ```text
+/// a c e
+/// b d f
+/// 0 0 1
+/// ```
+/// This function computes `M_result = M_new × M_current`.
+fn concat_matrix(current: &[f32; 6], new: &[f32; 6]) -> [f32; 6] {
+    let (a, b, c, d, e, f) = (new[0], new[1], new[2], new[3], new[4], new[5]);
+    let (a2, b2, c2, d2, e2, f2) = (
+        current[0], current[1], current[2], current[3], current[4], current[5],
+    );
+    [
+        a * a2 + b * c2,
+        a * b2 + b * d2,
+        c * a2 + d * c2,
+        c * b2 + d * d2,
+        e * a2 + f * c2 + e2,
+        e * b2 + f * d2 + f2,
+    ]
+}
+
+/// Decode a PDF string to a Rust String.
+///
+/// Handles UTF-16 BE (BOM `\xFE\xFF`) strings. For all other strings,
+/// falls back to treating each byte as a Latin-1 code point.
+///
+/// Note: fulgur-generated PDFs use CID fonts where text in the content
+/// stream consists of glyph IDs, not Unicode code points. The decoded
+/// text for such PDFs will appear as raw byte sequences, not readable text.
+/// Full Unicode reconstruction requires ToUnicode CMap parsing, which is
+/// not yet implemented.
 fn decode_pdf_string(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         let chars: Vec<u16> = bytes[2..]
