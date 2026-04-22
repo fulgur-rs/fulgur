@@ -33,6 +33,27 @@ Built in Rust for server-side workloads where memory footprint and startup time 
 
 ## Installation
 
+Run directly with `npx` (no install needed):
+
+```bash
+npx @fulgur-rs/cli render -o output.pdf input.html
+```
+
+Or install globally via npm:
+
+```bash
+npm install -g @fulgur-rs/cli
+fulgur render -o output.pdf input.html
+```
+
+Or via Cargo:
+
+```bash
+cargo install fulgur-cli
+```
+
+From source:
+
 ```bash
 cargo install --path crates/fulgur-cli
 ```

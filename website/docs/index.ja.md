@@ -24,6 +24,21 @@ AIエージェントが生成した出力を、美しく永続的な文書とし
 
 === "CLI"
 
+    インストール不要。`npx` でそのまま実行:
+
+    ```bash
+    npx @fulgur-rs/cli render input.html -o output.pdf
+    ```
+
+    グローバルインストールする場合:
+
+    ```bash
+    npm install -g @fulgur-rs/cli
+    fulgur render input.html -o output.pdf
+    ```
+
+    Rust ユーザー向け:
+
     ```bash
     cargo install fulgur-cli
     fulgur render input.html -o output.pdf

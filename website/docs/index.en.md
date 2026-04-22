@@ -24,6 +24,21 @@ Seal the output your AI agent generates into authoritative, permanent documents.
 
 === "CLI"
 
+    No install needed — run directly with `npx`:
+
+    ```bash
+    npx @fulgur-rs/cli render input.html -o output.pdf
+    ```
+
+    Or install globally:
+
+    ```bash
+    npm install -g @fulgur-rs/cli
+    fulgur render input.html -o output.pdf
+    ```
+
+    For Rust users:
+
     ```bash
     cargo install fulgur-cli
     fulgur render input.html -o output.pdf
