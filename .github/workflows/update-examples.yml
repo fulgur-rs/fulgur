@@ -17,6 +17,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-release-fulgur
+      - name: Configure fast build
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
       - name: Build fulgur
         run: cargo build --bin fulgur --release
       - name: Regenerate example PDFs
