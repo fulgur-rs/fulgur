@@ -42,25 +42,29 @@ jobs:
             arch: amd64
             coverage: true
             mold: true
+            cache-key: ubuntu-latest-fulgur-cov
           - os: ubuntu-24.04-arm
             arch: arm64
             coverage: false
             mold: true
+            cache-key: ubuntu-24.04-arm-fulgur
           - os: macos-latest
             arch: arm64
             coverage: false
             mold: false
+            cache-key: macos-latest-fulgur
           - os: windows-latest
             arch: amd64
             coverage: false
             mold: false
+            cache-key: windows-latest-fulgur
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.os }}-fulgur
+          shared-key: ${{ matrix.cache-key }}
       - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
