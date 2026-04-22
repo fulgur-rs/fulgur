@@ -34,6 +34,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-publish-fulgur
+
+      - name: Configure fast build
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+
       - name: Extract version from branch name
         id: version
         env:
@@ -109,21 +118,33 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            rustflags: "-C link-arg=-fuse-ld=mold"
+            install-mold: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
+            rustflags: ""
+            install-mold: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             archive: tar.gz
+            rustflags: "-C link-arg=-fuse-ld=mold"
+            install-mold: true
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            rustflags: ""
+            install-mold: false
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            rustflags: ""
+            install-mold: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+            rustflags: "-C linker=lld-link"
+            install-mold: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,6 +153,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}-release
+
+      - name: Install mold
+        if: matrix.install-mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Configure linker
+        if: matrix.rustflags != ''
+        shell: bash
+        run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> $GITHUB_ENV
 
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
