@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.12] - 2026-04-22
+
+### Bug Fixes
+
+- clear NODE_AUTH_TOKEN to enable npm OIDC trusted publishing
+- upgrade npm and avoid _authToken injection for OIDC trusted publishing
+- use Node.js 24 (npm 11+) for npm OIDC trusted publishing
+
+### Miscellaneous
+
+- remove redundant PDF regeneration from release-prepare
+- regenerate example PDFs
+
 ## [0.5.11] - 2026-04-22
 
 ### Bug Fixes
@@ -16,6 +29,10 @@ All notable changes to this project will be documented in this file.
 - add cargo cache and mold linker to release-prepare and update-examples
 - add cargo cache and fast linker to release.yml
 - add cargo cache and lld-link to Python/Ruby release workflows
+
+### Release
+
+- v0.5.11
 
 ## [0.5.10] - 2026-04-22
 
