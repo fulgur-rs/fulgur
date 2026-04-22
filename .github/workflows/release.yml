@@ -163,6 +163,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: 'fulgur-*'
           merge-multiple: true
 
       # GITHUB_TOKEN で発火した release:published は別 workflow を起動しない
