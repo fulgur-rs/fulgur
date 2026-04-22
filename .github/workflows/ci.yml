@@ -40,6 +40,11 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: amd64
+            coverage: false
+            mold: true
+            cache-key: ubuntu-latest-fulgur
+          - os: ubuntu-latest
+            arch: amd64
             coverage: true
             mold: true
             cache-key: ubuntu-latest-fulgur-cov
