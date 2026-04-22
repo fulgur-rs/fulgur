@@ -197,82 +197,68 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
 
 fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
     let mut items = Vec::new();
-    let pages = doc.get_pages();
 
-    for (&page_num, &page_id) in &pages {
+    for (&page_num, &page_id) in &doc.get_pages() {
+        // Step 1: XObject から画像情報を一時 map に収集
+        // key = XObject name, value = (format, width_px, height_px)
+        let mut image_xobjects: std::collections::BTreeMap<String, (String, u32, u32)> =
+            std::collections::BTreeMap::new();
+
         let page_obj = match doc.get_object(page_id) {
             Ok(lopdf::Object::Dictionary(d)) => d.clone(),
             _ => continue,
         };
 
-        let resources = match page_obj.get(b"Resources") {
-            Ok(res) => {
-                let resolved = doc.dereference(res).map(|(_, o)| o);
-                match resolved {
-                    Ok(lopdf::Object::Dictionary(d)) => d.clone(),
-                    _ => continue,
+        if let Ok(res) = page_obj.get(b"Resources") {
+            if let Ok((_, resources_obj)) = doc.dereference(res) {
+                if let lopdf::Object::Dictionary(resources) = resources_obj {
+                    if let Ok(xo) = resources.get(b"XObject") {
+                        if let Ok((_, xobjects_obj)) = doc.dereference(xo) {
+                            if let lopdf::Object::Dictionary(xobjects) = xobjects_obj {
+                                for (name, obj_ref) in xobjects.iter() {
+                                    if let Ok((_, lopdf::Object::Stream(xobj))) =
+                                        doc.dereference(obj_ref)
+                                    {
+                                        let subtype = xobj
+                                            .dict
+                                            .get(b"Subtype")
+                                            .ok()
+                                            .and_then(|o| obj_as_name_str(o))
+                                            .unwrap_or_default();
+                                        if subtype == "Image" {
+                                            let fmt = detect_image_format(&xobj.dict);
+                                            let w_px = xobj
+                                                .dict
+                                                .get(b"Width")
+                                                .ok()
+                                                .and_then(|o| o.as_i64().ok())
+                                                .unwrap_or(0)
+                                                as u32;
+                                            let h_px = xobj
+                                                .dict
+                                                .get(b"Height")
+                                                .ok()
+                                                .and_then(|o| o.as_i64().ok())
+                                                .unwrap_or(0)
+                                                as u32;
+                                            let name_str =
+                                                String::from_utf8_lossy(name).into_owned();
+                                            image_xobjects.insert(name_str, (fmt, w_px, h_px));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            Err(_) => continue,
-        };
-
-        let xobjects = match resources.get(b"XObject") {
-            Ok(xo) => {
-                let resolved = doc.dereference(xo).map(|(_, o)| o);
-                match resolved {
-                    Ok(lopdf::Object::Dictionary(d)) => d.clone(),
-                    _ => continue,
-                }
-            }
-            Err(_) => continue,
-        };
-
-        let mut image_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for (name, obj_ref) in xobjects.iter() {
-            let xobj = match doc.dereference(obj_ref).map(|(_, o)| o) {
-                Ok(lopdf::Object::Stream(s)) => s,
-                _ => continue,
-            };
-            let subtype = xobj
-                .dict
-                .get(b"Subtype")
-                .ok()
-                .and_then(|o| obj_as_name_str(o))
-                .unwrap_or("");
-            if subtype == "Image" {
-                let fmt = detect_image_format(&xobj.dict);
-                let w_px = xobj
-                    .dict
-                    .get(b"Width")
-                    .ok()
-                    .and_then(|o| o.as_i64().ok())
-                    .unwrap_or(0) as u32;
-                let h_px = xobj
-                    .dict
-                    .get(b"Height")
-                    .ok()
-                    .and_then(|o| o.as_i64().ok())
-                    .unwrap_or(0) as u32;
-                let name_str = String::from_utf8_lossy(name).into_owned();
-                image_names.insert(name_str.clone());
-                items.push(ImageItem {
-                    page: page_num,
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                    format: fmt,
-                    width_px: w_px,
-                    height_px: h_px,
-                });
             }
         }
 
-        if image_names.is_empty() {
+        if image_xobjects.is_empty() {
             continue;
         }
 
+        // Step 2: content stream から Do オペレータで位置を取得し、突き合わせて push
         let content_bytes = match doc.get_page_content(page_id) {
             Ok(b) => b,
             Err(_) => continue,
@@ -297,19 +283,18 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                 }
                 "Do" => {
                     if let Some(name_obj) = op.operands.first() {
-                        let name = obj_as_name_str(name_obj).unwrap_or("");
-                        if image_names.contains(name) {
-                            for item in items.iter_mut().filter(|i| i.page == page_num) {
-                                if item.x == 0.0
-                                    && item.y == 0.0
-                                    && item.width == 0.0
-                                {
-                                    item.x = ctm[4];
-                                    item.y = ctm[5];
-                                    item.width = ctm[0].abs();
-                                    item.height = ctm[3].abs();
-                                    break;
-                                }
+                        if let Some(name) = obj_as_name_str(name_obj) {
+                            if let Some((fmt, w_px, h_px)) = image_xobjects.get(name) {
+                                items.push(ImageItem {
+                                    page: page_num,
+                                    x: ctm[4],
+                                    y: ctm[5],
+                                    width: ctm[0].abs(),
+                                    height: ctm[3].abs(),
+                                    format: fmt.clone(),
+                                    width_px: *w_px,
+                                    height_px: *h_px,
+                                });
                             }
                         }
                     }
@@ -324,7 +309,7 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
 fn obj_to_f32(obj: &lopdf::Object) -> f32 {
     match obj {
         lopdf::Object::Integer(i) => *i as f32,
-        lopdf::Object::Real(f) => *f as f32,
+        lopdf::Object::Real(f) => *f,
         _ => 0.0,
     }
 }
@@ -413,11 +398,10 @@ mod tests {
     fn inspect_text_item_fields() {
         let pdf = render_test_pdf("<html><body><p>Hello</p></body></html>");
         let result = inspect_bytes(&pdf);
-        if let Some(item) = result.text_items.first() {
-            assert!(item.page >= 1);
-            assert!(item.font_size > 0.0);
-            assert!(!item.text.is_empty());
-        }
+        let item = result.text_items.first().expect("text items should not be empty");
+        assert!(item.page >= 1);
+        assert!(item.font_size > 0.0);
+        assert!(!item.text.is_empty());
     }
 
     #[test]
