@@ -28,6 +28,15 @@ jobs:
         with:
           toolchain: stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-release-fulgur
+
+      - name: Configure fast build
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+
       - name: Install git-cliff
         env:
           GIT_CLIFF_VERSION: "2.7.0"
