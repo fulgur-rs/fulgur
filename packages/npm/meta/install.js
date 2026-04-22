@@ -58,8 +58,18 @@ try {
 
 const src = path.join(pkgDir, 'bin', platform.bin);
 const destDir = path.join(__dirname, 'bin');
-const dest = path.join(destDir, 'fulgur' + (process.platform === 'win32' ? '.exe' : ''));
+const dest = path.join(destDir, platform.bin);
+
+if (!fs.existsSync(src)) {
+  process.stderr.write(
+    `@fulgur-rs/cli: binary not found at ${src}\n` +
+    `The platform package ${platform.pkg} may be corrupted or incomplete.\n`
+  );
+  process.exit(1);
+}
 
 fs.mkdirSync(destDir, { recursive: true });
 fs.copyFileSync(src, dest);
-fs.chmodSync(dest, 0o755);
+if (process.platform !== 'win32') {
+  fs.chmodSync(dest, 0o755);
+}
