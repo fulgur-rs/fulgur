@@ -39,7 +39,7 @@ jobs:
             if [ -f "${dir}fulgur.args" ]; then
               while IFS= read -r line; do
                 [[ -z "$line" || "$line" == '#'* ]] && continue
-                args+=($line)
+                set -f; args+=($line); set +f
               done < "${dir}fulgur.args"
             fi
             target/release/fulgur render "$html" "${args[@]}" -o "$pdf"
