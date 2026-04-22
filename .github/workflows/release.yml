@@ -264,9 +264,9 @@ jobs:
         with:
           ref: "v${{ needs.publish.outputs.version }}"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all npm artifacts
