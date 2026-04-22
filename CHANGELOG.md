@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.8] - 2026-04-22
+
+### Bug Fixes
+
+- remove version number from default PDF producer metadata
+- update CLI help text for --producer default value
+- remove registry-url from setup-node to unblock npm OIDC auth
+
+### Miscellaneous
+
+- regenerate example PDFs
+
+### Testing
+
+- assert default producer contains no version number
+
 ## [0.5.7] - 2026-04-22
 
 ### Bug Fixes
@@ -30,6 +46,10 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - disable MD041 for frontmatter+HTML landing pages
+
+### Release
+
+- v0.5.7
 
 ## [0.5.6] - 2026-04-21
 
