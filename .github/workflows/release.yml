@@ -233,7 +233,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm and configure registry
+        run: |
+          npm install -g npm@latest
+          npm config set registry https://registry.npmjs.org/
 
       - name: Download all npm artifacts
         uses: actions/download-artifact@v4
@@ -245,7 +249,6 @@ jobs:
       - name: Publish platform packages
         env:
           VERSION: ${{ needs.publish.outputs.version }}
-          NODE_AUTH_TOKEN: ""
         run: |
           set -e
           declare -A TARGET_TO_DIR=(
@@ -283,7 +286,6 @@ jobs:
       - name: Publish meta package
         env:
           VERSION: ${{ needs.publish.outputs.version }}
-          NODE_AUTH_TOKEN: ""
         run: |
           cd packages/npm/meta
           node -e "
