@@ -1161,7 +1161,7 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "fulgur"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-cli"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "clap",
  "fulgur",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-ruby"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "base64",
  "fulgur",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "pyfulgur"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "fulgur",
  "pyo3",

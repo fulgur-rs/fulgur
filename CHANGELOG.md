@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.11] - 2026-04-22
+
+### Bug Fixes
+
+- isolate coverage cache key to prevent artifact contamination
+- add non-coverage ubuntu-latest row to populate ubuntu-latest-fulgur cache
+
+### Miscellaneous
+
+- speed up CI with mold linker, nextest, shared cache, and concurrency
+- use lld-link on Windows to speed up linking
+- add cargo cache and mold linker to release-prepare and update-examples
+- add cargo cache and fast linker to release.yml
+- add cargo cache and lld-link to Python/Ruby release workflows
+
+## [0.5.10] - 2026-04-22
+
+### Release
+
+- v0.5.10
+
 ## [0.5.9] - 2026-04-22
 
 ### Bug Fixes
