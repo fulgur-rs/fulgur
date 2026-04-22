@@ -27,18 +27,30 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             manylinux: "2014"
+            rustflags: ""
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             manylinux: "2014"
+            rustflags: ""
           - target: x86_64-apple-darwin
             runner: macos-15-intel
+            rustflags: ""
           - target: aarch64-apple-darwin
             runner: macos-latest
+            rustflags: ""
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
+            rustflags: "-C linker=lld-link"
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}-python-release
+      - name: Configure linker
+        if: matrix.rustflags != ''
+        shell: bash
+        run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> $GITHUB_ENV
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:

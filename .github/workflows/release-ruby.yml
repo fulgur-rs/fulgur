@@ -100,6 +100,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.platform }}-ruby-cross
       # oxidize-rb/actions/cross-gem@v1 は `gem install rb_sys` を host 上で
       # 直接実行するので、user-writable な gem directory を持つ Ruby が必要。
       # 事前に ruby/setup-ruby で runner owned の Ruby を入れておく。
