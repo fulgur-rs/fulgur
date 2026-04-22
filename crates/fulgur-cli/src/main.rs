@@ -192,7 +192,7 @@ enum Commands {
         #[arg(long)]
         creator: Option<String>,
 
-        /// PDF producer (default: fulgur vX.Y.Z)
+        /// PDF producer (default: fulgur)
         #[arg(long)]
         producer: Option<String>,
 

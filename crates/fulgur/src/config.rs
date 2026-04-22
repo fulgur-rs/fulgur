@@ -113,7 +113,7 @@ impl Default for Config {
             description: None,
             keywords: vec![],
             creator: None,
-            producer: Some(format!("fulgur v{}", env!("CARGO_PKG_VERSION"))),
+            producer: Some("fulgur".to_string()),
             creation_date: None,
             lang: None,
             bookmarks: false,
@@ -293,5 +293,13 @@ mod tests {
         let size = PageSize::custom(210.0, 297.0); // A4 in mm
         assert!((size.width - 595.28).abs() < 0.2);
         assert!((size.height - 841.89).abs() < 0.2);
+    }
+
+    #[test]
+    fn test_default_producer_has_no_version() {
+        let config = Config::default();
+        let producer = config.producer.as_deref().unwrap_or("");
+        assert_eq!(producer, "fulgur");
+        assert!(!producer.contains(env!("CARGO_PKG_VERSION")));
     }
 }
