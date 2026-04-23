@@ -632,4 +632,361 @@ mod tests {
             assert_eq!(corner[1], 0.0);
         }
     }
+
+    // Helper: BlockStyle with given border widths and padding, all else default.
+    fn make_style(border_widths: [f32; 4], padding: [f32; 4]) -> BlockStyle {
+        BlockStyle {
+            border_widths,
+            padding,
+            ..BlockStyle::default()
+        }
+    }
+
+    // ─── resolve_lp ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_lp_length_returns_value() {
+        assert_eq!(resolve_lp(&BgLengthPercentage::Length(42.0), 200.0), 42.0);
+    }
+
+    #[test]
+    fn resolve_lp_percentage_multiplies_basis() {
+        assert_eq!(
+            resolve_lp(&BgLengthPercentage::Percentage(0.25), 200.0),
+            50.0
+        );
+    }
+
+    // ─── resolve_size Explicit variants ──────────────────────────────────────
+
+    #[test]
+    fn resolve_size_explicit_both_axes() {
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(
+                Some(BgLengthPercentage::Length(80.0)),
+                Some(BgLengthPercentage::Length(40.0)),
+            ),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_width_only_derives_height_from_aspect() {
+        // iw=100, ih=50, aspect=2; explicit width=80 → height=80/2=40
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(Some(BgLengthPercentage::Length(80.0)), None),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_height_only_derives_width_from_aspect() {
+        // iw=100, ih=50, aspect=2; explicit height=40 → width=40*2=80
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(None, Some(BgLengthPercentage::Length(40.0))),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_neither_falls_back_to_intrinsic() {
+        let layer = make_layer(100.0, 50.0, BgSize::Explicit(None, None));
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 100.0);
+        assert_eq!(h, 50.0);
+    }
+
+    #[test]
+    fn resolve_size_zero_intrinsic_returns_zero() {
+        let layer = make_layer(0.0, 50.0, BgSize::Auto);
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    // ─── compute_origin_rect ─────────────────────────────────────────────────
+
+    // Layout used below: x=10, y=20, w=100, h=200
+    // border_widths: top=5, right=10, bottom=15, left=20
+    // padding:       top=2, right=4,  bottom=6,  left=8
+
+    #[test]
+    fn origin_rect_border_box_is_identity() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::BorderBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (10.0, 20.0, 100.0, 200.0));
+    }
+
+    #[test]
+    fn origin_rect_padding_box_insets_by_border() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        // x + left_border, y + top_border, w - right_border - left_border, h - top_border - bottom_border
+        // = 10+20=30, 20+5=25, 100-10-20=70, 200-5-15=180
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (30.0, 25.0, 70.0, 180.0));
+    }
+
+    #[test]
+    fn origin_rect_content_box_insets_by_border_and_padding() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        // x + left_border + left_pad = 10+20+8=38
+        // y + top_border + top_pad   = 20+5+2=27
+        // w - right_border - left_border - right_pad - left_pad = 100-10-20-4-8=58
+        // h - top_border - bottom_border - top_pad - bottom_pad = 200-5-15-2-6=172
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::ContentBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (38.0, 27.0, 58.0, 172.0));
+    }
+
+    // ─── compute_clip_rect ───────────────────────────────────────────────────
+
+    #[test]
+    fn clip_rect_border_box_is_identity() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::BorderBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (10.0, 20.0, 100.0, 200.0));
+    }
+
+    #[test]
+    fn clip_rect_padding_box_insets_by_border() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (30.0, 25.0, 70.0, 180.0));
+    }
+
+    #[test]
+    fn clip_rect_text_equals_padding_box() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let padding_box = compute_clip_rect(&style, &BgClip::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        let text_clip = compute_clip_rect(&style, &BgClip::Text, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!(padding_box, text_clip);
+    }
+
+    #[test]
+    fn clip_rect_content_box_insets_by_border_and_padding() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::ContentBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (38.0, 27.0, 58.0, 172.0));
+    }
+
+    // ─── compute_inner_radii ─────────────────────────────────────────────────
+
+    // outer corners all = 10pt; bw=(top=5,right=10,bottom=15,left=20); pad=(top=2,right=4,bottom=6,left=8)
+
+    #[test]
+    fn inner_radii_border_box_clip_unchanged() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::BorderBox);
+        assert_eq!(got, [[10.0; 2]; 4]);
+    }
+
+    #[test]
+    fn inner_radii_padding_box_clip_shrinks_by_border() {
+        // insets: top=5, right=10, bottom=15, left=20
+        // corner 0 (top-left):   [max(10-20,0), max(10-5,0)] = [0, 5]
+        // corner 1 (top-right):  [max(10-10,0), max(10-5,0)] = [0, 5]
+        // corner 2 (bot-right):  [max(10-10,0), max(10-15,0)] = [0, 0]
+        // corner 3 (bot-left):   [max(10-20,0), max(10-15,0)] = [0, 0]
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::PaddingBox);
+        assert_eq!(got[0], [0.0, 5.0]);
+        assert_eq!(got[1], [0.0, 5.0]);
+        assert_eq!(got[2], [0.0, 0.0]);
+        assert_eq!(got[3], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn inner_radii_content_box_clip_shrinks_by_border_and_padding() {
+        // insets: top=5+2=7, right=10+4=14, bottom=15+6=21, left=20+8=28
+        // corner 0 (top-left):   [max(10-28,0), max(10-7,0)] = [0, 3]
+        // corner 1 (top-right):  [max(10-14,0), max(10-7,0)] = [0, 3]
+        // corner 2 (bot-right):  [max(10-14,0), max(10-21,0)] = [0, 0]
+        // corner 3 (bot-left):   [max(10-28,0), max(10-21,0)] = [0, 0]
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::ContentBox);
+        assert_eq!(got[0], [0.0, 3.0]);
+        assert_eq!(got[1], [0.0, 3.0]);
+        assert_eq!(got[2], [0.0, 0.0]);
+        assert_eq!(got[3], [0.0, 0.0]);
+    }
+
+    // ─── compute_tile_positions ───────────────────────────────────────────────
+
+    #[test]
+    fn tile_positions_no_repeat_yields_single_tile() {
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            50.0,
+            30.0, // pos_x, pos_y
+            80.0,
+            60.0, // img_w, img_h
+            0.0,
+            0.0,
+            400.0,
+            300.0, // clip
+        );
+        assert_eq!(tiles, vec![(50.0, 30.0, 80.0, 60.0)]);
+    }
+
+    #[test]
+    fn tile_positions_repeat_both_axes_fills_clip() {
+        // 50×50 image, 100×100 clip at origin, position=(0,0)
+        // Tiles at x∈{0,50,100}, y∈{0,50,100} = 9 tiles (partial tiles included)
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(
+            tiles.len() >= 4,
+            "expected at least 4 tiles, got {}",
+            tiles.len()
+        );
+        assert!(tiles.iter().all(|&(_, _, w, h)| w == 50.0 && h == 50.0));
+    }
+
+    #[test]
+    fn tile_positions_no_repeat_x_repeat_y_yields_single_column() {
+        // x: NoRepeat → 1 tile per row; y: Repeat → multiple rows
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // All tiles share the same x position
+        assert!(tiles.len() >= 2);
+        assert!(tiles.iter().all(|&(tx, _, _, _)| tx == 0.0));
+    }
+
+    #[test]
+    fn tile_positions_max_tiles_cap() {
+        // 1×1 image on 200×200 clip → would produce 200*200=40000 tiles without cap
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            200.0,
+            200.0,
+        );
+        assert_eq!(tiles.len(), 10_000);
+    }
+
+    #[test]
+    fn tile_positions_zero_img_size_returns_empty() {
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            0.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    // ─── resolve_repeat_axis edge cases ──────────────────────────────────────
+
+    #[test]
+    fn resolve_repeat_axis_no_repeat_returns_position_as_start_end() {
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::NoRepeat, 25.0, 50.0, 0.0, 200.0);
+        assert_eq!(size, 50.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 25.0);
+        assert_eq!(end, 25.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_image_larger_than_clip_no_tiling() {
+        // image_size=250 > clip_size=200 → falls back to no-repeat at position
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::Space, 0.0, 250.0, 0.0, 200.0);
+        assert_eq!(size, 250.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+        assert_eq!(end, 0.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_count_one_no_gap() {
+        // image_size=200, clip_size=200 → count=1, falls back to no-repeat
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::Space, 0.0, 200.0, 0.0, 200.0);
+        assert_eq!(size, 200.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+        assert_eq!(end, 0.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_repeat_zero_image_size_degenerate() {
+        // image_size=0 → returns (0, 0, position, position)
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Repeat, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_zero_image_size_degenerate() {
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Round, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_zero_image_size_degenerate() {
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Space, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
 }
