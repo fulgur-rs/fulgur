@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.14] - 2026-04-23
+
+### Bug Fixes
+
+- replace postinstall with checked-in bin shim
+
 ## [0.5.13] - 2026-04-23
 
 ### Bug Fixes
@@ -64,6 +70,10 @@ All notable changes to this project will be documented in this file.
 - add coverage for pure logic functions
 - add inspect subcommand integration tests
 - improve inspect coverage — helpers, images, error paths
+
+### Release
+
+- v0.5.13
 
 ## [0.5.12] - 2026-04-22
 
