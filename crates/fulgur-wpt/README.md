@@ -87,8 +87,8 @@ SKIP  css/css-page/flaky-test.html  # flaky on low-DPI rendering, tracked in ful
 
 ```text
 # crates/fulgur-wpt/expectations/lists/my-list.txt
-FAIL  css/css-grid/grid-items-backgrounds-001.html  # fulgur-XXXX
-FAIL  css/css-images/linear-gradient-004.html       # fulgur-YYYY
+FAIL  css/CSS2/generated-content/before-after-positioned-003.html  # fulgur-vlr3: primary repro
+PASS  css/css-images/linear-gradient-1.html                         # fulgur-yax4: regression net
 ```
 
 ファイルを追加するだけで、自動的に新しい cargo test が生えます:
