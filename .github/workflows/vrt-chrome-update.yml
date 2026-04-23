@@ -19,6 +19,9 @@ name: VRT Chrome Golden Update
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   chrome-goldens:
     name: Regenerate Chromium goldens
