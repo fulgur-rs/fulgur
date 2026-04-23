@@ -10,8 +10,7 @@
     "directory": "packages/npm/meta"
   },
   "bin": { "fulgur": "bin/fulgur" },
-  "files": ["bin/", "install.js"],
-  "scripts": { "postinstall": "node install.js" },
+  "files": ["bin/"],
   "optionalDependencies": {
     "@fulgur-rs/cli-linux-x64":      "0.0.0",
     "@fulgur-rs/cli-linux-x64-musl": "0.0.0",

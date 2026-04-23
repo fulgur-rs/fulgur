@@ -1,0 +1,51 @@
+#!/usr/bin/env node
+'use strict';
+
+const { spawnSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const PLATFORMS = {
+  'linux-x64':      { pkg: '@fulgur-rs/cli-linux-x64',      bin: 'fulgur' },
+  'linux-x64-musl': { pkg: '@fulgur-rs/cli-linux-x64-musl', bin: 'fulgur' },
+  'linux-arm64':    { pkg: '@fulgur-rs/cli-linux-arm64',    bin: 'fulgur' },
+  'darwin-arm64':   { pkg: '@fulgur-rs/cli-darwin-arm64',   bin: 'fulgur' },
+  'darwin-x64':     { pkg: '@fulgur-rs/cli-darwin-x64',     bin: 'fulgur' },
+  'win32-x64':      { pkg: '@fulgur-rs/cli-win32-x64',      bin: 'fulgur.exe' },
+};
+
+function isMusl() {
+  try { return fs.readFileSync('/proc/self/maps', 'utf8').includes('musl'); }
+  catch { return false; }
+}
+
+function detectPlatformKey() {
+  const { platform, arch } = process;
+  if (platform === 'linux' && arch === 'x64') return isMusl() ? 'linux-x64-musl' : 'linux-x64';
+  if (platform === 'linux' && arch === 'arm64') return 'linux-arm64';
+  if (platform === 'darwin' && arch === 'arm64') return 'darwin-arm64';
+  if (platform === 'darwin' && arch === 'x64') return 'darwin-x64';
+  if (platform === 'win32' && arch === 'x64') return 'win32-x64';
+  return null;
+}
+
+const key = detectPlatformKey();
+if (!key) {
+  process.stderr.write(`@fulgur-rs/cli: unsupported platform ${process.platform}/${process.arch}\n`);
+  process.exit(1);
+}
+
+const { pkg, bin } = PLATFORMS[key];
+let pkgDir;
+try {
+  pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
+} catch {
+  process.stderr.write(
+    `@fulgur-rs/cli: platform package ${pkg} not found.\n` +
+    `This usually means it was not installed (e.g. --ignore-optional was used).\n`
+  );
+  process.exit(1);
+}
+
+const r = spawnSync(path.join(pkgDir, 'bin', bin), process.argv.slice(2), { stdio: 'inherit' });
+process.exit(r.status ?? 1);
