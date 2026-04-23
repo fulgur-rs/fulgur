@@ -93,7 +93,7 @@ jobs:
         with:
           name: sdist
           path: dist
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
@@ -139,7 +139,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install wheel (unix)
