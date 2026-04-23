@@ -329,15 +329,13 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                                     .get(b"Width")
                                     .ok()
                                     .and_then(|o| o.as_i64().ok())
-                                    .unwrap_or(0)
-                                    as u32;
+                                    .unwrap_or(0) as u32;
                                 let h_px = xobj
                                     .dict
                                     .get(b"Height")
                                     .ok()
                                     .and_then(|o| o.as_i64().ok())
-                                    .unwrap_or(0)
-                                    as u32;
+                                    .unwrap_or(0) as u32;
                                 let name_str = String::from_utf8_lossy(name).into_owned();
                                 image_xobjects.insert(name_str, (fmt, w_px, h_px));
                             }
