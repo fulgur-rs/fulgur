@@ -17,6 +17,8 @@ resources
 css/CSS2/visuren/float-inside-inline-between-blocks-1.html
 css/CSS2/visuren/float-inside-inline-between-blocks-1-ref.html
 # fulgur-vlr3 (::before / ::after with position:absolute + content:"")
+# Note: -003.html shares -002-ref.html via its <link rel="match"> — the ref
+# file only needs listing once.
 css/CSS2/generated-content/before-after-positioned-003.html
 css/CSS2/generated-content/before-after-positioned-002.html
 css/CSS2/generated-content/before-after-positioned-002-ref.html
