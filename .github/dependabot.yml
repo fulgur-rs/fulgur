@@ -67,7 +67,7 @@ updates:
           - minor
           - patch
 
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /website
     schedule:
       interval: weekly
