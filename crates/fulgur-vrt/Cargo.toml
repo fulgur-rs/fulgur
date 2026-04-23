@@ -10,7 +10,7 @@ description = "Visual regression testing harness for fulgur (dev-only, not publi
 [dependencies]
 fulgur = { path = "../fulgur" }
 image = { version = "0.25", default-features = false, features = ["png"] }
-toml = "0.8"
+toml = "1.1"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tempfile = "3"
