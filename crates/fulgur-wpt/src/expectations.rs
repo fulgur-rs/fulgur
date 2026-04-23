@@ -104,6 +104,11 @@ impl ExpectationFile {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Iterate all test paths registered in the file (sorted).
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,5 +271,20 @@ SKIP css/css-page/c.html  # manual
         assert_eq!(f.comment("b.html"), None);
         assert_eq!(f.comment("c.html"), Some("manual interaction needed"));
         assert_eq!(f.comment("nonexistent.html"), None);
+    }
+
+    #[test]
+    fn paths_iterates_sorted() {
+        // BTreeMap-backed, so insertion order differs from iteration order.
+        let src = "PASS z.html\nPASS a.html\nFAIL m.html\n";
+        let f = ExpectationFile::parse(src).unwrap();
+        let collected: Vec<&str> = f.paths().collect();
+        assert_eq!(collected, vec!["a.html", "m.html", "z.html"]);
+    }
+
+    #[test]
+    fn paths_on_empty_file_yields_nothing() {
+        let f = ExpectationFile::default();
+        assert_eq!(f.paths().count(), 0);
     }
 }

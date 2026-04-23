@@ -22,6 +22,12 @@ jobs:
             test: wpt_css_page
           - phase: css-multicol
             test: wpt_css_multicol
+          - phase: bugs
+            test: wpt_lists
+            filter: wpt_list_bugs
+          - phase: smoke
+            test: wpt_lists
+            filter: wpt_list_smoke
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +42,7 @@ jobs:
           # Panic instead of silent skip if run_phase returns None — this
           # job IS the WPT job, missing prereqs are a real bug.
           FULGUR_WPT_REQUIRED: "1"
-        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- --nocapture
+        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- ${{ matrix.filter }} --nocapture
       - name: Append step summary
         if: always()
         run: |

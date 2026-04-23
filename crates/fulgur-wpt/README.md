@@ -80,3 +80,29 @@ SKIP  css/css-page/flaky-test.html  # flaky on low-DPI rendering, tracked in ful
 ```
 
 原因追跡 issue を beads に起票して、修正後に `FAIL` か `PASS` に戻す。
+
+## Cross-subdir cherry-pick lists (`expectations/lists/`)
+
+大量の WPT テストをサブディレクトリ単位で丸ごと回すのは高コストです。複数の WPT サブディレクトリから数本ずつテストを引きたい bug 用途向けに、`expectations/lists/<name>.txt` というファイルを置くと、そのリストに列挙されたテストだけを cherry-pick で実行できます。書式は phase ファイル (`css-page.txt` など) と同じ `PASS | FAIL | SKIP` で、パスは `css/` 配下の **任意のサブディレクトリ**を跨いで指定可能です。
+
+```text
+# crates/fulgur-wpt/expectations/lists/my-list.txt
+FAIL  css/CSS2/generated-content/before-after-positioned-003.html  # fulgur-vlr3: primary repro
+PASS  css/css-images/linear-gradient-1.html                         # fulgur-yax4: regression net
+```
+
+ファイルを追加するだけで、自動的に新しい cargo test が生えます:
+
+```bash
+cargo test -p fulgur-wpt --test wpt_lists -- wpt_list_my_list
+```
+
+内部的には `build.rs` がビルド時に `expectations/lists/*.txt` を走査し、ファイルごとに `#[test] fn wpt_list_<stem>()` を生成します (stem 中のハイフンはアンダースコアに変換)。ファイルの追加・削除・リネームは `.txt` の編集のみで完結し、Rust コード変更は不要です。
+
+リストに載せるテストは `scripts/wpt/subset.txt` にも (test ファイルと `-ref.html` の両方を) 追加しておく必要があります。これを怠ると sparse-checkout に引っ張られず、`run_list` が warning を出して当該テストをスキップします。
+
+成果物は `target/wpt-report/<name>/` 配下に `report.json` / `regressions.json` / `summary.md` 形式で出力されます (phase runner と同じ構造)。
+
+### CI shard としての用途
+
+`css-multicol` のような巨大な phase をいくつかの `lists/multicol-1.txt`, `multicol-2.txt`, ... に分割し、各リストを独立した test binary filter として並列実行することで、CI matrix のシャーディングに使えます。各 matrix job は `cargo test -p fulgur-wpt --test wpt_lists -- wpt_list_multicol_1` のようにフィルタ引数だけで shard を選べます。

@@ -10,3 +10,25 @@ css/fonts
 css/CSS2/support
 fonts
 resources
+
+# Cross-subdir cherry-pick (expectations/lists/bugs.txt).
+# Each bug references 1-2 WPT reftests; fetch both test and -ref.
+# fulgur-z2ho (inline-block after block siblings, regression net)
+css/CSS2/visuren/float-inside-inline-between-blocks-1.html
+css/CSS2/visuren/float-inside-inline-between-blocks-1-ref.html
+# fulgur-vlr3 (::before / ::after with position:absolute + content:"")
+# Note: -003.html shares -002-ref.html via its <link rel="match"> — the ref
+# file only needs listing once.
+css/CSS2/generated-content/before-after-positioned-003.html
+css/CSS2/generated-content/before-after-positioned-002.html
+css/CSS2/generated-content/before-after-positioned-002-ref.html
+# fulgur-86fo (multiple grid items with background-color)
+css/css-grid/grid-definition/grid-layout-repeat-notation.html
+css/css-grid/grid-definition/grid-layout-basic.html
+css/css-grid/reference/grid-layout-repeat-notation-ref.html
+css/css-grid/reference/grid-layout-basic-ref.html
+# fulgur-yax4 (linear-gradient multi-stop + diagonal)
+css/css-images/linear-gradient-1.html
+css/css-images/linear-gradient-non-square.html
+css/css-images/linear-gradient-ref.html
+css/css-images/reference/linear-gradient-non-square-ref.html
