@@ -45,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache Chromium download
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/fulgur-vrt/
           key: chromium-${{ hashFiles('crates/fulgur-vrt/src/chrome.rs') }}
