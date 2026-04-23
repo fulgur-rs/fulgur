@@ -563,7 +563,7 @@ fn main() {
                     eprintln!("Error writing to {}: {e}", output_path.display());
                     std::process::exit(1);
                 });
-                eprintln!("Manifest written to {}", output_path.display());
+                eprintln!("Inspection JSON written to {}", output_path.display());
             } else {
                 println!("{json}");
             }

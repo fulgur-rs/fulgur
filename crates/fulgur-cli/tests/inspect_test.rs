@@ -1,13 +1,7 @@
 use std::process::Command;
 
 fn fulgur_bin() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("fulgur");
-    p
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fulgur"))
 }
 
 #[test]
@@ -18,13 +12,14 @@ fn inspect_outputs_valid_json() {
         return;
     }
 
-    let tmp_pdf = tempfile::NamedTempFile::with_suffix(".pdf").unwrap();
+    let tmpdir = tempfile::tempdir().unwrap();
+    let tmp_pdf = tmpdir.path().join("inspect.pdf");
 
     // fulgur render で一時PDFを生成
     let render_status = {
         use std::io::Write;
         let mut child = Command::new(&bin)
-            .args(["render", "--stdin", "-o", tmp_pdf.path().to_str().unwrap()])
+            .args(["render", "--stdin", "-o", tmp_pdf.to_str().unwrap()])
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -41,7 +36,7 @@ fn inspect_outputs_valid_json() {
 
     // fulgur inspect で JSON を取得
     let output = Command::new(&bin)
-        .args(["inspect", tmp_pdf.path().to_str().unwrap()])
+        .args(["inspect", tmp_pdf.to_str().unwrap()])
         .stderr(std::process::Stdio::null())
         .output()
         .expect("failed to run fulgur inspect");
@@ -75,14 +70,15 @@ fn inspect_file_output() {
         return;
     }
 
-    let tmp_pdf = tempfile::NamedTempFile::with_suffix(".pdf").unwrap();
-    let tmp_json = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+    let tmpdir = tempfile::tempdir().unwrap();
+    let tmp_pdf = tmpdir.path().join("inspect.pdf");
+    let tmp_json = tmpdir.path().join("inspect.json");
 
     // render
     {
         use std::io::Write;
         let mut child = Command::new(&bin)
-            .args(["render", "--stdin", "-o", tmp_pdf.path().to_str().unwrap()])
+            .args(["render", "--stdin", "-o", tmp_pdf.to_str().unwrap()])
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -100,9 +96,9 @@ fn inspect_file_output() {
     let status = Command::new(&bin)
         .args([
             "inspect",
-            tmp_pdf.path().to_str().unwrap(),
+            tmp_pdf.to_str().unwrap(),
             "-o",
-            tmp_json.path().to_str().unwrap(),
+            tmp_json.to_str().unwrap(),
         ])
         .stderr(std::process::Stdio::null())
         .status()
@@ -110,7 +106,7 @@ fn inspect_file_output() {
 
     assert!(status.success(), "fulgur inspect -o failed");
 
-    let content = std::fs::read_to_string(tmp_json.path()).unwrap();
+    let content = std::fs::read_to_string(&tmp_json).unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(&content).expect("file output is not valid JSON");
     assert!(parsed["pages"].as_u64().unwrap_or(0) >= 1);
