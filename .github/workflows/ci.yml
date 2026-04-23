@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Default least-privilege token scope. Jobs that need more (e.g. test's
+# id-token: write for Codecov OIDC, octocov's pull-requests: write) override
+# this with their own `permissions:` block — job-level permissions fully
+# replace the workflow-level set, they do not merge.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
