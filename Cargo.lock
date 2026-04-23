@@ -1166,7 +1166,7 @@ dependencies = [
  "blitz-dom",
  "blitz-html",
  "blitz-traits",
- "cssparser 0.35.0",
+ "cssparser 0.36.0",
  "image",
  "krilla",
  "krilla-svg",
