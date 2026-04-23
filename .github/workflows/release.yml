@@ -63,7 +63,7 @@ jobs:
       # 前提で発行されるので、そちらを使う (docs/RELEASE_SETUP.md 参照)。
       - name: Generate App token for tag push
         id: app-token-tag
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -227,7 +227,7 @@ jobs:
       # 手順は docs/RELEASE_SETUP.md を参照。
       - name: Generate App token for release publish
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
