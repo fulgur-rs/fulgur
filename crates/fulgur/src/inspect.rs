@@ -473,4 +473,153 @@ mod tests {
         assert!(json.contains("\"text_items\""));
         assert!(json.contains("\"images\""));
     }
+
+    #[test]
+    fn inspect_error_on_nonexistent_file() {
+        let result = inspect(std::path::Path::new("/nonexistent/path/to.pdf"));
+        assert!(result.is_err(), "expected error for nonexistent file");
+    }
+
+    #[test]
+    fn inspect_multi_page_pdf() {
+        // Force two pages by making content taller than a single A4 page
+        let html = "<html><body>\
+            <p style='margin-bottom:2000pt'>Page one</p>\
+            <p>Page two</p>\
+            </body></html>";
+        let pdf = render_test_pdf(html);
+        let result = inspect_bytes(&pdf);
+        assert!(result.pages >= 2, "expected at least 2 pages");
+    }
+
+    #[test]
+    fn inspect_metadata_all_fields() {
+        let pdf = crate::engine::Engine::builder()
+            .title("My Title".to_string())
+            .authors(vec!["Alice".to_string()])
+            .creator("TestApp".to_string())
+            .build()
+            .render_html("<html><body><p>x</p></body></html>")
+            .unwrap();
+        let result = inspect_bytes(&pdf);
+        assert_eq!(result.metadata.title.as_deref(), Some("My Title"));
+        assert_eq!(result.metadata.author.as_deref(), Some("Alice"));
+        assert_eq!(result.metadata.creator.as_deref(), Some("TestApp"));
+    }
+
+    #[test]
+    fn inspect_image_embedded() {
+        // Generate a valid 4x4 red PNG via the image crate (already a dev-dep)
+        let img = image::RgbImage::from_fn(4, 4, |_, _| image::Rgb([255u8, 0, 0]));
+        let mut png_bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let mut bundle = crate::asset::AssetBundle::new();
+        bundle.add_image("test.png", png_bytes);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(r#"<html><body><img src="test.png" width="50" height="50"></body></html>"#)
+            .unwrap();
+        let result = inspect_bytes(&pdf);
+        assert!(!result.images.is_empty(), "expected at least one image");
+        let img = &result.images[0];
+        assert_eq!(img.page, 1);
+        assert!(img.width > 0.0, "image width should be positive");
+        assert!(img.height > 0.0, "image height should be positive");
+    }
+
+    // --- pure function unit tests ---
+
+    #[test]
+    fn decode_pdf_string_latin1() {
+        let bytes = b"Hello";
+        assert_eq!(decode_pdf_string(bytes), "Hello");
+    }
+
+    #[test]
+    fn decode_pdf_string_utf16be() {
+        // UTF-16 BE BOM + "Hi" (U+0048, U+0069)
+        let bytes = &[0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69];
+        assert_eq!(decode_pdf_string(bytes), "Hi");
+    }
+
+    #[test]
+    fn decode_pdf_string_utf16be_odd_trailing_byte_ignored() {
+        // BOM + one complete pair + one orphan byte
+        let bytes = &[0xFE, 0xFF, 0x00, 0x41, 0xFF];
+        let s = decode_pdf_string(bytes);
+        assert_eq!(s, "A"); // orphan byte filtered by chunks(2) + len==2
+    }
+
+    #[test]
+    fn detect_image_format_jpeg() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Name(b"DCTDecode".to_vec()));
+        assert_eq!(detect_image_format(&dict), "jpeg");
+    }
+
+    #[test]
+    fn detect_image_format_png() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Name(b"FlateDecode".to_vec()));
+        assert_eq!(detect_image_format(&dict), "png");
+    }
+
+    #[test]
+    fn detect_image_format_jp2() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Name(b"JPXDecode".to_vec()));
+        assert_eq!(detect_image_format(&dict), "jp2");
+    }
+
+    #[test]
+    fn detect_image_format_tiff() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Name(b"CCITTFaxDecode".to_vec()));
+        assert_eq!(detect_image_format(&dict), "tiff");
+    }
+
+    #[test]
+    fn detect_image_format_unknown() {
+        let dict = lopdf::Dictionary::new(); // no Filter key
+        assert_eq!(detect_image_format(&dict), "unknown");
+    }
+
+    #[test]
+    fn detect_image_format_array_filter() {
+        // Array filter — last entry wins
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(
+            b"Filter",
+            lopdf::Object::Array(vec![
+                lopdf::Object::Name(b"ASCII85Decode".to_vec()),
+                lopdf::Object::Name(b"DCTDecode".to_vec()),
+            ]),
+        );
+        assert_eq!(detect_image_format(&dict), "jpeg");
+    }
+
+    #[test]
+    fn concat_matrix_identity() {
+        let id = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let m = [1.0f32, 0.0, 0.0, 1.0, 10.0, 20.0];
+        let result = concat_matrix(&id, &m);
+        // id × m = m
+        assert!((result[4] - 10.0).abs() < 1e-4);
+        assert!((result[5] - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn concat_matrix_translation() {
+        let a = [1.0f32, 0.0, 0.0, 1.0, 5.0, 10.0];
+        let b = [1.0f32, 0.0, 0.0, 1.0, 3.0, 4.0];
+        let result = concat_matrix(&a, &b);
+        // Translations add: e = 3+5=8, f = 4+10=14
+        assert!((result[4] - 8.0).abs() < 1e-4);
+        assert!((result[5] - 14.0).abs() < 1e-4);
+    }
 }
