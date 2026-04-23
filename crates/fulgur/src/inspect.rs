@@ -113,6 +113,15 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
 
         let identity = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
         let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
+        // Text matrix linear components (scale/rotation); updated by Tm, reset by BT.
+        let mut tm_a: f32 = 1.0;
+        let mut tm_b: f32 = 0.0;
+        let mut tm_c: f32 = 0.0;
+        let mut tm_d: f32 = 1.0;
+        // Text line matrix translation in user space; updated by Tm/Td/TD/T*, reset by BT.
+        let mut tlm_e: f32 = 0.0;
+        let mut tlm_f: f32 = 0.0;
+        // Current text origin in page space.
         let mut tx: f32 = 0.0;
         let mut ty: f32 = 0.0;
         let mut font_name = String::from("unknown");
@@ -145,19 +154,47 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                         font_size = obj_to_f32(size);
                     }
                 }
+                // BT resets the text matrix and text line matrix to identity (PDF §9.4.1).
+                "BT" => {
+                    tm_a = 1.0;
+                    tm_b = 0.0;
+                    tm_c = 0.0;
+                    tm_d = 1.0;
+                    tlm_e = 0.0;
+                    tlm_f = 0.0;
+                    tx = 0.0;
+                    ty = 0.0;
+                }
                 "Tm" if operands.len() >= 6 => {
-                    let text_e = obj_to_f32(&operands[4]);
-                    let text_f = obj_to_f32(&operands[5]);
+                    tm_a = obj_to_f32(&operands[0]);
+                    tm_b = obj_to_f32(&operands[1]);
+                    tm_c = obj_to_f32(&operands[2]);
+                    tm_d = obj_to_f32(&operands[3]);
+                    tlm_e = obj_to_f32(&operands[4]);
+                    tlm_f = obj_to_f32(&operands[5]);
                     let ctm = ctm_stack.last().unwrap_or(&identity);
-                    tx = ctm[0] * text_e + ctm[2] * text_f + ctm[4];
-                    ty = ctm[1] * text_e + ctm[3] * text_f + ctm[5];
+                    tx = ctm[0] * tlm_e + ctm[2] * tlm_f + ctm[4];
+                    ty = ctm[1] * tlm_e + ctm[3] * tlm_f + ctm[5];
                 }
+                // Td/TD advances the text line matrix in text space (PDF §9.4.2).
+                // The offset (dx, dy) is in text coordinates; multiply through the
+                // linear part of the text matrix to get user-space displacement.
                 "Td" | "TD" if operands.len() >= 2 => {
-                    tx += obj_to_f32(&operands[0]);
-                    ty += obj_to_f32(&operands[1]);
+                    let dx = obj_to_f32(&operands[0]);
+                    let dy = obj_to_f32(&operands[1]);
+                    tlm_e += dx * tm_a + dy * tm_c;
+                    tlm_f += dx * tm_b + dy * tm_d;
+                    let ctm = ctm_stack.last().unwrap_or(&identity);
+                    tx = ctm[0] * tlm_e + ctm[2] * tlm_f + ctm[4];
+                    ty = ctm[1] * tlm_e + ctm[3] * tlm_f + ctm[5];
                 }
+                // T* ≡ Td 0 -leading; approximate leading as 1 text unit.
                 "T*" => {
-                    ty -= font_size;
+                    tlm_e -= tm_c;
+                    tlm_f -= tm_d;
+                    let ctm = ctm_stack.last().unwrap_or(&identity);
+                    tx = ctm[0] * tlm_e + ctm[2] * tlm_f + ctm[4];
+                    ty = ctm[1] * tlm_e + ctm[3] * tlm_f + ctm[5];
                 }
                 "Tj" => {
                     if let Some(text_obj) = operands.first() {
