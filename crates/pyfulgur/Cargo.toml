@@ -1,6 +1,6 @@
 [package]
 name = "pyfulgur"
-version = "0.5.12"
+version = "0.5.13"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -2,6 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.13] - 2026-04-23
+
+### Bug Fixes
+
+- apply CTM stack to image/text positions in inspect
+- collapse nested if-let to fix clippy::collapsible_match
+- use match guards to fix clippy::collapsible_match on Rust 1.95
+- correct Td/TD text-space transform and add BT reset
+- address AI review feedback (10 items)
+
+### CI
+
+- add Dependabot config for cargo, actions, npm, pip, bundler
+- use uv ecosystem for website
+- drop semver-*-days for github-actions ecosystem
+- set default contents:read permissions on workflows
+
+### Documentation
+
+- add npx installation as primary option for CLI
+- fix Japanese 'local install' wording to 'global install'
+- add README for @fulgur-rs/cli meta and platform packages
+- add inspect implementation plan
+
+### Features
+
+- add inspect module — extract text, images, metadata from PDF
+- add inspect subcommand
+
+### Miscellaneous
+
+- bump rand in the cargo group across 1 directory
+- bump the cargo-minor-patch group with 3 updates
+- bump cssparser from 0.35.0 to 0.36.0
+- bump actions/setup-node in the actions-minor-patch group
+- bump actions/cache from 4 to 5
+- bump chromiumoxide from 0.7.0 to 0.8.0
+- bump dirs from 5.0.1 to 6.0.0
+- bump skrifa from 0.37.0 to 0.40.0
+- bump DavidAnson/markdownlint-cli2-action
+- bump magnus from 0.7.1 to 0.8.2
+- bump actions/create-github-app-token from 2 to 3
+- bump actions/setup-python from 5 to 6
+- bump actions/checkout from 4 to 6
+- bump toml from 0.8.23 to 1.1.2+spec-1.1.0
+- add lopdf and serde dependencies for inspect
+
+### Refactor
+
+- fix code quality issues in inspect module
+- simplify and fix graphics state restore
+
+### Styling
+
+- cargo fmt for inspect module
+- cargo fmt
+
+### Testing
+
+- add coverage for pure logic functions
+- add inspect subcommand integration tests
+- improve inspect coverage — helpers, images, error paths
+
 ## [0.5.12] - 2026-04-22
 
 ### Bug Fixes
@@ -14,6 +77,10 @@ All notable changes to this project will be documented in this file.
 
 - remove redundant PDF regeneration from release-prepare
 - regenerate example PDFs
+
+### Release
+
+- v0.5.12
 
 ## [0.5.11] - 2026-04-22
 
