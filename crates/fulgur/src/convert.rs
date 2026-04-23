@@ -1252,10 +1252,9 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
 
 /// Build a [`Pagination`] for `node` from the fulgur-ftp column_css sniffer.
 ///
-/// Only `break-inside` flows through today — `break-before` / `break-after` /
-/// `orphans` / `widows` stay at their defaults (see
-/// [`Pagination::default`]). Absence of the node from `ctx.column_styles`
-/// collapses cleanly to [`BreakInside::Auto`], so every
+/// Maps `break-inside`, `break-after`, and `break-before` from the column CSS
+/// props into [`Pagination`]. Absence of the node from `ctx.column_styles`
+/// collapses cleanly to the `Auto` variants, so every
 /// `BlockPageable::with_positioned_children` site can call this
 /// unconditionally without regressing the baseline behaviour that the
 /// existing test suite depends on.
@@ -1263,10 +1262,12 @@ fn extract_pagination_from_column_css(
     ctx: &ConvertContext<'_>,
     node: &Node,
 ) -> crate::pageable::Pagination {
-    use crate::pageable::{BreakInside, Pagination};
+    use crate::pageable::{BreakAfter, BreakBefore, BreakInside, Pagination};
     let props = ctx.column_styles.get(&node.id).copied().unwrap_or_default();
     Pagination {
         break_inside: props.break_inside.unwrap_or(BreakInside::Auto),
+        break_after: props.break_after.unwrap_or(BreakAfter::Auto),
+        break_before: props.break_before.unwrap_or(BreakBefore::Auto),
         ..Pagination::default()
     }
 }
