@@ -1,0 +1,43 @@
+# fulgur-review.html ベンチ（epic fulgur-rs7b）で発見された bug に対応する
+# cross-subdir cherry-pick。
+#
+# 2 種類のエントリが混在:
+#   - FAIL: bug を WPT で直接再現できるもの。fulgur 修正で PASS に昇格し、
+#           該当 bead issue をクローズする primary 検証。
+#   - PASS: 基本ケースは fulgur が通るもの。bug の再現は WPT 外（custom
+#           fixture / fulgur-review.html などの interaction 条件）だが、
+#           近接メカニズムの regression net として保持しておく。
+#
+# 各ブロック冒頭のコメントで bead-id と役割 (primary / regression net) を明記。
+
+# fulgur-vlr3: ::before / ::after に position:absolute + content:"" + background
+# を指定した際に擬似要素が描画されないバグ。WPT で直接再現 (primary)。
+FAIL  css/CSS2/generated-content/before-after-positioned-003.html  # fulgur-vlr3: primary repro (::before/::after + position:absolute + empty content + bg)
+FAIL  css/CSS2/generated-content/before-after-positioned-002.html  # fulgur-vlr3: primary repro (同 mechanism、position:fixed)
+
+# fulgur-86fo: 複数 grid item の background-color が描画されないバグ。
+# WPT の basic な grid-items は fulgur で通っているため、実際のバグは
+# ページ境界・nested flex 等の interaction に限定されそう。custom fixture で要追補。
+PASS  css/css-grid/grid-definition/grid-layout-repeat-notation.html  # fulgur-86fo: regression net (basic repeat() + bg 多 cell)
+PASS  css/css-grid/grid-definition/grid-layout-basic.html             # fulgur-86fo: regression net (basic explicit columns + bg)
+
+# fulgur-yax4: linear-gradient の基本ケース (3-stop / 斜角) は実は fulgur で通る。
+# fulgur-review.html で白地になった原因は height:100vh や page-break 絡みの
+# interaction の可能性。primary repro は custom fixture で要追補。
+PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: regression net (3-stop, axis direction)
+PASS  css/css-images/linear-gradient-non-square.html    # fulgur-yax4: regression net (4 diagonals on non-square)
+
+# fulgur-z2ho: inline-block 末尾要素がブロック兄弟の後に来た時の配置バグ。
+# 本件は fulgur 内部の Pageable handoff バグで厳密一致 reftest は不在。
+# §9.2.1.1 (anonymous block-level handling) を検証する近接機構として登録。
+PASS  css/CSS2/visuren/float-inside-inline-between-blocks-1.html  # fulgur-z2ho: regression net (anonymous block-level handling)
+
+# fulgur-y9pu: height:100vh + page-break-after:always で先頭に空白ページが挿入。
+# 厳密一致 reftest は無く、zero-height-page-break-001 が「break-after:page 直後に
+# 余計な空ページを作らない」点で機構が近い (方向は逆)。
+PASS  css/css-break/zero-height-page-break-001-print.html  # fulgur-y9pu: regression net (pagination correctness primitive)
+
+# fulgur-fy42: ページ境界で次ページ先頭要素が前ページ末尾に bleed。
+# 厳密一致 reftest は無く、monolithic-overflow-001 が page-edge clip primitive を
+# 検証する点で機構が近い。
+PASS  css/css-page/monolithic-overflow-001-print.html  # fulgur-fy42: regression net (page-edge clip primitive)
