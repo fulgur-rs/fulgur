@@ -88,6 +88,79 @@ pub fn run_phase(workspace_root: &Path, subdir: &str, dpi: u32) -> Result<Option
     Ok(Some(outcome))
 }
 
+/// Run exactly the reftests enumerated in `expectations_path` — keys of
+/// the expectations file are interpreted as WPT-root-relative paths
+/// (e.g. `css/css-page/foo.html`). Cross-subdir: paths may live under
+/// any `css/<subdir>` as long as they exist in the fetched WPT snapshot.
+///
+/// `list_name` is used as the report subdirectory name
+/// (`target/wpt-report/<list_name>/`) and as the stderr verdict tag
+/// (`wpt-<list_name>:`). Keep it filesystem-safe (alphanumerics, `-`, `_`).
+///
+/// Returns `Ok(None)` when prerequisites are missing (no WPT checkout,
+/// no expectations file, or no pdftocairo).
+pub fn run_list(
+    workspace_root: &Path,
+    list_name: &str,
+    expectations_path: &Path,
+    dpi: u32,
+) -> Result<Option<PhaseOutcome>> {
+    let wpt_root = workspace_root.join("target/wpt");
+    if !wpt_root.is_dir() {
+        eprintln!(
+            "skip: {} missing (run scripts/wpt/fetch.sh first)",
+            wpt_root.display()
+        );
+        return Ok(None);
+    }
+    if !expectations_path.exists() {
+        eprintln!(
+            "skip: {} missing (list has no expectations file)",
+            expectations_path.display()
+        );
+        return Ok(None);
+    }
+    if !poppler_available() {
+        eprintln!("skip: pdftocairo not available on PATH");
+        return Ok(None);
+    }
+
+    let declared = ExpectationFile::load(expectations_path)
+        .with_context(|| format!("load {}", expectations_path.display()))?;
+
+    // declared.paths() yields BTreeMap-sorted keys; wpt_root.join preserves
+    // relative order, so tests is naturally sorted without an extra pass.
+    let mut tests: Vec<PathBuf> = Vec::with_capacity(declared.len());
+    let mut missing: Vec<String> = Vec::new();
+    for rel in declared.paths() {
+        let abs = wpt_root.join(rel);
+        if abs.is_file() {
+            tests.push(abs);
+        } else {
+            missing.push(rel.to_string());
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!(
+            "warning: {} test(s) declared in {} are missing from the WPT snapshot:",
+            missing.len(),
+            expectations_path.display()
+        );
+        for m in &missing {
+            eprintln!("  - {m}");
+        }
+    }
+
+    Ok(Some(execute_and_report(
+        workspace_root,
+        list_name,
+        tests,
+        declared,
+        dpi,
+    )?))
+}
+
 /// Iterate `tests`, judge each observed result against `declared`, and
 /// write `report.json` / `regressions.json` / `summary.md` under
 /// `target/wpt-report/<label>/`. Shared by `run_phase` (label = subdir)
