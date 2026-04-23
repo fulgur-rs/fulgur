@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
 
+const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 #[derive(Debug, Serialize, PartialEq)]
 pub struct InspectResult {
     pub pages: u32,
@@ -111,7 +113,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
             Err(_) => continue,
         };
 
-        let identity = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let identity = IDENTITY;
         // Graphics state stack: (CTM, font_name, font_size).
         // Tf is part of the graphics state (PDF §8.4.5 Table 52), so q/Q save/restore it.
         let mut gs_stack: Vec<([f32; 6], String, f32)> =
@@ -134,14 +136,15 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         for Operation { operator, operands } in &content.operations {
             match operator.as_str() {
                 "q" => {
-                    let top = gs_stack.last().cloned().unwrap_or((identity, "unknown".to_string(), 12.0));
+                    let top = gs_stack.last().expect("gs_stack non-empty").clone();
                     gs_stack.push(top);
                 }
                 "Q" if gs_stack.len() > 1 => {
-                    if let Some((_, saved_font, saved_size)) = gs_stack.pop() {
-                        font_name = saved_font;
-                        font_size = saved_size;
-                    }
+                    gs_stack.pop();
+                    let (_, ref saved_font, saved_size) =
+                        *gs_stack.last().expect("gs_stack non-empty after Q");
+                    font_name = saved_font.clone();
+                    font_size = saved_size;
                 }
                 "cm" if operands.len() == 6 => {
                     let new_m = [
@@ -358,7 +361,7 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
             Err(_) => continue,
         };
 
-        let identity = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let identity = IDENTITY;
         let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
         for op in &content.operations {
             match op.operator.as_str() {
@@ -416,8 +419,8 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                                     page: page_num,
                                     x: min_x,
                                     y: min_y,
-                                    width: (max_x - min_x).abs(),
-                                    height: (max_y - min_y).abs(),
+                                    width: max_x - min_x,
+                                    height: max_y - min_y,
                                     format: fmt.clone(),
                                     width_px: *w_px,
                                     height_px: *h_px,
