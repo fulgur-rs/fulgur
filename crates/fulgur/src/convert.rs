@@ -1058,9 +1058,7 @@ fn convert_node_inner(
     }
 
     let layout_children_guard = node.layout_children.borrow();
-    let children: &[usize] = layout_children_guard
-        .as_deref()
-        .unwrap_or(&node.children);
+    let children: &[usize] = layout_children_guard.as_deref().unwrap_or(&node.children);
 
     if children.is_empty() {
         let style = extract_block_style(node, ctx.assets);
@@ -1152,22 +1150,6 @@ fn collect_positioned_children(
 
         let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
 
-        // Temporary debug: FULGUR_DEBUG_LAYOUT=1 で座標を出力
-        if std::env::var("FULGUR_DEBUG_LAYOUT").is_ok() {
-            let tag = child_node
-                .element_data()
-                .map(|ed| ed.name.local.as_ref().to_string())
-                .unwrap_or_else(|| "(text)".to_string());
-            eprintln!(
-                "[layout] id={} <{}> cx={:.1} cy={:.1} cw={:.1} ch={:.1} inline_root={} children={}",
-                child_id,
-                tag,
-                cx, cy, cw, ch,
-                child_node.flags.is_inline_root(),
-                child_node.children.len()
-            );
-        }
-
         // Zero-size leaf nodes (whitespace text, etc.) — skip, but first
         // harvest any string-set entries so `string-set: name attr(...)` on
         // an empty element still propagates into the page tree.
@@ -1196,17 +1178,6 @@ fn collect_positioned_children(
         // into the parent. Harvest the container's own string-set entries
         // before recursing so they aren't dropped.
         if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
-            // Temporary debug
-            if std::env::var("FULGUR_DEBUG_LAYOUT").is_ok() {
-                let tag = child_node
-                    .element_data()
-                    .map(|ed| ed.name.local.as_ref().to_string())
-                    .unwrap_or_else(|| "(text)".to_string());
-                eprintln!(
-                    "[layout] FLATTEN id={} <{}> at cx={:.1} cy={:.1} (zero-size container)",
-                    child_id, tag, cx, cy
-                );
-            }
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
             emit_orphan_bookmark_marker(child_id, cx, cy, ctx, &mut result);
