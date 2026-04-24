@@ -108,6 +108,11 @@ pub struct ColumnStyleProps {
     /// reason as the other fields: a later rule overwrites only the
     /// properties it declares (see [`merge`](Self::merge)).
     pub break_inside: Option<BreakInside>,
+    /// `break-before` as resolved by the fulgur sniffer. `None` means the
+    /// author did not set the property — consumers should treat that as the
+    /// initial value (`BreakBefore::Auto`). Stored as `Option` for the same
+    /// cascade reason as the other fields.
+    pub break_before: Option<crate::pageable::BreakBefore>,
 }
 
 impl ColumnStyleProps {
@@ -123,10 +128,16 @@ impl ColumnStyleProps {
         if other.break_inside.is_some() {
             self.break_inside = other.break_inside;
         }
+        if other.break_before.is_some() {
+            self.break_before = other.break_before;
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.rule.is_none() && self.fill.is_none() && self.break_inside.is_none()
+        self.rule.is_none()
+            && self.fill.is_none()
+            && self.break_inside.is_none()
+            && self.break_before.is_none()
     }
 }
 
@@ -420,6 +431,23 @@ fn parse_column_fill_value<'i>(
     }
 }
 
+/// Parse the value side of `break-before`. Accepts `page`, `always`, `left`,
+/// `right`, `recto`, and `verso` as `BreakBefore::Page` (fulgur's fragmentation
+/// model merges all forced-break flavours into a single page break). `auto` is
+/// the initial value; unknown idents drop the declaration so siblings still apply.
+fn parse_break_before_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<crate::pageable::BreakBefore, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    match ident.as_ref().to_ascii_lowercase().as_str() {
+        "page" | "always" | "left" | "right" | "recto" | "verso" => {
+            Ok(crate::pageable::BreakBefore::Page)
+        }
+        "auto" => Ok(crate::pageable::BreakBefore::Auto),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 /// Parse the value side of `break-inside`. Accepts the three avoid flavours
 /// (`avoid`, `avoid-page`, `avoid-column`) as `BreakInside::Avoid`, and
 /// `auto` as `BreakInside::Auto`. Other idents (`avoid-region`,
@@ -517,6 +545,10 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
             // so siblings keep applying.
             if let Ok(bi) = input.parse_entirely(parse_break_inside_value) {
                 self.props.break_inside = Some(bi);
+            }
+        } else if name.eq_ignore_ascii_case("break-before") {
+            if let Ok(bb) = input.parse_entirely(parse_break_before_value) {
+                self.props.break_before = Some(bb);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -1583,5 +1615,36 @@ mod tests {
         // Text node between #a and #b must be skipped; #a is still the
         // adjacent element sibling of #b.
         assert!(matches_complex(&sel, b, &doc));
+    }
+
+    // -------- break-before --------
+
+    #[test]
+    fn parses_break_before_page() {
+        let props = parse_declaration_block("break-before: page;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+    }
+
+    #[test]
+    fn parses_break_before_always() {
+        let props = parse_declaration_block("break-before: always;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+    }
+
+    #[test]
+    fn parses_break_before_auto() {
+        let props = parse_declaration_block("break-before: auto;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Auto));
+    }
+
+    #[test]
+    fn break_before_propagates_to_pagination() {
+        // Test that the stylesheet parser correctly captures break_before.
+        let rules = parse_stylesheet("div { break-before: page; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].props.break_before,
+            Some(crate::pageable::BreakBefore::Page)
+        );
     }
 }

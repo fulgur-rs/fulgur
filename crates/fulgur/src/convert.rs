@@ -1280,10 +1280,11 @@ fn extract_pagination_from_column_css(
     ctx: &ConvertContext<'_>,
     node: &Node,
 ) -> crate::pageable::Pagination {
-    use crate::pageable::{BreakInside, Pagination};
+    use crate::pageable::{BreakBefore, BreakInside, Pagination};
     let props = ctx.column_styles.get(&node.id).copied().unwrap_or_default();
     Pagination {
         break_inside: props.break_inside.unwrap_or(BreakInside::Auto),
+        break_before: props.break_before.unwrap_or(BreakBefore::Auto),
         ..Pagination::default()
     }
 }
