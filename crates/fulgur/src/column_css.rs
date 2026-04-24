@@ -743,12 +743,6 @@ fn matches_compound(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
     })
 }
 
-/// Match a [`CompoundSelector`] against a blitz DOM node. Every
-/// [`SimpleSelector`] in the compound must hold (logical AND).
-pub fn matches_node(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
-    matches_compound(sel, node)
-}
-
 pub fn matches_complex(
     sel: &ComplexSelector,
     node: &blitz_dom::Node,
@@ -1167,8 +1161,14 @@ mod tests {
     fn selector_comma_list_parsed_as_multiple_compounds() {
         let list = parse_selector_list(".a, div, #x");
         assert_eq!(list.len(), 3);
-        assert_eq!(list[0].subject.parts, vec![SimpleSelector::Class("a".into())]);
-        assert_eq!(list[1].subject.parts, vec![SimpleSelector::Type("div".into())]);
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Class("a".into())]
+        );
+        assert_eq!(
+            list[1].subject.parts,
+            vec![SimpleSelector::Type("div".into())]
+        );
         assert_eq!(list[2].subject.parts, vec![SimpleSelector::Id("x".into())]);
     }
 
@@ -1195,7 +1195,10 @@ mod tests {
     #[test]
     fn selector_tag_lowercased() {
         let list = parse_selector_list("DIV");
-        assert_eq!(list[0].subject.parts, vec![SimpleSelector::Type("div".into())]);
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Type("div".into())]
+        );
     }
 
     // -------- end-to-end matcher (via blitz_adapter::parse) --------
@@ -1267,11 +1270,11 @@ mod tests {
             parts: vec![SimpleSelector::Class("other".into())],
         };
 
-        assert!(matches_node(&t, div));
-        assert!(matches_node(&c, div));
-        assert!(matches_node(&i, div));
-        assert!(matches_node(&compound, div));
-        assert!(!matches_node(&not_match, div));
+        assert!(matches_compound(&t, div));
+        assert!(matches_compound(&c, div));
+        assert!(matches_compound(&i, div));
+        assert!(matches_compound(&compound, div));
+        assert!(!matches_compound(&not_match, div));
     }
 
     #[test]
@@ -1286,7 +1289,7 @@ mod tests {
         let u = CompoundSelector {
             parts: vec![SimpleSelector::Universal],
         };
-        assert!(matches_node(&u, span));
+        assert!(matches_compound(&u, span));
     }
 
     // -------- stylesheet parsing --------
@@ -1482,5 +1485,103 @@ mod tests {
     #[test]
     fn descendant_after_plus_drops_rule() {
         assert!(parse_selector_list("div + div .foo").is_empty());
+    }
+
+    // -------- matches_complex DOM behaviour --------
+
+    /// `div + div` matches the second div but not the first.
+    #[test]
+    fn matches_complex_adjacent_sibling_matches_second_not_first() {
+        let doc = build_doc(
+            r#"<html><body>
+                <div id="first"></div>
+                <div id="second"></div>
+            </body></html>"#,
+        );
+
+        let first_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("first")
+        })
+        .expect("first");
+        let second_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("second")
+        })
+        .expect("second");
+
+        // `div + div`: prev_sibling = div, subject = div
+        let div_compound = CompoundSelector {
+            parts: vec![SimpleSelector::Type("div".into())],
+        };
+        let sel = ComplexSelector {
+            subject: div_compound.clone(),
+            prev_sibling: Some(div_compound),
+        };
+
+        let first = doc.get_node(first_id).unwrap();
+        let second = doc.get_node(second_id).unwrap();
+
+        // The second div has a div immediately before it → should match.
+        assert!(matches_complex(&sel, second, &doc));
+        // The first div has no element before it → should not match.
+        assert!(!matches_complex(&sel, first, &doc));
+    }
+
+    /// A `ComplexSelector` with `prev_sibling: None` matches the first element.
+    #[test]
+    fn matches_complex_no_sibling_context_matches_first_element() {
+        let doc = build_doc(
+            r#"<html><body>
+                <div id="only"></div>
+            </body></html>"#,
+        );
+
+        let only_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("only")
+        })
+        .expect("only");
+
+        let sel = ComplexSelector {
+            subject: CompoundSelector {
+                parts: vec![SimpleSelector::Type("div".into())],
+            },
+            prev_sibling: None,
+        };
+
+        let only = doc.get_node(only_id).unwrap();
+        assert!(matches_complex(&sel, only, &doc));
+    }
+
+    /// Text nodes between siblings must not prevent the adjacent-sibling match.
+    #[test]
+    fn matches_complex_adjacent_sibling_skips_text_nodes() {
+        // Explicit text between the two divs guarantees a text node in the DOM.
+        let doc =
+            build_doc(r#"<html><body><div id="a"></div>some text<div id="b"></div></body></html>"#);
+
+        let b_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("b")
+        })
+        .expect("b");
+
+        let div_compound = CompoundSelector {
+            parts: vec![SimpleSelector::Type("div".into())],
+        };
+        let sel = ComplexSelector {
+            subject: div_compound.clone(),
+            prev_sibling: Some(div_compound),
+        };
+
+        let b = doc.get_node(b_id).unwrap();
+        // Text node between #a and #b must be skipped; #a is still the
+        // adjacent element sibling of #b.
+        assert!(matches_complex(&sel, b, &doc));
     }
 }
