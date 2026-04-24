@@ -488,7 +488,9 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
@@ -498,12 +500,13 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
                     .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
@@ -536,7 +539,9 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
@@ -544,12 +549,13 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
                     .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
@@ -566,14 +572,8 @@ fn build_list_item_body(
             // fall through to the non-inline-root path below.
             let children: &[usize] = &node.children;
             let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let positioned_children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                positioned_children,
-            );
+            let (positioned_children, _has_pseudo) =
+                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
@@ -585,14 +585,8 @@ fn build_list_item_body(
     } else {
         let children: &[usize] = &node.children;
         let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let positioned_children = wrap_with_block_pseudo_images(
-            before_pseudo,
-            after_pseudo,
-            content_box,
-            positioned_children,
-        );
+        let (positioned_children, _has_pseudo) =
+            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
         let mut block = BlockPageable::with_positioned_children(positioned_children)
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
@@ -786,17 +780,17 @@ fn convert_node_inner(
                     baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
                     items: vec![item],
                 }]);
-                let (before_pseudo, after_pseudo) =
-                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
                 }];
-                let positioned_children = wrap_with_block_pseudo_images(
-                    before_pseudo,
-                    after_pseudo,
+                let (positioned_children, _has_pseudo) = wrap_with_pseudo_content(
+                    doc,
+                    node,
+                    ctx,
+                    depth,
                     content_box,
                     paragraph_children,
                 );
@@ -849,14 +843,8 @@ fn convert_node_inner(
                 }
             }
 
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let positioned_children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                positioned_children,
-            );
+            let (positioned_children, _has_pseudo) =
+                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
             let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
@@ -972,7 +960,9 @@ fn convert_node_inner(
             // Then existing block pseudo check
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
@@ -985,12 +975,13 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
                     .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
@@ -1028,7 +1019,9 @@ fn convert_node_inner(
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
@@ -1036,12 +1029,13 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
                     .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
@@ -1065,13 +1059,10 @@ fn convert_node_inner(
         // Check for pseudo images even on childless elements — e.g.
         // `<div class="icon"></div>` with `.icon::before { content: url(...) }`
         // should emit the image. Without this the pseudo is silently dropped.
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
+        let (positioned_children, has_pseudo) =
+            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, Vec::new());
         if style.needs_block_wrapper() || has_pseudo {
             let (opacity, visible) = extract_opacity_visible(node);
-            let positioned_children =
-                wrap_with_block_pseudo_images(before_pseudo, after_pseudo, content_box, Vec::new());
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
@@ -1092,14 +1083,8 @@ fn convert_node_inner(
     let positioned_children = collect_positioned_children(doc, children, ctx, depth);
     let style = extract_block_style(node, ctx.assets);
     let content_box = compute_content_box(node, &style);
-    let (before_pseudo, after_pseudo) =
-        build_block_pseudo_images(doc, node, content_box, ctx.assets);
-    let positioned_children = wrap_with_block_pseudo_images(
-        before_pseudo,
-        after_pseudo,
-        content_box,
-        positioned_children,
-    );
+    let (positioned_children, _has_pseudo) =
+        wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
 
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
@@ -1424,6 +1409,205 @@ fn is_block_pseudo(pseudo: &Node) -> bool {
     pseudo
         .primary_styles()
         .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Block)
+}
+
+/// Whether `node`'s computed `position` is `absolute` or `fixed`.
+///
+/// Used to reroute pseudo-elements that Blitz/Parley would otherwise place
+/// inline at (0, 0) of the surrounding flow: absolute/fixed pseudos have a
+/// Taffy-computed `final_layout.location` we want to honor instead.
+fn is_absolutely_positioned(node: &Node) -> bool {
+    node.primary_styles()
+        .is_some_and(|s| s.get_box().clone_position().is_absolutely_positioned())
+}
+
+/// Whether `node`'s computed `position` is `static` (the default — does not
+/// establish a containing block for absolute descendants).
+fn is_position_static(node: &Node) -> bool {
+    use style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_none_or(|s| matches!(s.get_box().clone_position(), Pos::Static))
+}
+
+/// Resolved containing block for an absolutely-positioned descendant.
+#[derive(Clone, Copy)]
+struct AbsCb {
+    /// CB dimensions in CSS px.
+    size: (f32, f32),
+    /// The descendant's (pseudo's) parent expressed in the CB's CSS-px frame.
+    /// We accumulate Taffy `final_layout.location` while climbing from the
+    /// parent up to the CB.
+    parent_offset_in_cb: (f32, f32),
+}
+
+/// Walk ancestors starting at `parent` (the absolutely-positioned descendant's
+/// parent) to find the containing block.
+///
+/// - First `position: relative|absolute|fixed|sticky` ancestor wins.
+/// - Otherwise falls back to the nearest `<body>` ancestor, which matches
+///   Blitz/Taffy's effective CB for top-level absolute elements in the
+///   before-after-positioned reftests (see fulgur-vlr3 diagnostic).
+/// - Returns `None` if no such ancestor exists (extremely unusual).
+fn resolve_cb_for_absolute(doc: &blitz_dom::BaseDocument, parent: &Node) -> Option<AbsCb> {
+    let mut offset_x = parent.final_layout.location.x;
+    let mut offset_y = parent.final_layout.location.y;
+    let mut cur_id = parent.parent;
+    let mut body_fallback: Option<AbsCb> = None;
+
+    while let Some(id) = cur_id {
+        let Some(cur) = doc.get_node(id) else {
+            break;
+        };
+        // `(offset_x, offset_y)` = `parent`'s position expressed in `cur`'s
+        // Taffy frame.
+        if !is_position_static(cur) {
+            let sz = cur.final_layout.size;
+            return Some(AbsCb {
+                size: (sz.width, sz.height),
+                parent_offset_in_cb: (offset_x, offset_y),
+            });
+        }
+        if let Some(elem) = cur.element_data() {
+            if elem.name.local.as_ref() == "body" {
+                let sz = cur.final_layout.size;
+                body_fallback = Some(AbsCb {
+                    size: (sz.width, sz.height),
+                    parent_offset_in_cb: (offset_x, offset_y),
+                });
+            }
+        }
+        offset_x += cur.final_layout.location.x;
+        offset_y += cur.final_layout.location.y;
+        cur_id = cur.parent;
+    }
+    body_fallback
+}
+
+/// Resolve a stylo `Inset` value against a CSS-px basis. Returns `None` for
+/// `auto` and other non-length variants.
+fn resolve_inset_px(
+    inset: &style::values::computed::position::Inset,
+    basis_px: f32,
+) -> Option<f32> {
+    use style::values::computed::Length;
+    use style::values::generics::position::GenericInset;
+    match inset {
+        GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
+        _ => None,
+    }
+}
+
+/// Build `PositionedChild` entries for any `::before` / `::after` pseudo whose
+/// computed `position` is `absolute` or `fixed`. Each child is placed at the
+/// position resolved against the appropriate containing block (see below),
+/// converted to pt and expressed relative to the pseudo's parent.
+///
+/// **Why this isn't just `pseudo.final_layout.location`**: Blitz/Taffy
+/// compute the pseudo's layout with its Taffy parent as the containing block.
+/// When that parent is `position: static` (the CSS default) the result is
+/// wrong: CSS specifies that absolute elements resolve against the nearest
+/// `position: relative|absolute|fixed|sticky` ancestor, not the immediate
+/// parent. For the before-after-positioned-{002,003} WPT reftests, the
+/// pseudo's parent is static, so Taffy places the pseudos at `y=0` relative
+/// to that parent (origin of parent's box), while the corresponding ref div
+/// is placed by Taffy at `y = body.height - 100`. We recover the correct
+/// position here by walking up to the real CB and resolving the pseudo's
+/// `top`/`right`/`bottom`/`left` against it. When the parent IS positioned,
+/// Taffy's answer is correct and we keep it verbatim.
+///
+/// Runs ALONGSIDE `wrap_with_block_pseudo_images` at the call sites that
+/// construct a `BlockPageable` wrapping a node with pseudos; see
+/// fulgur-vlr3 for the full investigation.
+fn build_absolute_pseudo_children(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Vec<PositionedChild> {
+    let mut out = Vec::new();
+    let parent_is_static = is_position_static(node);
+    let cb = if parent_is_static {
+        resolve_cb_for_absolute(doc, node)
+    } else {
+        None
+    };
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        let Some(pseudo) = doc.get_node(pseudo_id) else {
+            continue;
+        };
+        if !is_absolutely_positioned(pseudo) {
+            continue;
+        }
+        let (x_pt, y_pt) = if let Some(cb) = cb {
+            // Resolve pseudo position against the real CB (body or nearest
+            // positioned ancestor), then express relative to the pseudo's
+            // parent by subtracting `parent_offset_in_cb`.
+            if let Some(styles) = pseudo.primary_styles() {
+                let pos = styles.get_position();
+                let (cb_w, cb_h) = cb.size;
+                let pw = pseudo.final_layout.size.width;
+                let ph = pseudo.final_layout.size.height;
+                let left = resolve_inset_px(&pos.left, cb_w);
+                let right = resolve_inset_px(&pos.right, cb_w);
+                let top = resolve_inset_px(&pos.top, cb_h);
+                let bottom = resolve_inset_px(&pos.bottom, cb_h);
+                let x_cb = if let Some(r) = right {
+                    cb_w - pw - r
+                } else {
+                    left.unwrap_or(0.0)
+                };
+                let y_cb = if let Some(b) = bottom {
+                    cb_h - ph - b
+                } else {
+                    top.unwrap_or(0.0)
+                };
+                let (ox, oy) = cb.parent_offset_in_cb;
+                (px_to_pt(x_cb - ox), px_to_pt(y_cb - oy))
+            } else {
+                let (x, y, _, _) = layout_in_pt(&pseudo.final_layout);
+                (x, y)
+            }
+        } else {
+            // Parent IS positioned (or CB couldn't be resolved) — Taffy's
+            // pseudo.final_layout.location is already correct.
+            let (x, y, _, _) = layout_in_pt(&pseudo.final_layout);
+            (x, y)
+        };
+        let child = convert_node(doc, pseudo_id, ctx, depth + 1);
+        out.push(PositionedChild {
+            child,
+            x: x_pt,
+            y: y_pt,
+        });
+    }
+    out
+}
+
+/// Orchestrator that combines block-pseudo-image wrapping with absolute
+/// pseudo positioning. Returns `(positioned_children, has_pseudo)` where
+/// `has_pseudo` is true if EITHER a block-pseudo image OR an
+/// absolutely-positioned pseudo contributed to the child vec.
+///
+/// Call sites previously did `build_block_pseudo_images` +
+/// `wrap_with_block_pseudo_images` back to back and computed `has_pseudo`
+/// from the pair of `Option<ImagePageable>`; that two-step is folded here
+/// so the absolute-pseudo path is picked up uniformly without duplicating
+/// boilerplate at every construction site.
+fn wrap_with_pseudo_content(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+    parent_cb: ContentBox,
+    children: Vec<PositionedChild>,
+) -> (Vec<PositionedChild>, bool) {
+    let (before_img, after_img) = build_block_pseudo_images(doc, node, parent_cb, ctx.assets);
+    let has_img_pseudo = before_img.is_some() || after_img.is_some();
+    let mut out = wrap_with_block_pseudo_images(before_img, after_img, parent_cb, children);
+    let abs = build_absolute_pseudo_children(doc, node, ctx, depth);
+    let has_any_pseudo = has_img_pseudo || !abs.is_empty();
+    out.extend(abs);
+    (out, has_any_pseudo)
 }
 
 /// Cheap probe: does `node` have at least one `::before` / `::after` pseudo
@@ -2113,6 +2297,16 @@ fn convert_inline_box_node(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
 ) -> crate::paragraph::InlineBoxContent {
+    // Suppress inline drawing for `position: absolute` / `fixed` nodes —
+    // Parley places them at (0, 0) of the surrounding flow, which is wrong
+    // for out-of-flow elements. The containing block's converter picks them
+    // up separately via `build_absolute_pseudo_children` using Taffy's
+    // computed `final_layout.location`.
+    if let Some(node) = doc.get_node(node_id) {
+        if is_absolutely_positioned(node) {
+            return Box::new(SpacerPageable::new(0.0));
+        }
+    }
     convert_node(doc, node_id, ctx, depth + 1)
 }
 
