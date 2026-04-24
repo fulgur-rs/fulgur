@@ -1164,9 +1164,16 @@ fn collect_positioned_children(
         // branch can emit it. Without this, `<span class="icon"></span>`
         // + `span::before { content: url(...); display: block }` silently
         // drops the image even though the empty-children branch is wired up.
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+
         if ch == 0.0
             && cw == 0.0
-            && child_node.children.is_empty()
+            && child_effective_is_empty
             && !node_has_block_pseudo_image(doc, child_node)
             && !node_has_inline_pseudo_image(doc, child_node)
         {
@@ -1182,14 +1189,18 @@ fn collect_positioned_children(
         // Zero-size container (thead, tbody, tr, etc.) — flatten children
         // into the parent. Harvest the container's own string-set entries
         // before recursing so they aren't dropped.
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
             emit_orphan_bookmark_marker(child_id, cx, cy, ctx, &mut result);
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
-            let mut nested = collect_positioned_children(doc, &child_node.children, ctx, depth + 1);
+            let child_lc_guard = child_node.layout_children.borrow();
+            let child_effective_children =
+                child_lc_guard.as_deref().unwrap_or(&child_node.children);
+            let mut nested =
+                collect_positioned_children(doc, child_effective_children, ctx, depth + 1);
             // Flush pending running markers to the first real nested child so
             // they travel with the flattened content on page break. Without
             // this, the markers would skip over the container's children and
@@ -1981,7 +1992,13 @@ fn collect_table_cells(
         let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
 
         // Zero-size container (tr, thead, tbody) — recurse into children
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+        if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
             collect_table_cells(
                 doc,
