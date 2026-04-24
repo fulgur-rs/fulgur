@@ -1551,15 +1551,25 @@ fn build_absolute_pseudo_children(
                 let right = resolve_inset_px(&pos.right, cb_w);
                 let top = resolve_inset_px(&pos.top, cb_h);
                 let bottom = resolve_inset_px(&pos.bottom, cb_h);
-                let x_cb = if let Some(r) = right {
+                // Over-constrained inset resolution per CSS 2.1 §10.3.7
+                // (horizontal) and §10.6.4 (vertical): when both inset
+                // properties on an axis are specified, `left` wins over
+                // `right` (LTR only — we don't support RTL yet) and `top`
+                // wins over `bottom`. Only when the start-side inset is
+                // `auto` does the end-side inset determine position.
+                let x_cb = if let Some(l) = left {
+                    l
+                } else if let Some(r) = right {
                     cb_w - pw - r
                 } else {
-                    left.unwrap_or(0.0)
+                    0.0
                 };
-                let y_cb = if let Some(b) = bottom {
+                let y_cb = if let Some(t) = top {
+                    t
+                } else if let Some(b) = bottom {
                     cb_h - ph - b
                 } else {
-                    top.unwrap_or(0.0)
+                    0.0
                 };
                 let (ox, oy) = cb.parent_offset_in_cb;
                 (px_to_pt(x_cb - ox), px_to_pt(y_cb - oy))
@@ -1717,6 +1727,15 @@ fn build_block_pseudo_images(
     let load = |pseudo_id: Option<usize>| -> Option<ImagePageable> {
         let pseudo = doc.get_node(pseudo_id?)?;
         if !is_block_pseudo(pseudo) {
+            return None;
+        }
+        // Absolutely-positioned pseudos are handled by
+        // `build_absolute_pseudo_children`. CSS §9.7 blockifies them, so
+        // `is_block_pseudo` is true even with `position: absolute`, and
+        // without this guard a pseudo with both `content: url(...)` and
+        // `position: absolute` would be emitted twice (once as an
+        // `ImagePageable` here and once via the absolute path).
+        if is_absolutely_positioned(pseudo) {
             return None;
         }
         build_pseudo_image(pseudo, parent_cb.width, parent_cb.height, assets)
