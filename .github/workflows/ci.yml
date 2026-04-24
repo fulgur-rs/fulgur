@@ -143,17 +143,6 @@ jobs:
           shared-key: ubuntu-latest-fulgur
       - name: Configure mold linker
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
-      - name: Debug font resolution
-        run: |
-          echo "=== sans-serif:italic ==="
-          FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
-            fc-match -v 'sans-serif:italic' | grep -E 'file|hinting|antialias|rgba|hintstyle|autohint|lcdfilter' || true
-          echo "=== sans-serif ==="
-          FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
-            fc-match -v 'sans-serif' | grep -E 'file|hinting|antialias|rgba|hintstyle|autohint|lcdfilter' || true
-          echo "=== DejaVu Sans (should be rejected) ==="
-          FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
-            fc-match -v 'DejaVu Sans' | grep 'file' || true
       - name: Run VRT
         run: FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt
       - name: Upload diff artifacts on failure
