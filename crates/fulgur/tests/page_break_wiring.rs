@@ -142,8 +142,8 @@ fn break_before_page_splits_pages() {
     );
 }
 
-/// Without any break property, 4 × 80pt = 320pt > 200pt gives exactly 2 pages.
-/// This confirms the break tests above are detecting forced splits, not just overflow.
+/// Without any break property, 2 × 80pt = 160pt < 200pt fits on exactly 1 page.
+/// This control case confirms the break tests above detect forced splits, not overflow.
 #[test]
 fn no_break_property_stays_on_one_page() {
     let html = r#"<!doctype html><html><head><style>
