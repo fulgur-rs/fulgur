@@ -1,12 +1,11 @@
 //! Orchestrates VRT: walks the manifest, renders each fixture through fulgur,
-//! compares against committed fulgur goldens, and — depending on
-//! `FULGUR_VRT_UPDATE` — either writes diff images on failure or updates
+//! compares against committed fulgur goldens (PDF byte-wise), and — depending
+//! on `FULGUR_VRT_UPDATE` — either writes diff artifacts on failure or updates
 //! goldens in place.
 
-use crate::diff::{self, DiffReport};
+use crate::diff;
 use crate::manifest::Manifest;
 use crate::pdf_render::{self, RenderSpec};
-use image::RgbaImage;
 use std::path::{Path, PathBuf};
 
 /// Controls whether the runner compares against goldens (`Off`), rewrites
@@ -71,7 +70,7 @@ impl RunnerContext {
     }
 
     fn fulgur_golden(&self, fixture_path: &Path) -> PathBuf {
-        let rel = fixture_path.with_extension("png");
+        let rel = fixture_path.with_extension("pdf");
         self.goldens_dir.join("fulgur").join(rel)
     }
 
@@ -81,7 +80,7 @@ impl RunnerContext {
     }
 
     fn actual_path(&self, fixture_path: &Path) -> PathBuf {
-        let rel = fixture_path.with_extension("actual.png");
+        let rel = fixture_path.with_extension("actual.pdf");
         self.diff_out_dir.join(rel)
     }
 }
@@ -90,7 +89,8 @@ impl RunnerContext {
 #[derive(Debug, Clone)]
 pub struct FailedFixture {
     pub path: PathBuf,
-    pub report: DiffReport,
+    pub reference_size: u64,
+    pub actual_size: u64,
     pub diff_png: PathBuf,
 }
 
@@ -105,18 +105,16 @@ pub struct RunResult {
 
 /// Execute the VRT pipeline for every fixture declared in the manifest.
 ///
+/// Main path is PDF byte-wise comparison; rasterization runs only on failure
+/// to produce a diff PNG for human inspection.
+///
 /// In `UpdateMode::Off`:
-/// - missing golden → error out (the user must run with `FULGUR_VRT_UPDATE=1`
-///   to seed the golden)
-/// - mismatch → write a diff image to `diff_out_dir` and record the fixture
-///   in `result.failed`
+/// - missing golden → error out (user must run `FULGUR_VRT_UPDATE=1`)
+/// - mismatch → write diff.png + actual.pdf to `diff_out_dir` and record the failure
 /// - match → increment `result.passed`
 ///
-/// In `UpdateMode::All`, every fixture's golden is rewritten from the current
-/// fulgur output and comparison is skipped.
-///
-/// In `UpdateMode::Failing`, missing goldens are seeded and mismatched
-/// goldens are rewritten; passing fixtures are left alone.
+/// In `UpdateMode::All`, every golden is rewritten from the current render.
+/// In `UpdateMode::Failing`, missing goldens are seeded and mismatched ones rewritten.
 pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
     let manifest = Manifest::load(&ctx.manifest_path())?;
 
@@ -136,29 +134,27 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
         let html = std::fs::read_to_string(&html_path)
             .map_err(|e| anyhow::anyhow!("failed to read fixture {}: {e}", fx.path.display()))?;
 
-        let work_dir = work_root.path().join(format!("fx-{idx}"));
-        let actual = pdf_render::render_html_to_rgba(
+        let actual_pdf = pdf_render::render_html_to_pdf(
             &html,
             RenderSpec {
                 page_size: &fx.page_size,
                 margin_pt: 0.0,
                 dpi: fx.dpi,
             },
-            &work_dir,
         )?;
 
         let golden_path = ctx.fulgur_golden(&fx.path);
 
         match ctx.update_mode {
             UpdateMode::All => {
-                save_golden(&golden_path, &actual)?;
+                save_pdf(&golden_path, &actual_pdf)?;
                 result.updated.push(golden_path);
                 continue;
             }
             UpdateMode::Off | UpdateMode::Failing => {
                 if !golden_path.exists() {
                     if matches!(ctx.update_mode, UpdateMode::Failing) {
-                        save_golden(&golden_path, &actual)?;
+                        save_pdf(&golden_path, &actual_pdf)?;
                         result.updated.push(golden_path);
                         continue;
                     } else {
@@ -168,25 +164,32 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
                         );
                     }
                 }
-                let reference = diff::load_png(&golden_path)?;
-                let report = diff::compare(&reference, &actual, fx.tolerance_fulgur);
 
-                if report.pass {
+                let reference_pdf = std::fs::read(&golden_path)?;
+
+                if diff::pdf_bytes_equal(&reference_pdf, &actual_pdf) {
                     result.passed += 1;
                 } else if matches!(ctx.update_mode, UpdateMode::Failing) {
-                    save_golden(&golden_path, &actual)?;
+                    save_pdf(&golden_path, &actual_pdf)?;
                     result.updated.push(golden_path);
                 } else {
+                    let work_dir = work_root.path().join(format!("fx-{idx}"));
                     let diff_png = ctx.diff_path(&fx.path);
-                    diff::write_diff_image(&reference, &actual, fx.tolerance_fulgur, &diff_png)?;
-                    // Also persist the actual render next to the diff so a
-                    // CI-generated rendering can be copied verbatim into
-                    // goldens/ when local and CI freetype/cairo versions
-                    // diverge.
-                    save_golden(&ctx.actual_path(&fx.path), &actual)?;
+                    let actual_pdf_artifact = ctx.actual_path(&fx.path);
+
+                    write_pdf_diff_artifacts(
+                        &reference_pdf,
+                        &actual_pdf,
+                        fx.dpi,
+                        &work_dir,
+                        &diff_png,
+                        &actual_pdf_artifact,
+                    )?;
+
                     result.failed.push(FailedFixture {
                         path: fx.path.clone(),
-                        report,
+                        reference_size: reference_pdf.len() as u64,
+                        actual_size: actual_pdf.len() as u64,
                         diff_png,
                     });
                 }
@@ -197,11 +200,44 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
     Ok(result)
 }
 
-fn save_golden(path: &Path, img: &RgbaImage) -> anyhow::Result<()> {
+fn save_pdf(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    img.save(path)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// On byte-mismatch, rasterize both PDFs and save diagnostic artifacts:
+/// - `diff_png`: pixel diff between reference and actual renders (tolerance 0)
+/// - `actual_pdf_path`: the actual PDF (mirrors PR #195's CI-golden recovery flow)
+fn write_pdf_diff_artifacts(
+    reference_pdf: &[u8],
+    actual_pdf: &[u8],
+    dpi: u32,
+    work_dir: &Path,
+    diff_png: &Path,
+    actual_pdf_path: &Path,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(work_dir)?;
+    let ref_pdf_path = work_dir.join("reference.pdf");
+    let act_pdf_path = work_dir.join("actual.pdf");
+    std::fs::write(&ref_pdf_path, reference_pdf)?;
+    std::fs::write(&act_pdf_path, actual_pdf)?;
+
+    let ref_img = pdf_render::pdf_to_rgba(&ref_pdf_path, dpi, &work_dir.join("ref"))?;
+    let act_img = pdf_render::pdf_to_rgba(&act_pdf_path, dpi, &work_dir.join("act"))?;
+
+    let tol = crate::manifest::Tolerance {
+        max_channel_diff: 0,
+        max_diff_pixels_ratio: 0.0,
+    };
+    diff::write_diff_image(&ref_img, &act_img, tol, diff_png)?;
+
+    if let Some(parent) = actual_pdf_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(actual_pdf_path, actual_pdf)?;
     Ok(())
 }
 
@@ -211,9 +247,6 @@ mod tests {
 
     #[test]
     fn update_mode_parses_env_strings() {
-        // Save and restore env var to avoid leaking between tests.
-        // We can't use std::env::set_var safely from multiple tests in parallel,
-        // so we only test the parse via a thin wrapper below.
         fn parse(s: Option<&str>) -> UpdateMode {
             match s {
                 Some("1") | Some("all") => UpdateMode::All,

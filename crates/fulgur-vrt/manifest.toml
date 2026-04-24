@@ -1,7 +1,6 @@
 [defaults]
 page_size = "A4"
 dpi = 150
-tolerance_fulgur = { max_channel_diff = 2, max_diff_pixels_ratio = 0.001 }
 tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
 
 [[fixture]]

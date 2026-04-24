@@ -13,7 +13,6 @@ pub struct Defaults {
     pub page_size: String,
     #[serde(default = "default_dpi")]
     pub dpi: u32,
-    pub tolerance_fulgur: Tolerance,
     pub tolerance_chrome: Tolerance,
 }
 
@@ -28,7 +27,6 @@ fn default_dpi() -> u32 {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FixtureRow {
     pub path: String,
-    pub tolerance_fulgur: Option<Tolerance>,
     pub tolerance_chrome: Option<Tolerance>,
     pub page_size: Option<String>,
     pub dpi: Option<u32>,
@@ -47,7 +45,6 @@ pub struct Fixture {
     pub path: PathBuf,
     pub page_size: String,
     pub dpi: u32,
-    pub tolerance_fulgur: Tolerance,
     pub tolerance_chrome: Tolerance,
 }
 
@@ -73,9 +70,6 @@ impl Manifest {
                     .page_size
                     .unwrap_or_else(|| raw.defaults.page_size.clone()),
                 dpi: row.dpi.unwrap_or(raw.defaults.dpi),
-                tolerance_fulgur: row
-                    .tolerance_fulgur
-                    .unwrap_or(raw.defaults.tolerance_fulgur),
                 tolerance_chrome: row
                     .tolerance_chrome
                     .unwrap_or(raw.defaults.tolerance_chrome),
@@ -93,7 +87,6 @@ mod tests {
 [defaults]
 page_size = "A4"
 dpi = 150
-tolerance_fulgur = { max_channel_diff = 2, max_diff_pixels_ratio = 0.001 }
 tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
 
 [[fixture]]
@@ -112,7 +105,6 @@ tolerance_chrome = { max_channel_diff = 24, max_diff_pixels_ratio = 0.03 }
         assert_eq!(solid.path, PathBuf::from("basic/solid-box.html"));
         assert_eq!(solid.dpi, 150);
         assert_eq!(solid.page_size, "A4");
-        assert_eq!(solid.tolerance_fulgur.max_channel_diff, 2);
         assert_eq!(solid.tolerance_chrome.max_channel_diff, 16);
     }
 
@@ -121,8 +113,6 @@ tolerance_chrome = { max_channel_diff = 24, max_diff_pixels_ratio = 0.03 }
         let m = Manifest::from_toml(SAMPLE).expect("parse");
         let grid = &m.fixtures[1];
         assert_eq!(grid.tolerance_chrome.max_channel_diff, 24);
-        // fulgur tolerance still inherits defaults
-        assert_eq!(grid.tolerance_fulgur.max_channel_diff, 2);
     }
 
     #[test]
