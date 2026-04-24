@@ -79,6 +79,11 @@ impl RunnerContext {
         let rel = fixture_path.with_extension("diff.png");
         self.diff_out_dir.join(rel)
     }
+
+    fn actual_path(&self, fixture_path: &Path) -> PathBuf {
+        let rel = fixture_path.with_extension("actual.png");
+        self.diff_out_dir.join(rel)
+    }
 }
 
 /// Details of a fixture whose fulgur golden comparison failed.
@@ -174,6 +179,11 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
                 } else {
                     let diff_png = ctx.diff_path(&fx.path);
                     diff::write_diff_image(&reference, &actual, fx.tolerance_fulgur, &diff_png)?;
+                    // Also persist the actual render next to the diff so a
+                    // CI-generated rendering can be copied verbatim into
+                    // goldens/ when local and CI freetype/cairo versions
+                    // diverge.
+                    save_golden(&ctx.actual_path(&fx.path), &actual)?;
                     result.failed.push(FailedFixture {
                         path: fx.path.clone(),
                         report,
