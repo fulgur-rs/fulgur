@@ -1148,6 +1148,7 @@ fn collect_positioned_children(
             && child_node.children.is_empty()
             && !node_has_block_pseudo_image(doc, child_node)
             && !node_has_inline_pseudo_image(doc, child_node)
+            && !node_has_absolute_pseudo(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -1161,7 +1162,17 @@ fn collect_positioned_children(
         // Zero-size container (thead, tbody, tr, etc.) — flatten children
         // into the parent. Harvest the container's own string-set entries
         // before recursing so they aren't dropped.
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        //
+        // Exception: when the container has its own `::before` / `::after`
+        // with `position: absolute|fixed`, flattening would drop those
+        // pseudos since `build_absolute_pseudo_children` only runs inside
+        // `convert_node` for the container itself. Fall through to
+        // `convert_node` in that case so the pseudos survive.
+        if ch == 0.0
+            && cw == 0.0
+            && !child_node.children.is_empty()
+            && !node_has_absolute_pseudo(doc, child_node)
+        {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
             emit_orphan_bookmark_marker(child_id, cx, cy, ctx, &mut result);
@@ -1421,6 +1432,16 @@ fn is_absolutely_positioned(node: &Node) -> bool {
         .is_some_and(|s| s.get_box().clone_position().is_absolutely_positioned())
 }
 
+/// Whether `node`'s computed `position` is `fixed` (as opposed to `absolute`).
+///
+/// CSS 2.1 §10.1.5: `position: fixed` establishes the *initial* containing
+/// block (page / viewport) as the CB, not the nearest positioned ancestor.
+fn is_position_fixed(node: &Node) -> bool {
+    use style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed))
+}
+
 /// Whether `node`'s computed `position` is `static` (the default — does not
 /// establish a containing block for absolute descendants).
 fn is_position_static(node: &Node) -> bool {
@@ -1489,24 +1510,44 @@ fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
 /// Walk ancestors starting at `parent` (the absolutely-positioned descendant's
 /// parent) to find the containing block.
 ///
-/// - First `position: relative|absolute|fixed|sticky` ancestor wins.
-/// - Otherwise falls back to the nearest `<body>` ancestor, which matches
-///   Blitz/Taffy's effective CB for top-level absolute elements in the
-///   before-after-positioned reftests (see fulgur-vlr3 diagnostic).
-/// - Returns `None` if no such ancestor exists (extremely unusual).
-fn resolve_cb_for_absolute(doc: &blitz_dom::BaseDocument, parent: &Node) -> Option<AbsCb> {
+/// - When `is_fixed` is `false` (`position: absolute`): the first
+///   `position: relative | absolute | fixed | sticky` ancestor wins, per
+///   CSS 2.1 §10.1.4.
+/// - When `is_fixed` is `true` (`position: fixed`): positioned ancestors
+///   are ignored and the CB is the initial containing block per CSS 2.1
+///   §10.1.5. Fulgur approximates the initial CB with the nearest `<body>`
+///   ancestor (the largest box that matches the page content area for
+///   the single-page reftests that exercise this path). True per-page
+///   viewport anchoring for paginated output is out of scope here.
+/// - In both modes we fall back to `<body>` if no stronger match is
+///   found. Returns `None` only for truly detached parent chains (no
+///   reachable `<body>`).
+///
+/// A `MAX_DOM_DEPTH` guard protects against pathological / malformed
+/// parent chains, matching the defensive bounds applied elsewhere in
+/// `convert.rs` (`debug_print_tree`, `collect_positioned_children`,
+/// `resolve_enclosing_anchor`).
+fn resolve_cb_for_absolute(
+    doc: &blitz_dom::BaseDocument,
+    parent: &Node,
+    is_fixed: bool,
+) -> Option<AbsCb> {
     let mut offset_x = parent.final_layout.location.x;
     let mut offset_y = parent.final_layout.location.y;
     let mut cur_id = parent.parent;
     let mut body_fallback: Option<AbsCb> = None;
+    let mut depth: usize = 0;
 
     while let Some(id) = cur_id {
+        if depth >= MAX_DOM_DEPTH {
+            break;
+        }
         let Some(cur) = doc.get_node(id) else {
             break;
         };
         // `(offset_x, offset_y)` = `parent`'s position expressed in `cur`'s
         // Taffy frame (border-box-origin-relative).
-        if !is_position_static(cur) {
+        if !is_fixed && !is_position_static(cur) {
             let (padding_box_size, border_top_left) = cb_padding_box(cur);
             return Some(AbsCb {
                 padding_box_size,
@@ -1527,6 +1568,7 @@ fn resolve_cb_for_absolute(doc: &blitz_dom::BaseDocument, parent: &Node) -> Opti
         offset_x += cur.final_layout.location.x;
         offset_y += cur.final_layout.location.y;
         cur_id = cur.parent;
+        depth += 1;
     }
     body_fallback
 }
@@ -1574,11 +1616,11 @@ fn build_absolute_pseudo_children(
 ) -> Vec<PositionedChild> {
     let mut out = Vec::new();
     let parent_is_static = is_position_static(node);
-    let cb = if parent_is_static {
-        resolve_cb_for_absolute(doc, node)
-    } else {
-        None
-    };
+    // `resolve_cb_for_absolute` only depends on `node` and `is_fixed`, so
+    // memoize the two possible results we might need to avoid walking the
+    // ancestor chain repeatedly when both `::before` and `::after` hit.
+    let mut cb_absolute: Option<Option<AbsCb>> = None;
+    let mut cb_fixed: Option<Option<AbsCb>> = None;
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         let Some(pseudo) = doc.get_node(pseudo_id) else {
             continue;
@@ -1586,6 +1628,23 @@ fn build_absolute_pseudo_children(
         if !is_absolutely_positioned(pseudo) {
             continue;
         }
+        // CB selection:
+        //   - `position: fixed` → skip positioned ancestors, use the
+        //     initial CB (body approximation). This holds whether or not
+        //     the parent is itself positioned.
+        //   - `position: absolute` + static parent → walk to nearest
+        //     positioned ancestor, else body.
+        //   - `position: absolute` + positioned parent → Taffy's
+        //     `pseudo.final_layout.location` is already correct
+        //     (Blitz/Taffy used the correct parent as CB); skip our
+        //     own resolution and honor Taffy.
+        let cb = if is_position_fixed(pseudo) {
+            *cb_fixed.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, true))
+        } else if parent_is_static {
+            *cb_absolute.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, false))
+        } else {
+            None
+        };
         let (x_pt, y_pt) = if let Some(cb) = cb {
             // Resolve pseudo position against the real CB (body or nearest
             // positioned ancestor), then express relative to the pseudo's
@@ -1724,6 +1783,38 @@ fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> b
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
             && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` if `node` has a `::before` or `::after` pseudo-element
+/// whose computed `position` is `absolute` or `fixed`. Such a pseudo is
+/// emitted by `build_absolute_pseudo_children` when the node reaches
+/// `convert_node_inner`; we need `collect_positioned_children`'s zero-size
+/// leaf / container filter to NOT drop the node on the way there.
+///
+/// Without this probe, a pattern like
+///
+/// ```html
+/// <style>
+///   .marker { position: relative; width: 0; height: 0; }
+///   .marker::before {
+///     content: ""; position: absolute;
+///     width: 8px; height: 8px; background: red;
+///   }
+/// </style>
+/// <div class="marker"></div>
+/// ```
+///
+/// would be skipped by the zero-size-leaf branch of
+/// `collect_positioned_children` and the pseudo would never paint.
+fn node_has_absolute_pseudo(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        if let Some(pseudo) = doc.get_node(pseudo_id)
+            && is_absolutely_positioned(pseudo)
         {
             return true;
         }
@@ -2488,6 +2579,22 @@ fn extract_paragraph(
                 }
                 parley::PositionedLayoutItem::InlineBox(positioned) => {
                     let node_id = positioned.id as usize;
+                    // Absolute/fixed pseudos are out of normal flow and must
+                    // NOT reserve inline width or contribute to line metrics.
+                    // Returning a `SpacerPageable` from
+                    // `convert_inline_box_node` alone is insufficient because
+                    // this branch would still push an `InlineBoxItem` built
+                    // from Parley's `positioned.width` / `positioned.height`,
+                    // which reserves space even when the content is blank.
+                    // Skip the whole `items.push` for such pseudos — the
+                    // containing block's converter re-emits them at their
+                    // CSS-correct position via
+                    // `build_absolute_pseudo_children`.
+                    if let Some(box_node) = doc.get_node(node_id) {
+                        if is_absolutely_positioned(box_node) && is_pseudo_node(doc, box_node) {
+                            continue;
+                        }
+                    }
                     let content = convert_inline_box_node(doc, node_id, ctx, depth);
                     let link = ctx.link_cache.lookup(doc, node_id);
                     // Parley's `PositionedInlineBox` has no baseline field
