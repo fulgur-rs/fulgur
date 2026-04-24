@@ -1337,7 +1337,8 @@ where
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_opacity(opacity)
-            .with_visible(visible);
+            .with_visible(visible)
+            .with_id(extract_block_id(node));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
