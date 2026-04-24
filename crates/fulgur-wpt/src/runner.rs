@@ -199,6 +199,15 @@ fn execute_and_report(
     dpi: u32,
 ) -> Result<PhaseOutcome> {
     let wpt_root = workspace_root.join("target/wpt");
+    let fonts_bundle = crate::fonts::load_fonts_dir(&wpt_root.join("fonts")).unwrap_or_else(|e| {
+        log::warn!("fonts loader failed: {e}; proceeding without bundled fonts");
+        fulgur::asset::AssetBundle::new()
+    });
+    let fonts_arg = if fonts_bundle.fonts.is_empty() {
+        None
+    } else {
+        Some(&fonts_bundle)
+    };
     let total = tests.len();
 
     let report_dir = workspace_root.join("target/wpt-report").join(label);
@@ -234,7 +243,9 @@ fn execute_and_report(
             .join("diff");
 
         let t0 = Instant::now();
-        let outcome = catch_unwind(AssertUnwindSafe(|| run_one(test, &work, &diff, dpi)));
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_one(test, &work, &diff, dpi, fonts_arg)
+        }));
         let duration = t0.elapsed();
         let (observed, message) = match outcome {
             Ok(Ok(o)) => (o.observed, o.reason),

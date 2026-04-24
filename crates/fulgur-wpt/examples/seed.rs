@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result, bail};
 use fulgur_wpt::expectations::Expectation;
+use fulgur_wpt::fonts::load_fonts_dir;
 use fulgur_wpt::harness::run_one;
 use fulgur_wpt::reftest::collect_reftest_files;
 use std::collections::BTreeMap;
@@ -43,6 +44,19 @@ fn main() -> Result<()> {
     let dir = wpt_root.join("css").join(&subdir);
     anyhow::ensure!(dir.is_dir(), "not a directory: {}", dir.display());
 
+    // Runner の execute_and_report と同条件で測定するために
+    // target/wpt/fonts を同じく登録する（さもないと seed の PASS/FAIL
+    // 基準が runner と drift する）。
+    let fonts_bundle = load_fonts_dir(&wpt_root.join("fonts")).unwrap_or_else(|e| {
+        eprintln!("warn: fonts loader failed: {e}; proceeding without bundled fonts");
+        fulgur::asset::AssetBundle::new()
+    });
+    let fonts_arg = if fonts_bundle.fonts.is_empty() {
+        None
+    } else {
+        Some(&fonts_bundle)
+    };
+
     // Recursive walk via the shared helper — handles nested subdirectories
     // (tentative/, margin-boxes/, cssom/, ...) and the `-ref.tentative.html`
     // edge case that a suffix-only filter misses.
@@ -63,7 +77,7 @@ fn main() -> Result<()> {
         let work = PathBuf::from("target/wpt-seed").join(&*stem).join("work");
         let diff = PathBuf::from("target/wpt-seed").join(&*stem).join("diff");
         let outcome = match catch_unwind(AssertUnwindSafe(|| {
-            run_one(test, &work as &Path, &diff as &Path, 96)
+            run_one(test, &work as &Path, &diff as &Path, 96, fonts_arg)
         })) {
             Ok(Ok(o)) => (o.observed, o.reason),
             Ok(Err(e)) => (Expectation::Fail, Some(format!("harness error: {e}"))),
