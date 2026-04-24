@@ -48,7 +48,7 @@ fn identical_test_and_ref_pass() {
 
     let work = dir.path().join("work");
     let diff = dir.path().join("diff");
-    let out = run_one(&test, &work, &diff, 96).unwrap();
+    let out = run_one(&test, &work, &diff, 96, None).unwrap();
     assert_eq!(out.observed, Expectation::Pass, "reason: {:?}", out.reason);
 }
 
@@ -86,7 +86,7 @@ fn page_count_mismatch_fails() {
 
     let work = dir.path().join("work");
     let diff = dir.path().join("diff");
-    let out = run_one(&test, &work, &diff, 96).unwrap();
+    let out = run_one(&test, &work, &diff, 96, None).unwrap();
     assert_eq!(out.observed, Expectation::Fail);
     assert!(
         out.reason.as_deref().unwrap_or("").contains("page count"),
@@ -107,7 +107,7 @@ fn skipped_reftest_reports_skip() {
 
     let work = dir.path().join("work");
     let diff = dir.path().join("diff");
-    let out = run_one(&test, &work, &diff, 96).unwrap();
+    let out = run_one(&test, &work, &diff, 96, None).unwrap();
     assert_eq!(out.observed, Expectation::Skip);
 }
 
@@ -134,6 +134,7 @@ fn mismatch_test_with_identical_ref_is_fail() {
         &root.join("work"),
         &root.join("diff"),
         96,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -174,6 +175,7 @@ fn mismatch_test_with_different_ref_is_pass() {
         &root.join("work"),
         &root.join("diff"),
         96,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -213,6 +215,7 @@ div { height: 50px; break-after: page; }
         &root.join("work"),
         &root.join("diff"),
         96,
+        None,
     )
     .unwrap();
     assert_eq!(

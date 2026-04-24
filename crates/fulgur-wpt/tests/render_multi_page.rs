@@ -43,7 +43,7 @@ fn renders_all_pages_from_overflow() {
         .unwrap();
 
     let work = dir.path().join("work");
-    let out = render_test(&html_path, &work, 96).expect("render should succeed");
+    let out = render_test(&html_path, &work, 96, None).expect("render should succeed");
     assert!(
         out.pages.len() >= 2,
         "expected >=2 pages (got {})",

@@ -31,6 +31,7 @@ pub fn run_one(
     work_dir: &Path,
     diff_out_dir: &Path,
     dpi: u32,
+    assets: Option<&fulgur::asset::AssetBundle>,
 ) -> Result<RunOutcome> {
     use fulgur_vrt::diff::{compare, write_diff_image};
     use fulgur_vrt::manifest::Tolerance;
@@ -60,8 +61,8 @@ pub fn run_one(
 
     let test_work = work_dir.join("test");
     let ref_work = work_dir.join("ref");
-    let test_out = render_test(test_html_path, &test_work, dpi)?;
-    let ref_out = render_test(&ref_abs, &ref_work, dpi)?;
+    let test_out = render_test(test_html_path, &test_work, dpi, assets)?;
+    let ref_out = render_test(&ref_abs, &ref_work, dpi, assets)?;
 
     if test_out.pages.len() != ref_out.pages.len() {
         let msg = format!(

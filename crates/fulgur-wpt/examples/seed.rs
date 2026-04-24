@@ -63,7 +63,7 @@ fn main() -> Result<()> {
         let work = PathBuf::from("target/wpt-seed").join(&*stem).join("work");
         let diff = PathBuf::from("target/wpt-seed").join(&*stem).join("diff");
         let outcome = match catch_unwind(AssertUnwindSafe(|| {
-            run_one(test, &work as &Path, &diff as &Path, 96)
+            run_one(test, &work as &Path, &diff as &Path, 96, None)
         })) {
             Ok(Ok(o)) => (o.observed, o.reason),
             Ok(Err(e)) => (Expectation::Fail, Some(format!("harness error: {e}"))),

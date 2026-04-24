@@ -18,7 +18,14 @@ pub struct RenderedTest {
 /// fulgur's `base_path` for resolving CSS/asset links. `work_dir`
 /// receives the PDF and per-page PNGs (left behind for debugging).
 /// `dpi` controls pdftocairo's rasterization resolution.
-pub fn render_test(test_html_path: &Path, work_dir: &Path, dpi: u32) -> Result<RenderedTest> {
+/// `assets`: optional bundle of fonts/images injected into the engine
+/// (cloned internally; `AssetBundle` stores shared `Arc`s so clones are cheap).
+pub fn render_test(
+    test_html_path: &Path,
+    work_dir: &Path,
+    dpi: u32,
+    assets: Option<&fulgur::asset::AssetBundle>,
+) -> Result<RenderedTest> {
     use fulgur::engine::Engine;
 
     std::fs::create_dir_all(work_dir)
@@ -31,7 +38,11 @@ pub fn render_test(test_html_path: &Path, work_dir: &Path, dpi: u32) -> Result<R
         .parent()
         .ok_or_else(|| anyhow::anyhow!("test has no parent dir: {}", abs.display()))?;
 
-    let engine = Engine::builder().base_path(base).build();
+    let mut builder = Engine::builder().base_path(base);
+    if let Some(b) = assets {
+        builder = builder.assets(b.clone());
+    }
+    let engine = builder.build();
     let pdf_bytes = engine
         .render_html(&html)
         .map_err(|e| anyhow::anyhow!("fulgur render_html failed for {}: {e}", abs.display()))?;
