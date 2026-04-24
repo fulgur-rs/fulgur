@@ -79,6 +79,12 @@ callers don't get this guarantee by default — see the tracking issue
 
 ### Gotchas
 
+- **Coordinate system and unit conversion**: fulgur uses three distinct unit spaces
+  (Blitz/Taffy in CSS px, Pageable/Krilla in PDF pt, `PageSize::custom` in mm).
+  Forgetting a conversion is the most common source of scale bugs (4/3× or 3/4× off).
+  See `.claude/rules/coordinate-system.md` for the full rules, conversion helpers,
+  and known pitfalls (Krilla Y-down, Stylo px basis, CSS transform composition,
+  PDF text-space operators).
 - **Blitz is thread-safe** (contrary to earlier belief). Multiple threads can
   call `blitz_adapter::parse` / `resolve` / `apply_passes` concurrently on
   independent documents. The previous "Blitz not thread-safe" note was based
