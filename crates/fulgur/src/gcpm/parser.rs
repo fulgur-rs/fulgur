@@ -1967,4 +1967,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_page_margin_zero_parsed() {
+        let css = "@page { margin: 0; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.page_settings.len(), 1, "expected 1 PageSettingsRule");
+        let rule = &ctx.page_settings[0];
+        assert!(rule.page_selector.is_none());
+        let m = rule.margin.as_ref().expect("margin should be parsed");
+        assert_eq!(m.top, 0.0);
+        assert_eq!(m.bottom, 0.0);
+        assert_eq!(m.left, 0.0);
+        assert_eq!(m.right, 0.0);
+        assert!(
+            !ctx.is_empty(),
+            "gcpm should not be empty with page_settings"
+        );
+    }
 }

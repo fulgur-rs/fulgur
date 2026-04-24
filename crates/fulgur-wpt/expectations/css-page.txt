@@ -55,9 +55,9 @@ FAIL  css/css-page/margin-boxes/background-001-print.html  # page 1 diff: 35762/
 FAIL  css/css-page/margin-boxes/content-001-print.html  # page 1 diff: 19259/160000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/margin-boxes/content-002-print.html  # page count mismatch: test=1 ref=3
 FAIL  css/css-page/margin-boxes/content-003-print.html  # page 1 diff: 1440/891662 pixels exceed tol (max_ch=255)
-FAIL  css/css-page/margin-boxes/content-004-print.html  # page count mismatch: test=1 ref=6
-FAIL  css/css-page/margin-boxes/content-005-print.html  # page count mismatch: test=1 ref=6
-FAIL  css/css-page/margin-boxes/content-006-print.html  # page count mismatch: test=1 ref=6
+FAIL  css/css-page/margin-boxes/content-004-print.html  # page 1 diff: 10413/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-page/margin-boxes/content-005-print.html  # page 1 diff: 9921/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-page/margin-boxes/content-006-print.html  # page 1 diff: 9921/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/margin-boxes/content-007-print.html  # page count mismatch: test=1 ref=6
 FAIL  css/css-page/margin-boxes/content-008-print.html  # page count mismatch: test=1 ref=8
 FAIL  css/css-page/margin-boxes/content-009-print.html  # page count mismatch: test=1 ref=8
@@ -151,18 +151,18 @@ FAIL  css/css-page/page-margin-auto-and-non-zero-print.html  # page 1 diff: 1633
 FAIL  css/css-page/page-margin-auto-negative-print.tentative.html  # page 1 diff: 56325/90000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-margin-auto-print.html  # page 1 diff: 112431/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-margin-negative-print.tentative.html  # page 1 diff: 84300/90000 pixels exceed tol (max_ch=255)
-PASS  css/css-page/page-name-000-print.html
+FAIL  css/css-page/page-name-000-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 FAIL  css/css-page/page-name-001-print.html  # page 1 diff: 55296/55296 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-name-002-print.html  # page 1 diff: 3566/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-name-003-print.html  # page 1 diff: 411/891662 pixels exceed tol (max_ch=255)
 PASS  css/css-page/page-name-abspos-001-print.html
 PASS  css/css-page/page-name-abspos-002-print.html
-PASS  css/css-page/page-name-abspos-003-print.html
+FAIL  css/css-page/page-name-abspos-003-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-and-break-001-print.html
-PASS  css/css-page/page-name-and-break-002-print.html
+FAIL  css/css-page/page-name-and-break-002-print.html  # page count mismatch: test=2 ref=1 (CSS page property not implemented)
 PASS  css/css-page/page-name-and-break-003-print.html
 PASS  css/css-page/page-name-and-break-004-print.html
-PASS  css/css-page/page-name-canvas-001-print.html
+FAIL  css/css-page/page-name-canvas-001-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-canvas-002-print.html
 PASS  css/css-page/page-name-canvas-003-print.html
 PASS  css/css-page/page-name-canvas-004-print.html
@@ -170,16 +170,16 @@ PASS  css/css-page/page-name-display-none-child-print.html
 FAIL  css/css-page/page-name-fixed-pos-001-print.html  # page 1 diff: 272/891662 pixels exceed tol (max_ch=255)
 PASS  css/css-page/page-name-flex-001-print.html
 PASS  css/css-page/page-name-flex-002-print.html
-PASS  css/css-page/page-name-flex-003-print.html
+FAIL  css/css-page/page-name-flex-003-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-flex-004-print.html
 PASS  css/css-page/page-name-float-001-print.html
-PASS  css/css-page/page-name-float-002-print.html
-PASS  css/css-page/page-name-img-001-print.html
+FAIL  css/css-page/page-name-float-002-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
+FAIL  css/css-page/page-name-img-001-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-img-002-print.html
 PASS  css/css-page/page-name-img-003-print.html
 PASS  css/css-page/page-name-img-004-print.html
 PASS  css/css-page/page-name-inline-block-001-print.html
-PASS  css/css-page/page-name-inline-block-002-print.html
+FAIL  css/css-page/page-name-inline-block-002-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-inline-block-003-print.html
 FAIL  css/css-page/page-name-margin-001-print.html  # page 1 diff: 2274/891662 pixels exceed tol (max_ch=127)
 FAIL  css/css-page/page-name-margin-002-print.html  # page 1 diff: 640/891662 pixels exceed tol (max_ch=255)
@@ -188,11 +188,11 @@ FAIL  css/css-page/page-name-orthogonal-writing-002-print.html  # page count mis
 PASS  css/css-page/page-name-orthogonal-writing-003-print.html
 PASS  css/css-page/page-name-orthogonal-writing-004-print.html
 PASS  css/css-page/page-name-propagated-001-print.html
-PASS  css/css-page/page-name-propagated-002-print.html
+FAIL  css/css-page/page-name-propagated-002-print.html  # page count mismatch: test=1 ref=3 (CSS page property not implemented)
 PASS  css/css-page/page-name-propagated-003-print.html
 PASS  css/css-page/page-name-propagated-004-print.html
 PASS  css/css-page/page-name-propagated-005-print.html
-PASS  css/css-page/page-name-propagated-006-print.html
+FAIL  css/css-page/page-name-propagated-006-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 PASS  css/css-page/page-name-propagated-007-print.html
 PASS  css/css-page/page-name-propagated-008-print.html
 PASS  css/css-page/page-name-propagated-009-print.html
@@ -203,7 +203,7 @@ PASS  css/css-page/page-name-siblings-004-print.html
 PASS  css/css-page/page-name-siblings-005-print.html
 FAIL  css/css-page/page-name-table-001-print.html  # page 1 diff: 230400/230400 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-name-unnamed-trailing-001-print.html  # page 1 diff: 19719/60000 pixels exceed tol (max_ch=255)
-PASS  css/css-page/page-name-zero-height-001-print.html
+FAIL  css/css-page/page-name-zero-height-001-print.html  # page count mismatch: test=1 ref=2 (CSS page property not implemented)
 FAIL  css/css-page/page-orientation-on-landscape-001-print.html  # page 1 diff: 25830/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-orientation-on-portrait-001-print.html  # page 1 diff: 891662/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-orientation-on-portrait-002-print.html  # mismatch expected but test matches ref within tolerance

@@ -145,6 +145,20 @@ impl Config {
         };
         ps.height - self.margin.top - self.margin.bottom
     }
+
+    /// Physical page height in PDF pt (before subtracting margins).
+    ///
+    /// Used as the Blitz viewport height so that CSS `vh` units resolve to the
+    /// full page height.  This is the correct value because WPT ref pages use
+    /// `@page { margin: 0; }` together with `height: 100vh`, meaning the page
+    /// content area equals the physical page height.
+    pub fn page_height(&self) -> f32 {
+        if self.landscape {
+            self.page_size.landscape().height
+        } else {
+            self.page_size.height
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -256,7 +256,7 @@ pub enum BreakInside {
     Avoid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pagination {
     pub break_before: BreakBefore,
     pub break_after: BreakAfter,
@@ -588,6 +588,14 @@ pub trait Pageable: Send + Sync {
     /// if you intend to run `find_split_point` on a freshly-split fragment
     /// directly (outside the `paginate` loop, which already re-propagates).
     fn propagate_page_height(&mut self, _page_height: Pt) {}
+
+    /// Returns `true` if any descendant has a forced page break that is not
+    /// visible from the direct-child level (i.e. nested inside another block).
+    /// Used by `BlockPageable::find_split_point` to detect that a child needs
+    /// recursive splitting even when the child fits within `avail_height`.
+    fn has_forced_break_below(&self) -> bool {
+        false
+    }
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -819,6 +827,16 @@ enum SplitDecision {
     WithinChild(usize, SplitPair),
 }
 
+impl std::fmt::Debug for SplitDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SplitDecision::NoSplit => write!(f, "NoSplit"),
+            SplitDecision::AtIndex(i) => write!(f, "AtIndex({i})"),
+            SplitDecision::WithinChild(i, _) => write!(f, "WithinChild({i}, ...)"),
+        }
+    }
+}
+
 // ─── BlockPageable ───────────────────────────────────────
 
 /// A block container that positions children using Taffy layout coordinates.
@@ -937,6 +955,7 @@ impl BlockPageable {
             (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
                 || (pc.child.pagination().break_after == BreakAfter::Page
                     && i < self.children.len() - 1)
+                || pc.child.has_forced_break_below()
         });
 
         let total_height = self.cached_size.map(|s| s.height).unwrap_or(0.0);
@@ -961,6 +980,17 @@ impl BlockPageable {
                     return SplitDecision::NoSplit;
                 } else {
                     return SplitDecision::AtIndex(i.max(1));
+                }
+            }
+
+            // Child fits within avail_height but contains a nested forced break:
+            // delegate splitting to the child so the break is honoured.
+            if pc.child.has_forced_break_below() {
+                let child_avail = avail_height - pc.y;
+                if child_avail > 0.0 {
+                    if let Some(parts) = pc.child.split(0.0, child_avail) {
+                        return SplitDecision::WithinChild(i, parts);
+                    }
                 }
             }
 
@@ -1872,6 +1902,14 @@ impl Pageable for BlockPageable {
 
     fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.children.iter().any(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.pagination().break_after == BreakAfter::Page
+                || pc.child.has_forced_break_below()
+        })
     }
 }
 
@@ -4930,5 +4968,115 @@ mod multicol_rule_tests {
         assert!(first.is_empty());
         assert_eq!(second.len(), 1);
         assert!((second[0].y_offset - 0.0).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod forced_break_below_tests {
+    use super::*;
+
+    fn make_block_pc(height: f32, break_before: BreakBefore, y: f32) -> PositionedChild {
+        let block = BlockPageable::with_positioned_children(vec![]).with_pagination(Pagination {
+            break_before,
+            ..Pagination::default()
+        });
+        // We manually set cached_size via a mutable ref after creation
+        let mut block = block;
+        block.cached_size = Some(Size {
+            width: 100.0,
+            height,
+        });
+        PositionedChild {
+            child: Box::new(block),
+            x: 0.0,
+            y,
+        }
+    }
+
+    fn make_body(pcs: Vec<PositionedChild>, total_height: f32) -> BlockPageable {
+        let mut body = BlockPageable::with_positioned_children(pcs);
+        body.cached_size = Some(Size {
+            width: 100.0,
+            height: total_height,
+        });
+        body
+    }
+
+    // Mirrors content-004: body contains [text_anon(y=0,h=15), div1(y=15,break_before=Page), div2(y=25,break_before=Page)]
+    #[test]
+    fn has_forced_break_below_detects_nested_break() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+        assert!(
+            body.has_forced_break_below(),
+            "body should detect nested break"
+        );
+
+        let html = make_body(
+            vec![PositionedChild {
+                child: Box::new(body),
+                x: 0.0,
+                y: 0.0,
+            }],
+            35.0,
+        );
+        assert!(
+            html.has_forced_break_below(),
+            "html should detect break through body"
+        );
+    }
+
+    #[test]
+    fn find_split_point_splits_nested_break_before_page() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+
+        // Body itself fits in 700pt avail, but has forced breaks → should split at index 1.
+        let split = body.find_split_point(700.0);
+        assert!(
+            matches!(split, SplitDecision::AtIndex(1)),
+            "body should split at index 1, got {:?}",
+            split
+        );
+    }
+
+    #[test]
+    fn find_split_point_html_delegates_to_body_for_nested_break() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+        let html = make_body(
+            vec![PositionedChild {
+                child: Box::new(body),
+                x: 0.0,
+                y: 0.0,
+            }],
+            35.0,
+        );
+
+        // html fits in 700pt but body contains forced breaks → WithinChild(0, ...).
+        let split = html.find_split_point(700.0);
+        assert!(
+            matches!(split, SplitDecision::WithinChild(0, _)),
+            "html should delegate to body via WithinChild(0,...), got {:?}",
+            split
+        );
     }
 }

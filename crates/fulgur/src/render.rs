@@ -232,8 +232,23 @@ pub fn render_to_pdf_with_gcpm(
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
 ) -> Result<Vec<u8>> {
-    let content_width = config.content_width();
-    let content_height = config.content_height();
+    // Resolve the default (no-selector) CSS @page margin for initial pagination.
+    // :first/:left/:right overrides are applied per-page during rendering below.
+    let default_page_rules: Vec<_> = gcpm
+        .page_settings
+        .iter()
+        .filter(|r| r.page_selector.is_none())
+        .cloned()
+        .collect();
+    let (init_size, init_margin, init_landscape) =
+        crate::gcpm::page_settings::resolve_page_settings(&default_page_rules, 1, 0, config);
+    let init_size = if init_landscape {
+        init_size.landscape()
+    } else {
+        init_size
+    };
+    let content_width = init_size.width - init_margin.left - init_margin.right;
+    let content_height = init_size.height - init_margin.top - init_margin.bottom;
 
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);

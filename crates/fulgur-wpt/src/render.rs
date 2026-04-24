@@ -47,11 +47,26 @@ pub fn render_test(
         .render_html(&html)
         .map_err(|e| anyhow::anyhow!("fulgur render_html failed for {}: {e}", abs.display()))?;
 
+    // Remove stale page PNGs from prior runs so page count is accurate.
+    let prefix = work_dir.join("page");
+    let stem = prefix
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stale_needle = format!("{stem}-");
+    if let Ok(entries) = std::fs::read_dir(work_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with(&stale_needle) && name.ends_with(".png") {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+
     let pdf_path = work_dir.join("fixture.pdf");
     std::fs::write(&pdf_path, &pdf_bytes)
         .with_context(|| format!("write PDF to {}", pdf_path.display()))?;
-
-    let prefix = work_dir.join("page");
     // NOTE: intentionally NOT passing -f/-l so pdftocairo emits every page.
     let out = Command::new("pdftocairo")
         .args(["-png", "-r", &dpi.to_string()])
