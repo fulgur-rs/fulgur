@@ -13,7 +13,7 @@
 ### Task 1: 最小再現フィクスチャを作成する
 
 **Files:**
-- Create: `crates/fulgur-vrt/fixtures/review_card_inline_block.html`
+- Create: `crates/fulgur-vrt/fixtures/layout/review_card_inline_block.html`
 
 **Step 1: フィクスチャファイルを作成する**
 
@@ -43,7 +43,7 @@
 </html>
 ```
 
-保存先: `crates/fulgur-vrt/fixtures/review_card_inline_block.html`
+保存先: `crates/fulgur-vrt/fixtures/layout/review_card_inline_block.html`
 
 **Step 2: ファイルが存在することを確認する**
 
