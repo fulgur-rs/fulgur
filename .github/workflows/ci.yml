@@ -144,7 +144,7 @@ jobs:
       - name: Configure mold linker
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
       - name: Run VRT
-        run: cargo test -p fulgur-vrt
+        run: FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt
       - name: Upload diff artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4

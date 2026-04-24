@@ -54,3 +54,6 @@ path = "paint/opacity.html"
 
 [[fixture]]
 path = "svg/shapes.html"
+
+[[fixture]]
+path = "layout/review_card_inline_block.html"

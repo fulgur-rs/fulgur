@@ -570,7 +570,8 @@ fn build_list_item_body(
         } else {
             // Inline root with no text and no inline pseudo images —
             // fall through to the non-inline-root path below.
-            let children: &[usize] = &node.children;
+            let layout_children_guard_1 = node.layout_children.borrow();
+            let children: &[usize] = layout_children_guard_1.as_deref().unwrap_or(&node.children);
             let positioned_children = collect_positioned_children(doc, children, ctx, depth);
             let (positioned_children, _has_pseudo) =
                 wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
@@ -583,7 +584,8 @@ fn build_list_item_body(
             Box::new(block)
         }
     } else {
-        let children: &[usize] = &node.children;
+        let layout_children_guard_2 = node.layout_children.borrow();
+        let children: &[usize] = layout_children_guard_2.as_deref().unwrap_or(&node.children);
         let positioned_children = collect_positioned_children(doc, children, ctx, depth);
         let (positioned_children, _has_pseudo) =
             wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
@@ -762,7 +764,10 @@ fn convert_node_inner(
 
         let color = get_text_color(doc, node_id);
 
-        let children: &[usize] = &node.children;
+        let layout_children_guard_inside = node.layout_children.borrow();
+        let children: &[usize] = layout_children_guard_inside
+            .as_deref()
+            .unwrap_or(&node.children);
         if children.is_empty() {
             // Empty <li>: create a standalone paragraph with just the marker.
             // Try image marker first (list-style-image), then text fallback.
@@ -1051,7 +1056,8 @@ fn convert_node_inner(
         // Fall through: inline root with no text and no inline pseudo images
     }
 
-    let children: &[usize] = &node.children;
+    let layout_children_guard = node.layout_children.borrow();
+    let children: &[usize] = layout_children_guard.as_deref().unwrap_or(&node.children);
 
     if children.is_empty() {
         let style = extract_block_style(node, ctx.assets);
@@ -1143,9 +1149,16 @@ fn collect_positioned_children(
         // branch can emit it. Without this, `<span class="icon"></span>`
         // + `span::before { content: url(...); display: block }` silently
         // drops the image even though the empty-children branch is wired up.
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+
         if ch == 0.0
             && cw == 0.0
-            && child_node.children.is_empty()
+            && child_effective_is_empty
             && !node_has_block_pseudo_image(doc, child_node)
             && !node_has_inline_pseudo_image(doc, child_node)
             && !node_has_absolute_pseudo(doc, child_node)
@@ -1170,7 +1183,7 @@ fn collect_positioned_children(
         // `convert_node` in that case so the pseudos survive.
         if ch == 0.0
             && cw == 0.0
-            && !child_node.children.is_empty()
+            && !child_effective_is_empty
             && !node_has_absolute_pseudo(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
@@ -1179,7 +1192,11 @@ fn collect_positioned_children(
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
-            let mut nested = collect_positioned_children(doc, &child_node.children, ctx, depth + 1);
+            let child_lc_guard = child_node.layout_children.borrow();
+            let child_effective_children =
+                child_lc_guard.as_deref().unwrap_or(&child_node.children);
+            let mut nested =
+                collect_positioned_children(doc, child_effective_children, ctx, depth + 1);
             // Flush pending running markers to the first real nested child so
             // they travel with the flattened content on page break. Without
             // this, the markers would skip over the container's children and
@@ -2325,7 +2342,9 @@ fn collect_table_cells(
         emit_orphan_bookmark_marker(node_id, x, y, ctx, out);
     }
 
-    for &child_id in &node.children {
+    let layout_children_guard = node.layout_children.borrow();
+    let effective_children = layout_children_guard.as_deref().unwrap_or(&node.children);
+    for &child_id in effective_children {
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
         };
@@ -2339,7 +2358,13 @@ fn collect_table_cells(
         let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
 
         // Zero-size container (tr, thead, tbody) — recurse into children
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+        if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
             collect_table_cells(
                 doc,
