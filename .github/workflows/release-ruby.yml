@@ -111,19 +111,15 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
           working-directory: crates/fulgur-ruby
-      # Gemfile.lock は .gitignore で除外されているため、action が Gemfile.lock
-      # から rb_sys version を推論できない。そのまま放置すると fallback で
-      # `gem info rb_sys --remote` が最新版を取りに行き、rb-sys-dock image tag
-      # が float してビルド非決定になる。Gemfile の `rb_sys (~> 0.9)` と整合する
-      # 最新 stable (0.9.127) を `tag:` で明示 pin する。
-      #
-      # ホスト rb_sys と container image の tag が一致していないと、container 内の
-      # rake-compiler が一部 Ruby 用 rbconfig を持たず fat gem 生成が崩れる
-      # (3.2/3.3/3.4 用 rbconfig 不在 → 3.1 用 .so のみ入った gem が
-      # `required_ruby_version: >= 3.1, < 3.2.dev` で出力され、Ruby 3.2+ で
-      # install 不能になる。v0.7.0 で実際に発生)。
-      # rb_sys upgrade 時はここと Gemfile 側を両方更新すること。
-      # Gemfile.lock を commit する構造的修正は fulgur-jdt3 で追跡。
+      # rb_sys version は crates/fulgur-ruby/Gemfile.lock で pin している
+      # (fulgur-jdt3)。action は Gemfile.lock を読んでホスト側 rb_sys version を
+      # 解決し、`tag:` で指定した container image と一致させる必要がある。
+      # 両者がずれると container 内 rake-compiler が一部 Ruby 用 rbconfig を持たず
+      # fat gem 生成が崩れる (3.2/3.3/3.4 用 rbconfig 不在 → 3.1 用 .so のみ入った
+      # gem が `required_ruby_version: >= 3.1, < 3.2.dev` で出力され、Ruby 3.2+ で
+      # install 不能。v0.7.0 で実際に発生)。
+      # rb_sys upgrade 時は Gemfile.lock (`bundle update rb_sys`) と下記 `tag:` を
+      # 同じ version に揃えて更新すること。
       - uses: oxidize-rb/actions/cross-gem@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
         with:
           platform: ${{ matrix.platform }}
