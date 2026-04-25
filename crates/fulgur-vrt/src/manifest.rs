@@ -30,6 +30,7 @@ pub struct FixtureRow {
     pub tolerance_chrome: Option<Tolerance>,
     pub page_size: Option<String>,
     pub dpi: Option<u32>,
+    pub margin_pt: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +47,7 @@ pub struct Fixture {
     pub page_size: String,
     pub dpi: u32,
     pub tolerance_chrome: Tolerance,
+    pub margin_pt: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +75,7 @@ impl Manifest {
                 tolerance_chrome: row
                     .tolerance_chrome
                     .unwrap_or(raw.defaults.tolerance_chrome),
+                margin_pt: row.margin_pt,
             })
             .collect();
         Ok(Self { fixtures })
@@ -119,5 +122,25 @@ tolerance_chrome = { max_channel_diff = 24, max_diff_pixels_ratio = 0.03 }
     fn rejects_missing_defaults_section() {
         let bad = "[[fixture]]\npath = \"a.html\"\n";
         assert!(Manifest::from_toml(bad).is_err());
+    }
+
+    #[test]
+    fn margin_pt_is_propagated_when_specified() {
+        const SAMPLE_WITH_MARGIN: &str = r#"
+[defaults]
+page_size = "A4"
+dpi = 150
+tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
+
+[[fixture]]
+path = "a.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "b.html"
+"#;
+        let m = Manifest::from_toml(SAMPLE_WITH_MARGIN).expect("parse");
+        assert_eq!(m.fixtures[0].margin_pt, Some(0.0));
+        assert_eq!(m.fixtures[1].margin_pt, None);
     }
 }
