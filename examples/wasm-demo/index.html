@@ -19,19 +19,22 @@
   <h1>fulgur WASM demo</h1>
   <p class="note">
     Browser-side HTML &rarr; PDF rendering, no server required.
-    This is the B-1 step (no fonts / CSS / images) &mdash; keep the HTML
-    to constructs that need no font, e.g. coloured boxes.
+    This is the B-2 step (font bridge) &mdash; Noto Sans Regular is
+    fetched from <code>../.fonts/</code> and registered via
+    <code>Engine.add_font</code>. CSS resources, images, and richer
+    options follow in B-3.
   </p>
 
   <label for="html">HTML input</label>
-  <textarea id="html"><div style="background:red; width:100px; height:100px"></div></textarea>
+  <textarea id="html"><style>body { font-family: 'Noto Sans'; }</style>
+<h1>Hello World</h1></textarea>
   <p>
     <button id="render" disabled>Loading WASM&hellip;</button>
   </p>
   <div id="status" role="status" aria-live="polite"></div>
 
   <script type="module">
-    import init, { render_html } from "./pkg/fulgur_wasm.js";
+    import init, { Engine } from "./pkg/fulgur_wasm.js";
 
     const button = document.getElementById("render");
     const statusEl = document.getElementById("status");
@@ -41,13 +44,23 @@
       statusEl.className = kind ?? "";
     }
 
+    let engine;
+
     try {
       await init();
+      setStatus("Loading font…", "");
+      const fontResponse = await fetch("../.fonts/NotoSans-Regular.ttf");
+      if (!fontResponse.ok) {
+        throw new Error(`Font fetch failed: ${fontResponse.status}`);
+      }
+      const fontBytes = new Uint8Array(await fontResponse.arrayBuffer());
+      engine = new Engine();
+      engine.add_font(fontBytes);
       button.disabled = false;
       button.textContent = "Render PDF";
-      setStatus("WASM ready.", "ok");
+      setStatus("WASM ready (Noto Sans Regular registered).", "ok");
     } catch (e) {
-      setStatus(`Failed to load WASM: ${e}`, "error");
+      setStatus(`Failed to initialise: ${e}`, "error");
       throw e;
     }
 
@@ -55,7 +68,7 @@
       const html = document.getElementById("html").value;
       const t0 = performance.now();
       try {
-        const bytes = render_html(html);
+        const bytes = engine.render(html);
         const elapsed = (performance.now() - t0).toFixed(1);
         const blob = new Blob([bytes], { type: "application/pdf" });
         const url = URL.createObjectURL(blob);

@@ -1,15 +1,18 @@
 # fulgur WASM demo
 
 Browser-side `HTML → PDF` rendering powered by `fulgur-wasm`. Renders entirely
-in the browser; no network calls.
+in the browser; no network calls except for the local Noto Sans font asset.
 
-## Scope (B-1)
+## Scope (B-2)
 
-- Single entry point: `render_html(html: string) → Uint8Array`
-- No fonts, CSS resources, or images. The default sample HTML is a coloured
-  `<div>` so nothing depends on a font being available.
-- Subsequent steps (B-2, B-3) will add an `AssetBundle` bridge for fonts /
-  CSS / images and richer rendering options.
+- `Engine` builder mirror: `new()`, `add_font(bytes)`, `render(html)`.
+- Default sample HTML is `<h1>Hello World</h1>` with a `font-family: 'Noto Sans'`
+  rule. The demo fetches `../.fonts/NotoSans-Regular.ttf` at startup and
+  registers it via `engine.add_font(bytes)` before enabling the Render button.
+- The B-1 standalone `render_html(html)` entry point is preserved for callers
+  that don't need fonts.
+- CSS resources, images, page-size / metadata options, CJK fallback, and
+  bundle-size optimisation are out of scope here — see B-3.
 
 ## Build
 
@@ -25,13 +28,14 @@ This populates `examples/wasm-demo/pkg/` with `fulgur_wasm.js`,
 
 ## Run
 
-ES modules require a real HTTP origin (file:// will not work). Any static
-server is fine; for a quick check:
+ES modules require a real HTTP origin (file:// will not work). The demo also
+fetches Noto Sans from `../.fonts/`, so you must serve the **repository root**
+(not just `examples/wasm-demo/`) so the relative path resolves:
 
 ```bash
-cd examples/wasm-demo
+# from repo root
 python3 -m http.server 8000
-# then visit http://localhost:8000/
+# then visit http://localhost:8000/examples/wasm-demo/
 ```
 
 Edit the HTML in the textarea, click "Render PDF", and the browser will
@@ -42,13 +46,19 @@ download `output.pdf`.
 - `--dev` builds produce a ~37 MB `.wasm`. `wasm-pack build … --release` (no
   flag = release) shrinks it but currently still ships every fulgur dependency.
   Aggressive size reduction (`wasm-opt`, dead-code analysis) is part of the
-  later B-3 / scope C work, not B-1.
+  later B-3 / scope C work.
 - The first call after page load incurs a one-time WASM compile cost on top
   of the render itself; subsequent calls reuse the instance.
+- The demo fetches `../.fonts/NotoSans-Regular.ttf` over the static server at
+  startup. If you serve the demo directory in isolation, copy the TTF next to
+  `index.html` or adjust the `fetch` URL.
+- WOFF2 payloads work too — `Engine.add_font` decodes them in-process via
+  `fulgur::AssetBundle::add_font_bytes`. WOFF1 is rejected.
 
 ## Tracking
 
 - `fulgur-iym` (strategic v0.7.0) — overall WASM bet
-- `fulgur-id9x` (this step) — B-1: bare wasm-bindgen wrapper
+- `fulgur-id9x` (closed) — B-1: bare wasm-bindgen wrapper
+- `fulgur-7js9` (this step) — B-2: font bridge via `AssetBundle::add_font_bytes`
 - `crates/fulgur/CLAUDE.md` ※memory `project_wasm_resource_bridging.md` —
   scope 1 / 3a / 3b stage design
