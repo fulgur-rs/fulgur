@@ -113,7 +113,7 @@ jobs:
         run: cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: lcov.info
@@ -173,7 +173,7 @@ jobs:
         run: FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt
       - name: Upload diff artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vrt-diffs
           path: target/vrt-diff/
@@ -188,7 +188,7 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: lcov
       - uses: k1LoW/octocov-action@73d561f65d59e66899ed5c87e4621a913b5d5c20 # v1
@@ -252,7 +252,7 @@ jobs:
           fi
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wpt-${{ matrix.phase }}-report
           path: target/wpt-report/${{ matrix.phase }}

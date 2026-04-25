@@ -61,7 +61,7 @@ jobs:
           fi
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wpt-${{ matrix.phase }}-nightly
           path: target/wpt-report/${{ matrix.phase }}
@@ -84,7 +84,7 @@ jobs:
       issues: write
     steps:
       - name: Download regression artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: wpt-*-nightly
