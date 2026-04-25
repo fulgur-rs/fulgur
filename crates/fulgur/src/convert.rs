@@ -1772,7 +1772,7 @@ fn build_absolute_pseudo_children(
             let (x, y, _, _) = layout_in_pt(&pseudo.final_layout);
             (x, y)
         };
-        let child = convert_node(doc, pseudo_id, ctx, depth + 1);
+        let child = build_absolute_pseudo_child(doc, node, pseudo, pseudo_id, cb, ctx, depth);
         out.push(PositionedChild {
             child,
             x: x_pt,
@@ -1780,6 +1780,57 @@ fn build_absolute_pseudo_children(
         });
     }
     out
+}
+
+/// Build the `Pageable` for a single absolutely-positioned pseudo.
+///
+/// For a textless `content: url(...)` pseudo, Blitz never assigns a
+/// non-zero `final_layout.size` (see `build_pseudo_image`'s comment), so
+/// the generic `convert_node → convert_content_url` path would size the
+/// image to zero and silently drop it. Detect that shape here and route
+/// through `build_pseudo_image` so computed `width` / `height` (or the
+/// image's intrinsic dimensions) drive the size instead.
+///
+/// Pseudos with visual style (background, border, padding, box-shadow)
+/// fall back to `convert_node` because `build_pseudo_image` produces a
+/// bare `ImagePageable` that would drop those decorations. That edge case
+/// (absolute pseudo + content:url + visual style + zero final_layout) is
+/// narrow enough to defer to a follow-up.
+fn build_absolute_pseudo_child(
+    doc: &blitz_dom::BaseDocument,
+    parent: &Node,
+    pseudo: &Node,
+    pseudo_id: usize,
+    cb: Option<AbsCb>,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Box<dyn Pageable> {
+    if crate::blitz_adapter::extract_content_image_url(pseudo).is_some() {
+        let pseudo_style = extract_block_style(pseudo, ctx.assets);
+        if !pseudo_style.has_visual_style() {
+            // CSS spec: percentage `width` / `height` on an absolutely-
+            // positioned element resolve against the CB's padding-box.
+            // - cb=Some: we already resolved the CB → use its padding-box.
+            // - cb=None: parent is the CB; approximate with the parent's
+            //   border-box dims (in CSS px). This is an approximation —
+            //   percentage width/height on an absolute pseudo whose parent
+            //   has padding would resolve slightly off — but absolute pseudos
+            //   with `content:url(...)` typically use pixel sizing, so the
+            //   common case is handled correctly.
+            let (basis_w_px, basis_h_px) = if let Some(cb) = cb {
+                cb.padding_box_size
+            } else {
+                (
+                    parent.final_layout.size.width,
+                    parent.final_layout.size.height,
+                )
+            };
+            if let Some(img) = build_pseudo_image(pseudo, basis_w_px, basis_h_px, ctx.assets) {
+                return Box::new(img);
+            }
+        }
+    }
+    convert_node(doc, pseudo_id, ctx, depth + 1)
 }
 
 /// Orchestrator that combines block-pseudo-image wrapping with absolute
