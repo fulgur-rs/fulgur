@@ -29,7 +29,7 @@ jobs:
       - name: Build source gem
         working-directory: crates/fulgur-ruby
         run: bundle exec rake build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: source-gem
           path: crates/fulgur-ruby/pkg/*.gem
@@ -130,7 +130,7 @@ jobs:
           ruby-versions: "3.1,3.2,3.3,3.4"
           working-directory: crates/fulgur-ruby
           tag: "0.9.127"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cross-gem-${{ matrix.platform }}
           path: crates/fulgur-ruby/pkg/*.gem

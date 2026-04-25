@@ -59,7 +59,7 @@ jobs:
         run: cargo test -p fulgur-vrt --features chrome-golden -- --ignored
 
       - name: Upload regenerated goldens
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chrome-goldens
           path: crates/fulgur-vrt/goldens/chrome/
