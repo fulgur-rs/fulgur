@@ -71,6 +71,59 @@ fn pseudo_only_inline_root_honours_break_before_page() {
     );
 }
 
+/// 空の `<div>` (子無し、pseudo 無し、style 無し) に `break-before: page`
+/// が付いた場合、新しいページが生成される。
+/// `convert_node_inner` 内の "Plain leaf node" SpacerPageable fallback を
+/// exercise する。
+#[test]
+fn empty_leaf_div_honours_break_before_page() {
+    let html = r#"<!doctype html><html><head><style>
+        @page { size: 200pt 200pt; margin: 0; }
+        body, div { margin: 0; padding: 0; }
+        .first { height: 40pt; background: #eee; }
+        .leaf { break-before: page; height: 10pt; }
+    </style></head><body>
+      <div class="first">before</div>
+      <div class="leaf"></div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize::custom(70.5556, 70.5556))
+        .build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(
+        page_count(&pdf) >= 2,
+        "empty leaf <div> with break-before:page should force new page, got {} pages",
+        page_count(&pdf)
+    );
+}
+
+/// 裸の `<img>` (visual block style 無し) に `break-before: page` が付いた
+/// 場合、新しいページが生成される。
+/// `wrap_replaced_in_block_style` の no-style branch を exercise する。
+#[test]
+fn bare_img_honours_break_before_page() {
+    let html = r#"<!doctype html><html><head><style>
+        @page { size: 200pt 200pt; margin: 0; }
+        body { margin: 0; padding: 0; }
+        img { display: block; }
+        .first { height: 40pt; }
+        .marker { break-before: page; }
+    </style></head><body>
+      <img class="first" src="dot.png">
+      <img class="marker" src="dot.png">
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize::custom(70.5556, 70.5556))
+        .assets(make_bundle_with_image())
+        .build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(
+        page_count(&pdf) >= 2,
+        "bare <img> with break-before:page should force new page, got {} pages",
+        page_count(&pdf)
+    );
+}
+
 /// pseudo-only な `<li>` (`::before` で画像を供給) に `break-before: page`
 /// が付いた場合、新しいページが生成される。
 /// `build_list_item_body` 内の pseudo-only fallback を exercise する。
