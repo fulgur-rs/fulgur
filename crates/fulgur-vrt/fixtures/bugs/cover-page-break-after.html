@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>VRT fixture: bugs/cover-page-break-after</title>
+<style>
+  /* Regression net for fulgur-y9pu: in v0.5.13 the legacy
+     `page-break-after: always` was not wired to `Pagination.break_after`,
+     so a `height: 100vh` cover followed by `page-break-after: always`
+     produced a spurious blank leading page. Fixed by PR #188
+     (fulgur-lje5-page-break-wire). */
+  @page {
+    size: A4;
+    margin: 20mm 18mm;
+    @top-center { content: "y9pu"; font-size: 9pt; color: #888; }
+    @bottom-center {
+      content: counter(page) " / " counter(pages);
+      font-size: 9pt; color: #888;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #fff; }
+  .cover {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+    color: #fff;
+    page-break-after: always;
+  }
+  .cover-logo { font-size: 56pt; font-weight: 700; color: #e94560; }
+  .body-section { padding: 12pt; }
+  .body-section h1 {
+    font-size: 20pt;
+    color: #0f3460;
+    border-bottom: 3pt solid #e94560;
+    padding-bottom: 6pt;
+  }
+</style>
+</head><body>
+<div class="cover">
+  <div class="cover-logo">fulgur</div>
+</div>
+<div class="body-section">
+  <h1>1. Overview</h1>
+</div>
+</body></html>
