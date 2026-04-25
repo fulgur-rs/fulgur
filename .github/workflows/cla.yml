@@ -31,7 +31,7 @@ jobs:
           path-to-signatures: '.github/cla-signatures.json'
           path-to-document: 'https://github.com/fulgur-rs/fulgur/blob/main/CLA.md'
           branch: 'cla-signatures'
-          allowlist: 'dependabot[bot],github-actions[bot],renovate[bot],Copilot'
+          allowlist: 'dependabot[bot],github-actions[bot],renovate[bot],Copilot,devin-ai-integration[bot]'
           custom-notsigned-prcomment: >
             Thank you for your pull request! Before we can merge this contribution,
             please sign our Contributor License Agreement (CLA). The CLA is a
