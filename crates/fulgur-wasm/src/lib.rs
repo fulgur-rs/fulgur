@@ -346,12 +346,11 @@ impl Engine {
 }
 
 // `wasm-pack test --node` runs these against the real wasm-bindgen path
-// (`configure(JsValue)` + `serde_wasm_bindgen::from_value`). serde_json
-// and serde-wasm-bindgen are not interchangeable for `untagged` enums
-// with struct variants (e.g. PageSizeOption::Custom, MarginOption::Full),
-// so the native `configure_json` tests above are insufficient for the
-// shipped JS API. These tests catch deserializer drift before the
-// browser does.
+// (`configure(JsValue)` → `JSON.stringify` → `serde_json::from_str`).
+// The native `configure_json` tests exercise the same `serde_json`
+// deserializer, but these wasm tests additionally cover the
+// `JSON.stringify` round-trip (JS value → JSON string) and confirm
+// that the full JsValue entry point works end-to-end.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use super::*;
