@@ -1362,7 +1362,8 @@ where
         // Replaced element with no visual style but a non-default Pagination
         // (e.g. `<img style="break-before: page">`): wrap in a thin
         // BlockPageable so paginate() honours the break.
-        let inner = build_inner(width, height, opacity, visible);
+        // Match the styled branch: the wrapper owns opacity, the inner keeps visibility.
+        let inner = build_inner(width, height, 1.0, visible);
         let child = PositionedChild {
             child: inner,
             x: 0.0,
