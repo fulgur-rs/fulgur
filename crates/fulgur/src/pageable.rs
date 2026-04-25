@@ -4500,6 +4500,32 @@ mod affine_tests {
         let q = Affine2D::rotation(std::f32::consts::FRAC_PI_4).transform_rect(&r);
         assert!(!q.is_degenerate(), "rotated rect should not be degenerate");
     }
+
+    #[test]
+    fn skew_x_shears_point_along_x_axis() {
+        use std::f32::consts::FRAC_PI_4;
+        // skew(ax=π/4, ay=0): x' = x + tan(π/4)·y = x + y, y' = y
+        let m = Affine2D::skew(FRAC_PI_4, 0.0);
+        let (x, y) = m.transform_point(1.0, 1.0);
+        assert!((x - 2.0).abs() < 1e-5, "x should equal x+y=2, got {x}");
+        assert!((y - 1.0).abs() < 1e-5, "y should be unchanged=1, got {y}");
+    }
+
+    #[test]
+    fn skew_y_shears_point_along_y_axis() {
+        use std::f32::consts::FRAC_PI_4;
+        // skew(ax=0, ay=π/4): x' = x, y' = tan(π/4)·x + y = x + y
+        let m = Affine2D::skew(0.0, FRAC_PI_4);
+        let (x, y) = m.transform_point(1.0, 1.0);
+        assert!((x - 1.0).abs() < 1e-5, "x should be unchanged=1, got {x}");
+        assert!((y - 2.0).abs() < 1e-5, "y should equal x+y=2, got {y}");
+    }
+
+    #[test]
+    fn skew_zero_angles_equals_identity() {
+        let m = Affine2D::skew(0.0, 0.0);
+        assert!(m.is_identity(), "skew(0,0) must equal identity");
+    }
 }
 
 #[cfg(test)]
@@ -5442,5 +5468,269 @@ mod forced_break_below_tests {
             "html should delegate to body via WithinChild(0,...), got {:?}",
             split
         );
+    }
+}
+
+#[cfg(test)]
+mod link_collector_tests {
+    use super::*;
+    use crate::paragraph::{LinkSpan, LinkTarget};
+    use std::sync::Arc;
+
+    fn make_link(url: &str) -> Arc<LinkSpan> {
+        Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new(url.to_string())),
+            alt_text: None,
+        })
+    }
+
+    fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn push_rect_zero_width_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 0.0, 10.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "zero-width rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn push_rect_zero_height_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 0.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "zero-height rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn push_rect_negative_dimension_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, -5.0, 10.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "negative-width rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn same_link_same_page_merges_into_one_occurrence() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        // Simulates a multi-line anchor: two rects for the same Arc<LinkSpan>
+        lc.push_rect(&link, r(0.0, 0.0, 50.0, 12.0));
+        lc.push_rect(&link, r(0.0, 14.0, 30.0, 12.0));
+        let occs = lc.into_occurrences();
+        assert_eq!(
+            occs.len(),
+            1,
+            "same link same page must produce one occurrence"
+        );
+        assert_eq!(
+            occs[0].quads.len(),
+            2,
+            "both rects must be retained as separate quads"
+        );
+    }
+
+    #[test]
+    fn same_link_different_pages_produce_separate_occurrences() {
+        let mut lc = LinkCollector::new();
+        let link = make_link("https://example.com");
+        lc.set_current_page(0);
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+        lc.set_current_page(1);
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+        let occs = lc.into_occurrences();
+        assert_eq!(
+            occs.len(),
+            2,
+            "same link on different pages must produce two occurrences"
+        );
+        assert_eq!(occs[0].page_idx, 0);
+        assert_eq!(occs[1].page_idx, 1);
+    }
+
+    #[test]
+    fn take_page_returns_and_removes_its_page() {
+        let mut lc = LinkCollector::new();
+        let link_a = make_link("https://a.com");
+        let link_b = make_link("https://b.com");
+        lc.set_current_page(0);
+        lc.push_rect(&link_a, r(0.0, 0.0, 10.0, 10.0));
+        lc.set_current_page(1);
+        lc.push_rect(&link_b, r(0.0, 0.0, 10.0, 10.0));
+
+        let page0 = lc.take_page(0);
+        assert_eq!(page0.len(), 1);
+        assert_eq!(page0[0].page_idx, 0);
+
+        // Page 0 gone; only page 1 remains.
+        let remaining = lc.into_occurrences();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].page_idx, 1);
+    }
+
+    #[test]
+    fn take_page_on_missing_page_returns_empty() {
+        let mut lc = LinkCollector::new();
+        let result = lc.take_page(99);
+        assert!(
+            result.is_empty(),
+            "take_page on absent page must return empty vec"
+        );
+    }
+
+    #[test]
+    fn occurrences_is_non_consuming_snapshot() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+
+        let snap1 = lc.occurrences();
+        let snap2 = lc.occurrences();
+        assert_eq!(snap1.len(), 1);
+        assert_eq!(snap2.len(), 1, "second call must see the same data");
+
+        // Collector must still be usable after snapshots.
+        lc.set_current_page(1);
+        lc.push_rect(&link, r(0.0, 0.0, 5.0, 5.0));
+        assert_eq!(
+            lc.occurrences().len(),
+            2,
+            "new page occurrence visible after snapshots"
+        );
+    }
+}
+
+#[cfg(test)]
+mod break_after_tests {
+    use super::*;
+
+    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
+        let mut s = SpacerPageable::new(h);
+        s.wrap(100.0, 1000.0);
+        Box::new(s)
+    }
+
+    #[test]
+    fn break_after_page_forces_split_even_when_everything_fits() {
+        // The first child carries break_after: Page; even though both children
+        // fit in 1000pt, the forced break must produce a split.
+        let mut child_with_break =
+            BlockPageable::new(vec![make_spacer(50.0)]).with_pagination(Pagination {
+                break_after: BreakAfter::Page,
+                ..Pagination::default()
+            });
+        child_with_break.wrap(200.0, 1000.0);
+
+        let mut block = BlockPageable::new(vec![
+            Box::new(child_with_break) as Box<dyn Pageable>,
+            make_spacer(50.0),
+        ]);
+        block.wrap(200.0, 1000.0);
+
+        let result = block.split(200.0, 1000.0);
+        assert!(result.is_some(), "break-after:page must force a page split");
+
+        let (first, second) = result.unwrap();
+        let mut first = first;
+        let mut second = second;
+        // First fragment: just the child with break-after (50pt)
+        assert!((first.wrap(200.0, 1000.0).height - 50.0).abs() < 0.01);
+        // Second fragment: the remaining spacer (50pt)
+        assert!((second.wrap(200.0, 1000.0).height - 50.0).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod block_split_boxed_tests {
+    use super::*;
+
+    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
+        let mut s = SpacerPageable::new(h);
+        s.wrap(100.0, 1000.0);
+        Box::new(s)
+    }
+
+    #[test]
+    fn split_boxed_at_index_returns_ok_and_preserves_children() {
+        // Three 100pt spacers; available height 250pt.
+        // Children: y=0 (h=100), y=100 (h=100), y=200 (h=100).
+        // At avail=250: first two fit, third overflows → AtIndex(2).
+        let mut block = BlockPageable::new(vec![
+            make_spacer(100.0),
+            make_spacer(100.0),
+            make_spacer(100.0),
+        ]);
+        block.wrap(200.0, 1000.0);
+        let concrete: Box<BlockPageable> = Box::new(block);
+        let result = concrete.split_boxed(200.0, 250.0);
+        assert!(
+            result.is_ok(),
+            "split_boxed must succeed when a split is possible"
+        );
+        let (first, second) = match result {
+            Ok(pair) => pair,
+            Err(_) => panic!("split_boxed returned Err unexpectedly"),
+        };
+        let first_block = first.as_any().downcast_ref::<BlockPageable>().unwrap();
+        let second_block = second.as_any().downcast_ref::<BlockPageable>().unwrap();
+        assert_eq!(
+            first_block.children.len(),
+            2,
+            "first fragment keeps two children"
+        );
+        assert_eq!(
+            second_block.children.len(),
+            1,
+            "second fragment keeps one child"
+        );
+        // Second fragment's child must be rebased to y=0.
+        assert!(
+            (second_block.children[0].y - 0.0).abs() < 0.01,
+            "second fragment child must be rebased to y=0"
+        );
+    }
+
+    #[test]
+    fn split_boxed_no_split_returns_err_with_original_box() {
+        // Single 50pt spacer in 1000pt: no split needed.
+        // The BlockPageable override returns Err(self) without cloning.
+        let mut block = BlockPageable::new(vec![make_spacer(50.0)]);
+        block.wrap(200.0, 1000.0);
+        let concrete: Box<BlockPageable> = Box::new(block);
+        match concrete.split_boxed(200.0, 1000.0) {
+            Ok(_) => panic!("no split needed must return Err"),
+            Err(original) => {
+                let block = original
+                    .as_any()
+                    .downcast_ref::<BlockPageable>()
+                    .expect("Err must return the original BlockPageable");
+                assert_eq!(block.children.len(), 1, "child count must be preserved");
+                assert!(
+                    (block.children[0].child.height() - 50.0).abs() < 0.01,
+                    "child height must be preserved"
+                );
+            }
+        }
     }
 }
