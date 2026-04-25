@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-04-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(bindings): handle fulgur::Error::Other in pyfulgur and fulgur-ruby by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/217
+### Other Changes
+* ci(cache): consolidate dev shared-keys + scope save-if to main by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/216
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.6.0...v0.7.0
+
 ## [0.6.0] - 2026-04-25
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
