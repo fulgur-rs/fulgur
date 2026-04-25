@@ -1,0 +1,96 @@
+name: PR Labeler
+
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  label:
+    if: github.event.pull_request.state == 'open'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+            const titleChanged = !!context.payload.changes?.title;
+
+            // On `edited`, only act when the title actually changed.
+            // This preserves manual label overrides applied via the UI:
+            // editing a label or PR body alone won't reclassify the PR.
+            if (action === 'edited' && !titleChanged) {
+              core.info(`PR #${pr.number}: edited without title change, skipping.`);
+              return;
+            }
+
+            const title = pr.title || '';
+            const labels = pr.labels.map(l => l.name);
+            const existing = labels.filter(l => l.startsWith('release-notes:'));
+
+            if (/^release:/i.test(title)) {
+              core.info(`PR #${pr.number} has release: prefix, skipping.`);
+              return;
+            }
+
+            const m = title.match(/^([a-zA-Z]+)(?:\([^)]+\))?!?:/);
+            if (!m) {
+              core.info(`PR #${pr.number} has no conventional commits prefix: ${title}`);
+              return;
+            }
+            const type = m[1].toLowerCase();
+
+            const map = {
+              feat: 'release-notes:feature',
+              fix: 'release-notes:fix',
+              docs: 'release-notes:docs',
+              chore: 'release-notes:internal',
+              test: 'release-notes:internal',
+              ci: 'release-notes:internal',
+              refactor: 'release-notes:internal',
+              style: 'release-notes:internal',
+              build: 'release-notes:internal',
+              perf: 'release-notes:internal',
+            };
+
+            const desired = map[type];
+            if (!desired) {
+              core.info(`PR #${pr.number} has unmapped type "${type}", skipping.`);
+              return;
+            }
+
+            if (existing.length === 1 && existing[0] === desired) {
+              core.info(`PR #${pr.number} already has ${desired}, skipping.`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: [desired],
+            });
+            core.info(`Added ${desired} to PR #${pr.number}`);
+
+            for (const stale of existing) {
+              if (stale === desired) continue;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: stale,
+                });
+                core.info(`Removed stale ${stale} from PR #${pr.number}`);
+              } catch (err) {
+                if (err.status === 404) {
+                  core.info(`Label ${stale} already absent on PR #${pr.number}`);
+                } else {
+                  throw err;
+                }
+              }
+            }
