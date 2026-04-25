@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** `.github/workflows/ci.yml` に `bindings-check` job を追加し、`#![cfg(feature = "...")]` で gate された `crates/pyfulgur` / `crates/fulgur-ruby` を毎 PR で `cargo check` + `cargo clippy` する。fulgur-0qwi の根本対策。
+**Goal:** `.github/workflows/ci.yml` に `bindings-check` job を追加し、`#![cfg(feature = "...")]` で gate された `crates/pyfulgur` / `crates/fulgur-ruby` を毎 PR で `cargo clippy --all-targets -- -D warnings` する。fulgur-0qwi の根本対策。
 
 **Architecture:** 単一 job (Linux only) を `oxidize-rb/actions/setup-ruby-and-rust` で Ruby+Rust 環境を整備し、pyfulgur (extension-module) と fulgur-ruby (ruby-api) の 2 crate に対して `cargo clippy --all-targets -- -D warnings` を順に実行する。matrix なし。
 
@@ -70,7 +70,7 @@ Expected: 何も出力されない (YAML として valid)
 Run: `command -v actionlint && actionlint .github/workflows/ci.yml || echo "actionlint not installed; skipping"`
 Expected: actionlint が無ければ skip メッセージ、あればエラー無し。
 
-**Step 5: ローカルで cargo check を最低限走らせて design の正当性を確認**
+**Step 5: ローカルで cargo clippy を最低限走らせて design の正当性を確認**
 
 Run: `cargo clippy -p pyfulgur --features extension-module --all-targets -- -D warnings 2>&1 | tail -5`
 Expected: `Finished` で終わる (現在の main は PR #217 で修正済み)。
@@ -137,7 +137,7 @@ gh pr create --title "ci: add bindings-check job for cfg-gated pyfulgur / fulgur
 ## Summary
 
 - `.github/workflows/ci.yml` に `bindings-check` job を新設
-- `crates/pyfulgur` (`extension-module`) と `crates/fulgur-ruby` (`ruby-api`) を毎 PR で `cargo check` + `cargo clippy --all-targets -- -D warnings`
+- `crates/pyfulgur` (`extension-module`) と `crates/fulgur-ruby` (`ruby-api`) を毎 PR で `cargo clippy --all-targets -- -D warnings`
 - PR #217 で実証された「workspace `cargo check` が cfg-gated bindings crate を空コンパイルし、release-* まで型エラーが検出されない」盲点を CI で塞ぐ
 
 ## Background
@@ -148,7 +148,7 @@ gh pr create --title "ci: add bindings-check job for cfg-gated pyfulgur / fulgur
 
 - 専用 job: lint job に Ruby env を相乗りさせると lint 全体が遅くなる + Ruby 不要なジョブにも Ruby setup が掛かる
 - Linux 単一: クロスプラットフォーム build / link 検証は release-* job の責務。ここでは型エラー検出に絞る
-- clippy `-D warnings` 込み: `cargo check` だけだと unused warning 等が通り、main lint job と乖離する
+- clippy `--all-targets -- -D warnings` 単体採用: 既存 lint job (ci.yml:40-41) と同じ pattern。`cargo check` を別途走らせてもビルド工程は重複するだけで信号は増えない
 - cache shared-key を分離 (`ubuntu-latest-fulgur-bindings`): pyo3 / magnus / rb-sys を引き込むので main 用 cache とは graph が異なる
 
 ## Test plan

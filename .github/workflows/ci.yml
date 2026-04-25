@@ -259,7 +259,7 @@ jobs:
           if-no-files-found: warn
 
   bindings-check:
-    name: Bindings cargo check
+    name: Bindings type-check
     # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
     # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
     # `cargo check --workspace` / clippy では空コンパイルされるため型エラーが
