@@ -88,8 +88,18 @@ jobs:
 
           # Avoid spamming a fresh issue every night when the same regression
           # persists: look for an open issue whose title starts with the phase
-          # prefix. If found, add a comment linking this run and exit.
-          title_prefix="WPT nightly regression: ${{ matrix.phase }}"
+          # group prefix. If found, add a comment linking this run and exit.
+          #
+          # Group is the matrix.phase with any trailing `-<digits>` shard
+          # suffix stripped, so the three multicol shards (multicol-1,
+          # multicol-2, multicol-3) all converge on a single
+          # "WPT nightly regression: multicol" issue rather than fanning
+          # out to one issue per shard. Non-sharded phases (css-page,
+          # bugs, smoke) keep their original prefix unchanged. The body
+          # and artifact link below still reference the specific shard,
+          # so triage can locate the failing tests directly.
+          phase_group=$(echo "${{ matrix.phase }}" | sed 's/-[0-9]\+$//')
+          title_prefix="WPT nightly regression: ${phase_group}"
           existing=$(gh issue list \
             --state open \
             --search "\"$title_prefix\" in:title" \
@@ -110,11 +120,11 @@ jobs:
           if gh label list --search "wpt-nightly-regression" --limit 1 \
                | grep -q "^wpt-nightly-regression"; then
             gh issue create \
-              --title "$title_prefix $(date -u +%Y-%m-%d)" \
+              --title "$title_prefix" \
               --body "$BODY" \
               --label "wpt-nightly-regression"
           else
             gh issue create \
-              --title "$title_prefix $(date -u +%Y-%m-%d)" \
+              --title "$title_prefix" \
               --body "$BODY"
           fi
