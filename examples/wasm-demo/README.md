@@ -1,8 +1,10 @@
 # fulgur WASM demo
 
-Browser-side `HTML → PDF` rendering powered by `fulgur-wasm`. Renders entirely
-in the browser; no network calls except for the local font / CSS / image assets
-served alongside the demo.
+Browser-side `HTML → PDF` rendering powered by `fulgur-wasm`. The PDF is
+rendered entirely in the browser; the result is then previewed in-page via
+[pdf.js](https://mozilla.github.io/pdf.js/) (loaded on demand from
+`cdn.jsdelivr.net`). Apart from that one CDN fetch, the demo only loads the
+local font / CSS / image assets served alongside it.
 
 ## Scope (B-3c)
 
@@ -58,8 +60,9 @@ python3 -m http.server 8000
 # then visit http://localhost:8000/examples/wasm-demo/
 ```
 
-Edit the HTML in the textarea, click "Render PDF", and the browser will
-download `output.pdf`.
+Edit the HTML in the textarea and click "Render PDF". The generated PDF is
+displayed in-page below the button, with one canvas per page rendered by
+pdf.js. (No file download — see notes below if you need bytes.)
 
 ## Notes
 
@@ -76,6 +79,15 @@ download `output.pdf`.
   Always fetch CSS on the JS side and pass it via `engine.add_css(text)`.
 - `<img src="…">` works only for keys that have been registered via
   `engine.add_image(name, bytes)`; arbitrary remote URLs are not fetched.
+- pdf.js is fetched from `cdn.jsdelivr.net/npm/pdfjs-dist@4` only when the
+  first render finishes; subsequent renders reuse the cached module. To run
+  fully offline, vendor `pdf.mjs` + `pdf.worker.mjs` next to `index.html` and
+  point `PDFJS_BASE` at the local copy.
+- The Uint8Array returned by `engine.render(html)` is the raw PDF. The demo
+  feeds it straight into `pdfjs.getDocument({ data: bytes })`. If you want a
+  download instead, wrap it in a `Blob` (`new Blob([bytes], { type: "application/pdf" })`)
+  and trigger a `<a download>` click — the previous version of this demo
+  shows that pattern in git history.
 
 ## Tracking
 
