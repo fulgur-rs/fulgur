@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 0.2.0). Leave empty to auto-bump patch.'
+        description: 'Release version (e.g. 0.6.0). Leave empty to auto-bump minor (ZeroVer policy).'
         required: false
         type: string
+      skip_bindings:
+        description: 'Skip PyPI / RubyGems / npm publish (core release only). Adds release:skip-bindings label to the release PR.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,13 +37,6 @@ jobs:
         with:
           shared-key: ubuntu-release-fulgur
 
-      - name: Install git-cliff
-        env:
-          GIT_CLIFF_VERSION: "2.7.0"
-        run: |
-          curl -sSL "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/git-cliff-*/git-cliff /usr/local/bin/
-
       - name: Determine version
         id: version
         env:
@@ -48,10 +46,11 @@ jobs:
           echo "current=$CURRENT"
 
           if [ -z "$INPUT_VERSION" ]; then
-            # Auto-bump patch: 0.1.0 → 0.1.1
+            # ZeroVer auto-bump: minor++ (0.5.14 → 0.6.0). Patches are reserved
+            # for hotfixes — pass `version` input explicitly when cutting a patch.
             IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-            PATCH=$((PATCH + 1))
-            VERSION="$MAJOR.$MINOR.$PATCH"
+            MINOR=$((MINOR + 1))
+            VERSION="$MAJOR.$MINOR.0"
           else
             VERSION="$INPUT_VERSION"
             # Strip leading 'v' if present
@@ -95,26 +94,67 @@ jobs:
 
           cargo check --workspace
 
-      - name: Generate changelog
+      # PR-based changelog: ask GitHub to render notes from merged PRs since the
+      # last release, classified by `release-notes:*` labels per .github/release.yml.
+      # `previous_tag_name` is auto-detected when omitted.
+      - name: Generate release notes from PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="v$VERSION" \
+            --jq .body > RELEASE_NOTES.md
+
+      - name: Prepend new section to CHANGELOG.md
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: git-cliff --tag "v$VERSION" -o CHANGELOG.md
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          # Drop the API's "## What's Changed" preamble so categories nest
+          # cleanly under "## [VERSION] - DATE" as H3.
+          sed -i "/^## What's Changed$/d" RELEASE_NOTES.md
+          {
+            echo "# Changelog"
+            echo
+            echo "All notable changes to this project will be documented in this file."
+            echo
+            echo "## [$VERSION] - $DATE"
+            echo
+            cat RELEASE_NOTES.md
+            echo
+            # Skip the existing top-of-file header and keep history from the first
+            # versioned section onward (matches git-cliff's prior output shape).
+            awk '/^## \[/{found=1} found' CHANGELOG.md
+          } > CHANGELOG.tmp
+          mv CHANGELOG.tmp CHANGELOG.md
 
       - name: Create release branch and PR
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          SKIP_BINDINGS: ${{ inputs.skip_bindings }}
         run: |
           BRANCH="release/v$VERSION"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Clean up existing branch/PR if re-running
+          # Clean up existing branch/PR if re-running.
           git push origin --delete "$BRANCH" 2>/dev/null || true
           git checkout -b "$BRANCH"
+          # RELEASE_NOTES.md is a transient artifact handed to the draft release
+          # step below; keep it on disk but out of the commit.
           git add -A
+          git reset HEAD -- RELEASE_NOTES.md
           git commit -m "release: v$VERSION"
           git push origin "$BRANCH"
+
+          PR_LABEL_ARGS=()
+          SKIP_NOTE=""
+          if [ "$SKIP_BINDINGS" = "true" ]; then
+            PR_LABEL_ARGS=(--label release:skip-bindings)
+            SKIP_NOTE=$'\n\n> **skip_bindings=true**: PyPI / RubyGems / npm publish will be skipped for this release.'
+          fi
 
           gh pr create \
             --title "release: v$VERSION" \
@@ -122,23 +162,19 @@ jobs:
           ## Release v$VERSION
 
           - Version bumped in Cargo.toml
-          - CHANGELOG.md updated
+          - CHANGELOG.md updated (PR-based notes)
           - Draft GitHub Release created
 
           **Merging this PR will automatically:**
           1. Tag \`v$VERSION\`
           2. Publish to crates.io
           3. Build binaries (linux gnu/musl, macOS, Windows)
-          4. Publish the draft GitHub Release with binary assets
+          4. Publish the draft GitHub Release with binary assets$SKIP_NOTE
           EOF
           )" \
             --base main \
-            --head "$BRANCH"
-
-      - name: Generate release notes for draft
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: git-cliff --tag "v$VERSION" --unreleased --strip header -o RELEASE_NOTES.md
+            --head "$BRANCH" \
+            "${PR_LABEL_ARGS[@]}"
 
       - name: Create draft GitHub Release
         env:

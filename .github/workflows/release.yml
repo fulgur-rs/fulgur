@@ -254,6 +254,9 @@ jobs:
   publish-npm:
     name: Publish npm packages
     needs: [publish, build-binaries]
+    # GH Release (and CLI binary distribution) is unconditional, but the npm
+    # publish is gated by `release:skip-bindings` to allow core-only releases.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'release:skip-bindings') }}
     runs-on: ubuntu-latest
     environment: release
     permissions:

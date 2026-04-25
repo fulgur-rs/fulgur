@@ -231,6 +231,39 @@ jobs:
             "
           '
 
+  # release-prepare.yml が release PR に `release:skip-bindings` ラベルを付けて
+  # いれば bindings publish を丸ごと skip する。release event は PR コンテキストを
+  # 持たないため、tag → commit → associated PR の順に逆引きしてラベルを参照する。
+  check-skip-label:
+    name: Check skip-bindings label
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Check label
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "release" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" \
+            --jq '.[].labels[].name' 2>/dev/null || true)
+          if printf '%s\n' "$LABELS" | grep -qx 'release:skip-bindings'; then
+            echo "release:skip-bindings label set on associated PR; skipping RubyGems publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # NOTE: RubyGems publish は release イベント (release.yml がタグから発火) のみ。
   # workflow_dispatch からは任意の ref を push できないようにする (security)。
   # RubyGems には TestPyPI 相当が無いため、workflow_dispatch は build + smoke
@@ -238,8 +271,8 @@ jobs:
   # See docs/RELEASE_SETUP.md.
   publish:
     name: Publish to RubyGems
-    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl]
-    if: github.event_name == 'release'
+    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl, check-skip-label]
+    if: github.event_name == 'release' && needs.check-skip-label.outputs.skip != 'true'
     runs-on: ubuntu-latest
     environment: rubygems
     permissions:
