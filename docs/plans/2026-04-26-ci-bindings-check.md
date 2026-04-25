@@ -33,7 +33,7 @@ Run: `tail -30 .github/workflows/ci.yml`
 ```yaml
 
   bindings-check:
-    name: Bindings cargo check
+    name: Bindings type-check
     # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
     # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
     # `cargo check --workspace` / clippy では空コンパイルされるため型エラーが
@@ -168,7 +168,7 @@ EOF
 gh pr checks --watch
 ```
 
-Expected: 全 check が pass。`bindings-check / Bindings cargo check` が PASS。
+Expected: 全 check が pass。`bindings-check / Bindings type-check` が PASS。
 
 **Step 4: 任意の artificial regression test**
 
