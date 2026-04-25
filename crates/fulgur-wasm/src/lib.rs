@@ -85,7 +85,10 @@ enum PageSizeOption {
     // enums whose variants are struct-shaped, each variant needs its own
     // `rename_all` to camelCase its fields.
     #[serde(rename_all = "camelCase")]
-    Custom { width_mm: f32, height_mm: f32 },
+    Custom {
+        width_mm: f32,
+        height_mm: f32,
+    },
 }
 
 #[derive(Deserialize)]
