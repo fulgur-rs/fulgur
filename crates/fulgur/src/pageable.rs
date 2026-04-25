@@ -1252,12 +1252,16 @@ fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) ->
 /// When `y_offset` is 0.0, children are cloned as-is.
 /// A negative `y_offset` shifts children upward (subtracts from y).
 fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<PositionedChild> {
+    // Clamp at 0.0 so parallel siblings (grid/flex children sharing the same
+    // y as a split-causing child) don't end up at negative y on the second
+    // fragment, which would push their background+border above the page top
+    // and silently drop them. fulgur-86fo.
     children
         .iter()
         .map(|pc| PositionedChild {
             child: pc.child.clone_box(),
             x: pc.x,
-            y: pc.y - y_offset,
+            y: (pc.y - y_offset).max(0.0),
         })
         .collect()
 }
@@ -1821,9 +1825,12 @@ impl Pageable for BlockPageable {
 
                 // Rebase tail by split_y + consumed_height so siblings sit
                 // flush against the second fragment on page 2, with no extra
-                // gap equal to the first fragment's height.
+                // gap equal to the first fragment's height. Clamp at 0.0 for
+                // parallel siblings (grid/flex same-row) so they don't end up
+                // above the page top — see clone_children for fulgur-86fo.
+                let tail_offset = split_child_y + consumed_height;
                 for pc in &mut tail {
-                    pc.y -= split_child_y + consumed_height;
+                    pc.y = (pc.y - tail_offset).max(0.0);
                 }
 
                 let mut second = vec![PositionedChild {
@@ -1880,9 +1887,10 @@ impl Pageable for BlockPageable {
                 let mut second_children = me.children.split_off(split_index);
                 let first_children = me.children;
 
-                // Shift y coordinates on second fragment
+                // Shift y coordinates on second fragment. Clamp at 0.0 for
+                // parallel siblings — see clone_children for fulgur-86fo.
                 for pc in &mut second_children {
-                    pc.y -= split_y;
+                    pc.y = (pc.y - split_y).max(0.0);
                 }
 
                 let mut first_block = BlockPageable::with_positioned_children(first_children)
@@ -3706,6 +3714,49 @@ mod tests {
         // Even though everything fits in 1000pt, break-before should force split
         let result = block.split(200.0, 1000.0);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_split_clamps_parallel_sibling_y_to_zero() {
+        // Regression for fulgur-86fo: in grid/flex layouts, sibling children
+        // share the same y. When the first child gets split (WithinChild), the
+        // second child must end up at y=0 in the second fragment, not at a
+        // negative y (which causes its background+border to render above the
+        // page top and disappear).
+        let mut card_a = BlockPageable::new(vec![make_spacer(31.0), make_spacer(49.0)]);
+        card_a.wrap(80.0, 1000.0);
+        let card_b = BlockPageable::new(vec![make_spacer(80.0)]);
+        // Place both cards at y=0 (parallel grid row layout)
+        let mut grid = BlockPageable::with_positioned_children(vec![
+            PositionedChild {
+                child: Box::new(card_a),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: Box::new(card_b),
+                x: 100.0,
+                y: 0.0,
+            },
+        ]);
+        grid.wrap(200.0, 1000.0);
+
+        // Force a split where only card_a's first spacer (31pt) fits; the rest
+        // of card_a (49pt) plus the entire card_b must land on the second fragment.
+        let result = grid.split(200.0, 31.0);
+        assert!(result.is_some(), "expected split to occur");
+        let (_first, second) = result.unwrap();
+        let second_block = second
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("second fragment must be a BlockPageable");
+        for pc in &second_block.children {
+            assert!(
+                pc.y >= 0.0,
+                "parallel sibling y must be clamped to >= 0, got {}",
+                pc.y,
+            );
+        }
     }
 
     #[test]
