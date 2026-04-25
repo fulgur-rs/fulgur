@@ -257,3 +257,32 @@ jobs:
           name: wpt-${{ matrix.phase }}-report
           path: target/wpt-report/${{ matrix.phase }}
           if-no-files-found: warn
+
+  bindings-check:
+    name: Bindings cargo check
+    # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
+    # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
+    # `cargo check --workspace` / clippy では空コンパイルされるため型エラーが
+    # 検出されない。0.6.0 release で `fulgur::Error::Other` の match arm 不足が
+    # release-* job まで気付かれなかった問題 (PR #217) の再発防止。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+        with:
+          ruby-version: "3.3"
+          rustup-toolchain: stable
+          bundler-cache: false
+          cargo-cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur-bindings
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check pyfulgur (extension-module)
+        run: cargo check -p pyfulgur --features extension-module
+      - name: cargo check fulgur-ruby (ruby-api)
+        run: cargo check -p fulgur-ruby --features ruby-api
+      - name: cargo clippy pyfulgur (extension-module)
+        run: cargo clippy -p pyfulgur --features extension-module --all-targets -- -D warnings
+      - name: cargo clippy fulgur-ruby (ruby-api)
+        run: cargo clippy -p fulgur-ruby --features ruby-api --all-targets -- -D warnings
