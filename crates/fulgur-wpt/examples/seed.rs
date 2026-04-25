@@ -1,11 +1,26 @@
 //! Walk a directory of WPT reftests, run each through the harness, and
-//! emit an `expectations/<subdir>.txt` with the observed PASS/FAIL/SKIP.
+//! emit an expectations file with the observed PASS/FAIL/SKIP.
 //!
-//! Usage:
+//! Single-list subdirectories (e.g. css-page) write directly to the
+//! `expectations/` root:
+//!
 //!     cargo run -p fulgur-wpt --example seed -- \
 //!         --subdir css-page \
 //!         --wpt-root target/wpt \
 //!         --out crates/fulgur-wpt/expectations/css-page.txt
+//!
+//! Sharded subdirectories (e.g. css-multicol — 3 shards in CI) seed to a
+//! single intermediate file, then split with the `shard_list` example.
+//! The intermediate file is git-ignored; only the shards are checked in:
+//!
+//!     cargo run -p fulgur-wpt --example seed -- \
+//!         --subdir css-multicol \
+//!         --wpt-root target/wpt \
+//!         --out target/wpt-seed/css-multicol.all.txt
+//!     cargo run -p fulgur-wpt --example shard_list -- \
+//!         --from target/wpt-seed/css-multicol.all.txt \
+//!         --shards 3 \
+//!         --output-prefix crates/fulgur-wpt/expectations/lists/multicol-
 //!
 //! The expectations format matches `ExpectationFile::parse()`.
 

@@ -92,7 +92,7 @@ jobs:
         uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
       - name: Install cargo-nextest
         uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
-      # NOTE: fulgur-wpt integration tests (wpt_css_page, wpt_css_multicol)
+      # NOTE: fulgur-wpt integration tests (wpt_css_page, wpt_lists)
       # silently skip here because target/wpt is not fetched in the coverage
       # cell — fetching + running all phases would add ~4-5 min to PR CI.
       # That leaves `crates/fulgur-wpt/src/runner.rs` under-reported in
@@ -179,8 +179,15 @@ jobs:
         include:
           - phase: css-page
             test: wpt_css_page
-          - phase: css-multicol
-            test: wpt_css_multicol
+          - phase: multicol-1
+            test: wpt_lists
+            filter: wpt_list_multicol_1
+          - phase: multicol-2
+            test: wpt_lists
+            filter: wpt_list_multicol_2
+          - phase: multicol-3
+            test: wpt_lists
+            filter: wpt_list_multicol_3
           - phase: bugs
             test: wpt_lists
             filter: wpt_list_bugs

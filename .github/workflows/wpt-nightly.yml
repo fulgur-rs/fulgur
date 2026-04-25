@@ -20,8 +20,15 @@ jobs:
         include:
           - phase: css-page
             test: wpt_css_page
-          - phase: css-multicol
-            test: wpt_css_multicol
+          - phase: multicol-1
+            test: wpt_lists
+            filter: wpt_list_multicol_1
+          - phase: multicol-2
+            test: wpt_lists
+            filter: wpt_list_multicol_2
+          - phase: multicol-3
+            test: wpt_lists
+            filter: wpt_list_multicol_3
           - phase: bugs
             test: wpt_lists
             filter: wpt_list_bugs
