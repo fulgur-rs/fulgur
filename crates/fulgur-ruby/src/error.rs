@@ -38,7 +38,8 @@ pub fn map_fulgur_error(ruby: &Ruby, err: FulgurError) -> Error {
         | FulgurError::HtmlParse(msg)
         | FulgurError::Layout(msg)
         | FulgurError::PdfGeneration(msg)
-        | FulgurError::Template(msg) => render_error(ruby, msg),
+        | FulgurError::Template(msg)
+        | FulgurError::Other(msg) => render_error(ruby, msg),
     }
 }
 

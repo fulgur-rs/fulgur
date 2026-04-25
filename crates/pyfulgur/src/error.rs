@@ -17,7 +17,8 @@ pub fn map_fulgur_error(err: FulgurError) -> PyErr {
         FulgurError::HtmlParse(msg)
         | FulgurError::Layout(msg)
         | FulgurError::PdfGeneration(msg)
-        | FulgurError::Template(msg) => RenderError::new_err(msg),
+        | FulgurError::Template(msg)
+        | FulgurError::Other(msg) => RenderError::new_err(msg),
     }
 }
 

@@ -36,7 +36,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-publish-fulgur
+          shared-key: ubuntu-latest-fulgur
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Configure fast build
         run: |
