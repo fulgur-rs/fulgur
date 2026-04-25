@@ -5,7 +5,7 @@
 //! `fulgur::Error` の variant に応じて適切な Ruby 例外に変換する。
 
 use fulgur::Error as FulgurError;
-use magnus::{Error, ExceptionClass, Module, RModule, Ruby, exception};
+use magnus::{Error, ExceptionClass, Module, RModule, Ruby};
 
 /// Ruby 側の `Fulgur::<name>` 例外クラスを lookup する。
 fn class(ruby: &Ruby, name: &str) -> Result<ExceptionClass, Error> {
@@ -28,7 +28,7 @@ pub fn map_fulgur_error(ruby: &Ruby, err: FulgurError) -> Error {
                     .class_object()
                     .const_get::<_, RModule>("Errno")
                     .and_then(|m| m.const_get::<_, ExceptionClass>("ENOENT"))
-                    .unwrap_or_else(|_| exception::runtime_error());
+                    .unwrap_or_else(|_| ruby.exception_runtime_error());
                 Error::new(errno, io_err.to_string())
             }
             _ => render_error(ruby, io_err.to_string()),
@@ -46,13 +46,13 @@ pub fn map_fulgur_error(ruby: &Ruby, err: FulgurError) -> Error {
 fn render_error(ruby: &Ruby, msg: String) -> Error {
     match class(ruby, "RenderError") {
         Ok(c) => Error::new(c, msg),
-        Err(_) => Error::new(exception::runtime_error(), msg),
+        Err(_) => Error::new(ruby.exception_runtime_error(), msg),
     }
 }
 
 fn asset_error(ruby: &Ruby, msg: String) -> Error {
     match class(ruby, "AssetError") {
         Ok(c) => Error::new(c, msg),
-        Err(_) => Error::new(exception::runtime_error(), msg),
+        Err(_) => Error::new(ruby.exception_runtime_error(), msg),
     }
 }
