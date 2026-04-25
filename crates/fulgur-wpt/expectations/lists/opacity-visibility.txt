@@ -1,0 +1,47 @@
+# opacity / visibility coverage (fulgur-i3u9).
+# Cherry-picked WPT reftests across css/CSS2/visufx, css/css-tables,
+# css/css-color, css/css-pseudo, css/css-position, css/css-overflow,
+# and css/compositing. The implementation lives in fulgur-luu (closed),
+# this list is the regression net.
+#
+# Skipped from coverage (not in this list):
+#   - css/CSS2/visufx visibility-* manual tests without rel=match (~21)
+#   - css/css-tables visibility-{collapse,hidden}-* testharness/crash variants (~31)
+#   - css/css-overflow outline-with-opacity-crash.html
+#   - css/compositing opacity-and-transform-animation-crash.html
+#   - css/compositing Blending_in_a_group_with_opacity.html (filename-pair, no rel=match)
+#
+# Summary: 13 PASS, 18 FAIL, 0 SKIP (total 31).
+# Promote FAILs to PASS by editing this file in a PR after fixing the harness.
+
+FAIL  css/CSS2/visufx/visibility-005.xht  # page 1 diff 10201/891662 pixels exceed tol (max_ch=255)
+PASS  css/CSS2/visufx/visibility-block-001.xht
+FAIL  css/css-tables/visibility-collapse-border-spacing-001.html  # page 1 diff 2380/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-tables/visibility-collapse-border-spacing-002.html  # page 1 diff 40401/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-tables/visibility-collapse-colspan-003.html  # page 1 diff 5685/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-tables/visibility-collapse-rowspan-005.html  # page 1 diff 1286/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-tables/visibility-hidden-collapsed-borders.html
+PASS  css/css-color/t32-opacity-basic-0.0-a.xht
+PASS  css/css-color/t32-opacity-basic-0.6-a.xht
+PASS  css/css-color/t32-opacity-basic-1.0-a.xht
+PASS  css/css-color/t32-opacity-clamping-0.0-b.xht
+PASS  css/css-color/t32-opacity-clamping-1.0-b.xht
+FAIL  css/css-color/t32-opacity-offscreen-b.xht  # page 1 diff 702/891662 pixels exceed tol (max_ch=26)
+FAIL  css/css-color/t32-opacity-offscreen-multiple-boxes-1-c.xht  # page 1 diff 430/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-color/t32-opacity-offscreen-multiple-boxes-2-c.xht  # page 1 diff 138/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-color/t32-opacity-offscreen-with-alpha-c.xht
+FAIL  css/css-color/t32-opacity-zorder-c.xht  # page 1 diff 1290/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-color/body-opacity-0-to-1-stacking-context.html  # page 1 diff 39454/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-color/canvas-change-opacity.html  # page 1 diff 37249/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-color/clip-opacity-out-of-flow.html
+FAIL  css/css-color/composited-filters-under-opacity.html  # page 1 diff 22801/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-color/filters-under-will-change-opacity.html  # page 1 diff 22801/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-color/inline-opacity-float-child.html
+FAIL  css/css-color/opacity-overlapping-letters.html  # page 1 diff 5699/891662 pixels exceed tol (max_ch=128)
+FAIL  css/css-pseudo/first-letter-opacity-001.html  # page 1 diff 10/891662 pixels exceed tol (max_ch=44)
+PASS  css/css-pseudo/first-letter-opacity-float-001.html
+PASS  css/css-pseudo/first-line-opacity-001.html
+FAIL  css/css-position/invalidate-opacity-negative-z-index.html  # page 1 diff 2601/891662 pixels exceed tol (max_ch=202)
+PASS  css/css-overflow/overflow-inline-block-with-opacity.html
+FAIL  css/css-overflow/overflow-scroll-resize-visibility-hidden.html  # page 1 diff 501/891662 pixels exceed tol (max_ch=3)
+FAIL  css/compositing/root-element-background-margin-opacity.html  # page 1 diff 10201/891662 pixels exceed tol (max_ch=128)
