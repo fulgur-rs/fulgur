@@ -489,7 +489,11 @@ fn build_list_item_body(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            let needs_wrapper = style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default();
+            if needs_wrapper {
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
                 p.visible = visible;
@@ -505,7 +509,7 @@ fn build_list_item_body(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -537,7 +541,11 @@ fn build_list_item_body(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
@@ -551,7 +559,7 @@ fn build_list_item_body(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -978,7 +986,11 @@ fn convert_node_inner(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
                 // but the node's own text content, so it must respect the node's visibility.
@@ -997,7 +1009,7 @@ fn convert_node_inner(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1034,7 +1046,11 @@ fn convert_node_inner(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
@@ -1048,7 +1064,7 @@ fn convert_node_inner(
                     paragraph_children,
                 );
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1074,12 +1090,16 @@ fn convert_node_inner(
         let (before_pseudo, after_pseudo) =
             build_block_pseudo_images(doc, node, content_box, ctx.assets);
         let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.needs_block_wrapper() || has_pseudo {
+        let pagination = extract_pagination_from_column_css(ctx, node);
+        if style.needs_block_wrapper()
+            || has_pseudo
+            || pagination != crate::pageable::Pagination::default()
+        {
             let (opacity, visible) = extract_opacity_visible(node);
             let positioned_children =
                 wrap_with_block_pseudo_images(before_pseudo, after_pseudo, content_box, Vec::new());
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_pagination(extract_pagination_from_column_css(ctx, node))
+                .with_pagination(pagination)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -1269,10 +1289,10 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
 
 /// Build a [`Pagination`] for `node` from the fulgur-ftp column_css sniffer.
 ///
-/// Only `break-inside` flows through today — `break-before` / `break-after` /
-/// `orphans` / `widows` stay at their defaults (see
-/// [`Pagination::default`]). Absence of the node from `ctx.column_styles`
-/// collapses cleanly to [`BreakInside::Auto`], so every
+/// `break-inside` and `break-before` flow through today — `break-after` /
+/// `orphans` / `widows` stay at their defaults (see [`Pagination::default`]).
+/// Absence of the node from `ctx.column_styles` collapses cleanly to
+/// [`BreakInside::Auto`] / [`BreakBefore::Auto`], so every
 /// `BlockPageable::with_positioned_children` site can call this
 /// unconditionally without regressing the baseline behaviour that the
 /// existing test suite depends on.
@@ -1280,10 +1300,11 @@ fn extract_pagination_from_column_css(
     ctx: &ConvertContext<'_>,
     node: &Node,
 ) -> crate::pageable::Pagination {
-    use crate::pageable::{BreakInside, Pagination};
+    use crate::pageable::{BreakBefore, BreakInside, Pagination};
     let props = ctx.column_styles.get(&node.id).copied().unwrap_or_default();
     Pagination {
         break_inside: props.break_inside.unwrap_or(BreakInside::Auto),
+        break_before: props.break_before.unwrap_or(BreakBefore::Auto),
         ..Pagination::default()
     }
 }
@@ -1309,6 +1330,7 @@ where
 
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
+    let pagination = extract_pagination_from_column_css(ctx, node);
 
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
@@ -1327,9 +1349,26 @@ where
             y: cy,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_pagination(extract_pagination_from_column_css(ctx, node))
+            .with_pagination(pagination)
             .with_style(style)
             .with_opacity(opacity)
+            .with_visible(visible)
+            .with_id(extract_block_id(node));
+        block.wrap(width, height);
+        block.layout_size = Some(Size { width, height });
+        Box::new(block)
+    } else if pagination != crate::pageable::Pagination::default() {
+        // Replaced element with no visual style but a non-default Pagination
+        // (e.g. `<img style="break-before: page">`): wrap in a thin
+        // BlockPageable so paginate() honours the break.
+        let inner = build_inner(width, height, opacity, visible);
+        let child = PositionedChild {
+            child: inner,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_pagination(pagination)
             .with_visible(visible)
             .with_id(extract_block_id(node));
         block.wrap(width, height);

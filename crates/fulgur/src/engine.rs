@@ -86,6 +86,7 @@ impl Engine {
         let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             &html,
             crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.page_height()) as u32,
             fonts,
             self.base_path.as_deref(),
         );
@@ -175,7 +176,6 @@ impl Engine {
         // consumed first by the multicol layout hook (for column-fill) and
         // then by the convert pass (for column-rule wrapping).
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
-
         // Blitz treats multicol containers as plain blocks; route them
         // through fulgur's Taffy hook so columns balance and siblings
         // shift in lockstep. The returned geometry table captures per-
@@ -281,6 +281,7 @@ impl Engine {
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
             crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.page_height()) as u32,
             fonts,
             self.base_path.as_deref(),
         );

@@ -63,7 +63,7 @@ pub trait DomPass {
 /// [`parse_html_with_local_resources`] instead, which wires fulgur's
 /// own [`crate::net::FulgurNetProvider`] into Blitz.
 pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
-    parse_inner(html, viewport_width, font_data, None, None)
+    parse_inner(html, viewport_width, 10000, font_data, None, None)
 }
 
 /// Parse HTML and load any `<link rel="stylesheet">` / `@import` files
@@ -98,6 +98,7 @@ pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> Htm
 pub fn parse_html_with_local_resources(
     html: &str,
     viewport_width: f32,
+    viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
     base_path: Option<&Path>,
 ) -> (HtmlDocument, crate::gcpm::GcpmContext) {
@@ -112,7 +113,14 @@ pub fn parse_html_with_local_resources(
         .and_then(|p| Url::from_directory_path(&p).ok())
         .map(|u| u.to_string());
 
-    let mut doc = parse_inner(html, viewport_width, font_data, Some(provider), base_url);
+    let mut doc = parse_inner(
+        html,
+        viewport_width,
+        viewport_height_px,
+        font_data,
+        Some(provider),
+        base_url,
+    );
 
     // Identify <link rel=stylesheet media=X> nodes *before* mutating so
     // their attributes are stable, and before loading so we can filter
@@ -159,11 +167,17 @@ pub fn parse_html_with_local_resources(
 fn parse_inner(
     html: &str,
     viewport_width: f32,
+    viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
     net_provider: Option<Arc<dyn NetProvider<Resource>>>,
     base_url: Option<String>,
 ) -> HtmlDocument {
-    let viewport = Viewport::new(viewport_width as u32, 10000, 1.0, ColorScheme::Light);
+    let viewport = Viewport::new(
+        viewport_width as u32,
+        viewport_height_px,
+        1.0,
+        ColorScheme::Light,
+    );
 
     let font_ctx = if font_data.is_empty() {
         None
@@ -1893,7 +1907,8 @@ mod tests {
 <html><head><link rel="stylesheet" href="parent.css"></head>
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
-        let (_doc, gcpm) = parse_html_with_local_resources(html, 400.0, &[], Some(dir.path()));
+        let (_doc, gcpm) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], Some(dir.path()));
 
         let cleaned = &gcpm.cleaned_css;
         let child_pos = cleaned
@@ -2356,7 +2371,7 @@ mod tests {
         }
         html.push_str("</body></html>");
 
-        let (doc, _gcpm) = parse_html_with_local_resources(&html, 400.0, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(&html, 400.0, 10000, &[], None);
         use std::ops::Deref;
         let root = doc.root_element();
         let _ = element_text(doc.deref(), root.id);
@@ -2394,7 +2409,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_between_block_children() {
         let html = "<html><body><a id='x'><div>foo</div><div>bar</div></a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -2404,7 +2419,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_for_br() {
         let html = "<html><body><a id='x'>foo<br>bar</a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -2416,7 +2431,7 @@ mod tests {
         // If the text already ends in whitespace, a block boundary should
         // not add another space.
         let html = "<html><body><a id='x'>foo <div>bar</div></a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -2432,7 +2447,7 @@ mod tests {
         let html = r#"<!doctype html><html><head>
             <style>@page { size: A4 landscape; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -2444,7 +2459,7 @@ mod tests {
     #[test]
     fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
         let html = r#"<!doctype html><html><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert!(gcpm.page_settings.is_empty());
     }
@@ -2459,7 +2474,7 @@ mod tests {
             <style>@page { size: A4 landscape; }</style>
             <style>@page { margin: 2cm; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),

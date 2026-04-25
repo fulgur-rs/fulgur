@@ -47,11 +47,34 @@ pub fn render_test(
         .render_html(&html)
         .map_err(|e| anyhow::anyhow!("fulgur render_html failed for {}: {e}", abs.display()))?;
 
+    // Remove stale page PNGs from prior runs so page count is accurate.
+    let prefix = work_dir.join("page");
+    let stem = prefix
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stale_needle = format!("{stem}-");
+    // Propagate cleanup failures — a leftover PNG from a prior run would mix
+    // into the current page count and skew diff results, so we must fail loud
+    // rather than silently continue with stale data.
+    for entry in
+        std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
+        let p = entry.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.starts_with(&stale_needle) && name.ends_with(".png") {
+            if let Err(e) = std::fs::remove_file(&p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
+                }
+            }
+        }
+    }
+
     let pdf_path = work_dir.join("fixture.pdf");
     std::fs::write(&pdf_path, &pdf_bytes)
         .with_context(|| format!("write PDF to {}", pdf_path.display()))?;
-
-    let prefix = work_dir.join("page");
     // NOTE: intentionally NOT passing -f/-l so pdftocairo emits every page.
     let out = Command::new("pdftocairo")
         .args(["-png", "-r", &dpi.to_string()])
