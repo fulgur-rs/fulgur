@@ -270,7 +270,7 @@ margin_pt = 0.0
 **Step 2: VRT を走らせ 18 fixture が byte-identical で pass、2 fixture が fail することを確認**
 
 Run: `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt 2>&1 | tail -40`
-Expected: 18 fixture pass、2 fixture fail (grid-row-promote-background, cover-page-break-after)。fail メッセージは「golden mismatch」を含む
+Expected: 18 fixtures pass、2 fixtures fail (grid-row-promote-background, cover-page-break-after)。fail メッセージは「golden mismatch」を含む
 
 **Step 3: 失敗が想定の 2 件のみであることを diff_out_dir で確認**
 
