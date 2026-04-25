@@ -4,17 +4,20 @@
 //!
 //! 1. [`render_html`] (B-1 compatible) — single-shot, no fonts/CSS/images.
 //! 2. [`Engine`] — builder mirror with `add_font` (B-2), `add_css` /
-//!    `add_image` (B-3a) for registering `Uint8Array` payloads. WOFF2 is
-//!    auto-decoded by `fulgur::AssetBundle::add_font_bytes`; WOFF1 is rejected.
+//!    `add_image` (B-3a), and `configure` (B-3c) for registering
+//!    `Uint8Array` asset payloads and POJO-style configuration. WOFF2 is
+//!    auto-decoded by `fulgur::AssetBundle::add_font_bytes`; WOFF1 is
+//!    rejected.
 //!
 //! Browser-class targets (`wasm32-unknown-unknown`) only. WASI requires
 //! a different `getrandom` backend selection (see
 //! `crates/fulgur/Cargo.toml`).
 //!
 //! Tracking: fulgur-iym (strategic v0.7.0), fulgur-7js9 (B-2),
-//! fulgur-xi6c (this step, B-3a).
+//! fulgur-xi6c (B-3a), fulgur-ufda (this step, B-3c).
 
-use fulgur::AssetBundle;
+use fulgur::{AssetBundle, Margin, PageSize};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 /// Render the given HTML string to a PDF byte array (B-1 compatible).
@@ -31,6 +34,116 @@ pub fn render_html(html: &str) -> Result<Vec<u8>, JsError> {
 #[wasm_bindgen]
 pub struct Engine {
     assets: AssetBundle,
+    page_size: Option<PageSize>,
+    margin: Option<Margin>,
+    landscape: Option<bool>,
+    title: Option<String>,
+    authors: Vec<String>,
+    description: Option<String>,
+    keywords: Vec<String>,
+    creator: Option<String>,
+    producer: Option<String>,
+    creation_date: Option<String>,
+    lang: Option<String>,
+    bookmarks: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EngineOptions {
+    #[serde(default)]
+    page_size: Option<PageSizeOption>,
+    #[serde(default)]
+    margin: Option<MarginOption>,
+    #[serde(default)]
+    landscape: Option<bool>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    authors: Option<Vec<String>>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
+    #[serde(default)]
+    creator: Option<String>,
+    #[serde(default)]
+    producer: Option<String>,
+    #[serde(default)]
+    creation_date: Option<String>,
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    bookmarks: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PageSizeOption {
+    Named(String),
+    // `rename_all` on the enum only renames variant names; for untagged
+    // enums whose variants are struct-shaped, each variant needs its own
+    // `rename_all` to camelCase its fields.
+    #[serde(rename_all = "camelCase")]
+    Custom { width_mm: f32, height_mm: f32 },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MarginOption {
+    Mm {
+        mm: f32,
+    },
+    Pt {
+        pt: f32,
+    },
+    #[serde(rename_all = "camelCase")]
+    Full {
+        top_mm: f32,
+        right_mm: f32,
+        bottom_mm: f32,
+        left_mm: f32,
+    },
+}
+
+impl PageSizeOption {
+    fn to_page_size(&self) -> Result<PageSize, String> {
+        match self {
+            Self::Named(name) => match name.to_ascii_lowercase().as_str() {
+                "a4" => Ok(PageSize::A4),
+                "a3" => Ok(PageSize::A3),
+                "letter" => Ok(PageSize::LETTER),
+                other => Err(format!("unknown page size: {other}")),
+            },
+            Self::Custom {
+                width_mm,
+                height_mm,
+            } => Ok(PageSize::custom(*width_mm, *height_mm)),
+        }
+    }
+}
+
+impl MarginOption {
+    fn to_margin(&self) -> Margin {
+        match self {
+            Self::Mm { mm } => Margin::uniform_mm(*mm),
+            Self::Pt { pt } => Margin::uniform(*pt),
+            Self::Full {
+                top_mm,
+                right_mm,
+                bottom_mm,
+                left_mm,
+            } => {
+                let to_pt = |mm: f32| mm * 72.0 / 25.4;
+                Margin {
+                    top: to_pt(*top_mm),
+                    right: to_pt(*right_mm),
+                    bottom: to_pt(*bottom_mm),
+                    left: to_pt(*left_mm),
+                }
+            }
+        }
+    }
 }
 
 impl Engine {
@@ -38,11 +151,85 @@ impl Engine {
         self.assets.add_font_bytes(bytes)
     }
 
+    fn apply_options(&mut self, opts: EngineOptions) -> Result<(), String> {
+        if let Some(ps) = opts.page_size {
+            self.page_size = Some(ps.to_page_size()?);
+        }
+        if let Some(m) = opts.margin {
+            self.margin = Some(m.to_margin());
+        }
+        if let Some(l) = opts.landscape {
+            self.landscape = Some(l);
+        }
+        if let Some(t) = opts.title {
+            self.title = Some(t);
+        }
+        if let Some(a) = opts.authors {
+            self.authors = a;
+        }
+        if let Some(d) = opts.description {
+            self.description = Some(d);
+        }
+        if let Some(k) = opts.keywords {
+            self.keywords = k;
+        }
+        if let Some(c) = opts.creator {
+            self.creator = Some(c);
+        }
+        if let Some(p) = opts.producer {
+            self.producer = Some(p);
+        }
+        if let Some(cd) = opts.creation_date {
+            self.creation_date = Some(cd);
+        }
+        if let Some(l) = opts.lang {
+            self.lang = Some(l);
+        }
+        if let Some(b) = opts.bookmarks {
+            self.bookmarks = Some(b);
+        }
+        Ok(())
+    }
+
     fn render_impl(&self, html: &str) -> fulgur::Result<Vec<u8>> {
-        fulgur::Engine::builder()
-            .assets(self.assets.clone())
-            .build()
-            .render_html(html)
+        let mut builder = fulgur::Engine::builder().assets(self.assets.clone());
+        if let Some(s) = self.page_size {
+            builder = builder.page_size(s);
+        }
+        if let Some(m) = self.margin {
+            builder = builder.margin(m);
+        }
+        if let Some(l) = self.landscape {
+            builder = builder.landscape(l);
+        }
+        if let Some(ref t) = self.title {
+            builder = builder.title(t.clone());
+        }
+        if !self.authors.is_empty() {
+            builder = builder.authors(self.authors.clone());
+        }
+        if let Some(ref d) = self.description {
+            builder = builder.description(d.clone());
+        }
+        if !self.keywords.is_empty() {
+            builder = builder.keywords(self.keywords.clone());
+        }
+        if let Some(ref c) = self.creator {
+            builder = builder.creator(c.clone());
+        }
+        if let Some(ref p) = self.producer {
+            builder = builder.producer(p.clone());
+        }
+        if let Some(ref cd) = self.creation_date {
+            builder = builder.creation_date(cd.clone());
+        }
+        if let Some(ref l) = self.lang {
+            builder = builder.lang(l.clone());
+        }
+        if let Some(b) = self.bookmarks {
+            builder = builder.bookmarks(b);
+        }
+        builder.build().render_html(html)
     }
 }
 
@@ -53,6 +240,18 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             assets: AssetBundle::new(),
+            page_size: None,
+            margin: None,
+            landscape: None,
+            title: None,
+            authors: Vec::new(),
+            description: None,
+            keywords: Vec::new(),
+            creator: None,
+            producer: None,
+            creation_date: None,
+            lang: None,
+            bookmarks: None,
         }
     }
 
@@ -90,6 +289,21 @@ impl Engine {
         self.assets.add_image(name, bytes);
     }
 
+    /// Apply configuration options from a JS object (B-3c).
+    ///
+    /// 受け付けるキーは `pageSize` / `margin` / `landscape` / `title` /
+    /// `authors` / `description` / `keywords` / `creator` / `producer` /
+    /// `creationDate` / `lang` / `bookmarks`。`pageSize` は `"A4"` /
+    /// `"Letter"` / `"A3"` の文字列か `{ widthMm, heightMm }` object。
+    /// `margin` は `{ mm }` / `{ pt }` / `{ topMm, rightMm, bottomMm,
+    /// leftMm }` のいずれか。未知のキーや不明な page size 名はエラー。
+    /// 複数回呼び出すと後勝ちで partial merge される。
+    pub fn configure(&mut self, options: JsValue) -> Result<(), JsError> {
+        let opts: EngineOptions = serde_wasm_bindgen::from_value(options)
+            .map_err(|e| JsError::new(&format!("invalid options: {e}")))?;
+        self.apply_options(opts).map_err(|e| JsError::new(&e))
+    }
+
     /// Render the given HTML string to a PDF byte array.
     pub fn render(&self, html: &str) -> Result<Vec<u8>, JsError> {
         self.render_impl(html)
@@ -100,6 +314,20 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    /// Test-only entry point that bypasses `JsValue` (which cannot be
+    /// constructed on non-wasm targets). Drives the real
+    /// `apply_options` + `EngineOptions` deserialize path so the same
+    /// validation (`deny_unknown_fields`, page-size resolution, partial
+    /// merge) is exercised under `cargo test`.
+    fn configure_json(&mut self, json: serde_json::Value) -> Result<(), String> {
+        let opts: EngineOptions =
+            serde_json::from_value(json).map_err(|e| format!("invalid options: {e}"))?;
+        self.apply_options(opts)
     }
 }
 
@@ -229,6 +457,12 @@ mod tests {
         Some(String::from_utf8_lossy(bytes).into_owned())
     }
 
+    // 注: テストは `configure_json` を使う。`configure` は `JsValue` を受けるが
+    // wasm-bindgen の imported function は non-wasm では panic する
+    // (`cannot call wasm-bindgen imported functions on non-wasm targets`)。
+    // `configure_json` は同じ `EngineOptions` deserialize + `apply_options` を
+    // 通すので validation 経路は等価。
+
     #[test]
     fn configure_applies_landscape_and_page_size() {
         // Letter landscape (792 x 612 pt) を要求し、PDF MediaBox がその寸法に
@@ -236,13 +470,10 @@ mod tests {
         // (~595 x 842) のまま出てくるので壊れたら検知できる。
         let mut engine = Engine::new();
         engine
-            .configure(
-                serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "pageSize": "Letter",
-                    "landscape": true,
-                }))
-                .unwrap(),
-            )
+            .configure_json(serde_json::json!({
+                "pageSize": "Letter",
+                "landscape": true,
+            }))
             .expect("configure should succeed");
         let pdf = engine
             .render(r#"<div style="width:10px;height:10px"></div>"#)
@@ -262,13 +493,10 @@ mod tests {
         // Info dictionary に title / author が反映されることを検証する。
         let mut engine = Engine::new();
         engine
-            .configure(
-                serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "title": "B3C Test",
-                    "authors": ["Alice", "Bob"],
-                }))
-                .unwrap(),
-            )
+            .configure_json(serde_json::json!({
+                "title": "B3C Test",
+                "authors": ["Alice", "Bob"],
+            }))
             .expect("configure should succeed");
         let pdf = engine.render("<p>x</p>").expect("render should succeed");
 
@@ -284,12 +512,9 @@ mod tests {
         // pageSize に { widthMm, heightMm } object を渡せること。
         let mut engine = Engine::new();
         engine
-            .configure(
-                serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "pageSize": { "widthMm": 100.0, "heightMm": 200.0 },
-                }))
-                .unwrap(),
-            )
+            .configure_json(serde_json::json!({
+                "pageSize": { "widthMm": 100.0, "heightMm": 200.0 },
+            }))
             .expect("configure should succeed");
         let pdf = engine.render("<p>x</p>").expect("render");
         let doc = lopdf::Document::load_mem(&pdf).expect("PDF parses");
@@ -304,24 +529,18 @@ mod tests {
     #[test]
     fn configure_rejects_unknown_page_size() {
         let mut engine = Engine::new();
-        let result = engine.configure(
-            serde_wasm_bindgen::to_value(&serde_json::json!({
-                "pageSize": "Foo",
-            }))
-            .unwrap(),
-        );
+        let result = engine.configure_json(serde_json::json!({
+            "pageSize": "Foo",
+        }));
         assert!(result.is_err(), "unknown page size should be rejected");
     }
 
     #[test]
     fn configure_rejects_unknown_field() {
         let mut engine = Engine::new();
-        let result = engine.configure(
-            serde_wasm_bindgen::to_value(&serde_json::json!({
-                "pageSizeTypo": "A4",
-            }))
-            .unwrap(),
-        );
+        let result = engine.configure_json(serde_json::json!({
+            "pageSizeTypo": "A4",
+        }));
         assert!(result.is_err(), "unknown field should be rejected");
     }
 
@@ -330,21 +549,15 @@ mod tests {
         // 2 回呼んで一部だけ上書き、他のフィールドは前の値が維持されること。
         let mut engine = Engine::new();
         engine
-            .configure(
-                serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "title": "First",
-                    "landscape": true,
-                }))
-                .unwrap(),
-            )
+            .configure_json(serde_json::json!({
+                "title": "First",
+                "landscape": true,
+            }))
             .unwrap();
         engine
-            .configure(
-                serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "title": "Second",
-                }))
-                .unwrap(),
-            )
+            .configure_json(serde_json::json!({
+                "title": "Second",
+            }))
             .unwrap();
         let pdf = engine.render("<p>x</p>").expect("render");
         let doc = lopdf::Document::load_mem(&pdf).expect("PDF parses");
