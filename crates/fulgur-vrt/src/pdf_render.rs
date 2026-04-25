@@ -10,7 +10,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy)]
 pub struct RenderSpec<'a> {
     pub page_size: &'a str,
-    pub margin_pt: f32,
+    pub margin_pt: Option<f32>,
     pub dpi: u32,
 }
 
@@ -29,10 +29,11 @@ fn page_size_from_name(name: &str) -> anyhow::Result<PageSize> {
 /// failure-diagnosis path via `render_html_to_rgba`); it is kept in
 /// `RenderSpec` so the same struct can drive both APIs.
 pub fn render_html_to_pdf(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Vec<u8>> {
-    let engine = Engine::builder()
-        .page_size(page_size_from_name(spec.page_size)?)
-        .margin(Margin::uniform(spec.margin_pt))
-        .build();
+    let mut builder = Engine::builder().page_size(page_size_from_name(spec.page_size)?);
+    if let Some(mpt) = spec.margin_pt {
+        builder = builder.margin(Margin::uniform(mpt));
+    }
+    let engine = builder.build();
 
     engine
         .render_html(html)
@@ -89,7 +90,7 @@ mod tests {
             html,
             RenderSpec {
                 page_size: "A4",
-                margin_pt: 0.0,
+                margin_pt: Some(0.0),
                 dpi: 150,
             },
             tmp.path(),
@@ -108,7 +109,7 @@ mod tests {
             html,
             RenderSpec {
                 page_size: "A4",
-                margin_pt: 0.0,
+                margin_pt: Some(0.0),
                 dpi: 150,
             },
         )
@@ -128,11 +129,44 @@ mod tests {
 </body></html>"#;
         let spec = RenderSpec {
             page_size: "A4",
-            margin_pt: 0.0,
+            margin_pt: Some(0.0),
             dpi: 150,
         };
         let a = render_html_to_pdf(html, spec).unwrap();
         let b = render_html_to_pdf(html, spec).unwrap();
         assert_eq!(a, b, "two renders of same HTML should be byte-identical");
+    }
+
+    #[test]
+    fn css_at_page_margin_is_respected_when_margin_pt_is_none() {
+        // @page { margin: 30mm } を指定した HTML
+        let html = r#"<!DOCTYPE html>
+<html><head><style>
+@page { size: A4; margin: 30mm; }
+</style></head>
+<body><div style="width:100px;height:100px;background:#ff0000"></div></body></html>"#;
+        let with_none = render_html_to_pdf(
+            html,
+            RenderSpec {
+                page_size: "A4",
+                margin_pt: None,
+                dpi: 150,
+            },
+        )
+        .expect("render with None should succeed");
+        let with_zero = render_html_to_pdf(
+            html,
+            RenderSpec {
+                page_size: "A4",
+                margin_pt: Some(0.0),
+                dpi: 150,
+            },
+        )
+        .expect("render with Some(0.0) should succeed");
+        // None は CSS @page margin を尊重するので、Some(0.0) (CSS を上書き) と異なる出力になる
+        assert_ne!(
+            with_none, with_zero,
+            "None should respect CSS @page margin; Some(0.0) should override it"
+        );
     }
 }
