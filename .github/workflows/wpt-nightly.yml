@@ -82,7 +82,7 @@ jobs:
       issues: write
     steps:
       - name: Download regression artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: wpt-*-nightly
