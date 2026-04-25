@@ -489,9 +489,8 @@ fn build_list_item_body(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
-            let has_pseudo = before_pseudo.is_some()
-                || after_pseudo.is_some()
-                || !abs_pseudos.is_empty();
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
             let needs_wrapper = style.needs_block_wrapper()
                 || has_pseudo
@@ -545,9 +544,8 @@ fn build_list_item_body(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
-            let has_pseudo = before_pseudo.is_some()
-                || after_pseudo.is_some()
-                || !abs_pseudos.is_empty();
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
             if style.needs_block_wrapper()
                 || has_pseudo
@@ -976,9 +974,8 @@ fn convert_node_inner(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
-            let has_pseudo = before_pseudo.is_some()
-                || after_pseudo.is_some()
-                || !abs_pseudos.is_empty();
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
             if style.needs_block_wrapper()
                 || has_pseudo
@@ -1040,9 +1037,8 @@ fn convert_node_inner(
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
-            let has_pseudo = before_pseudo.is_some()
-                || after_pseudo.is_some()
-                || !abs_pseudos.is_empty();
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
             if style.needs_block_wrapper()
                 || has_pseudo
