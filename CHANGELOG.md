@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-04-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(release-ruby): bump rb-sys-dock tag to 0.9.127 (host version drift) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/220
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.7.0...v0.8.0
+
 ## [0.7.0] - 2026-04-25
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
