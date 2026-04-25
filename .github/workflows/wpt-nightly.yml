@@ -64,67 +64,103 @@ jobs:
           name: wpt-${{ matrix.phase }}-nightly
           path: target/wpt-report/${{ matrix.phase }}
           if-no-files-found: warn
-      - name: File regression issue
-        # Only when the run itself succeeded — test exits 0 even with
-        # regressions (reporting-only model), so this fires on legitimate
-        # regression data. Infra failures (fetch/build/runner crash) leave
-        # no regressions.json anyway and are surfaced by the nightly job
-        # failing, not by issue spam.
-        if: success()
+
+  # Single post-matrix job that downloads every shard's regressions.json,
+  # groups them by phase_group (matrix.phase with any trailing `-<digits>`
+  # stripped), and files exactly one issue per group. Doing this in the
+  # matrix race-conditioned with parallel shards: each shard would search
+  # for an open issue, all see "none", and all create one — yielding up
+  # to N duplicate issues per group on the first regression. Aggregation
+  # in a serial job eliminates the TOCTOU window entirely.
+  regressions-aggregate:
+    name: regressions / aggregate
+    needs: wpt
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download regression artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: wpt-*-nightly
+      - name: Aggregate and file issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          regressions="target/wpt-report/${{ matrix.phase }}/regressions.json"
-          if [ ! -f "$regressions" ]; then
-            echo "no regressions.json — skipping"
-            exit 0
-          fi
-          count=$(jq 'length' "$regressions")
-          if [ "$count" = "0" ]; then
-            echo "no regressions — skipping"
-            exit 0
-          fi
 
-          # Avoid spamming a fresh issue every night when the same regression
-          # persists: look for an open issue whose title starts with the phase
-          # group prefix. If found, add a comment linking this run and exit.
-          #
-          # Group is the matrix.phase with any trailing `-<digits>` shard
-          # suffix stripped, so the three multicol shards (multicol-1,
-          # multicol-2, multicol-3) all converge on a single
-          # "WPT nightly regression: multicol" issue rather than fanning
-          # out to one issue per shard. Non-sharded phases (css-page,
-          # bugs, smoke) keep their original prefix unchanged. The body
-          # and artifact link below still reference the specific shard,
-          # so triage can locate the failing tests directly.
-          phase_group=$(echo "${{ matrix.phase }}" | sed 's/-[0-9]\+$//')
-          title_prefix="WPT nightly regression: ${phase_group}"
-          existing=$(gh issue list \
-            --state open \
-            --search "\"$title_prefix\" in:title" \
-            --limit 1 \
-            --json number \
-            --jq '.[0].number // empty')
+          declare -A group_count
+          declare -A group_phases
 
-          BODY="Nightly WPT ${{ matrix.phase }} detected $count regression(s). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          for artifact_dir in artifacts/wpt-*-nightly; do
+            [ -d "$artifact_dir" ] || continue
+            phase="${artifact_dir#artifacts/wpt-}"
+            phase="${phase%-nightly}"
+            regressions="$artifact_dir/regressions.json"
+            if [ ! -f "$regressions" ]; then
+              echo "no regressions.json for ${phase} — skipping"
+              continue
+            fi
+            count=$(jq 'length' "$regressions")
+            if [ "$count" = "0" ]; then
+              continue
+            fi
+            group=$(echo "$phase" | sed 's/-[0-9]\+$//')
+            prev_count="${group_count[$group]:-0}"
+            group_count[$group]=$((prev_count + count))
+            prev_phases="${group_phases[$group]:-}"
+            entry="${phase} ($count)"
+            if [ -n "$prev_phases" ]; then
+              group_phases[$group]="${prev_phases}, ${entry}"
+            else
+              group_phases[$group]="$entry"
+            fi
+          done
 
-          Download the \`wpt-${{ matrix.phase }}-nightly\` artifact for details."
-
-          if [ -n "$existing" ]; then
-            echo "open regression issue #$existing already exists for ${{ matrix.phase }} — commenting"
-            gh issue comment "$existing" --body "$BODY"
+          if [ ${#group_count[@]} -eq 0 ]; then
+            echo "no regressions across any shard — done"
             exit 0
           fi
 
+          has_label=0
           if gh label list --search "wpt-nightly-regression" --limit 1 \
                | grep -q "^wpt-nightly-regression"; then
-            gh issue create \
-              --title "$title_prefix" \
-              --body "$BODY" \
-              --label "wpt-nightly-regression"
-          else
-            gh issue create \
-              --title "$title_prefix" \
-              --body "$BODY"
+            has_label=1
           fi
+
+          for group in "${!group_count[@]}"; do
+            total="${group_count[$group]}"
+            phases="${group_phases[$group]}"
+            title_prefix="WPT nightly regression: ${group}"
+
+            existing=$(gh issue list \
+              --state open \
+              --search "\"$title_prefix\" in:title" \
+              --limit 1 \
+              --json number \
+              --jq '.[0].number // empty')
+
+            BODY="Nightly WPT ${group} detected ${total} regression(s) across: ${phases}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Download the matching \`wpt-<phase>-nightly\` artifact(s) for details."
+
+            if [ -n "$existing" ]; then
+              echo "open regression issue #${existing} exists for ${group} — commenting"
+              gh issue comment "$existing" --body "$BODY"
+              continue
+            fi
+
+            if [ "$has_label" = "1" ]; then
+              gh issue create \
+                --title "$title_prefix" \
+                --body "$BODY" \
+                --label "wpt-nightly-regression"
+            else
+              gh issue create \
+                --title "$title_prefix" \
+                --body "$BODY"
+            fi
+          done
