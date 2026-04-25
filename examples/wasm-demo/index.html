@@ -13,23 +13,39 @@
     #status { margin-top: 1em; padding: 0.6em; background: #f4f4f4; white-space: pre-wrap; min-height: 1.2em; }
     #status.error { background: #fde7e7; color: #a00; }
     #status.ok { background: #e7f5e7; color: #060; }
+    fieldset.config { border: 1px solid #ddd; margin: 0 0 1em; padding: 0.6em 0.8em; }
+    fieldset.config legend { font-size: 0.85em; color: #666; padding: 0 0.3em; }
+    fieldset.config label { display: inline-block; margin-right: 1em; font-size: 0.9em; }
+    fieldset.config input[type="text"] { width: 14em; }
   </style>
 </head>
 <body>
   <h1>fulgur WASM demo</h1>
   <p class="note">
     Browser-side HTML &rarr; PDF rendering, no server required.
-    This is the B-3a step (CSS + image bridge) &mdash; Noto Sans Regular,
-    <code>style.css</code>, and <code>icon.png</code> are fetched from the
-    static server and registered via <code>Engine.add_font</code> /
-    <code>add_css</code> / <code>add_image</code>. Page-size, metadata,
-    bundle-size and CJK fallback follow in B-3b+.
+    This is the B-3c step (config mirror) &mdash; page size, orientation,
+    and PDF metadata are configured from JS via <code>engine.configure({...})</code>.
+    Asset bridging (font / CSS / image) from B-2 / B-3a is unchanged.
   </p>
 
   <label for="html">HTML input</label>
   <textarea id="html"><h1>Hello World</h1>
-<p class="subtitle">CSS + image bridge demo (B-3a)</p>
+<p class="subtitle">Config mirror demo (B-3c)</p>
 <img class="icon" src="icon.png" alt="icon"></textarea>
+
+  <fieldset class="config">
+    <legend>Render config (forwarded to <code>engine.configure</code>)</legend>
+    <label>Page size:
+      <select id="page-size">
+        <option value="A4" selected>A4</option>
+        <option value="Letter">Letter</option>
+        <option value="A3">A3</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="landscape"> Landscape</label>
+    <label>Title: <input type="text" id="title" placeholder="(optional)"></label>
+  </fieldset>
+
   <p>
     <button id="render" disabled>Loading WASM&hellip;</button>
   </p>
@@ -90,10 +106,20 @@
       throw e;
     }
 
+    const pageSizeEl = document.getElementById("page-size");
+    const landscapeEl = document.getElementById("landscape");
+    const titleEl = document.getElementById("title");
+
     button.addEventListener("click", () => {
       const html = document.getElementById("html").value;
       const t0 = performance.now();
       try {
+        const titleValue = titleEl.value.trim();
+        engine.configure({
+          pageSize: pageSizeEl.value,
+          landscape: landscapeEl.checked,
+          ...(titleValue ? { title: titleValue } : {}),
+        });
         const bytes = engine.render(html);
         const elapsed = (performance.now() - t0).toFixed(1);
         const blob = new Blob([bytes], { type: "application/pdf" });

@@ -4,21 +4,34 @@ Browser-side `HTML → PDF` rendering powered by `fulgur-wasm`. Renders entirely
 in the browser; no network calls except for the local font / CSS / image assets
 served alongside the demo.
 
-## Scope (B-3a)
+## Scope (B-3c)
 
 - `Engine` builder mirror: `new()`, `add_font(bytes)`, `add_css(text)`,
-  `add_image(name, bytes)`, `render(html)`.
+  `add_image(name, bytes)`, `configure(options)`, `render(html)`.
 - The default sample HTML uses `<h1>`, a subtitle paragraph, and an `<img>`
   tag. The demo fetches three assets at startup and registers them on the
   engine before enabling the Render button:
   - `../.fonts/NotoSans-Regular.ttf` &rarr; `engine.add_font`
   - `./style.css` &rarr; `engine.add_css`
   - `../image/icon.png` &rarr; `engine.add_image("icon.png", …)`
+- The render config form (page size, landscape toggle, title) is forwarded
+  to `engine.configure({...})` immediately before each render. `configure`
+  accepts a POJO with the following keys (all optional, partial merge,
+  later calls override earlier ones):
+  - `pageSize`: `"A4"` / `"Letter"` / `"A3"` (case-insensitive) or
+    `{ widthMm, heightMm }`
+  - `margin`: `{ mm }` (uniform mm) / `{ pt }` (uniform pt) /
+    `{ topMm, rightMm, bottomMm, leftMm }`
+  - `landscape`: boolean
+  - `title` / `description` / `creator` / `producer` / `creationDate` /
+    `lang`: string
+  - `authors` / `keywords`: string array
+  - `bookmarks`: boolean (PDF outline from `<h1>`–`<h6>`)
 - The B-1 standalone `render_html(html)` entry point is preserved for callers
-  that don't need fonts / CSS / images.
-- Page-size / metadata options, bundle-size optimisation, CJK fallback chain,
-  and dynamic `<link rel=stylesheet>` resolution are out of scope here — see
-  B-3b+ / scope 3b.
+  that don't need fonts / CSS / images / config.
+- Bundle-size optimisation, CJK fallback chain, and dynamic
+  `<link rel=stylesheet>` resolution are out of scope here — see scope 3b
+  and the bundle-size step.
 
 ## Build
 
@@ -69,6 +82,7 @@ download `output.pdf`.
 - `fulgur-iym` (strategic v0.7.0) — overall WASM bet
 - `fulgur-id9x` (closed) — B-1: bare wasm-bindgen wrapper
 - `fulgur-7js9` (closed) — B-2: font bridge via `AssetBundle::add_font_bytes`
-- `fulgur-xi6c` (this step) — B-3a: CSS / image bridge via `add_css` / `add_image`
+- `fulgur-xi6c` (closed) — B-3a: CSS / image bridge via `add_css` / `add_image`
+- `fulgur-ufda` (this step) — B-3c: config mirror via `Engine.configure`
 - `crates/fulgur/CLAUDE.md` ※memory `project_wasm_resource_bridging.md` —
   scope 1 / 3a / 3b stage design
