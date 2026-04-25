@@ -24,8 +24,9 @@ impl RbPdf {
     }
 
     fn to_s(&self) -> RString {
-        // `RString::from_slice` は ASCII-8BIT (binary) encoding の Ruby String を返す。
-        RString::from_slice(&self.bytes)
+        // `Ruby::str_from_slice` は ASCII-8BIT (binary) encoding の Ruby String を返す。
+        let ruby = Ruby::get().expect("ruby vm");
+        ruby.str_from_slice(&self.bytes)
     }
 
     fn to_base64(&self) -> String {
@@ -62,18 +63,19 @@ impl RbPdf {
     /// - `IO#write` が要求より少ないバイト数を返した場合 (socket / pipe / 独自 IO の短書き込み)
     ///   は残りを再送する。戻り値が 0 の場合は無限ループを防ぐため `RuntimeError` を返す。
     fn write_to_io(&self, io: Value) -> Result<(), Error> {
-        let responds: bool = io.funcall("respond_to?", (magnus::Symbol::new("binmode"),))?;
+        let ruby = Ruby::get().expect("ruby vm");
+        let responds: bool = io.funcall("respond_to?", (ruby.to_symbol("binmode"),))?;
         if responds {
             let _: Value = io.funcall("binmode", ())?;
         }
         for chunk in self.bytes.chunks(CHUNK_SIZE) {
             let mut offset = 0;
             while offset < chunk.len() {
-                let rb_bytes = RString::from_slice(&chunk[offset..]);
+                let rb_bytes = ruby.str_from_slice(&chunk[offset..]);
                 let written: usize = io.funcall("write", (rb_bytes,))?;
                 if written == 0 {
                     return Err(Error::new(
-                        magnus::exception::runtime_error(),
+                        ruby.exception_runtime_error(),
                         "IO#write returned 0 bytes; cannot make progress",
                     ));
                 }
@@ -87,7 +89,8 @@ impl RbPdf {
 /// Ruby 値をファイルパス文字列に変換する。`Pathname` 等 `to_path` に応答する
 /// オブジェクトを受け入れ、そうでなければ `to_str` で暗黙変換する。
 pub(crate) fn coerce_to_path(value: Value) -> Result<String, Error> {
-    let responds: bool = value.funcall("respond_to?", (magnus::Symbol::new("to_path"),))?;
+    let ruby = Ruby::get().expect("ruby vm");
+    let responds: bool = value.funcall("respond_to?", (ruby.to_symbol("to_path"),))?;
     let converted: Value = if responds {
         value.funcall("to_path", ())?
     } else {
@@ -95,14 +98,14 @@ pub(crate) fn coerce_to_path(value: Value) -> Result<String, Error> {
     };
     <String>::try_convert(converted).map_err(|_| {
         Error::new(
-            magnus::exception::type_error(),
+            ruby.exception_type_error(),
             "path must be a String or respond to to_path",
         )
     })
 }
 
-pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
-    let class = fulgur.define_class("Pdf", magnus::class::object())?;
+pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
+    let class = fulgur.define_class("Pdf", ruby.class_object())?;
     class.define_method("bytesize", method!(RbPdf::bytesize, 0))?;
     class.define_method("to_s", method!(RbPdf::to_s, 0))?;
     class.define_method("to_base64", method!(RbPdf::to_base64, 0))?;

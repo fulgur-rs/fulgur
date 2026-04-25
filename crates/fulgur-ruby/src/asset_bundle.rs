@@ -66,8 +66,8 @@ impl RbAssetBundle {
     }
 }
 
-pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
-    let class = fulgur.define_class("AssetBundle", magnus::class::object())?;
+pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
+    let class = fulgur.define_class("AssetBundle", ruby.class_object())?;
     class.define_singleton_method("new", function!(RbAssetBundle::new, 0))?;
     class.define_method("add_css", method!(RbAssetBundle::add_css, 1))?;
     class.define_method("add_css_file", method!(RbAssetBundle::add_css_file, 1))?;
