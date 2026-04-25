@@ -138,7 +138,7 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
             &html,
             RenderSpec {
                 page_size: &fx.page_size,
-                margin_pt: 0.0,
+                margin_pt: fx.margin_pt,
                 dpi: fx.dpi,
             },
         )?;

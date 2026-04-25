@@ -5,57 +5,75 @@ tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
 
 [[fixture]]
 path = "basic/solid-box.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "basic/borders.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "basic/border-radius.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "basic/box-shadow.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/flex-row.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/grid-simple.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/multicol-2.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/overflow-hidden.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/overflow-hidden-rounded.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/inline-block-basic.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/inline-block-overflow-hidden.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/inline-block-nested.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/inline-flex-smoke.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/inline-grid-smoke.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "paint/background-gradient.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "paint/opacity.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "svg/shapes.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "layout/review_card_inline_block.html"
+margin_pt = 0.0
 
 [[fixture]]
 path = "bugs/grid-row-promote-background.html"
