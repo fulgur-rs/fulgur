@@ -217,6 +217,9 @@ jobs:
           - phase: bugs
             test: wpt_lists
             filter: wpt_list_bugs
+          - phase: opacity-visibility
+            test: wpt_lists
+            filter: wpt_list_opacity_visibility
           - phase: smoke
             test: wpt_lists
             filter: wpt_list_smoke
