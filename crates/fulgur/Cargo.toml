@@ -12,7 +12,7 @@ keywords = ["pdf", "html", "css", "converter"]
 categories = ["text-processing", "command-line-utilities"]
 
 [dependencies]
-cssparser = "0.36"
+cssparser = "0.37"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
 usvg = "0.45"
