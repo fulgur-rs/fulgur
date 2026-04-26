@@ -127,19 +127,35 @@ fn radial_gradient_circular_matches_ring_reference() {
     let test_img = pdf_to_rgba(&test_pdf_path, spec.dpi, &test_dir).expect("rasterize test");
     let ref_img = pdf_to_rgba(&ref_pdf_path, spec.dpi, &ref_dir).expect("rasterize ref");
 
-    // Tolerance: linear gradient harness は 10/0.5% で運用中。radial は
-    // (a) 円弧境界の AA が strip 境界より広く出る、(b) 中心1点の収束特性、
-    // の2点で linear より許容を緩める必要がある。だが緩すぎると
-    // `cr` を倍にしても通ってしまうので、12 channels / 1.0% に絞る。
+    // CodeRabbit #238: full A4 raster (~890k px @ 150dpi) を denominator にすると
+    // gradient box (90k px) に対し effective tolerance が ~10x 緩くなる。
+    // box 周辺だけを crop してから比較することで `max_diff_pixels_ratio` を box 基準にする。
+    //
+    // 150dpi で 1 CSS px = 25/16 raster px:
+    //   margin 32 CSS px  → 50  raster px
+    //   box    192 CSS px → 300 raster px
+    //   total  256 CSS px → 400 raster px (margin + box + margin の上限)
+    // box 周囲に 4 raster px の余白を付けて crop する (端の AA も含めて評価したいが、
+    // ページ余白の白を denominator から除外するのが目的)。
+    const CROP_MARGIN_RASTER: u32 = 4;
+    let crop_x = (GRADIENT_MARGIN_PX as u64 * 25 / 16) as u32 - CROP_MARGIN_RASTER;
+    let crop_y = crop_x;
+    let crop_w = (GRADIENT_SIZE_PX as u64 * 25 / 16) as u32 + CROP_MARGIN_RASTER * 2;
+    let crop_h = crop_w;
+    let test_crop = image::imageops::crop_imm(&test_img, crop_x, crop_y, crop_w, crop_h).to_image();
+    let ref_crop = image::imageops::crop_imm(&ref_img, crop_x, crop_y, crop_w, crop_h).to_image();
+
+    // Tolerance (cropped 308x308 ≈ 95k px denominator):
     // - 12 channels: ring step (24 ring → 0.5*255/24 ≈ 5) + AA 余裕で 7 程度を見込み +5 の headroom
-    // - 1.0%: 192² ≈ 110k pixel × 1% = 1100 pixel ≈ 24 ring の境界 1.5 px 帯と box 縁 AA で収まるはず
-    // 失敗したら数値を調整する前に diff 画像を確認すること (生 diff 画像は work_dir に出る)。
+    // - 1.0%: 95k px × 1% = 950 pixel ≈ 24 ring の境界 1.5 px 帯と box 縁 AA で収まるはず
+    //   (cropしたので box 基準で 1% になり、`cr` を倍にすると確実に超える)
+    // 失敗したら数値を調整する前に crop 元の diff 画像を確認すること。
     let tol = Tolerance {
         max_channel_diff: 12,
         max_diff_pixels_ratio: 0.01,
     };
 
-    let report = diff::compare(&ref_img, &test_img, tol);
+    let report = diff::compare(&ref_crop, &test_crop, tol);
 
     assert!(
         report.pass,

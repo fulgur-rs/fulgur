@@ -33,9 +33,10 @@ css/css-images/linear-gradient-non-square.html
 css/css-images/linear-gradient-ref.html
 css/css-images/reference/linear-gradient-non-square-ref.html
 # fulgur-gm56 (radial-gradient Phase 2: shape/size/position + % stops)
-# Wide net of candidates — only the ones that PASS get listed in
-# expectations/lists/bugs.txt; the rest stay sparse-checked-out for
-# future Phase 3+ iterations (length-typed stops, repeating, lh/cq units).
+# Wide net of candidates — annotated outcomes (PASS / FAIL / SKIP) live in
+# expectations/lists/bugs.txt. 候補がここに list 化されていても bugs.txt に
+# 載っていないものは未トラッキングではなく「sparse-checkout はしているが
+# まだ outcome を annotate していない」状態 (Phase 3+ で順次拾う見込み)。
 css/css-images/multiple-position-color-stop-radial.html
 css/css-images/multiple-position-color-stop-radial-2.html
 css/css-images/multiple-position-color-stop-radial-2-ref.html

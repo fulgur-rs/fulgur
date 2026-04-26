@@ -831,6 +831,15 @@ git commit -m "test(vrt): add radial-gradient ring-approximation harness"
 
 ## Task 6: WPT expectations seed (css-images)
 
+> **実装後追記 (PR #238):** 当初は新規 subdir 専用 list (`expectations/css-images.txt`)
+> および対応するランナー (`tests/wpt_css_images.rs`) を作る計画だったが、実装時に
+> 既存 `crates/fulgur-wpt/expectations/lists/bugs.txt` が cherry-pick 用 list
+> として linear-gradient (fulgur-yax4) を既に管理していることが判明し、同じ
+> 仕組みに寄せる方が運用統一できるため **`bugs.txt` への追記に変更** した。
+> 新規 subdir 用ランナーは作っていない (`tests/wpt_lists.rs` の build.rs が
+> `bugs.txt` を既に拾うため不要)。下記の Step 1〜4 はオリジナルの計画として
+> 残す (履歴記録)。実装の最終形は `commit 51167f0` を参照。
+
 **Files:**
 
 - Create: `crates/fulgur-wpt/expectations/css-images.txt` (新規)

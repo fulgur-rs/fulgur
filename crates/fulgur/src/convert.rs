@@ -3363,8 +3363,8 @@ fn resolve_radial_gradient(
         EndingShape::Ellipse(Ellipse::Radii(rx, ry)) => (
             RadialGradientShape::Ellipse,
             RadialGradientSize::Explicit {
-                rx: convert_lp_to_bg(&rx.0),
-                ry: convert_lp_to_bg(&ry.0),
+                rx: try_convert_lp_to_bg(&rx.0)?,
+                ry: try_convert_lp_to_bg(&ry.0)?,
             },
         ),
         EndingShape::Ellipse(Ellipse::Extent(ext)) => (
@@ -3374,8 +3374,9 @@ fn resolve_radial_gradient(
     };
 
     // computed::Position::horizontal / vertical はどちらも LengthPercentage 直接 (wrapper なし)。
-    let position_x = convert_lp_to_bg(&position.horizontal);
-    let position_y = convert_lp_to_bg(&position.vertical);
+    // calc() 等 resolve 不能な値は silent 0 で誤描画させずに layer drop する。
+    let position_x = try_convert_lp_to_bg(&position.horizontal)?;
+    let position_y = try_convert_lp_to_bg(&position.vertical)?;
 
     let stops = resolve_color_stops(items, current_color, "radial-gradient")?;
 
@@ -3434,11 +3435,28 @@ fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) 
 /// Convert Stylo LengthPercentage to BgLengthPercentage.
 /// Note: calc() values (e.g. `calc(50% + 10px)`) are not fully supported —
 /// they fall back to 0.0 if neither pure percentage nor pure length.
+/// 呼び出し側が "silent 0.0 で良い" 場面 (background-position / -size の Phase 1) のみ
+/// 使うこと。radial-gradient の半径や中心位置のように 0 が誤描画になる場面では
+/// `try_convert_lp_to_bg` を使って calc() を None にして bail する。
 fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthPercentage {
     if let Some(pct) = lp.to_percentage() {
         BgLengthPercentage::Percentage(pct.0)
     } else {
         BgLengthPercentage::Length(lp.to_length().map(|l| px_to_pt(l.px())).unwrap_or(0.0))
+    }
+}
+
+/// `convert_lp_to_bg` の Option 版。calc() 等の resolve 不能な値で `None` を返す。
+/// silent 0.0 fallback では誤描画になる radial-gradient の半径 / 中心位置で使う
+/// (CodeRabbit #238 で指摘)。
+fn try_convert_lp_to_bg(
+    lp: &style::values::computed::LengthPercentage,
+) -> Option<BgLengthPercentage> {
+    if let Some(pct) = lp.to_percentage() {
+        Some(BgLengthPercentage::Percentage(pct.0))
+    } else {
+        lp.to_length()
+            .map(|l| BgLengthPercentage::Length(px_to_pt(l.px())))
     }
 }
 
