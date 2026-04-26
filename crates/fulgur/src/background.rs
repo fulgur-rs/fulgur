@@ -237,20 +237,23 @@ fn draw_background_layer(
 
     match &layer.content {
         BgImageContent::LinearGradient { direction, stops } => {
-            // Compute Corner-direction angle per tile rather than hoisting
-            // from tiles[0]. This removes the uniform-tile-size invariant
-            // requirement entirely. The cost is N atan2 calls (a few
-            // hundred nanoseconds total) — negligible compared to the
-            // krilla shading objects emitted per tile, and avoids any
-            // release-mode assert on a non-local invariant.
-            for (tx, ty, tw, th) in &tiles {
-                let angle_rad = match direction {
-                    crate::pageable::LinearGradientDirection::Angle(a) => *a,
-                    crate::pageable::LinearGradientDirection::Corner(corner) => {
-                        corner_to_angle_rad(*corner, *tw, *th)
+            // Match before the loop, not inside: Angle(_) is constant per
+            // layer and gets hoisted automatically; Corner needs per-tile
+            // recomputation because the angle depends on tile aspect (CSS
+            // Images §3.1.1) and we don't rely on tile uniformity.
+            match direction {
+                crate::pageable::LinearGradientDirection::Angle(a) => {
+                    let angle = *a;
+                    for (tx, ty, tw, th) in &tiles {
+                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
                     }
-                };
-                draw_linear_gradient(canvas, angle_rad, stops, *tx, *ty, *tw, *th);
+                }
+                crate::pageable::LinearGradientDirection::Corner(corner) => {
+                    for (tx, ty, tw, th) in &tiles {
+                        let angle = corner_to_angle_rad(*corner, *tw, *th);
+                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
+                    }
+                }
             }
         }
         BgImageContent::RadialGradient {
@@ -1572,6 +1575,69 @@ mod tests {
         let (sx, sy, _, _) = slow[0];
         let (fx, fy, _, _) = fast[0];
         assert!((sx - fx).abs() < 1e-3 && (sy - fy).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_no_repeat_various_inputs() {
+        // The NoRepeat × NoRepeat short-circuit emits a single tile at
+        // (pos, pos, img, img). Verify it matches the slow path across
+        // positive, negative, and image-larger-than-clip positions, and
+        // for image-smaller-than-clip (where the broader fast-path
+        // coverage check declines but NoRepeat still single-tiles).
+        for &(pos_x, pos_y, img_w, img_h) in &[
+            (0.0_f32, 0.0_f32, 100.0_f32, 100.0_f32), // image == clip
+            (50.0, 30.0, 80.0, 60.0),                 // image inside clip
+            (-10.0, -5.0, 150.0, 120.0),              // image larger, neg pos
+            (20.0, 20.0, 200.0, 200.0),               // image extends past clip
+        ] {
+            let fast = compute_tile_positions(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            assert_eq!(
+                fast, slow,
+                "NoRepeat fast-slow parity broken for pos=({pos_x}, {pos_y}) img=({img_w}, {img_h})"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_no_repeat_zero_axis_returns_empty() {
+        // Degenerate axis (img_w == 0) under NoRepeat: must emit no tiles
+        // (the slow path's resolve_repeat_axis guards image_size <= 0).
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            10.0,
+            10.0,
+            0.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
     }
 
     #[test]
