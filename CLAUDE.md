@@ -132,5 +132,15 @@ callers don't get this guarantee by default — see the tracking issue
 - Use `BTreeMap` (not `HashMap`) for iteration that affects PDF output (determinism)
 - Blitz: `!important` unreliable, `padding-top` on inline roots ignored (use `margin-top`)
 - `cargo fmt --check` enforced by CI
+- **Coverage scope**: CI の coverage job は `cargo llvm-cov nextest --workspace --exclude fulgur-vrt`
+  で動いている (`.github/workflows/ci.yml`)。`crates/fulgur-vrt` は別ジョブで実行されるため、
+  **VRT reftest だけでカバーした draw 経路は codecov の patch coverage に乗らない**。
+  新しい draw / convert / pageable ロジックを書くときは VRT に加えて lib 側にもテストを置く:
+  - 純関数 (helper, fixup, math) → 当該モジュールの `#[cfg(test)] mod tests` に unit test
+  - レンダリング経路 (`draw_background_layer` の match arm 等、`Engine::render_html` を通って初めて
+    叩かれる箇所) → `crates/fulgur/src/engine.rs` の `tests` モジュールに end-to-end smoke test
+    (`Engine::builder().build().render_html(html)` で `assert!(!pdf.is_empty())`)
+  VRT を後付けで足すと codecov に再指摘されて lib 側 smoke test を追加する手戻りが発生する
+  (PR #244 で実例)。最初から両方書くこと。
 - **`Engine` is a builder**: `Engine::builder().page_size(PageSize::A4).base_path(root).build()` + single-arg `render_html(html)`. There is no `Engine::new().with_*()`.
 - **VRT は PDF byte 比較**: `crates/fulgur-vrt` は HTML → PDF を生成して `goldens/fulgur/**/*.pdf` と byte-wise 比較する (`crates/fulgur-cli/tests/examples_determinism.rs` と同じ哲学)。pdftocairo は失敗時の diff 画像生成のみで使う。golden 更新は `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt`。
