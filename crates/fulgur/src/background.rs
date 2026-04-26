@@ -216,6 +216,17 @@ fn draw_background_layer(
             };
             draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh);
         }
+        BgImageContent::RadialGradient {
+            shape,
+            size,
+            position_x,
+            position_y,
+            stops,
+        } => {
+            draw_radial_gradient(
+                canvas, *shape, size, position_x, position_y, stops, ox, oy, ow, oh,
+            );
+        }
         BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => {
             let (img_w, img_h) = resolve_size(layer, ow, oh);
             if img_w <= 0.0 || img_h <= 0.0 {
@@ -278,7 +289,9 @@ fn draw_background_layer(
                         canvas.surface.pop();
                     }
                 }
-                BgImageContent::LinearGradient { .. } => unreachable!("handled above"),
+                BgImageContent::LinearGradient { .. } | BgImageContent::RadialGradient { .. } => {
+                    unreachable!("handled above")
+                }
             }
         }
     }
@@ -392,6 +405,194 @@ fn draw_linear_gradient(
     canvas.surface.draw_path(&rect_path);
     // Don't leak the gradient paint to the next draw on this surface.
     canvas.surface.set_fill(None);
+}
+
+/// Draw a CSS radial-gradient over the origin rect.
+///
+/// CSS Images 3 §3.6 の式に従い (cx, cy, rx, ry) を計算し、Krilla の
+/// `RadialGradient` (円のみサポート) に楕円を transform で表現する。
+#[allow(clippy::too_many_arguments)]
+fn draw_radial_gradient(
+    canvas: &mut Canvas<'_, '_>,
+    shape: crate::pageable::RadialGradientShape,
+    size: &crate::pageable::RadialGradientSize,
+    position_x: &BgLengthPercentage,
+    position_y: &BgLengthPercentage,
+    stops: &[crate::pageable::GradientStop],
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) {
+    use crate::pageable::{RadialExtent, RadialGradientShape, RadialGradientSize};
+
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    // 中心位置 (cx, cy) を origin rect 内の絶対座標に解決
+    // CSS では position の percentage は origin rect の幅/高さに対する割合 (image=0)
+    let cx = ox + resolve_point(position_x, ow);
+    let cy = oy + resolve_point(position_y, oh);
+
+    // 辺までの距離 (符号は問わない、abs で扱う)
+    let left = (cx - ox).abs();
+    let right = (ox + ow - cx).abs();
+    let top = (cy - oy).abs();
+    let bottom = (oy + oh - cy).abs();
+
+    let (rx, ry) = match (shape, size) {
+        (RadialGradientShape::Circle, RadialGradientSize::Extent(ext)) => {
+            let r = match ext {
+                RadialExtent::ClosestSide => left.min(right).min(top).min(bottom),
+                RadialExtent::FarthestSide => left.max(right).max(top).max(bottom),
+                RadialExtent::ClosestCorner => {
+                    let dl = left.hypot(top);
+                    let dr = right.hypot(top);
+                    let dbl = left.hypot(bottom);
+                    let dbr = right.hypot(bottom);
+                    dl.min(dr).min(dbl).min(dbr)
+                }
+                RadialExtent::FarthestCorner => {
+                    let dl = left.hypot(top);
+                    let dr = right.hypot(top);
+                    let dbl = left.hypot(bottom);
+                    let dbr = right.hypot(bottom);
+                    dl.max(dr).max(dbl).max(dbr)
+                }
+            };
+            (r, r)
+        }
+        (RadialGradientShape::Circle, RadialGradientSize::Explicit { rx, .. }) => {
+            // circle は parser 段階で rx == ry なので rx だけ使う (% 不可だが念のため resolve)
+            let r = resolve_length(rx, ow);
+            (r, r)
+        }
+        (RadialGradientShape::Ellipse, RadialGradientSize::Extent(ext)) => match ext {
+            RadialExtent::ClosestSide => (left.min(right), top.min(bottom)),
+            RadialExtent::FarthestSide => (left.max(right), top.max(bottom)),
+            RadialExtent::ClosestCorner => {
+                // CSS Images §3.6: closest-corner ellipse は closest-side の ratio スケール
+                let (rx0, ry0) = (left.min(right), top.min(bottom));
+                ellipse_corner_scale(cx, cy, ox, oy, ow, oh, rx0, ry0, false)
+            }
+            RadialExtent::FarthestCorner => {
+                let (rx0, ry0) = (left.max(right), top.max(bottom));
+                ellipse_corner_scale(cx, cy, ox, oy, ow, oh, rx0, ry0, true)
+            }
+        },
+        (RadialGradientShape::Ellipse, RadialGradientSize::Explicit { rx, ry }) => {
+            (resolve_length(rx, ow), resolve_length(ry, oh))
+        }
+    };
+
+    if rx <= 0.0 || ry <= 0.0 {
+        return;
+    }
+
+    let krilla_stops: Vec<krilla::paint::Stop> = stops
+        .iter()
+        .map(|s| krilla::paint::Stop {
+            offset: krilla::num::NormalizedF32::new(s.offset.clamp(0.0, 1.0))
+                .expect("offset is clamped to [0, 1]"),
+            color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
+            opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
+        })
+        .collect();
+
+    // Krilla の RadialGradient は円のみ。楕円は cr=rx + transform で y 軸を ry/rx に scale。
+    // 合成 T(cx,cy) · S(1, ry/rx) · T(-cx,-cy) を直接展開:
+    //   x → x
+    //   y → sy*y + cy*(1 - sy)  (sy = ry/rx)
+    // tiny_skia の Transform 行列 |sx kx tx; ky sy ty; 0 0 1| に当てはめると
+    //   sx=1, kx=0, tx=0, ky=0, sy=sy, ty=cy*(1-sy)
+    // krilla::geom::Transform の `pre_concat` は pub(crate) で外部から chain できないため、
+    // `from_row(sx, ky, kx, sy, tx, ty)` で行列直接構築する。
+    let transform = if (rx - ry).abs() > f32::EPSILON {
+        let scale_y = ry / rx;
+        krilla::geom::Transform::from_row(1.0, 0.0, 0.0, scale_y, 0.0, cy * (1.0 - scale_y))
+    } else {
+        krilla::geom::Transform::default()
+    };
+
+    let rg = krilla::paint::RadialGradient {
+        fx: cx,
+        fy: cy,
+        fr: 0.0,
+        cx,
+        cy,
+        cr: rx, // 円半径 (楕円は transform で表現)
+        transform,
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: krilla_stops,
+        anti_alias: false,
+    };
+
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: rg.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    canvas.surface.set_stroke(None);
+
+    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
+        canvas.surface.set_fill(None);
+        return;
+    };
+    canvas.surface.draw_path(&rect_path);
+    canvas.surface.set_fill(None);
+}
+
+/// `BgLengthPercentage` を origin rect 内の点座標に変換 (radial 中心位置用)。
+/// CSS では radial-gradient の position percentage は container の幅/高さに対する単純な割合。
+fn resolve_point(lp: &BgLengthPercentage, container: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Percentage(p) => container * p,
+    }
+}
+
+/// `BgLengthPercentage` を半径として解決 (length はそのまま、percentage は container 基準)。
+fn resolve_length(lp: &BgLengthPercentage, container: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Percentage(p) => container * p,
+    }
+}
+
+/// CSS Images §3.6: ellipse の closest-corner / farthest-corner は
+/// closest-side / farthest-side の (rx0, ry0) を ratio スケールしたもの。
+/// `farthest=true` で最も遠い corner、`false` で最も近い corner を選ぶ。
+#[allow(clippy::too_many_arguments)]
+fn ellipse_corner_scale(
+    cx: f32,
+    cy: f32,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+    rx0: f32,
+    ry0: f32,
+    farthest: bool,
+) -> (f32, f32) {
+    if rx0 <= 0.0 || ry0 <= 0.0 {
+        return (rx0, ry0);
+    }
+    let corners = [(ox, oy), (ox + ow, oy), (ox, oy + oh), (ox + ow, oy + oh)];
+    let ratios: Vec<f32> = corners
+        .iter()
+        .map(|(corx, cory)| {
+            let dx = corx - cx;
+            let dy = cory - cy;
+            ((dx / rx0).powi(2) + (dy / ry0).powi(2)).sqrt()
+        })
+        .collect();
+    let chosen = if farthest {
+        ratios.iter().cloned().fold(0.0_f32, f32::max)
+    } else {
+        ratios.iter().cloned().fold(f32::INFINITY, f32::min)
+    };
+    (rx0 * chosen, ry0 * chosen)
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
