@@ -370,6 +370,10 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
 /// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
 /// `Stop` 列に変換する。
 ///
+/// **Unit contract:** `line_length` must be in **CSS px** (matching
+/// `GradientStopPosition::LengthPx`). Callers in pt-space (Krilla draw
+/// surface) convert with `crate::convert::pt_to_px` before invoking.
+///
 /// CSS Images Level 3 §3.5.1 の color-stop fixup に従って:
 ///   1. `LengthPx(px)` を `px / line_length` で fraction 化
 ///   2. 先頭/末尾の `Auto` を 0.0 / 1.0 に確定
