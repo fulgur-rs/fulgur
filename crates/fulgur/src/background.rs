@@ -647,7 +647,7 @@ fn expand_repeating_stops(stops: Vec<(f32, [u8; 4])>) -> Option<Vec<(f32, [u8; 4
     let backward = if p_first <= 0.0 {
         0
     } else {
-        ((p_first - 0.0) / period).ceil() as i32
+        (p_first / period).ceil() as i32
     };
 
     let forward = forward.min(MAX_PERIODS);
