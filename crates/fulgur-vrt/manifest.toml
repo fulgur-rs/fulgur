@@ -80,3 +80,31 @@ path = "bugs/grid-row-promote-background.html"
 
 [[fixture]]
 path = "bugs/cover-page-break-after.html"
+
+[[fixture]]
+path = "paint/gradient-size-no-repeat-center.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/gradient-repeat-x-with-position.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/gradient-repeat-round.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/radial-gradient-no-repeat-corner.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/radial-gradient-tiled.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/gradient-to-top-right-tile-aspect.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/radial-gradient-repeat-round.html"
+margin_pt = 0.0

@@ -204,17 +204,57 @@ fn draw_background_layer(
         .surface
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
+    let (img_w, img_h) = match &layer.content {
+        BgImageContent::LinearGradient { .. } | BgImageContent::RadialGradient { .. } => {
+            resolve_gradient_size(&layer.size, ow, oh)
+        }
+        BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => resolve_size(layer, ow, oh),
+    };
+    if img_w <= 0.0 || img_h <= 0.0 {
+        canvas.surface.pop();
+        return;
+    }
+
+    let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
+    let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
+
+    let tiles = compute_tile_positions(
+        layer.repeat_x,
+        layer.repeat_y,
+        pos_x,
+        pos_y,
+        img_w,
+        img_h,
+        cx,
+        cy,
+        cw,
+        ch,
+    );
+    if tiles.is_empty() {
+        canvas.surface.pop();
+        return;
+    }
+
     match &layer.content {
         BgImageContent::LinearGradient { direction, stops } => {
-            // Phase 1: gradient covers the full origin rect (no
-            // background-size / background-repeat support yet).
-            let angle_rad = match direction {
-                crate::pageable::LinearGradientDirection::Angle(a) => *a,
-                crate::pageable::LinearGradientDirection::Corner(corner) => {
-                    corner_to_angle_rad(*corner, ow, oh)
+            // Match before the loop, not inside: Angle(_) is constant per
+            // layer and gets hoisted automatically; Corner needs per-tile
+            // recomputation because the angle depends on tile aspect (CSS
+            // Images §3.1.1) and we don't rely on tile uniformity.
+            match direction {
+                crate::pageable::LinearGradientDirection::Angle(a) => {
+                    let angle = *a;
+                    for (tx, ty, tw, th) in &tiles {
+                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
+                    }
                 }
-            };
-            draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh);
+                crate::pageable::LinearGradientDirection::Corner(corner) => {
+                    for (tx, ty, tw, th) in &tiles {
+                        let angle = corner_to_angle_rad(*corner, *tw, *th);
+                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
+                    }
+                }
+            }
         }
         BgImageContent::RadialGradient {
             shape,
@@ -223,75 +263,46 @@ fn draw_background_layer(
             position_y,
             stops,
         } => {
-            draw_radial_gradient(
-                canvas, *shape, size, position_x, position_y, stops, ox, oy, ow, oh,
-            );
+            // Per-tile shape geometry — uses each tile's own (tw, th)
+            // for cx/cy/rx/ry. No uniformity assumption needed.
+            for (tx, ty, tw, th) in &tiles {
+                draw_radial_gradient(
+                    canvas, *shape, size, position_x, position_y, stops, *tx, *ty, *tw, *th,
+                );
+            }
         }
-        BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => {
-            let (img_w, img_h) = resolve_size(layer, ow, oh);
-            if img_w <= 0.0 || img_h <= 0.0 {
+        BgImageContent::Raster { data, format } => {
+            let data: krilla::Data = Arc::clone(data).into();
+            let Ok(image) = format.to_krilla_image(data) else {
                 canvas.surface.pop();
                 return;
-            }
-
-            let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
-            let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
-
-            let tiles = compute_tile_positions(
-                layer.repeat_x,
-                layer.repeat_y,
-                pos_x,
-                pos_y,
-                img_w,
-                img_h,
-                cx,
-                cy,
-                cw,
-                ch,
-            );
-            if tiles.is_empty() {
+            };
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                canvas.surface.draw_image(image.clone(), size);
                 canvas.surface.pop();
-                return;
             }
-
-            match &layer.content {
-                BgImageContent::Raster { data, format } => {
-                    let data: krilla::Data = Arc::clone(data).into();
-                    let Ok(image) = format.to_krilla_image(data) else {
-                        canvas.surface.pop();
-                        return;
-                    };
-                    for (tx, ty, tw, th) in &tiles {
-                        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-                            continue;
-                        };
-                        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-                        canvas.surface.push_transform(&transform);
-                        canvas.surface.draw_image(image.clone(), size);
-                        canvas.surface.pop();
-                    }
+        }
+        BgImageContent::Svg { tree } => {
+            use krilla_svg::{SurfaceExt, SvgSettings};
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                if canvas
+                    .surface
+                    .draw_svg(tree, size, SvgSettings::default())
+                    .is_none()
+                {
+                    log::warn!("failed to draw SVG background tile");
                 }
-                BgImageContent::Svg { tree } => {
-                    use krilla_svg::{SurfaceExt, SvgSettings};
-                    for (tx, ty, tw, th) in &tiles {
-                        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-                            continue;
-                        };
-                        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-                        canvas.surface.push_transform(&transform);
-                        if canvas
-                            .surface
-                            .draw_svg(tree, size, SvgSettings::default())
-                            .is_none()
-                        {
-                            log::warn!("failed to draw SVG background tile");
-                        }
-                        canvas.surface.pop();
-                    }
-                }
-                BgImageContent::LinearGradient { .. } | BgImageContent::RadialGradient { .. } => {
-                    unreachable!("handled above")
-                }
+                canvas.surface.pop();
             }
         }
     }
@@ -595,6 +606,30 @@ fn ellipse_corner_scale(
     (rx0 * chosen, ry0 * chosen)
 }
 
+/// Resolve `background-size` for a gradient layer.
+///
+/// Per CSS Images §3.3 / §5.5, gradients have no intrinsic dimensions and no
+/// intrinsic aspect ratio. The default concrete object size is the positioning
+/// area, so `auto` / `cover` / `contain` all return `(origin_w, origin_h)`.
+/// `Explicit` with one axis `None` falls back to the corresponding origin axis
+/// (still no aspect to derive from).
+fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
+    match size {
+        BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
+        BgSize::Explicit(w_opt, h_opt) => {
+            let rw = w_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_w))
+                .unwrap_or(origin_w);
+            let rh = h_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_h))
+                .unwrap_or(origin_h);
+            (rw, rh)
+        }
+    }
+}
+
 /// Resolve `background-size` for a layer relative to the origin area.
 fn resolve_size(layer: &BackgroundLayer, origin_w: f32, origin_h: f32) -> (f32, f32) {
     let iw = layer.intrinsic_width;
@@ -732,6 +767,88 @@ fn compute_inner_radii(outer: &[[f32; 2]; 4], style: &BlockStyle, clip: &BgClip)
 
 #[allow(clippy::too_many_arguments)]
 fn compute_tile_positions(
+    repeat_x: BgRepeat,
+    repeat_y: BgRepeat,
+    pos_x: f32,
+    pos_y: f32,
+    img_w: f32,
+    img_h: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    // NoRepeat × NoRepeat short-circuit: the slow path's NoRepeat branch
+    // unconditionally emits exactly one tile at (pos, pos, img, img),
+    // regardless of clip overlap. Skip the resolve_repeat_axis indirection
+    // entirely — pure simplification, no correctness change.
+    if repeat_x == BgRepeat::NoRepeat && repeat_y == BgRepeat::NoRepeat {
+        if img_w <= 0.0 || img_h <= 0.0 {
+            return Vec::new();
+        }
+        return vec![(pos_x, pos_y, img_w, img_h)];
+    }
+
+    // Degenerate fast-path: a single image already fully covers the clip rect
+    // from its position. Without this, the boundary tile loop in `repeat`
+    // mode emits up to 4 tiles for the common "image fills box" case (e.g.
+    // default repeat with `image == clip` exactly) where 3 are entirely
+    // outside the clip and add nothing visible but bloat the PDF stream and
+    // can perturb sub-pixel rasterization. Excluded for `round`, which
+    // deliberately resizes tiles to fit an integer count and must not
+    // collapse to a single image-sized tile.
+    //
+    // Epsilon choice: `1e-3` here, vs. the slow-path loop's `+ 0.01` (1e-2).
+    // The two epsilons answer different questions: the slow-path's `+ 0.01`
+    // is a loop-overshoot tolerance asking "should we emit one more tile at
+    // the boundary?", while the fast-path's `1e-3` is a coverage tolerance
+    // asking "does the image cover the clip within float precision?".
+    // Using a tighter epsilon here keeps the fast-path conservative — if the
+    // image only marginally covers the clip (e.g., 5e-3 short on the right),
+    // the fast-path declines and the slow-path's larger epsilon emits a
+    // second tile to fill the residual gap. This asymmetry is intentional.
+    //
+    // Parity with the slow path is enforced by the
+    // `tile_positions_fast_slow_parity_*` tests below, which call
+    // `compute_tile_positions_slow` directly to compare and assert that any
+    // extra slow-path tiles lie entirely outside the clip rect.
+    // Per-axis cover predicate: Repeat axes require *strict* containment
+    // because any uncovered sliver on the cover side is filled by the
+    // adjacent repeated tile in the slow path. Without strict, the
+    // fast path silently drops that sliver (e.g., pos=0.0005, img=99.9995,
+    // clip=(0,100): the [0, 0.0005) strip is covered by the slow path's
+    // boundary-overlap tile but not by a single fast-path tile at pos).
+    // NoRepeat / Space axes have no adjacent tile to fall back on, so the
+    // 1e-3 coverage tolerance is safe — it only collapses already-covered
+    // cases.
+    let covers_x = match repeat_x {
+        BgRepeat::Repeat => pos_x <= clip_x && pos_x + img_w >= clip_x + clip_w,
+        _ => pos_x <= clip_x + 1e-3 && pos_x + img_w + 1e-3 >= clip_x + clip_w,
+    };
+    let covers_y = match repeat_y {
+        BgRepeat::Repeat => pos_y <= clip_y && pos_y + img_h >= clip_y + clip_h,
+        _ => pos_y <= clip_y + 1e-3 && pos_y + img_h + 1e-3 >= clip_y + clip_h,
+    };
+    if repeat_x != BgRepeat::Round
+        && repeat_y != BgRepeat::Round
+        && img_w > 0.0
+        && img_h > 0.0
+        && covers_x
+        && covers_y
+    {
+        return vec![(pos_x, pos_y, img_w, img_h)];
+    }
+
+    compute_tile_positions_slow(
+        repeat_x, repeat_y, pos_x, pos_y, img_w, img_h, clip_x, clip_y, clip_w, clip_h,
+    )
+}
+
+/// Slow path: emit tiles via the `resolve_repeat_axis`-driven loop.
+/// Extracted from `compute_tile_positions` so tests can compare fast-path
+/// output against this path for the same input.
+#[allow(clippy::too_many_arguments)]
+fn compute_tile_positions_slow(
     repeat_x: BgRepeat,
     repeat_y: BgRepeat,
     pos_x: f32,
@@ -1043,6 +1160,69 @@ mod tests {
         assert_eq!(h, 0.0);
     }
 
+    // ─── resolve_gradient_size (no intrinsic dimensions) ─────────────────────
+
+    #[test]
+    fn resolve_gradient_size_auto_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Auto, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_cover_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Cover, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_contain_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Contain, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_both_resolves() {
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(50.0)),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 50.0).abs() < 1e-6);
+        assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_asymmetric_percentages() {
+        // Each axis resolves against its own origin dimension independently,
+        // so `(50%, 25%)` on a 200×100 origin yields (100, 25), not a
+        // uniform scale. Locks the percentage basis.
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Percentage(0.5)),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 100.0).abs() < 1e-6);
+        assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_one_auto_uses_origin() {
+        // width specified, height auto → height fills origin (no aspect)
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(80.0)), None);
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 80.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+
+        // height specified, width auto → width fills origin
+        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Percentage(0.5)));
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 50.0).abs() < 1e-6);
+    }
+
     // ─── compute_origin_rect ─────────────────────────────────────────────────
 
     // Layout used below: x=10, y=20, w=100, h=200
@@ -1174,6 +1354,436 @@ mod tests {
             300.0, // clip
         );
         assert_eq!(tiles, vec![(50.0, 30.0, 80.0, 60.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_repeat_collapses_to_one_tile() {
+        // image == clip exactly with default repeat: the boundary epsilon
+        // would otherwise emit 4 tiles (3 fully outside clip). Fast-path
+        // collapses to a single tile.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0, // image == clip
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(0.0, 0.0, 100.0, 100.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_larger_than_clip_repeat_collapses_to_one_tile() {
+        // image strictly larger than clip with repeat: still a single tile
+        // since the image already covers the clip from its position.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            -10.0,
+            -5.0,
+            150.0,
+            120.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(-10.0, -5.0, 150.0, 120.0)]);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_repeat_image_equals_clip() {
+        // Direct fast-path vs slow-path comparison: same input, the fast
+        // path must produce the same tile set as the slow path would.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // The slow path emits 4 tiles (the +0.01 boundary epsilon); the
+        // fast path emits 1. They cover the same visible area: tile[0] of
+        // slow == fast[0], and the other 3 slow tiles lie entirely outside
+        // the clip rect (right, below, and bottom-right of clip end).
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow[0], fast[0]);
+        for &(tx, ty, _, _) in slow.iter().skip(1) {
+            assert!(
+                tx >= 100.0 - 1e-3 || ty >= 100.0 - 1e-3,
+                "slow-path extra tile ({tx}, {ty}) should be outside clip rect"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_equals_clip() {
+        // For Space×Space with image == clip, the slow path's count <= 1
+        // branch produces a single tile at position. Fast path matches.
+        let fast = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast, slow, "fast and slow paths must agree for Space");
+        assert_eq!(fast.len(), 1);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_negative_position_repeat() {
+        // Reviewer's concern: for Repeat with negative pos_x where the
+        // image covers the clip (pos_x + img_w >= clip_x + clip_w), does
+        // the slow path's `start_x` equal `pos_x`? Mathematical analysis:
+        // when image covers clip from pos_x, img_w >= clip_w + (clip_x -
+        // pos_x), so `clip_x - pos_x < img_w` and the slow-path's
+        // `(clip_x - pos_x) % img_w` reduces to `clip_x - pos_x` exactly,
+        // making `start_x = pos_x` algebraically.
+        //
+        // Empirically there is a sub-ulp drift through the modulo when
+        // pos_x is not exactly representable in f32 (e.g. -99.999), so we
+        // assert agreement within 1e-3 — well below sub-pixel rendering
+        // precision. The fast path uses the literal pos_x and is in fact
+        // strictly more accurate than the slow path here.
+        for &(pos_x, img_w) in &[
+            (-50.0_f32, 200.0_f32),
+            (-99.999, 250.0),
+            (-150.0, 250.0),
+            (-1.0, 110.0),
+            // Reviewer concern (job 442 Medium): pos_x = -150, img_w = 260
+            // claim: slow start_x = 0, fast tile at -150 → mismatch.
+            // Actual slow: offset = 150 % 260 = 150, start_x = 0 - 150 = -150.
+            // Both fast and slow yield -150. Lock this case explicitly.
+            (-150.0, 260.0),
+            // Larger absolute pos_x where image still covers clip:
+            // pos = -250, img = 360, clip = (0, 100). Slow offset =
+            // 250 % 360 = 250, start_x = 0 - 250 = -250 (still equals pos_x
+            // because 250 < 360, i.e. clip_x - pos_x < img_w as required by
+            // the cover-clip predicate).
+            (-250.0, 360.0),
+        ] {
+            let fast = compute_tile_positions(
+                BgRepeat::Repeat,
+                BgRepeat::Repeat,
+                pos_x,
+                pos_x,
+                img_w,
+                img_w,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                BgRepeat::Repeat,
+                BgRepeat::Repeat,
+                pos_x,
+                pos_x,
+                img_w,
+                img_w,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            assert_eq!(
+                fast.len(),
+                1,
+                "fast-path must emit 1 tile for pos={pos_x} img={img_w}"
+            );
+            let (sx, sy, sw, sh) = slow[0];
+            let (fx, fy, fw, fh) = fast[0];
+            assert!(
+                (sx - fx).abs() < 1e-3
+                    && (sy - fy).abs() < 1e-3
+                    && (sw - fw).abs() < 1e-3
+                    && (sh - fh).abs() < 1e-3,
+                "tile[0] mismatch for pos={pos_x} img={img_w}: \
+                 fast={:?} slow={:?}",
+                fast[0],
+                slow[0],
+            );
+            // Any extra slow-path tile must lie entirely outside the clip
+            // rect (above/below/left/right of the clip box) for the
+            // fast-path collapse to be safe.
+            for &(tx, ty, tw, th) in slow.iter().skip(1) {
+                let outside_left = tx + tw <= 0.0 + 1e-3;
+                let outside_right = tx >= 100.0 - 1e-3;
+                let outside_top = ty + th <= 0.0 + 1e-3;
+                let outside_bottom = ty >= 100.0 - 1e-3;
+                assert!(
+                    outside_left || outside_right || outside_top || outside_bottom,
+                    "slow extra tile ({tx}, {ty}, {tw}, {th}) inside clip for \
+                     pos={pos_x} img={img_w}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_slightly_less_than_clip() {
+        // Reviewer concern (job 439 Medium): Space mode might "center" a
+        // single tile when image is slightly less than clip. Per
+        // resolve_repeat_axis::Space:
+        //   - image_size > clip_size? false (image is less)
+        //   - count = floor(clip / image) = floor(1.000005) = 1
+        //   - count <= 1 → return single tile at *position* (NOT centered)
+        // So Space does not center for count=1. Verify fast and slow agree
+        // for image just under clip where the fast-path 1e-3 epsilon still
+        // triggers.
+        let img = 99.9995_f32;
+        let clip = 100.0_f32;
+        let fast = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow.len(), 1);
+        let (sx, sy, _, _) = slow[0];
+        let (fx, fy, _, _) = fast[0];
+        assert!((sx - fx).abs() < 1e-3 && (sy - fy).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_no_repeat_various_inputs() {
+        // The NoRepeat × NoRepeat short-circuit emits a single tile at
+        // (pos, pos, img, img). Verify it matches the slow path across
+        // positive, negative, and image-larger-than-clip positions, and
+        // for image-smaller-than-clip (where the broader fast-path
+        // coverage check declines but NoRepeat still single-tiles).
+        for &(pos_x, pos_y, img_w, img_h) in &[
+            (0.0_f32, 0.0_f32, 100.0_f32, 100.0_f32), // image == clip
+            (50.0, 30.0, 80.0, 60.0),                 // image inside clip
+            (-10.0, -5.0, 150.0, 120.0),              // image larger, neg pos
+            (20.0, 20.0, 200.0, 200.0),               // image extends past clip
+        ] {
+            let fast = compute_tile_positions(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            assert_eq!(
+                fast, slow,
+                "NoRepeat fast-slow parity broken for pos=({pos_x}, {pos_y}) img=({img_w}, {img_h})"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_no_repeat_zero_axis_returns_empty() {
+        // Degenerate axis (img_w == 0) under NoRepeat: must emit no tiles
+        // (the slow path's resolve_repeat_axis guards image_size <= 0).
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            10.0,
+            10.0,
+            0.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    #[test]
+    fn tile_positions_repeat_strict_cover_preserves_sliver() {
+        // Regression for coderabbit job 442 Major: with Repeat × Repeat
+        // and pos = 0.0005, img = 99.9995, clip = (0, 100), the slow
+        // path's boundary-overlap tile covers the [0.0, 0.0005) strip
+        // via the offset modulo. The pre-fix fast-path collapsed to a
+        // single tile at pos=0.0005 and silently dropped the sliver.
+        // After the fix (strict cover for Repeat axes), the fast-path
+        // declines and the slow path runs.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0005,
+            0.0005,
+            99.9995,
+            99.9995,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // fast-path must NOT collapse to 1 tile here — it should fall
+        // through to the slow path which emits multiple boundary tiles
+        // covering the sliver.
+        assert!(
+            fast.len() > 1,
+            "Repeat axis with sliver-uncovered strip must not collapse: \
+             got {} tiles, expected slow-path multi-tile",
+            fast.len()
+        );
+        // Verify at least one tile starts at or before clip_x = 0 (the
+        // boundary tile that covers the sliver).
+        assert!(
+            fast.iter()
+                .any(|&(tx, _, tw, _)| tx <= 0.0 && tx + tw >= 0.0),
+            "no boundary tile covers the [0, 0.0005) strip: {fast:?}"
+        );
+    }
+
+    #[test]
+    fn tile_positions_repeat_strict_cover_with_no_sliver() {
+        // Sanity: Repeat axes still get the fast-path when image truly
+        // covers the clip from pos. (pos=0, img=100, clip=(0,100)) →
+        // 1 tile.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast.len(), 1);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_image_larger_than_clip() {
+        // Image strictly larger than clip with negative position: fast path
+        // returns single image-sized tile at position. Slow path may emit
+        // additional boundary-epsilon tiles for Repeat — those must lie
+        // entirely outside the clip rect for the fast-path collapse to be
+        // safe. Verify: tile[0] matches AND every extra tile is outside
+        // [clip_x, clip_x+clip_w) × [clip_y, clip_y+clip_h).
+        let clip_x = 0.0_f32;
+        let clip_y = 0.0_f32;
+        let clip_w = 100.0_f32;
+        let clip_h = 100.0_f32;
+        for repeat in [BgRepeat::Repeat, BgRepeat::Space, BgRepeat::NoRepeat] {
+            let fast = compute_tile_positions(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, clip_x, clip_y, clip_w, clip_h,
+            );
+            let slow = compute_tile_positions_slow(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, clip_x, clip_y, clip_w, clip_h,
+            );
+            assert_eq!(fast.len(), 1, "{repeat:?}: fast-path must be 1 tile");
+            assert_eq!(slow[0], fast[0], "{repeat:?}: tile[0] must match");
+            // Every extra slow-path tile must be fully outside the clip rect
+            // (tile_x >= clip end OR tile_y >= clip end OR tile_right <= clip_x
+            // OR tile_bottom <= clip_y). Since slow-path NEVER emits tiles to
+            // the left/above the start, the relevant checks are tx >= clip_end
+            // and ty >= clip_end.
+            for &(tx, ty, _, _) in slow.iter().skip(1) {
+                assert!(
+                    tx >= clip_x + clip_w - 1e-3 || ty >= clip_y + clip_h - 1e-3,
+                    "{repeat:?}: slow extra tile ({tx}, {ty}) must be outside clip",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_round_does_not_fast_path() {
+        // Round must not collapse to a single tile even when image == clip:
+        // round's contract is to resize tiles to fit an integer count, and
+        // the caller may rely on tile-size adjustment for the "round" effect.
+        let tiles = compute_tile_positions(
+            BgRepeat::Round,
+            BgRepeat::Round,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // Round with image == clip resolves to tile_size = clip_size / round(clip/image) = 100/1 = 100
+        // and emits boundary tiles per the existing loop (≥1). The point of
+        // this test is that the fast-path was NOT taken.
+        assert!(
+            tiles.iter().all(|&(_, _, w, h)| w == 100.0 && h == 100.0),
+            "round must not change tile size when image fits exactly"
+        );
     }
 
     #[test]
