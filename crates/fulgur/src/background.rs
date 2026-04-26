@@ -244,13 +244,16 @@ fn draw_background_layer(
     // sizes the assertion below fires loudly in dev/test rather than silently
     // misrendering the gradient on the affected tiles.
     let (_, _, tw0, th0) = tiles[0];
-    // Float tolerance instead of `==`: resolve_repeat_axis is contractually
-    // obligated to emit bit-identical sizes per axis today, but a future
-    // change that accumulates fractional spacing per tile (e.g. for a new
-    // round-style mode) could drift by sub-ulp amounts without breaking
-    // visual output. 1e-4 is well below sub-pixel rendering thresholds and
-    // catches genuine non-uniformity without flagging FP noise.
-    debug_assert!(
+    // Promoted from debug_assert to runtime assert: silent non-uniform tile
+    // sizes would mis-render gradients (linear hoists Corner-direction
+    // angle, radial computes per-tile shape geometry from tw/th) and the
+    // O(N) float-compare cost is negligible against the per-tile draw
+    // overhead. Float tolerance instead of `==`: resolve_repeat_axis is
+    // contractually obligated to emit bit-identical sizes today, but a
+    // future change that accumulates fractional spacing per tile could
+    // drift by sub-ulp amounts without breaking visual output. 1e-4 is
+    // well below sub-pixel rendering thresholds.
+    assert!(
         tiles
             .iter()
             .all(|&(_, _, w, h)| (w - tw0).abs() < 1e-4 && (h - th0).abs() < 1e-4),
@@ -1503,6 +1506,20 @@ mod tests {
                 fast[0],
                 slow[0],
             );
+            // Any extra slow-path tile must lie entirely outside the clip
+            // rect (above/below/left/right of the clip box) for the
+            // fast-path collapse to be safe.
+            for &(tx, ty, tw, th) in slow.iter().skip(1) {
+                let outside_left = tx + tw <= 0.0 + 1e-3;
+                let outside_right = tx >= 100.0 - 1e-3;
+                let outside_top = ty + th <= 0.0 + 1e-3;
+                let outside_bottom = ty >= 100.0 - 1e-3;
+                assert!(
+                    outside_left || outside_right || outside_top || outside_bottom,
+                    "slow extra tile ({tx}, {ty}, {tw}, {th}) inside clip for \
+                     pos={pos_x} img={img_w}",
+                );
+            }
         }
     }
 
