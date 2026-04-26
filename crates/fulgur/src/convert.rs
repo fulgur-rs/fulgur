@@ -3042,7 +3042,15 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                             AssetKind::Unknown => None,
                         }
                     }),
-                    Image::Gradient(g) => resolve_linear_gradient(g, &current_color),
+                    Image::Gradient(g) => {
+                        use style::values::computed::image::Gradient;
+                        // g: &Box<Gradient> なので as_ref() で &Gradient を取って match。
+                        match g.as_ref() {
+                            Gradient::Linear { .. } => resolve_linear_gradient(g, &current_color),
+                            Gradient::Radial { .. } => resolve_radial_gradient(g, &current_color),
+                            Gradient::Conic { .. } => None,
+                        }
+                    }
                     _ => None,
                 };
 
@@ -3132,9 +3140,9 @@ fn resolve_linear_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,
 ) -> Option<(BgImageContent, f32, f32)> {
-    use crate::pageable::{GradientStop, LinearGradientCorner, LinearGradientDirection};
+    use crate::pageable::{LinearGradientCorner, LinearGradientDirection};
     use style::values::computed::image::{Gradient, LineDirection};
-    use style::values::generics::image::{GradientFlags, GradientItem};
+    use style::values::generics::image::GradientFlags;
     use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 
     let (direction, items, flags) = match g {
@@ -3184,10 +3192,32 @@ fn resolve_linear_gradient(
         }
     };
 
-    // Pass 1: collect color + (optional) % position. Length stops bail.
-    // Positions outside [0, 1] (e.g. `linear-gradient(red -50%, blue 100%)`)
-    // are valid CSS but require recomputing the gradient line / stops to
-    // represent them in krilla's `[0, 1]` shading space — deferred to Phase 2.
+    let stops = resolve_color_stops(items, current_color, "linear-gradient")?;
+
+    Some((
+        BgImageContent::LinearGradient { direction, stops },
+        0.0,
+        0.0,
+    ))
+}
+
+/// CSS gradient items から GradientStop ベクタを解決する。linear / radial 共通。
+///
+/// - length-typed stop position は None を返す (gradient line 長さ依存のため Phase 2)
+/// - 範囲外 stop position も None (recompute が必要、Phase 2)
+/// - interpolation hint も None (Phase 2)
+/// - auto position は CSS Images §3.5.1 に従い等間隔で埋める
+fn resolve_color_stops(
+    items: &[style::values::generics::image::GenericGradientItem<
+        style::values::computed::Color,
+        style::values::computed::LengthPercentage,
+    >],
+    current_color: &style::color::AbsoluteColor,
+    gradient_kind: &'static str,
+) -> Option<Vec<crate::pageable::GradientStop>> {
+    use crate::pageable::GradientStop;
+    use style::values::generics::image::GradientItem;
+
     let mut raw: Vec<(Option<f32>, [u8; 4])> = Vec::with_capacity(items.len());
     for item in items.iter() {
         match item {
@@ -3198,14 +3228,14 @@ fn resolve_linear_gradient(
             GradientItem::ComplexColorStop { color, position } => {
                 let Some(pct) = position.to_percentage().map(|p| p.0) else {
                     log::warn!(
-                        "linear-gradient: length-typed stop position is not yet \
+                        "{gradient_kind}: length-typed stop position is not yet \
                          supported (Phase 2). Layer dropped."
                     );
                     return None;
                 };
                 if !(0.0..=1.0).contains(&pct) {
                     log::warn!(
-                        "linear-gradient: stop position {pct:.4} is outside [0, 1]. \
+                        "{gradient_kind}: stop position {pct:.4} is outside [0, 1]. \
                          Negative / >100% positions require recomputing the gradient \
                          line (Phase 2). Layer dropped."
                     );
@@ -3216,7 +3246,7 @@ fn resolve_linear_gradient(
             }
             GradientItem::InterpolationHint(_) => {
                 log::warn!(
-                    "linear-gradient: interpolation hints are not yet supported \
+                    "{gradient_kind}: interpolation hints are not yet supported \
                      (Phase 2). Layer dropped."
                 );
                 return None;
@@ -3228,12 +3258,6 @@ fn resolve_linear_gradient(
         return None;
     }
 
-    // Pass 2: fill in `auto` positions per CSS Images §3.5.1.
-    // - First stop defaults to 0%, last to 100%.
-    // - Each fixed stop must be ≥ the previous fixed stop (clamp non-monotonic).
-    // - Auto stops between fixed positions are evenly spaced.
-    // All explicit positions are now in [0, 1], so 0.0 is a sound monotonicity
-    // baseline.
     let n = raw.len();
     let mut positions: Vec<Option<f32>> = raw.iter().map(|(p, _)| *p).collect();
     if positions[0].is_none() {
@@ -3249,23 +3273,20 @@ fn resolve_linear_gradient(
         }
         last_resolved = *v;
     }
-    // Fill auto runs by even spacing between flanking fixed stops.
     let mut i = 0;
     while i < n {
         if positions[i].is_some() {
             i += 1;
             continue;
         }
-        // [start..end) is a run of `None`s; flanked by Some at start-1 and end.
         let start = i;
         let mut end = start;
         while end < n && positions[end].is_none() {
             end += 1;
         }
-        // start ≥ 1 and end < n because we set positions[0] and positions[n-1].
         let p_prev = positions[start - 1].expect("first slot resolved");
         let p_next = positions[end].expect("last slot resolved");
-        let span = (end - start + 1) as f32; // number of intervals
+        let span = (end - start + 1) as f32;
         for (k, slot) in positions.iter_mut().enumerate().take(end).skip(start) {
             let t = (k - start + 1) as f32 / span;
             *slot = Some(p_prev + (p_next - p_prev) * t);
@@ -3273,20 +3294,116 @@ fn resolve_linear_gradient(
         i = end;
     }
 
-    let stops: Vec<GradientStop> = raw
-        .into_iter()
-        .zip(positions)
-        .map(|((_, rgba), pos)| GradientStop {
-            offset: pos.unwrap().clamp(0.0, 1.0),
-            rgba,
-        })
-        .collect();
+    Some(
+        raw.into_iter()
+            .zip(positions)
+            .map(|((_, rgba), pos)| GradientStop {
+                offset: pos.unwrap().clamp(0.0, 1.0),
+                rgba,
+            })
+            .collect(),
+    )
+}
+
+/// Convert a Stylo computed `Gradient::Radial` into fulgur's `BgImageContent::RadialGradient`.
+///
+/// Phase 1 scope (per beads issue fulgur-gm56 design):
+/// - shape: circle / ellipse
+/// - size: extent keyword (closest-side / farthest-side / closest-corner / farthest-corner) or
+///   explicit length / length-percentage radii (resolved at draw time against gradient box)
+/// - position: keyword + length-percentage の組合せ (BgLengthPercentage 経由)
+/// - stops: linear と共通の resolve_color_stops を使用
+///
+/// Bail conditions (return None) — match resolve_linear_gradient:
+/// - REPEATING flag (fulgur-12z0 の対象)
+/// - non-default color interpolation method
+/// - length-typed / 範囲外 stop position, interpolation hint (resolve_color_stops 内)
+fn resolve_radial_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::pageable::{RadialGradientShape, RadialGradientSize};
+    use style::values::computed::image::Gradient;
+    use style::values::generics::image::{Circle, Ellipse, EndingShape, GradientFlags};
+
+    let (shape, position, items, flags) = match g {
+        Gradient::Radial {
+            shape,
+            position,
+            items,
+            flags,
+            ..
+        } => (shape, position, items, flags),
+        Gradient::Linear { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    if flags.contains(GradientFlags::REPEATING) {
+        return None;
+    }
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        return None;
+    }
+
+    let (out_shape, out_size) = match shape {
+        EndingShape::Circle(Circle::Radius(r)) => {
+            // r: NonNegativeLength = NonNegative<Length>。.0.px() で CSS px、px_to_pt() で pt 化。
+            let len_pt = px_to_pt(r.0.px());
+            (
+                RadialGradientShape::Circle,
+                RadialGradientSize::Explicit {
+                    rx: BgLengthPercentage::Length(len_pt),
+                    ry: BgLengthPercentage::Length(len_pt),
+                },
+            )
+        }
+        EndingShape::Circle(Circle::Extent(ext)) => (
+            RadialGradientShape::Circle,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+        EndingShape::Ellipse(Ellipse::Radii(rx, ry)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Explicit {
+                rx: convert_lp_to_bg(&rx.0),
+                ry: convert_lp_to_bg(&ry.0),
+            },
+        ),
+        EndingShape::Ellipse(Ellipse::Extent(ext)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+    };
+
+    // computed::Position::horizontal / vertical はどちらも LengthPercentage 直接 (wrapper なし)。
+    let position_x = convert_lp_to_bg(&position.horizontal);
+    let position_y = convert_lp_to_bg(&position.vertical);
+
+    let stops = resolve_color_stops(items, current_color, "radial-gradient")?;
 
     Some((
-        BgImageContent::LinearGradient { direction, stops },
+        BgImageContent::RadialGradient {
+            shape: out_shape,
+            size: out_size,
+            position_x,
+            position_y,
+            stops,
+        },
         0.0,
         0.0,
     ))
+}
+
+fn map_extent(e: style::values::generics::image::ShapeExtent) -> crate::pageable::RadialExtent {
+    use crate::pageable::RadialExtent;
+    use style::values::generics::image::ShapeExtent;
+    match e {
+        ShapeExtent::ClosestSide => RadialExtent::ClosestSide,
+        ShapeExtent::FarthestSide => RadialExtent::FarthestSide,
+        ShapeExtent::ClosestCorner => RadialExtent::ClosestCorner,
+        ShapeExtent::FarthestCorner => RadialExtent::FarthestCorner,
+        // CSS Images §3.6.1: Contain == ClosestSide のエイリアス、Cover == FarthestCorner のエイリアス。
+        ShapeExtent::Contain => RadialExtent::ClosestSide,
+        ShapeExtent::Cover => RadialExtent::FarthestCorner,
+    }
 }
 
 fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) -> BgSize {
