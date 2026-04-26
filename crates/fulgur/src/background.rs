@@ -613,7 +613,11 @@ fn resolve_gradient_stops(
 /// `renormalize_stops_to_unit_range` 段で out-of-range stop が端点補間に丸められる
 /// 前提なので、ここでは充分なオーバーラップを与える。
 ///
-/// `period <= 0` (degenerate) は最後の色で塗られる単色とみなして None を返す。
+/// `period <= 0` (degenerate) は CSS Images 3 §3.6 に従い「最終 stop の色で
+/// 塗りつぶす単色」として扱う。krilla は最低 2 stop 必要なので、`(0, last)`
+/// と `(1, last)` の 2 stop を返す。`None` ではなく単色 fill を返すことで
+/// `repeating-linear-gradient(red 0%, blue 0%)` のような入力もブラウザと
+/// 同じ blue 単色描画になる (PR #244 coderabbit review より)。
 /// `period > 0` でも安全上限 `MAX_PERIODS` を超えたら最終周期で打ち切り
 /// (`repeating-linear-gradient(red 0%, blue 0.01%)` のような病的入力でも有界化)。
 fn expand_repeating_stops(stops: Vec<(f32, [u8; 4])>) -> Option<Vec<(f32, [u8; 4])>> {
@@ -623,13 +627,12 @@ fn expand_repeating_stops(stops: Vec<(f32, [u8; 4])>) -> Option<Vec<(f32, [u8; 4
     let p_last = stops.last().expect("len >= 2").0;
     let period = p_last - p_first;
 
-    // CSS Images 3 §3.6: period が 0 または負 (monotonic clamp 通過後の
-    // 等位置 hard stop) の場合、繰り返しは degenerate。最後の色で塗りつぶす
-    // 1-stop に相当するが、krilla は最低 2 stop 必要なので呼び出し側で
-    // None を伝搬して layer drop させる (= white background がそのまま見える
-    // のに近い挙動)。
+    // CSS Images 3 §3.6: 周期が 0 または負 (monotonic clamp 通過後に first/last が
+    // 同位置に潰れた場合) は degenerate。最終 stop の色で塗りつぶす単色 fill を返す。
+    // NaN/Inf も同じ扱いで安全側に倒す。
     if period <= 0.0 || !period.is_finite() {
-        return None;
+        let last_color = stops.last().expect("len >= 2").1;
+        return Some(vec![(0.0, last_color), (1.0, last_color)]);
     }
 
     // 安全上限。256 周期あれば line_length 比 0.4% の周期まで描き切れ、
@@ -2889,15 +2892,19 @@ mod resolve_gradient_stops_tests {
     }
 
     /// `repeating-linear-gradient(red 0%, blue 0%)`: period = 0 (degenerate)。
-    /// None を返してレイヤー drop。
+    /// CSS Images 3 §3.6 に従い最終 stop の色 (blue) で塗りつぶす単色 fill になる。
     #[test]
-    fn repeating_period_zero_returns_none() {
+    fn repeating_period_zero_renders_solid_last_color() {
         let stops = vec![
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(0.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true);
-        assert!(out.is_none(), "period=0 should return None");
+        let out = resolve_gradient_stops(&stops, 100.0, true).expect("solid fill, not None");
+        // 単色 fill: 2 stops at 0.0/1.0 で同色 (blue)。renormalize の fast path
+        // (全 stop in [0, 1]) を通って 2 stops のまま。
+        assert_eq!(out.len(), 2);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-5);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-5);
     }
 
     /// `repeating-linear-gradient(red 0%, blue 100%)`: period = 1.0。
