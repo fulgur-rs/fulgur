@@ -378,10 +378,6 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
 ///   5. 最終 fraction が `[0, 1]` 外なら `Layer drop` (None)
 ///
 /// `line_length <= 0` の場合は length stop が解決不能なので None。
-// Wired into draw_linear_gradient / draw_radial_gradient in Task 4
-// (fulgur-78sl). Until then the helper is only exercised by the test module
-// below, so the non-test build sees it as dead. Allow until Task 4 lands.
-#[allow(dead_code)]
 fn resolve_gradient_stops(
     stops: &[crate::pageable::GradientStop],
     line_length: f32,
@@ -521,24 +517,9 @@ fn draw_linear_gradient(
     let x2 = cx_box + sin * half;
     let y2 = cy_box + cos_neg * half;
 
-    let krilla_stops: Vec<krilla::paint::Stop> = stops
-        .iter()
-        .map(|s| {
-            let offset_f = match s.position {
-                crate::pageable::GradientStopPosition::Fraction(f) => f.clamp(0.0, 1.0),
-                // Task 1: convert 側が Fraction のみ生成するため到達しない。
-                // Task 4 で resolve_gradient_stops 経由に切り替わる。
-                crate::pageable::GradientStopPosition::Auto
-                | crate::pageable::GradientStopPosition::LengthPx(_) => 0.0,
-            };
-            krilla::paint::Stop {
-                offset: krilla::num::NormalizedF32::new(offset_f)
-                    .expect("offset is clamped to [0, 1]"),
-                color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
-                opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
-            }
-        })
-        .collect();
+    let Some(krilla_stops) = resolve_gradient_stops(stops, length, "linear-gradient") else {
+        return;
+    };
 
     let lg = krilla::paint::LinearGradient {
         x1,
@@ -657,24 +638,10 @@ fn draw_radial_gradient(
         return;
     }
 
-    let krilla_stops: Vec<krilla::paint::Stop> = stops
-        .iter()
-        .map(|s| {
-            let offset_f = match s.position {
-                crate::pageable::GradientStopPosition::Fraction(f) => f.clamp(0.0, 1.0),
-                // Task 1: convert 側が Fraction のみ生成するため到達しない。
-                // Task 4 で resolve_gradient_stops 経由に切り替わる。
-                crate::pageable::GradientStopPosition::Auto
-                | crate::pageable::GradientStopPosition::LengthPx(_) => 0.0,
-            };
-            krilla::paint::Stop {
-                offset: krilla::num::NormalizedF32::new(offset_f)
-                    .expect("offset is clamped to [0, 1]"),
-                color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
-                opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
-            }
-        })
-        .collect();
+    // Radial gradient line length = rx (CSS Images §3.6.1, ellipse でも +X 軸)
+    let Some(krilla_stops) = resolve_gradient_stops(stops, rx, "radial-gradient") else {
+        return;
+    };
 
     // Krilla の RadialGradient は円のみ。楕円は cr=rx + transform で y 軸を ry/rx に scale。
     // 合成 T(cx,cy) · S(1, ry/rx) · T(-cx,-cy) を直接展開:
