@@ -842,6 +842,20 @@ pub enum BgImageContent {
         stops: Vec<GradientStop>,
         repeating: bool,
     },
+    /// CSS `conic-gradient(...)` / `repeating-conic-gradient(...)`.
+    ///
+    /// SPIKE 実装: 360 個の固定角三角ウェッジを path で描画する (krilla の
+    /// PostScript shading を使わず、PDF/A 適合)。stops の position は convert 時に
+    /// fraction (0..1) に正規化済み (`<percentage>` はそのまま、`<angle>` は
+    /// `angle / 2π`)。
+    ConicGradient {
+        /// CSS `from <angle>` を radians で保持 (規約: 0=top, CW)。
+        from_angle: f32,
+        position_x: BgLengthPercentage,
+        position_y: BgLengthPercentage,
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
 }
 
 /// A single CSS background image layer with all associated properties.

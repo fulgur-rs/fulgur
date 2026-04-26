@@ -218,3 +218,87 @@ fn test_render_linear_gradient_tiled_smoke() {
         .expect("render tiled linear gradient");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn test_render_html_conic_gradient_pie_chart() {
+    // 4 セクター pie chart。draw_conic_gradient が path wedge を発行し、
+    // 同色 wedge は merge されて step transition を表現する。
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:200px;height:200px;
+            background:conic-gradient(
+                red 0deg, red 90deg,
+                yellow 90deg, yellow 180deg,
+                green 180deg, green 270deg,
+                blue 270deg, blue 360deg);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render conic pie chart");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_conic_gradient_smooth() {
+    // 滑らか conic (auto-positioned stops)。fixup と sample_conic_color が
+    // 360 wedge ぶん補間色を計算する経路を通す。
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:200px;height:200px;
+            background:conic-gradient(red, yellow, green, blue, red);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render smooth conic");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_repeating_conic_gradient() {
+    // repeating-conic-gradient: period = (last - first) で fraction を周期化する経路。
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:200px;height:200px;
+            background:repeating-conic-gradient(
+                red 0deg, red 15deg, blue 15deg, blue 30deg);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render repeating conic");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_conic_gradient_from_angle() {
+    // from <angle> で sweep 開始位置をシフトする経路。
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:200px;height:200px;
+            background:conic-gradient(from 90deg,
+                red 0deg, red 90deg,
+                blue 90deg, blue 360deg);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render conic with from angle");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_conic_gradient_at_position() {
+    // at <position> で中心オフセットする経路。box_edge_at_angle が中心 ≠ box 中央
+    // のケースを扱うことを確認。
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:200px;height:200px;
+            background:conic-gradient(at 25% 75%,
+                red 0deg, red 90deg,
+                yellow 90deg, yellow 180deg,
+                green 180deg, green 270deg,
+                blue 270deg, blue 360deg);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render conic with offset center");
+    assert!(!pdf.is_empty());
+}
