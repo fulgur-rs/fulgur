@@ -3331,3 +3331,167 @@ mod renormalize_stops_to_unit_range_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod conic_helpers_tests {
+    use super::{box_edge_at_angle, normalize_conic_stops, sample_conic_color};
+    use crate::pageable::{GradientStop, GradientStopPosition};
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() < eps
+    }
+
+    #[test]
+    fn box_edge_top() {
+        // CSS 0deg = top → 中心 (50,50) から (50, 0) に向かう
+        let (x, y) = box_edge_at_angle(0.0, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 0.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_right() {
+        // CSS 90deg = right → 中心から (100, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 100.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_bottom() {
+        // CSS 180deg = bottom → 中心から (50, 100) に向かう
+        let (x, y) = box_edge_at_angle(std::f32::consts::PI, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 100.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_left() {
+        // CSS 270deg = left → 中心から (0, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            3.0 * std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 0.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_top_right_corner() {
+        // CSS 45deg = top-right corner direction → ray が top と right の交点に
+        // 当たる前にどちらかの edge にヒット。中心 (50,50)、box (0,0)-(100,100) で
+        // 45deg なら top-right 角 (100, 0) と原点距離が等しいので、辺の早い方に。
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_4,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // 中心から 45deg = (sin, -cos) = (0.707, -0.707)。tx = (100-50)/0.707 = 70.7、
+        // ty = (0-50)/-0.707 = 70.7 → tie。両方の辺に到達 → corner (100, 0) または近傍。
+        assert!(approx_eq(x, 100.0, 0.5));
+        assert!(approx_eq(y, 0.0, 0.5));
+    }
+
+    #[test]
+    fn normalize_with_explicit_fractions() {
+        // 全 stop が Fraction で position 順 → そのまま fraction 化される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [0, 255, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert_eq!(n[0], (0.0, [255, 0, 0, 255]));
+        assert_eq!(n[1], (0.5, [0, 255, 0, 255]));
+        assert_eq!(n[2], (1.0, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn normalize_auto_endpoints_filled() {
+        // Auto Auto Auto → 0.0, 0.5, 1.0 に補間される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 255, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 0, 255, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert!(approx_eq(n[0].0, 0.0, 1e-6));
+        assert!(approx_eq(n[1].0, 0.5, 1e-6));
+        assert!(approx_eq(n[2].0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn normalize_monotonic_clamp() {
+        // 後ろの stop が前より小さい → 前に合わせる (CSS Images L4 fixup)
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.3),
+                rgba: [0, 255, 0, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n[1].0, 0.5);
+    }
+
+    #[test]
+    fn sample_at_endpoints() {
+        let stops = vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_midpoint_lerps() {
+        let stops = vec![(0.0, [0, 0, 0, 255]), (1.0, [200, 100, 50, 255])];
+        let mid = sample_conic_color(&stops, 0.5);
+        assert_eq!(mid, [100, 50, 25, 255]);
+    }
+
+    #[test]
+    fn sample_clamp_outside_range() {
+        let stops = vec![(0.2, [255, 0, 0, 255]), (0.8, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+}
