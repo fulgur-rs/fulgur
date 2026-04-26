@@ -237,21 +237,38 @@ fn draw_background_layer(
 
     match &layer.content {
         BgImageContent::LinearGradient { direction, stops } => {
-            // Match before the loop, not inside: Angle(_) is constant per
-            // layer and gets hoisted automatically; Corner needs per-tile
-            // recomputation because the angle depends on tile aspect (CSS
-            // Images §3.1.1) and we don't rely on tile uniformity.
-            match direction {
-                crate::pageable::LinearGradientDirection::Angle(a) => {
-                    let angle = *a;
-                    for (tx, ty, tw, th) in &tiles {
-                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
+            // Try to detect a uniform tile grid and emit a single Tiling Pattern
+            // resource (one Function 2 + Shading 2 + Pattern triplet) rather
+            // than N independent gradient draws. Falls back to the per-tile
+            // loop for irregular tile geometry (e.g. uneven space repeat).
+            if let Some(grid) = try_uniform_grid(&tiles) {
+                let angle = match direction {
+                    crate::pageable::LinearGradientDirection::Angle(a) => *a,
+                    crate::pageable::LinearGradientDirection::Corner(corner) => {
+                        // uniform grid → all tiles share the same (cell_w, cell_h)
+                        // aspect, so a single corner-derived angle suffices.
+                        corner_to_angle_rad(*corner, grid.cell.0, grid.cell.1)
                     }
-                }
-                crate::pageable::LinearGradientDirection::Corner(corner) => {
-                    for (tx, ty, tw, th) in &tiles {
-                        let angle = corner_to_angle_rad(*corner, *tw, *th);
-                        draw_linear_gradient(canvas, angle, stops, *tx, *ty, *tw, *th);
+                };
+                draw_gradient_tiling_pattern(canvas, grid, |surface, _tw, _th| {
+                    draw_linear_gradient(surface, angle, stops, 0.0, 0.0, grid.cell.0, grid.cell.1);
+                });
+            } else {
+                // Fallback: per-tile loop. Match before the loop (Angle hoists,
+                // Corner needs per-tile recomputation because the angle depends
+                // on tile aspect — CSS Images §3.1.1).
+                match direction {
+                    crate::pageable::LinearGradientDirection::Angle(a) => {
+                        let angle = *a;
+                        for (tx, ty, tw, th) in &tiles {
+                            draw_linear_gradient(canvas.surface, angle, stops, *tx, *ty, *tw, *th);
+                        }
+                    }
+                    crate::pageable::LinearGradientDirection::Corner(corner) => {
+                        for (tx, ty, tw, th) in &tiles {
+                            let angle = corner_to_angle_rad(*corner, *tw, *th);
+                            draw_linear_gradient(canvas.surface, angle, stops, *tx, *ty, *tw, *th);
+                        }
                     }
                 }
             }
@@ -263,12 +280,32 @@ fn draw_background_layer(
             position_y,
             stops,
         } => {
-            // Per-tile shape geometry — uses each tile's own (tw, th)
-            // for cx/cy/rx/ry. No uniformity assumption needed.
-            for (tx, ty, tw, th) in &tiles {
-                draw_radial_gradient(
-                    canvas, *shape, size, position_x, position_y, stops, *tx, *ty, *tw, *th,
-                );
+            // Same dedup story as Linear: uniform grids share (cell_w, cell_h)
+            // so cx/cy/rx/ry are identical across tiles → a single Pattern
+            // resource is sound.
+            if let Some(grid) = try_uniform_grid(&tiles) {
+                draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
+                    draw_radial_gradient(
+                        surface, *shape, size, position_x, position_y, stops, 0.0, 0.0, tw, th,
+                    );
+                });
+            } else {
+                // Per-tile shape geometry — uses each tile's own (tw, th)
+                // for cx/cy/rx/ry. No uniformity assumption needed.
+                for (tx, ty, tw, th) in &tiles {
+                    draw_radial_gradient(
+                        canvas.surface,
+                        *shape,
+                        size,
+                        position_x,
+                        position_y,
+                        stops,
+                        *tx,
+                        *ty,
+                        *tw,
+                        *th,
+                    );
+                }
             }
         }
         BgImageContent::Raster { data, format } => {
@@ -341,7 +378,7 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
 /// gradient axis, ensuring the line spans corner-to-corner regardless of angle
 /// (CSS Images §3.1).
 fn draw_linear_gradient(
-    canvas: &mut Canvas<'_, '_>,
+    surface: &mut krilla::surface::Surface<'_>,
     angle_rad: f32,
     stops: &[crate::pageable::GradientStop],
     ox: f32,
@@ -395,12 +432,12 @@ fn draw_linear_gradient(
         anti_alias: false,
     };
 
-    canvas.surface.set_fill(Some(krilla::paint::Fill {
+    surface.set_fill(Some(krilla::paint::Fill {
         paint: lg.into(),
         rule: Default::default(),
         opacity: krilla::num::NormalizedF32::ONE,
     }));
-    canvas.surface.set_stroke(None);
+    surface.set_stroke(None);
 
     // Per CSS Images §3, the gradient image has the size of the positioning
     // (origin) area; areas inside `clip` but outside `origin` should be
@@ -410,12 +447,12 @@ fn draw_linear_gradient(
     // clip_path bounds it, so what's rendered is `origin ∩ clip`, which is
     // the spec-correct visible region.
     let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
-        canvas.surface.set_fill(None);
+        surface.set_fill(None);
         return;
     };
-    canvas.surface.draw_path(&rect_path);
+    surface.draw_path(&rect_path);
     // Don't leak the gradient paint to the next draw on this surface.
-    canvas.surface.set_fill(None);
+    surface.set_fill(None);
 }
 
 /// Draw a CSS radial-gradient over the origin rect.
@@ -424,7 +461,7 @@ fn draw_linear_gradient(
 /// `RadialGradient` (円のみサポート) に楕円を transform で表現する。
 #[allow(clippy::too_many_arguments)]
 fn draw_radial_gradient(
-    canvas: &mut Canvas<'_, '_>,
+    surface: &mut krilla::surface::Surface<'_>,
     shape: crate::pageable::RadialGradientShape,
     size: &crate::pageable::RadialGradientSize,
     position_x: &BgLengthPercentage,
@@ -539,14 +576,62 @@ fn draw_radial_gradient(
         anti_alias: false,
     };
 
-    canvas.surface.set_fill(Some(krilla::paint::Fill {
+    surface.set_fill(Some(krilla::paint::Fill {
         paint: rg.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    surface.set_stroke(None);
+
+    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
+        surface.set_fill(None);
+        return;
+    };
+    surface.draw_path(&rect_path);
+    surface.set_fill(None);
+}
+
+/// uniform-grid 検出時の Tiling Pattern 描画ヘルパー。
+///
+/// 1. `surface.stream_builder().surface()` で sub-surface を取得し、
+///    `paint_in_cell` クロージャで gradient を `(0, 0, tile_w, tile_h)` に描画。
+/// 2. `Pattern { stream, transform: Translate(origin), width: step_x, height: step_y }`
+///    を構築 (PDF /Matrix · /XStep · /YStep に対応)。
+/// 3. `set_fill(pattern)` + `draw_path(union_rect)` で塗りつぶし。
+///    既存の `clip_path` がレイヤーの可視領域を bound する。
+///
+/// Krilla の `Pattern` は `Cacheable` なので、同じ stream / transform / step を持つ
+/// Pattern は resource 層で dedupe される (`grid` 全体で 1 個の Pattern resource)。
+fn draw_gradient_tiling_pattern(
+    canvas: &mut Canvas<'_, '_>,
+    grid: UniformGrid,
+    paint_in_cell: impl FnOnce(&mut krilla::surface::Surface<'_>, f32, f32),
+) {
+    let mut sb = canvas.surface.stream_builder();
+    {
+        let mut ps = sb.surface();
+        paint_in_cell(&mut ps, grid.cell.0, grid.cell.1);
+        ps.finish();
+    }
+    let stream = sb.finish();
+
+    let pattern = krilla::paint::Pattern {
+        stream,
+        transform: krilla::geom::Transform::from_translate(grid.origin.0, grid.origin.1),
+        width: grid.step.0,
+        height: grid.step.1,
+    };
+
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: pattern.into(),
         rule: Default::default(),
         opacity: krilla::num::NormalizedF32::ONE,
     }));
     canvas.surface.set_stroke(None);
 
-    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
+    let total_w = grid.step.0 * grid.count.0 as f32;
+    let total_h = grid.step.1 * grid.count.1 as f32;
+    let Some(rect_path) = build_rect_path(grid.origin.0, grid.origin.1, total_w, total_h) else {
         canvas.surface.set_fill(None);
         return;
     };
@@ -892,6 +977,95 @@ fn compute_tile_positions_slow(
         }
     }
     tiles
+}
+
+/// 一様タイルグリッドのジオメトリ。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UniformGrid {
+    /// グリッドの最小座標 — ソート後の `(xs[0], ys[0])` であり、
+    /// `tiles[0].0..1` ではない (入力順序に依存しない)。
+    origin: (f32, f32),
+    /// セル (タイル) のサイズ。
+    cell: (f32, f32),
+    /// グリッドのステップ (cell + 任意の gap)。`cell == step` で repeat / round、
+    /// `step > cell` で space (タイル間 gap あり)。
+    step: (f32, f32),
+    /// X 方向のタイル数, Y 方向のタイル数。`count.0 * count.1 == tiles.len()`。
+    count: (usize, usize),
+}
+
+/// 全タイルが (cell サイズ一致 + ステップ一様 + count.x×count.y == tiles.len()) を
+/// 満たすなら `UniformGrid` を返す。Pattern dedup 経路の適用判定に使う。
+/// `tiles.len() < 2` のときは Pattern 構築コストが無駄なので `None`。
+fn try_uniform_grid(tiles: &[(f32, f32, f32, f32)]) -> Option<UniformGrid> {
+    if tiles.len() < 2 {
+        return None;
+    }
+    // eps は PDF user-space pt 座標における sub-pixel jitter 許容値。
+    let eps = 1e-3_f32;
+
+    // セルサイズ一致チェック
+    let (tw0, th0) = (tiles[0].2, tiles[0].3);
+    if !tiles
+        .iter()
+        .all(|t| (t.2 - tw0).abs() < eps && (t.3 - th0).abs() < eps)
+    {
+        return None;
+    }
+
+    // ユニークな x / y 座標を昇順で収集 (epsilon マージ)
+    let mut xs: Vec<f32> = Vec::new();
+    for t in tiles {
+        if !xs.iter().any(|&x| (x - t.0).abs() < eps) {
+            xs.push(t.0);
+        }
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut ys: Vec<f32> = Vec::new();
+    for t in tiles {
+        if !ys.iter().any(|&y| (y - t.1).abs() < eps) {
+            ys.push(t.1);
+        }
+    }
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // count.x × count.y がタイル数と一致 (=完全グリッド) であること
+    if xs.len() * ys.len() != tiles.len() {
+        return None;
+    }
+
+    // X / Y 方向のステップ一様性をチェック
+    let step_x = if xs.len() >= 2 {
+        let s = xs[1] - xs[0];
+        for w in xs.windows(2) {
+            if (w[1] - w[0] - s).abs() > eps {
+                return None;
+            }
+        }
+        s
+    } else {
+        // 単行 (count.x == 1): ステップは未定義だが、cell サイズで埋める
+        tw0
+    };
+    let step_y = if ys.len() >= 2 {
+        let s = ys[1] - ys[0];
+        for w in ys.windows(2) {
+            if (w[1] - w[0] - s).abs() > eps {
+                return None;
+            }
+        }
+        s
+    } else {
+        th0
+    };
+
+    Some(UniformGrid {
+        origin: (xs[0], ys[0]),
+        cell: (tw0, th0),
+        step: (step_x, step_y),
+        count: (xs.len(), ys.len()),
+    })
 }
 
 fn resolve_repeat_axis(
@@ -1925,5 +2099,126 @@ mod tests {
         assert_eq!(space, 0.0);
         assert_eq!(start, 5.0);
         assert_eq!(end, 5.0);
+    }
+
+    // ─── try_uniform_grid ─────────────────────────────────────────────────────
+
+    #[test]
+    fn uniform_grid_single_tile_returns_none() {
+        // Single tile (no-repeat) is not worth the Pattern overhead.
+        let tiles = vec![(10.0, 20.0, 30.0, 40.0)];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_repeat_round_8x6_detected() {
+        // 8 columns × 6 rows, cell = step = (10, 15)
+        let mut tiles = Vec::new();
+        for j in 0..6 {
+            for i in 0..8 {
+                tiles.push((i as f32 * 10.0, j as f32 * 15.0, 10.0, 15.0));
+            }
+        }
+        let g = try_uniform_grid(&tiles).expect("detect 8×6 grid");
+        assert_eq!(g.count, (8, 6));
+        assert!((g.cell.0 - 10.0).abs() < 1e-3);
+        assert!((g.cell.1 - 15.0).abs() < 1e-3);
+        assert!((g.step.0 - 10.0).abs() < 1e-3);
+        assert!((g.step.1 - 15.0).abs() < 1e-3);
+        assert!((g.origin.0 - 0.0).abs() < 1e-3);
+        assert!((g.origin.1 - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_space_with_gaps_detected() {
+        // 3 columns × 2 rows, cell = (10, 10), step = (15, 20)
+        let tiles = vec![
+            (0.0, 0.0, 10.0, 10.0),
+            (15.0, 0.0, 10.0, 10.0),
+            (30.0, 0.0, 10.0, 10.0),
+            (0.0, 20.0, 10.0, 10.0),
+            (15.0, 20.0, 10.0, 10.0),
+            (30.0, 20.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 3×2 spaced grid");
+        assert_eq!(g.count, (3, 2));
+        assert!((g.cell.0 - 10.0).abs() < 1e-3);
+        assert!((g.step.0 - 15.0).abs() < 1e-3);
+        assert!((g.step.1 - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_mismatched_cell_size_returns_none() {
+        // Second tile has different height → not uniform.
+        let tiles = vec![(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 12.0)];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_irregular_step_returns_none() {
+        // X steps: 10, 11 → not uniform.
+        let tiles = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (21.0, 0.0, 5.0, 5.0),
+        ];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_single_row_repeat_x() {
+        // 4 tiles in a single row → 4×1 grid.
+        let tiles = vec![
+            (0.0, 5.0, 10.0, 10.0),
+            (10.0, 5.0, 10.0, 10.0),
+            (20.0, 5.0, 10.0, 10.0),
+            (30.0, 5.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 4×1 grid");
+        assert_eq!(g.count, (4, 1));
+    }
+
+    #[test]
+    fn uniform_grid_count_mismatch_returns_none() {
+        // 3 tiles claimed but only 2 unique x positions × 2 unique y → 4 expected.
+        let tiles = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+        ];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_negative_origin_detected() {
+        // Negative origin (e.g. background-position pulling tiles into negative coords).
+        let tiles = vec![
+            (-50.0, -30.0, 10.0, 10.0),
+            (-40.0, -30.0, 10.0, 10.0),
+            (-50.0, -20.0, 10.0, 10.0),
+            (-40.0, -20.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 2×2 grid with negative origin");
+        assert_eq!(g.count, (2, 2));
+        assert!((g.origin.0 + 50.0).abs() < 1e-3);
+        assert!((g.origin.1 + 30.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_input_order_independent() {
+        // try_uniform_grid sorts xs/ys internally; shuffled input must give same result.
+        let canonical = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+        ];
+        let shuffled = vec![
+            (5.0, 5.0, 5.0, 5.0),
+            (0.0, 0.0, 5.0, 5.0),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+        ];
+        assert_eq!(try_uniform_grid(&canonical), try_uniform_grid(&shuffled));
     }
 }
