@@ -2328,6 +2328,183 @@ mod tests {
         ];
         assert_eq!(try_uniform_grid(&canonical), try_uniform_grid(&shuffled));
     }
+
+    // ─── corner_to_angle_rad ──────────────────────────────────────────────────
+
+    #[test]
+    fn corner_to_angle_rad_top_right_square_is_pi_over_4() {
+        use crate::pageable::LinearGradientCorner;
+        // "to top right" on a square → 45° = π/4 clockwise from "to top"
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 100.0, 100.0);
+        assert!(
+            (angle - std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "expected π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_top_left_square_is_neg_pi_over_4() {
+        use crate::pageable::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopLeft, 100.0, 100.0);
+        assert!(
+            (angle + std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "expected -π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_bottom_right_square_is_3pi_over_4() {
+        use crate::pageable::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::BottomRight, 100.0, 100.0);
+        let expected = 3.0 * std::f32::consts::FRAC_PI_4;
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected 3π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_bottom_left_square_is_neg_3pi_over_4() {
+        use crate::pageable::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::BottomLeft, 100.0, 100.0);
+        let expected = -3.0 * std::f32::consts::FRAC_PI_4;
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected -3π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_top_right_and_top_left_are_negations_for_square() {
+        // Symmetry: "to top right" and "to top left" are equal-magnitude on a square.
+        use crate::pageable::LinearGradientCorner;
+        let right = corner_to_angle_rad(LinearGradientCorner::TopRight, 200.0, 200.0);
+        let left = corner_to_angle_rad(LinearGradientCorner::TopLeft, 200.0, 200.0);
+        assert!(
+            (right + left).abs() < 1e-5,
+            "angles should cancel: right={right} left={left}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_non_square_top_right_uses_aspect_ratio() {
+        // For w=300, h=400: "to top right" = atan2(h, w) = atan2(400, 300).
+        // On a non-square box the corner direction depends on the aspect ratio.
+        use crate::pageable::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 300.0, 400.0);
+        let expected = f32::atan2(400.0_f32, 300.0_f32);
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected atan2(400,300)={expected}, got {angle}"
+        );
+    }
+
+    // ─── ellipse_corner_scale ─────────────────────────────────────────────────
+
+    #[test]
+    fn ellipse_corner_scale_zero_rx_returns_early() {
+        // Degenerate: rx0 == 0 → early return of (rx0, ry0) unchanged.
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 0.0, 25.0, true);
+        assert_eq!(rx, 0.0);
+        assert_eq!(ry, 25.0);
+    }
+
+    #[test]
+    fn ellipse_corner_scale_zero_ry_returns_early() {
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 30.0, 0.0, false);
+        assert_eq!(rx, 30.0);
+        assert_eq!(ry, 0.0);
+    }
+
+    #[test]
+    fn ellipse_corner_scale_centered_square_all_corners_equidistant() {
+        // Center exactly at box center (50,50); all corners are 50√2 away.
+        // Farthest == closest since all ratios equal; result = (50√2, 50√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx_f, ry_f) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, true);
+        assert!((rx_f - 50.0 * sqrt2).abs() < 1e-3, "farthest rx={rx_f}");
+        assert!((ry_f - 50.0 * sqrt2).abs() < 1e-3, "farthest ry={ry_f}");
+
+        let (rx_c, _ry_c) =
+            ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, false);
+        assert!(
+            (rx_f - rx_c).abs() < 1e-3,
+            "farthest={rx_f} and closest={rx_c} should match for symmetric center"
+        );
+    }
+
+    #[test]
+    fn ellipse_corner_scale_farthest_off_center() {
+        // Center at (30,30); box (0,0,100,100); rx0=ry0=1.
+        // Corner distances: (0,0)→30√2, (100,0)→√5800, (0,100)→√5800, (100,100)→70√2.
+        // Farthest ratio = 70√2 → result = (70√2, 70√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(30.0, 30.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, true);
+        assert!((rx - 70.0 * sqrt2).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 70.0 * sqrt2).abs() < 1e-3, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_closest_off_center() {
+        // Same setup; closest corner = (0,0) at 30√2 → result = (30√2, 30√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(30.0, 30.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, false);
+        assert!((rx - 30.0 * sqrt2).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 30.0 * sqrt2).abs() < 1e-3, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_non_uniform_radii_farthest() {
+        // Center at (0,0); box (100,0,100,100); rx0=50, ry0=25.
+        // Per-corner ratios: (100,0)→2, (200,0)→4, (100,100)→√20, (200,100)→4√2.
+        // Farthest ratio = 4√2 → result = (50·4√2, 25·4√2) = (200√2, 100√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 50.0, 25.0, true);
+        assert!((rx - 200.0 * sqrt2).abs() < 0.01, "rx={rx}");
+        assert!((ry - 100.0 * sqrt2).abs() < 0.01, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_non_uniform_radii_closest() {
+        // Same setup; closest corner (100,0) has ratio=2 → result = (100, 50).
+        let (rx, ry) = ellipse_corner_scale(0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 50.0, 25.0, false);
+        assert!((rx - 100.0).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 50.0).abs() < 1e-3, "ry={ry}");
+    }
+
+    // ─── resolve_point and resolve_length ─────────────────────────────────────
+
+    #[test]
+    fn resolve_point_length_returns_value() {
+        assert_eq!(
+            resolve_point(&BgLengthPercentage::Length(42.0), 200.0),
+            42.0
+        );
+    }
+
+    #[test]
+    fn resolve_point_percentage_multiplies_container() {
+        assert_eq!(
+            resolve_point(&BgLengthPercentage::Percentage(0.25), 200.0),
+            50.0
+        );
+    }
+
+    #[test]
+    fn resolve_length_length_returns_value() {
+        assert_eq!(
+            resolve_length(&BgLengthPercentage::Length(15.0), 300.0),
+            15.0
+        );
+    }
+
+    #[test]
+    fn resolve_length_percentage_multiplies_container() {
+        assert_eq!(
+            resolve_length(&BgLengthPercentage::Percentage(0.5), 300.0),
+            150.0
+        );
+    }
 }
 
 #[cfg(test)]
