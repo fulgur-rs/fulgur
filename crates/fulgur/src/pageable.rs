@@ -770,6 +770,36 @@ pub enum LinearGradientDirection {
     Corner(LinearGradientCorner),
 }
 
+/// CSS `radial-gradient(<shape>?, ...)` の shape 部分。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadialGradientShape {
+    Circle,
+    Ellipse,
+}
+
+/// CSS `radial-gradient(... <extent>, ...)` keyword。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadialExtent {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+}
+
+/// CSS `radial-gradient(<shape>? <size>?, ...)` の size 部分。
+///
+/// extent keyword は draw 時に gradient box から半径を計算する。
+/// 明示半径も length-percentage を含むため draw 時に解決する。
+#[derive(Clone, Debug)]
+pub enum RadialGradientSize {
+    Extent(RadialExtent),
+    /// circle の場合は rx == ry とする。ellipse は独立。
+    Explicit {
+        rx: BgLengthPercentage,
+        ry: BgLengthPercentage,
+    },
+}
+
 /// Content payload for a background-image layer.
 #[derive(Clone, Debug)]
 pub enum BgImageContent {
@@ -783,6 +813,14 @@ pub enum BgImageContent {
     /// CSS `linear-gradient(...)`.
     LinearGradient {
         direction: LinearGradientDirection,
+        stops: Vec<GradientStop>,
+    },
+    /// CSS `radial-gradient(...)`. position は origin rect 内の中心。
+    RadialGradient {
+        shape: RadialGradientShape,
+        size: RadialGradientSize,
+        position_x: BgLengthPercentage,
+        position_y: BgLengthPercentage,
         stops: Vec<GradientStop>,
     },
 }
