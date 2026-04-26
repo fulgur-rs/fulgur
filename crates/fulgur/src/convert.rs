@@ -3847,12 +3847,7 @@ fn get_text_color(doc: &blitz_dom::BaseDocument, node_id: usize) -> [u8; 4] {
     if let Some(node) = doc.get_node(node_id)
         && let Some(styles) = node.primary_styles()
     {
-        let color = styles.clone_color();
-        let r = (color.components.0.clamp(0.0, 1.0) * 255.0) as u8;
-        let g = (color.components.1.clamp(0.0, 1.0) * 255.0) as u8;
-        let b = (color.components.2.clamp(0.0, 1.0) * 255.0) as u8;
-        let a = (color.alpha.clamp(0.0, 1.0) * 255.0) as u8;
-        return [r, g, b, a];
+        return absolute_to_rgba(styles.clone_color());
     }
     [0, 0, 0, 255] // Default: black
 }
@@ -3890,13 +3885,7 @@ fn get_text_decoration(doc: &blitz_dom::BaseDocument, node_id: usize) -> TextDec
 
         // text-decoration-color (resolve currentcolor)
         let deco_color = styles.clone_text_decoration_color();
-        let resolved = deco_color.resolve_to_absolute(&current_color);
-        let color = [
-            (resolved.components.0.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.components.1.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.components.2.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.alpha.clamp(0.0, 1.0) * 255.0) as u8,
-        ];
+        let color = absolute_to_rgba(deco_color.resolve_to_absolute(&current_color));
 
         return TextDecoration { line, style, color };
     }
