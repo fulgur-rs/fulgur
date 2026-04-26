@@ -595,6 +595,32 @@ fn ellipse_corner_scale(
     (rx0 * chosen, ry0 * chosen)
 }
 
+/// Resolve `background-size` for a gradient layer.
+///
+/// Per CSS Images §3.3 / §5.5, gradients have no intrinsic dimensions and no
+/// intrinsic aspect ratio. The default concrete object size is the positioning
+/// area, so `auto` / `cover` / `contain` all return `(origin_w, origin_h)`.
+/// `Explicit` with one axis `None` falls back to the corresponding origin axis
+/// (still no aspect to derive from).
+// Used by Task 2 — wired into draw_background_layer
+#[allow(dead_code)]
+fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
+    match size {
+        BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
+        BgSize::Explicit(w_opt, h_opt) => {
+            let rw = w_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_w))
+                .unwrap_or(origin_w);
+            let rh = h_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_h))
+                .unwrap_or(origin_h);
+            (rw, rh)
+        }
+    }
+}
+
 /// Resolve `background-size` for a layer relative to the origin area.
 fn resolve_size(layer: &BackgroundLayer, origin_w: f32, origin_h: f32) -> (f32, f32) {
     let iw = layer.intrinsic_width;
@@ -1041,6 +1067,55 @@ mod tests {
         let (w, h) = resolve_size(&layer, 200.0, 200.0);
         assert_eq!(w, 0.0);
         assert_eq!(h, 0.0);
+    }
+
+    // ─── resolve_gradient_size (no intrinsic dimensions) ─────────────────────
+
+    #[test]
+    fn resolve_gradient_size_auto_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Auto, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_cover_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Cover, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_contain_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Contain, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_both_resolves() {
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(50.0)),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 50.0).abs() < 1e-6);
+        assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_one_auto_uses_origin() {
+        // width specified, height auto → height fills origin (no aspect)
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(80.0)), None);
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 80.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+
+        // height specified, width auto → width fills origin
+        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Percentage(0.5)));
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 50.0).abs() < 1e-6);
     }
 
     // ─── compute_origin_rect ─────────────────────────────────────────────────
