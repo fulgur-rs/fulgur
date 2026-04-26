@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRT: radial-gradient circular red&rarr;blue</title>
+<style>
+  html, body { margin: 0; padding: 0; background: white; }
+  /* 同心リング近似 ref と pixel 座標を揃えるため正方形・整数 raster サイズ。
+     192 CSS px = 300 raster px @ 150dpi (整数)。
+     margin 32 CSS px = 50 raster px (整数)。
+     `closest-side` を明示することで gradient 半径 = 96 px (=192/2) に固定し、
+     ref の RING_STEP_PX=4 整数アラインを成立させる。default の
+     `farthest-corner` だと半径 = 96*sqrt(2) ≈ 135.76 px となり、ring step
+     が非整数になって AA が広がるため tolerance が大幅に緩む。
+     `closest-side` では r > 96 の領域 (ボックス四隅) は最終色 (c1) で塗られ、
+     これは ref 側で `.box` に同色背景を敷くことで一致させる。 */
+  .g {
+    width: 192px;
+    height: 192px;
+    margin: 32px;
+    background: radial-gradient(circle closest-side, #e53935 0%, #1e88e5 100%);
+  }
+</style>
+</head>
+<body>
+  <div class="g"></div>
+</body>
+</html>
