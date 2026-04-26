@@ -367,6 +367,118 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
     (h * h_sign).atan2(-w * v_sign)
 }
 
+/// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
+/// `Stop` 列に変換する。
+///
+/// CSS Images Level 3 §3.5.1 の color-stop fixup に従って:
+///   1. `LengthPx(px)` を `px / line_length` で fraction 化
+///   2. 先頭/末尾の `Auto` を 0.0 / 1.0 に確定
+///   3. monotonic clamp (前 fixed より小さければ前 fixed に合わせる)
+///   4. 中間の `Auto` 群を前後 fixed の等間隔補間で埋める
+///   5. 最終 fraction が `[0, 1]` 外なら `Layer drop` (None)
+///
+/// `line_length <= 0` の場合は length stop が解決不能なので None。
+// Wired into draw_linear_gradient / draw_radial_gradient in Task 4
+// (fulgur-78sl). Until then the helper is only exercised by the test module
+// below, so the non-test build sees it as dead. Allow until Task 4 lands.
+#[allow(dead_code)]
+fn resolve_gradient_stops(
+    stops: &[crate::pageable::GradientStop],
+    line_length: f32,
+    gradient_kind: &'static str,
+) -> Option<Vec<krilla::paint::Stop>> {
+    use crate::pageable::GradientStopPosition;
+
+    if stops.len() < 2 {
+        return None;
+    }
+    if line_length <= 0.0 {
+        // length-typed stop が一つでもあれば解決不能。fraction-only でも
+        // 退化した gradient なので Layer drop 相当 (caller で先に early
+        // return しているため通常到達しない)。
+        return None;
+    }
+
+    let n = stops.len();
+    let mut positions: Vec<Option<f32>> = stops
+        .iter()
+        .map(|s| match s.position {
+            GradientStopPosition::Auto => None,
+            GradientStopPosition::Fraction(f) => Some(f),
+            GradientStopPosition::LengthPx(px) => Some(px / line_length),
+        })
+        .collect();
+
+    // 先頭/末尾の Auto を 0/1 に
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions[n - 1].is_none() {
+        positions[n - 1] = Some(1.0);
+    }
+
+    // monotonic clamp.
+    // 初期値が NEG_INFINITY (not 0.0) なのは意図的: 旧 convert.rs は
+    // ComplexColorStop を事前に [0, 1] バリデーションしていたが、本 helper は
+    // 負値を通過させて末尾の range check で drop する。0.0 初期値だと
+    // Fraction(-0.1) が暗黙に 0.0 に押し上げられて range check を擦り抜ける。
+    let mut last_resolved = f32::NEG_INFINITY;
+    for v in positions.iter_mut().flatten() {
+        if *v < last_resolved {
+            *v = last_resolved;
+        }
+        last_resolved = *v;
+    }
+
+    // 中間 Auto を前後 fixed の等間隔補間で埋める
+    let mut i = 0;
+    while i < n {
+        if positions[i].is_some() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = start;
+        while end < n && positions[end].is_none() {
+            end += 1;
+        }
+        let p_prev = positions[start - 1].expect("first slot resolved");
+        let p_next = positions[end].expect("last slot resolved");
+        let span = (end - start + 1) as f32;
+        for (k, slot) in positions.iter_mut().enumerate().take(end).skip(start) {
+            let t = (k - start + 1) as f32 / span;
+            *slot = Some(p_prev + (p_next - p_prev) * t);
+        }
+        i = end;
+    }
+
+    // 範囲外チェック (fulgur-n3zk が解くまでは Layer drop)
+    for (idx, p_opt) in positions.iter().enumerate() {
+        let p = p_opt.expect("all slots resolved");
+        if !(0.0..=1.0).contains(&p) {
+            log::warn!(
+                "{gradient_kind}: stop {idx} resolved offset {p:.4} is outside \
+                 [0, 1]. Out-of-range stops require gradient-line recompute \
+                 (fulgur-n3zk). Layer dropped."
+            );
+            return None;
+        }
+    }
+
+    // krilla::paint::Stop 構築
+    Some(
+        stops
+            .iter()
+            .zip(positions)
+            .map(|(s, p)| krilla::paint::Stop {
+                offset: krilla::num::NormalizedF32::new(p.unwrap()).expect("offset is in [0, 1]"),
+                color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
+                opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
+            })
+            .collect(),
+    )
+}
+
 /// Draw a CSS linear-gradient over the origin rect.
 ///
 /// CSS angle convention (radians): 0 = "to top", π/2 = "to right",
@@ -2236,5 +2348,124 @@ mod tests {
             (0.0, 5.0, 5.0, 5.0),
         ];
         assert_eq!(try_uniform_grid(&canonical), try_uniform_grid(&shuffled));
+    }
+}
+
+#[cfg(test)]
+mod resolve_gradient_stops_tests {
+    use super::*;
+    use crate::pageable::GradientStop;
+    use crate::pageable::GradientStopPosition::{self, *};
+
+    fn fr(f: f32) -> GradientStopPosition {
+        Fraction(f)
+    }
+    fn px(f: f32) -> GradientStopPosition {
+        LengthPx(f)
+    }
+    fn stop(p: GradientStopPosition, rgba: [u8; 4]) -> GradientStop {
+        GradientStop { position: p, rgba }
+    }
+
+    #[test]
+    fn fraction_only_passes_through() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn length_px_resolved_by_line_length() {
+        let stops = vec![
+            stop(px(0.0), [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+        ];
+        // line_length = 100 → 50px = 0.5
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_position_filled_at_endpoints() {
+        let stops = vec![stop(Auto, [255, 0, 0, 255]), stop(Auto, [0, 0, 255, 255])];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_position_filled_in_middle() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(Auto, [0, 255, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mixed_length_fraction_auto() {
+        // linear-gradient(red, blue 50px, green) on line_length=100
+        // → red Auto (→0), blue 0.5, green Auto (→1)
+        let stops = vec![
+            stop(Auto, [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+            stop(Auto, [0, 255, 0, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert_eq!(out.len(), 3);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+        assert!((out[2].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn out_of_range_length_returns_none() {
+        // 50px on line_length=30 → 50/30 ≈ 1.67 > 1 → Layer drop
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 30.0, "linear-gradient");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn negative_fraction_returns_none() {
+        let stops = vec![
+            stop(fr(-0.1), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn monotonic_clamp_applied() {
+        // [0.6, 0.3] → [0.6, 0.6] (monotonic fix)
+        let stops = vec![
+            stop(fr(0.6), [255, 0, 0, 255]),
+            stop(fr(0.3), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        assert!((out[0].offset.get() - 0.6).abs() < 1e-6);
+        assert!((out[1].offset.get() - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_length_zero_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 0.0, "linear-gradient");
+        assert!(out.is_none());
     }
 }
