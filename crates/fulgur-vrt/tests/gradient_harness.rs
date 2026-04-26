@@ -136,9 +136,13 @@ fn linear_gradient_horizontal_matches_strip_reference() {
     fs::create_dir_all(&work_dir).expect("create work dir");
 
     // Rasterize test and ref into separate sub-dirs so pdftocairo's
-    // hard-coded `page-1.png` output does not race / overwrite.
+    // hard-coded `page-1.png` output does not race / overwrite. Wipe both
+    // sub-dirs first so a stale `page-1.png` from a prior run can't be read
+    // back as the current output if rasterization unexpectedly fails.
     let test_dir = work_dir.join("test");
     let ref_dir = work_dir.join("ref");
+    let _ = fs::remove_dir_all(&test_dir);
+    let _ = fs::remove_dir_all(&ref_dir);
     fs::create_dir_all(&test_dir).expect("create test dir");
     fs::create_dir_all(&ref_dir).expect("create ref dir");
 

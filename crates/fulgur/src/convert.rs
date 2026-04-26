@@ -3183,14 +3183,31 @@ fn resolve_linear_gradient(
                 raw.push((None, absolute_to_rgba(abs)));
             }
             GradientItem::ComplexColorStop { color, position } => {
-                let pct = position.to_percentage().map(|p| p.0)?;
+                let Some(pct) = position.to_percentage().map(|p| p.0) else {
+                    log::warn!(
+                        "linear-gradient: length-typed stop position is not yet \
+                         supported (Phase 2). Layer dropped."
+                    );
+                    return None;
+                };
                 if !(0.0..=1.0).contains(&pct) {
+                    log::warn!(
+                        "linear-gradient: stop position {pct:.4} is outside [0, 1]. \
+                         Negative / >100% positions require recomputing the gradient \
+                         line (Phase 2). Layer dropped."
+                    );
                     return None;
                 }
                 let abs = color.resolve_to_absolute(current_color);
                 raw.push((Some(pct), absolute_to_rgba(abs)));
             }
-            GradientItem::InterpolationHint(_) => return None,
+            GradientItem::InterpolationHint(_) => {
+                log::warn!(
+                    "linear-gradient: interpolation hints are not yet supported \
+                     (Phase 2). Layer dropped."
+                );
+                return None;
+            }
         }
     }
 

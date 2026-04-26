@@ -214,7 +214,7 @@ fn draw_background_layer(
                     corner_to_angle_rad(*right, *bottom, ow, oh)
                 }
             };
-            draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh, cx, cy, cw, ch);
+            draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh);
         }
         BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => {
             let (img_w, img_h) = resolve_size(layer, ow, oh);
@@ -311,7 +311,6 @@ fn corner_to_angle_rad(right: bool, bottom: bool, w: f32, h: f32) -> f32 {
 /// `|W·sin θ| + |H·cos θ|` — this is the projection of both diagonals onto the
 /// gradient axis, ensuring the line spans corner-to-corner regardless of angle
 /// (CSS Images §3.1).
-#[allow(clippy::too_many_arguments)]
 fn draw_linear_gradient(
     canvas: &mut Canvas<'_, '_>,
     angle_rad: f32,
@@ -320,10 +319,6 @@ fn draw_linear_gradient(
     oy: f32,
     ow: f32,
     oh: f32,
-    cx: f32,
-    cy: f32,
-    cw: f32,
-    ch: f32,
 ) {
     if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
         return;
@@ -351,11 +346,14 @@ fn draw_linear_gradient(
     let krilla_stops: Vec<krilla::paint::Stop> = stops
         .iter()
         .map(|s| krilla::paint::Stop {
+            // `s.offset` is convert-time-clamped to [0, 1] in resolve_linear_gradient,
+            // so the explicit clamp + expect documents the invariant.
             offset: krilla::num::NormalizedF32::new(s.offset.clamp(0.0, 1.0))
-                .unwrap_or(krilla::num::NormalizedF32::ZERO),
+                .expect("offset is clamped to [0, 1]"),
             color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
+            // (u8 / 255.0) is always in [0, 1], so the conversion cannot fail.
             opacity: krilla::num::NormalizedF32::new((s.rgba[3] as f32) / 255.0)
-                .unwrap_or(krilla::num::NormalizedF32::ONE),
+                .expect("u8/255 fits NormalizedF32"),
         })
         .collect();
 
@@ -377,11 +375,14 @@ fn draw_linear_gradient(
     }));
     canvas.surface.set_stroke(None);
 
-    // Fill the visible region. The clip path was already pushed by the
-    // caller, so painting a rectangle covering the clip rect's bounding box
-    // produces the gradient exactly inside the (possibly rounded) clip area.
-    let Some(rect_path) = build_rect_path(cx, cy, cw, ch) else {
-        // Reset fill so subsequent draws don't inherit the gradient paint.
+    // Per CSS Images §3, the gradient image has the size of the positioning
+    // (origin) area; areas inside `clip` but outside `origin` should be
+    // transparent for this layer. With `SpreadMethod::Pad`, painting the
+    // clip rect would extend the first/last stop colors as solid bands into
+    // those areas. Draw the origin rect — the caller's already-pushed
+    // clip_path bounds it, so what's rendered is `origin ∩ clip`, which is
+    // the spec-correct visible region.
+    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
         canvas.surface.set_fill(None);
         return;
     };
