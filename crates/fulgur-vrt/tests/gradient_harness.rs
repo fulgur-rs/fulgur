@@ -487,3 +487,65 @@ fn linear_gradient_px_stop_angled_matches_percentage_reference() {
         "60deg angled gradient blue plateau center",
     );
 }
+
+/// `linear-gradient(90deg, #e53935 -50%, #1e88e5 100%)` の renormalize 動作確認。
+///
+/// 範囲外 stop -50% は drop され、offset 0 の色は CSS Images 3 §3.5.1 に従い
+/// `red + (1/3) * (blue - red)` で合成される。strip 近似 ref の左端をこの合成色、
+/// 右端を blue にして比較する。
+#[test]
+fn linear_gradient_out_of_range_low_matches_strip_reference() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_html_path = crate_root.join("fixtures/paint/linear-gradient-out-of-range-low.html");
+    let test_html = fs::read_to_string(&test_html_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", test_html_path.display()));
+
+    // Synthesized color at offset 0 (alpha = 1/3 between red(-0.5) and blue(1.0)):
+    //   r = 0xe5 + (1/3) * (0x1e - 0xe5) = 229 + (1/3) * (-199) ≈ 162.67 → 0xa3
+    //   g = 0x39 + (1/3) * (0x88 - 0x39) =  57 + (1/3) *   79  ≈  83.33 → 0x53
+    //   b = 0x35 + (1/3) * (0xe5 - 0x35) =  53 + (1/3) *  176  ≈ 111.67 → 0x70
+    let ref_html = build_strip_ref_html((0xa3, 0x53, 0x70), (0x1e, 0x88, 0xe5));
+
+    let tol = Tolerance {
+        max_channel_diff: 10,
+        max_diff_pixels_ratio: 0.005,
+    };
+    run_gradient_px_stop_reftest(
+        "linear-gradient out-of-range low",
+        "vrt-gradient-oor-low",
+        &test_html,
+        &ref_html,
+        tol,
+    );
+}
+
+/// `linear-gradient(90deg, #e53935 0%, #1e88e5 200%)` の renormalize 動作確認。
+///
+/// 範囲外 stop 200% は drop され、offset 1 の色は CSS Images 3 §3.5.1 に従い
+/// `red + (1/2) * (blue - red)` で合成される。strip 近似 ref の左端を red、
+/// 右端をこの合成色にする。
+#[test]
+fn linear_gradient_out_of_range_high_matches_strip_reference() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_html_path = crate_root.join("fixtures/paint/linear-gradient-out-of-range-high.html");
+    let test_html = fs::read_to_string(&test_html_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", test_html_path.display()));
+
+    // Synthesized color at offset 1 (alpha = 1/2 between red(0.0) and blue(2.0)):
+    //   r = 0xe5 + (1/2) * (0x1e - 0xe5) = 229 + 0.5 * (-199) = 129.5 → 0x82
+    //   g = 0x39 + (1/2) * (0x88 - 0x39) =  57 + 0.5 *   79  =  96.5 → 0x61
+    //   b = 0x35 + (1/2) * (0xe5 - 0x35) =  53 + 0.5 *  176  = 141.0 → 0x8d
+    let ref_html = build_strip_ref_html((0xe5, 0x39, 0x35), (0x82, 0x61, 0x8d));
+
+    let tol = Tolerance {
+        max_channel_diff: 10,
+        max_diff_pixels_ratio: 0.005,
+    };
+    run_gradient_px_stop_reftest(
+        "linear-gradient out-of-range high",
+        "vrt-gradient-oor-high",
+        &test_html,
+        &ref_html,
+        tol,
+    );
+}

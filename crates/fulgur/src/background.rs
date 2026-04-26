@@ -367,6 +367,88 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
     (h * h_sign).atan2(-w * v_sign)
 }
 
+/// 範囲外 fraction を CSS Images 3 §3.5.1 準拠で `[0, 1]` 内表現に renormalize する。
+///
+/// 入力: monotonically non-decreasing position の `(pos, rgba)` ベクタ。
+/// `pos` は ℝ で、範囲外 (`-0.5` や `1.5` など) も許容する。
+///
+/// 出力: `pos` が `[0, 1]` に収まる `(pos, rgba)` ベクタ。Krilla の
+/// `NormalizedF32` 制約をそのまま満たす。
+///
+/// アルゴリズム:
+/// - fast path: 全 stop が `[0, 1]` 内なら無変換
+/// - 範囲外を含む場合: `color_at(0)` / `color_at(1)` を隣接 stop 線形補間
+///   (前方は first stop の色で pad、後方は last stop の色で pad) で合成し、
+///   `(0, 1)` 内既存 stop と組み合わせる
+/// - 既に in-range stop が境界 (`0.0` / `1.0`) ぴったりに座っている場合は
+///   重複合成しない
+fn renormalize_stops_to_unit_range(stops: Vec<(f32, [u8; 4])>) -> Vec<(f32, [u8; 4])> {
+    debug_assert!(stops.len() >= 2, "caller guaranteed len >= 2");
+
+    if stops.iter().all(|(p, _)| (0.0..=1.0).contains(p)) {
+        return stops;
+    }
+
+    let last_idx = stops.len() - 1;
+    let color_at = |t: f32| -> [u8; 4] {
+        if t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[last_idx].0 {
+            return stops[last_idx].1;
+        }
+        for w in stops.windows(2) {
+            let (p0, c0) = w[0];
+            let (p1, c1) = w[1];
+            if p0 <= t && t <= p1 {
+                let span = p1 - p0;
+                if span <= 0.0 {
+                    // hard stop boundary (coincident positions): 後方の色を採用
+                    return c1;
+                }
+                let alpha = (t - p0) / span;
+                return [
+                    lerp_u8(c0[0], c1[0], alpha),
+                    lerp_u8(c0[1], c1[1], alpha),
+                    lerp_u8(c0[2], c1[2], alpha),
+                    lerp_u8(c0[3], c1[3], alpha),
+                ];
+            }
+        }
+        unreachable!("stops are monotonic and t is in [stops[0].0, stops[last].0]")
+    };
+
+    // 上流 (`resolve_gradient_stops` の Auto fill / fr(0.0) / px(0.0) 等) は
+    // exact 0.0 / 1.0 を保証するため、浮動小数 `==` 比較で十分。
+    let has_stop_at_zero = stops.iter().any(|(p, _)| *p == 0.0);
+    let has_stop_at_one = stops.iter().any(|(p, _)| *p == 1.0);
+
+    let mut result = Vec::with_capacity(stops.len() + 2);
+
+    if stops[0].0 != 0.0 && !has_stop_at_zero {
+        result.push((0.0, color_at(0.0)));
+    }
+
+    for (p, rgba) in stops.iter() {
+        if (0.0..=1.0).contains(p) {
+            result.push((*p, *rgba));
+        }
+    }
+
+    if stops[last_idx].0 != 1.0 && !has_stop_at_one {
+        result.push((1.0, color_at(1.0)));
+    }
+
+    result
+}
+
+#[inline]
+fn lerp_u8(a: u8, b: u8, alpha: f32) -> u8 {
+    let av = a as f32;
+    let bv = b as f32;
+    (av + (bv - av) * alpha).round().clamp(0.0, 255.0) as u8
+}
+
 /// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
 /// `Stop` 列に変換する。
 ///
@@ -379,13 +461,13 @@ fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h:
 ///   2. 先頭/末尾の `Auto` を 0.0 / 1.0 に確定
 ///   3. monotonic clamp (前 fixed より小さければ前 fixed に合わせる)
 ///   4. 中間の `Auto` 群を前後 fixed の等間隔補間で埋める
-///   5. 最終 fraction が `[0, 1]` 外なら `Layer drop` (None)
+///   5. 最終 fraction が `[0, 1]` 外なら `renormalize_stops_to_unit_range` で
+///      端点合成し正規化する (CSS Images 3 §3.5.1; fulgur-n3zk)
 ///
 /// `line_length <= 0` の場合は length stop が解決不能なので None。
 fn resolve_gradient_stops(
     stops: &[crate::pageable::GradientStop],
     line_length: f32,
-    gradient_kind: &'static str,
 ) -> Option<Vec<krilla::paint::Stop>> {
     use crate::pageable::GradientStopPosition;
 
@@ -418,10 +500,10 @@ fn resolve_gradient_stops(
     }
 
     // monotonic clamp.
-    // 初期値が NEG_INFINITY (not 0.0) なのは意図的: 旧 convert.rs は
-    // ComplexColorStop を事前に [0, 1] バリデーションしていたが、本 helper は
-    // 負値を通過させて末尾の range check で drop する。0.0 初期値だと
-    // Fraction(-0.1) が暗黙に 0.0 に押し上げられて range check を擦り抜ける。
+    // 初期値が NEG_INFINITY (not 0.0) なのは意図的: renormalize は負値の
+    // 入力位置をそのまま受け取って端点合成する必要があるため、
+    // 0.0 初期値だと Fraction(-0.1) が暗黙に 0.0 に押し上げられて
+    // out-of-range 入力として扱われなくなる。
     let mut last_resolved = f32::NEG_INFINITY;
     for v in positions.iter_mut().flatten() {
         if *v < last_resolved {
@@ -452,28 +534,25 @@ fn resolve_gradient_stops(
         i = end;
     }
 
-    // 範囲外チェック (fulgur-n3zk が解くまでは Layer drop)
-    for (idx, p_opt) in positions.iter().enumerate() {
-        let p = p_opt.expect("all slots resolved");
-        if !(0.0..=1.0).contains(&p) {
-            log::warn!(
-                "{gradient_kind}: stop {idx} resolved offset {p:.4} is outside \
-                 [0, 1]. Out-of-range stops require gradient-line recompute \
-                 (fulgur-n3zk). Layer dropped."
-            );
-            return None;
-        }
-    }
+    // renormalize: 範囲外 fraction は端点合成で [0, 1] 内表現に変換 (fulgur-n3zk)
+    let resolved: Vec<(f32, [u8; 4])> = stops
+        .iter()
+        .zip(positions)
+        .map(|(s, p)| (p.expect("all slots resolved"), s.rgba))
+        .collect();
+    let renormalized = renormalize_stops_to_unit_range(resolved);
+    debug_assert!(
+        renormalized.len() >= 2,
+        "renormalize_stops_to_unit_range guarantees len >= 2"
+    );
 
-    // krilla::paint::Stop 構築
     Some(
-        stops
-            .iter()
-            .zip(positions)
-            .map(|(s, p)| krilla::paint::Stop {
-                offset: krilla::num::NormalizedF32::new(p.unwrap()).expect("offset is in [0, 1]"),
-                color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
-                opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
+        renormalized
+            .into_iter()
+            .map(|(p, rgba)| krilla::paint::Stop {
+                offset: krilla::num::NormalizedF32::new(p).expect("renormalize guarantees [0, 1]"),
+                color: krilla::color::rgb::Color::new(rgba[0], rgba[1], rgba[2]).into(),
+                opacity: crate::pageable::alpha_to_opacity(rgba[3]),
             })
             .collect(),
     )
@@ -526,7 +605,7 @@ fn draw_linear_gradient(
     // `px / line_length` で fraction 化するので、line_length も CSS px に揃える。
     // (例: 400px box → length = 300pt → px 換算で 400 → 50px / 400 = 0.125)
     let length_px = crate::convert::pt_to_px(length);
-    let Some(krilla_stops) = resolve_gradient_stops(stops, length_px, "linear-gradient") else {
+    let Some(krilla_stops) = resolve_gradient_stops(stops, length_px) else {
         return;
     };
 
@@ -651,7 +730,7 @@ fn draw_radial_gradient(
     // rx は pt 単位 (ow/oh が pt) なので、`LengthPx` (CSS px) との比較のために
     // CSS px に揃える。
     let rx_px = crate::convert::pt_to_px(rx);
-    let Some(krilla_stops) = resolve_gradient_stops(stops, rx_px, "radial-gradient") else {
+    let Some(krilla_stops) = resolve_gradient_stops(stops, rx_px) else {
         return;
     };
 
@@ -2529,7 +2608,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
@@ -2542,7 +2621,7 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [0, 0, 255, 255]),
         ];
         // line_length = 100 → 50px = 0.5
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
     }
@@ -2550,7 +2629,7 @@ mod resolve_gradient_stops_tests {
     #[test]
     fn auto_position_filled_at_endpoints() {
         let stops = vec![stop(Auto, [255, 0, 0, 255]), stop(Auto, [0, 0, 255, 255])];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
     }
@@ -2562,7 +2641,7 @@ mod resolve_gradient_stops_tests {
             stop(Auto, [0, 255, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
     }
 
@@ -2575,7 +2654,7 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [0, 0, 255, 255]),
             stop(Auto, [0, 255, 0, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert_eq!(out.len(), 3);
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
@@ -2583,24 +2662,33 @@ mod resolve_gradient_stops_tests {
     }
 
     #[test]
-    fn out_of_range_length_returns_none() {
-        // 50px on line_length=30 → 50/30 ≈ 1.67 > 1 → Layer drop
+    fn out_of_range_length_renormalized() {
+        // 50px on line_length=30 → 50/30 ≈ 1.667 > 1 → renormalize で
+        // 端点合成。renormalize 入力 = [(0.0, red), (1.667, blue)]:
+        //   0.0 はちょうど red 位置なので左合成スキップ
+        //   1.667 を 1.0 で右合成 → 2 stops [(0.0, red), (1.0, synthesized)]
         let stops = vec![
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(px(50.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 30.0, "linear-gradient");
-        assert!(out.is_none());
+        let out = resolve_gradient_stops(&stops, 30.0).unwrap();
+        assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn negative_fraction_returns_none() {
+    fn negative_fraction_renormalized() {
+        // [(-0.1, red), (1.0, blue)]: 左合成で 0.0 を pad、1.0 はちょうど
+        // blue 位置なので右合成スキップ → 2 stops
         let stops = vec![
             stop(fr(-0.1), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient");
-        assert!(out.is_none());
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
+        assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2610,7 +2698,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.6), [255, 0, 0, 255]),
             stop(fr(0.3), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, "linear-gradient").unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0).unwrap();
         assert!((out[0].offset.get() - 0.6).abs() < 1e-6);
         assert!((out[1].offset.get() - 0.6).abs() < 1e-6);
     }
@@ -2621,7 +2709,127 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 0.0, "linear-gradient");
+        let out = resolve_gradient_stops(&stops, 0.0);
         assert!(out.is_none());
+    }
+}
+
+#[cfg(test)]
+mod renormalize_stops_to_unit_range_tests {
+    use super::renormalize_stops_to_unit_range;
+
+    fn s(offset: f32, r: u8, g: u8, b: u8) -> (f32, [u8; 4]) {
+        (offset, [r, g, b, 255])
+    }
+
+    fn expect(stops: &[(f32, [u8; 4])], expected: &[(f32, [u8; 4])]) {
+        assert_eq!(stops.len(), expected.len(), "stop count mismatch");
+        for (i, (got, exp)) in stops.iter().zip(expected).enumerate() {
+            assert!(
+                (got.0 - exp.0).abs() < 1e-5,
+                "stop[{i}].offset: got {} expected {}",
+                got.0,
+                exp.0
+            );
+            assert_eq!(got.1, exp.1, "stop[{i}].rgba");
+        }
+    }
+
+    #[test]
+    fn no_op_when_all_in_range() {
+        let stops = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])]);
+    }
+
+    #[test]
+    fn synthesize_left_endpoint() {
+        // red at -50%, blue at 100%: at offset 0, t = 0.5 / 1.5 = 1/3
+        // r = 255 + 1/3 * (0 - 255) = 170
+        // g = 0
+        // b = 0   + 1/3 * (255 - 0) = 85
+        let stops = vec![s(-0.5, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[(0.0, [170, 0, 85, 255]), (1.0, [0, 0, 255, 255])],
+        );
+    }
+
+    #[test]
+    fn synthesize_right_endpoint() {
+        // red at 50%, blue at 200%: at offset 1, t = 0.5 / 1.5 = 1/3
+        let stops = vec![s(0.5, 255, 0, 0), s(2.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[
+                (0.0, [255, 0, 0, 255]),
+                (0.5, [255, 0, 0, 255]),
+                (1.0, [170, 0, 85, 255]),
+            ],
+        );
+    }
+
+    #[test]
+    fn all_below_zero_pads_with_last_color() {
+        // stops at -50%, -25%: both out of range; pad after last (blue)
+        let stops = vec![s(-0.5, 255, 0, 0), s(-0.25, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [0, 0, 255, 255]), (1.0, [0, 0, 255, 255])]);
+    }
+
+    #[test]
+    fn all_above_one_pads_with_first_color() {
+        // stops at 150%, 200%: both out of range; pad before first (red)
+        let stops = vec![s(1.5, 255, 0, 0), s(2.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [255, 0, 0, 255]), (1.0, [255, 0, 0, 255])]);
+    }
+
+    #[test]
+    fn boundary_stop_at_zero_no_left_synthesis() {
+        // -50% red, 0% blue, 100% green: 0.0 はちょうど blue で合成不要
+        let stops = vec![s(-0.5, 255, 0, 0), s(0.0, 0, 0, 255), s(1.0, 0, 255, 0)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [0, 0, 255, 255]), (1.0, [0, 255, 0, 255])]);
+    }
+
+    #[test]
+    fn alpha_channel_is_interpolated() {
+        // red(alpha=0) at -50%, blue(alpha=255) at 100%
+        // at offset 0, t = 1/3 → alpha = 0 + 1/3 * 255 ≈ 85
+        let stops = vec![(-0.5_f32, [255, 0, 0, 0]), (1.0_f32, [0, 0, 255, 255])];
+        let result = renormalize_stops_to_unit_range(stops);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].1[3], 85, "alpha at offset 0");
+        assert_eq!(result[1].1[3], 255, "alpha at offset 1");
+    }
+
+    /// Hard stop (coincident positions) は CSS Images 3 §3.5.1 で valid。
+    /// 範囲外 stop の合成中に hard stop が含まれていても、in-range の
+    /// hard stop は preserve され、合成側は隣接区間を正しく拾う。
+    #[test]
+    fn hard_stop_in_range_is_preserved_during_synthesis() {
+        // -50% red, 50% blue, 50% green, 150% yellow
+        // 左端合成: t=0 は (-0.5, red)/(0.5, blue) 区間で alpha=0.5 → [128, 0, 128]
+        // hard stop preserved: blue at 0.5, green at 0.5
+        // 右端合成: t=1 は (0.5, green)/(1.5, yellow) 区間で alpha=0.5 → [128, 255, 0]
+        let stops = vec![
+            s(-0.5, 255, 0, 0),
+            s(0.5, 0, 0, 255),
+            s(0.5, 0, 255, 0),
+            s(1.5, 255, 255, 0),
+        ];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[
+                (0.0, [128, 0, 128, 255]),
+                (0.5, [0, 0, 255, 255]),
+                (0.5, [0, 255, 0, 255]),
+                (1.0, [128, 255, 0, 255]),
+            ],
+        );
     }
 }

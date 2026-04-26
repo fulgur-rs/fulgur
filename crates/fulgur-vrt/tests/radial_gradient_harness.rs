@@ -173,3 +173,86 @@ fn radial_gradient_circular_matches_ring_reference() {
         ref_dir.join("page-1.png").display(),
     );
 }
+
+/// `radial-gradient(circle closest-side, #e53935 -50%, #1e88e5 100%)` の renormalize 動作確認。
+///
+/// 範囲外 stop -50% は drop され、中心 (r=0, offset 0) の色は CSS Images 3 §3.5.1 に従い
+/// `red + (1/3) * (blue - red)` で合成される。同心リング近似 ref の中心側をこの合成色、
+/// 外周を blue にして比較する。
+#[test]
+fn radial_gradient_out_of_range_matches_ring_reference() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_html_path = crate_root.join("fixtures/paint/radial-gradient-out-of-range.html");
+    let test_html = fs::read_to_string(&test_html_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", test_html_path.display()));
+
+    // Synthesized color at offset 0 (alpha = 1/3 between red(-0.5) and blue(1.0)):
+    //   r = 0xe5 + (1/3) * (0x1e - 0xe5) = 229 + (1/3) * (-199) ≈ 162.67 → 0xa3
+    //   g = 0x39 + (1/3) * (0x88 - 0x39) =  57 + (1/3) *   79  ≈  83.33 → 0x53
+    //   b = 0x35 + (1/3) * (0xe5 - 0x35) =  53 + (1/3) *  176  ≈ 111.67 → 0x70
+    let ref_html = build_ring_ref_html((0xa3, 0x53, 0x70), (0x1e, 0x88, 0xe5));
+
+    let spec = RenderSpec {
+        page_size: "A4",
+        margin_pt: Some(0.0),
+        dpi: 150,
+    };
+
+    let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
+    let ref_pdf = render_html_to_pdf(&ref_html, spec).expect("render ref pdf");
+
+    let work_dir = crate_root
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .join("target/vrt-radial-gradient-oor-harness");
+    fs::create_dir_all(&work_dir).expect("create work dir");
+
+    let test_dir = work_dir.join("test");
+    let ref_dir = work_dir.join("ref");
+    let _ = fs::remove_dir_all(&test_dir);
+    let _ = fs::remove_dir_all(&ref_dir);
+    fs::create_dir_all(&test_dir).expect("create test dir");
+    fs::create_dir_all(&ref_dir).expect("create ref dir");
+
+    let test_pdf_path = test_dir.join("test.pdf");
+    let ref_pdf_path = ref_dir.join("ref.pdf");
+    fs::write(&test_pdf_path, &test_pdf).expect("write test pdf");
+    fs::write(&ref_pdf_path, &ref_pdf).expect("write ref pdf");
+
+    let test_img = pdf_to_rgba(&test_pdf_path, spec.dpi, &test_dir).expect("rasterize test");
+    let ref_img = pdf_to_rgba(&ref_pdf_path, spec.dpi, &ref_dir).expect("rasterize ref");
+
+    // 既存 `radial_gradient_circular_matches_ring_reference` と同じ crop 設定を使う。
+    const CROP_MARGIN_RASTER: u32 = 4;
+    let crop_x = (GRADIENT_MARGIN_PX as u64 * 25 / 16) as u32 - CROP_MARGIN_RASTER;
+    let crop_y = crop_x;
+    let crop_w = (GRADIENT_SIZE_PX as u64 * 25 / 16) as u32 + CROP_MARGIN_RASTER * 2;
+    let crop_h = crop_w;
+    let test_crop = image::imageops::crop_imm(&test_img, crop_x, crop_y, crop_w, crop_h).to_image();
+    let ref_crop = image::imageops::crop_imm(&ref_img, crop_x, crop_y, crop_w, crop_h).to_image();
+
+    // Tolerance は `radial_gradient_circular_matches_ring_reference` と同値。
+    let tol = Tolerance {
+        max_channel_diff: 12,
+        max_diff_pixels_ratio: 0.01,
+    };
+
+    let report = diff::compare(&ref_crop, &test_crop, tol);
+
+    assert!(
+        report.pass,
+        "radial gradient out-of-range test↔ref harness failed: {} of {} pixels differ ({:.3}%), max channel diff = {} (tolerance: max_diff={}, ratio<={:.3}%). \
+         test PDF: {}\n  ref PDF: {}\n  test img: {}\n  ref img:  {}",
+        report.diff_pixels,
+        report.total_pixels,
+        report.ratio() * 100.0,
+        report.max_channel_diff,
+        tol.max_channel_diff,
+        tol.max_diff_pixels_ratio * 100.0,
+        test_pdf_path.display(),
+        ref_pdf_path.display(),
+        test_dir.join("page-1.png").display(),
+        ref_dir.join("page-1.png").display(),
+    );
+}
