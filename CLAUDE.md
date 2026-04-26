@@ -138,7 +138,7 @@ callers don't get this guarantee by default — see the tracking issue
   新しい draw / convert / pageable ロジックを書くときは VRT に加えて lib 側にもテストを置く:
   - 純関数 (helper, fixup, math) → 当該モジュールの `#[cfg(test)] mod tests` に unit test
   - レンダリング経路 (`draw_background_layer` の match arm 等、`Engine::render_html` を通って初めて
-    叩かれる箇所) → `crates/fulgur/src/engine.rs` の `tests` モジュールに end-to-end smoke test
+    叩かれる箇所) → `crates/fulgur/tests/render_smoke.rs` に end-to-end smoke test
     (`Engine::builder().build().render_html(html)` で `assert!(!pdf.is_empty())`)
   VRT を後付けで足すと codecov に再指摘されて lib 側 smoke test を追加する手戻りが発生する
   (PR #244 で実例)。最初から両方書くこと。
