@@ -116,3 +116,23 @@ css/css-overflow/overflow-scroll-resize-visibility-hidden-ref.html
 # compositing opacity (rel=match explicit only)
 css/compositing/root-element-background-margin-opacity.html
 css/compositing/root-element-background-margin-opacity-ref.html
+
+# fulgur-m92h (conic-gradient Phase 2: path wedge 分解実装)
+# Bring upstream conic-gradient reftests into the subset. Outcomes
+# (PASS / FAIL / SKIP) are tracked in expectations/lists/bugs.txt.
+css/css-images/conic-gradient-angle.html
+css/css-images/conic-gradient-angle-negative.html
+css/css-images/conic-gradient-center.html
+css/css-images/conic-gradient-center-ref.html
+css/css-images/multiple-position-color-stop-conic.html
+css/css-images/multiple-position-color-stop-conic-2.html
+css/css-images/multiple-position-color-stop-conic-2-ref.html
+css/css-images/normalization-conic.html
+css/css-images/normalization-conic-2.html
+css/css-images/normalization-conic-degenerate.html
+css/css-images/out-of-range-color-stop-conic.html
+css/css-images/repeating-conic-gradient.html
+css/css-images/repeating-conic-gradient-ref.html
+css/css-images/tiled-conic-gradients.html
+css/css-images/tiled-conic-gradients-ref.html
+css/css-images/reference/200x200-blue-black-green-red.html

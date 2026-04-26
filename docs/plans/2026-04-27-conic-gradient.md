@@ -73,6 +73,14 @@ arm にも `BgImageContent::ConicGradient` を追加。
   - 4-quadrant pie chart vs 4 個の絶対配置矩形 ref で pixel diff
   - tolerance: max channel diff 12 / max diff ratio 2%
   - cropped 308×308 で評価 (radial harness と同じ思想)
+- **WPT (`crates/fulgur-wpt/expectations/lists/bugs.txt`):** 11 件 (10 PASS + 1 FAIL)
+  - upstream `web-platform-tests/wpt` の `css/css-images/*conic*` 系を vendor
+  - 通った 10 件: `conic-gradient-angle`, `conic-gradient-angle-negative`,
+    `conic-gradient-center`, `normalization-conic{,-2,-degenerate}`,
+    `out-of-range-color-stop-conic`, `multiple-position-color-stop-conic`,
+    `repeating-conic-gradient`, `tiled-conic-gradients`
+  - 通らなかった 1 件: `multiple-position-color-stop-conic-2` (548/892k px が
+    default tolerance 超え。視覚は完全一致だが sub-pixel AA 差で borderline)
 
 ## Verified Properties
 

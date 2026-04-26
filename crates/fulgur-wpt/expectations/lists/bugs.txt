@@ -75,3 +75,19 @@ PASS  css/css-break/zero-height-page-break-001-print.html  # fulgur-y9pu: regres
 # 厳密一致 reftest は無く、monolithic-overflow-001 が page-edge clip primitive を
 # 検証する点で機構が近い。
 PASS  css/css-page/monolithic-overflow-001-print.html  # fulgur-fy42: regression net (page-edge clip primitive)
+
+# fulgur-m92h: conic-gradient Phase 2 実装 (path wedge 分解、PDF/A 適合)。
+# upstream WPT css-images の conic 系 11 件のうち 10 件が実描画として PASS。
+# 視覚比較 / 角度規約検証は VRT
+# (`crates/fulgur-vrt/tests/conic_gradient_harness.rs`) に。
+PASS  css/css-images/conic-gradient-angle.html               # fulgur-m92h: 基本 angle parameter (4 quadrant)
+PASS  css/css-images/conic-gradient-angle-negative.html      # fulgur-m92h: 負角度 from <angle>
+PASS  css/css-images/conic-gradient-center.html              # fulgur-m92h: at <position> 中心オフセット
+PASS  css/css-images/multiple-position-color-stop-conic.html # fulgur-m92h: 双方向 position 短縮形 (single layer)
+FAIL  css/css-images/multiple-position-color-stop-conic-2.html  # fulgur-m92h: 双方向 position の border AA で sub-pixel 差 (548/892k px exceed default tol; 視覚は完全一致)
+PASS  css/css-images/normalization-conic.html                # fulgur-m92h: stop 正規化 (out-of-range fixup)
+PASS  css/css-images/normalization-conic-2.html              # fulgur-m92h: stop 正規化 (variant)
+PASS  css/css-images/normalization-conic-degenerate.html     # fulgur-m92h: degenerate gradient (全 stop 同位置)
+PASS  css/css-images/out-of-range-color-stop-conic.html      # fulgur-m92h: 範囲外 stop の renormalize
+PASS  css/css-images/repeating-conic-gradient.html           # fulgur-m92h: repeating-conic-gradient
+PASS  css/css-images/tiled-conic-gradients.html              # fulgur-m92h: background-size による tiled conic
