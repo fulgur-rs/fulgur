@@ -622,4 +622,69 @@ li::marker { content: url("bullet.png"); }
             .expect("render should succeed with marker image");
         assert!(!pdf.is_empty(), "PDF should be non-empty");
     }
+
+    /// `repeating-linear-gradient` を end-to-end で render し、`draw_background_layer`
+    /// の `LinearGradient { repeating: true }` 経路 (uniform-grid → tiling pattern) を
+    /// coverage 上カバーする。VRT 側で同等の reftest はあるが、CI が `--exclude fulgur-vrt`
+    /// で coverage 計測しているため lib 側にも smoke test が必要。
+    #[test]
+    fn test_render_repeating_linear_gradient_smoke() {
+        let html = r#"<!doctype html>
+<html><body>
+<div style="width:200px;height:100px;background:repeating-linear-gradient(to right, red 0%, blue 25%);"></div>
+</body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render_html(html)
+            .expect("render repeating-linear-gradient");
+        assert!(!pdf.is_empty());
+    }
+
+    /// `repeating-radial-gradient` の end-to-end smoke test。`RadialGradient { repeating: true }`
+    /// 経路をカバーする。
+    #[test]
+    fn test_render_repeating_radial_gradient_smoke() {
+        let html = r#"<!doctype html>
+<html><body>
+<div style="width:200px;height:200px;background:repeating-radial-gradient(circle 100px at center, red 0px, blue 25px);"></div>
+</body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render_html(html)
+            .expect("render repeating-radial-gradient");
+        assert!(!pdf.is_empty());
+    }
+
+    /// `linear-gradient(to top right, ...)` (Corner direction) の smoke test。
+    /// `draw_background_layer` の `LinearGradientDirection::Corner` 経路は既存だが
+    /// `repeating` 追加に伴い destructure を含む match arm を再書きしたため、
+    /// patch coverage を満たすために lib 側にも end-to-end カバーを置いておく。
+    #[test]
+    fn test_render_linear_gradient_corner_direction_smoke() {
+        let html = r#"<!doctype html>
+<html><body>
+<div style="width:200px;height:100px;background:linear-gradient(to top right, red, blue);"></div>
+</body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render_html(html)
+            .expect("render corner-direction linear gradient");
+        assert!(!pdf.is_empty());
+    }
+
+    /// `background-size` で複数タイルを生成して `try_uniform_grid` Some パスを
+    /// 通す smoke test。これで linear gradient の uniform-grid → tiling pattern
+    /// 経路が coverage に乗る。
+    #[test]
+    fn test_render_linear_gradient_tiled_smoke() {
+        let html = r#"<!doctype html>
+<html><body>
+<div style="width:200px;height:100px;background:linear-gradient(red, blue);background-size:50px 50px;"></div>
+</body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render_html(html)
+            .expect("render tiled linear gradient");
+        assert!(!pdf.is_empty());
+    }
 }
