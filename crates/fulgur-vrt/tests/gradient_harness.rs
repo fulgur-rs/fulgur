@@ -93,6 +93,37 @@ fn build_strip_ref_html(c0: (u8, u8, u8), c1: (u8, u8, u8)) -> String {
     )
 }
 
+/// 任意サイズの box (`width_px` × `height_px`) に `background` プロパティ値を
+/// 載せた HTML を生成する共通ヘルパー。linear / radial 両方の reftest で再利用される。
+fn build_gradient_html(title: &str, width_px: u32, height_px: u32, background: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  html, body {{ margin: 0; padding: 0; background: white; }}
+  .g {{
+    width: {w}px;
+    height: {h}px;
+    margin: {m}px;
+    background: {bg};
+  }}
+</style>
+</head>
+<body>
+  <div class="g"></div>
+</body>
+</html>"#,
+        title = title,
+        w = width_px,
+        h = height_px,
+        m = GRADIENT_MARGIN_PX,
+        bg = background,
+    )
+}
+
 #[test]
 fn linear_gradient_horizontal_matches_strip_reference() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -170,35 +201,67 @@ fn linear_gradient_horizontal_matches_strip_reference() {
     );
 }
 
-/// 共通レイアウト (`linear-gradient-horizontal.html` と同じ box geometry) で
-/// 任意の `background` プロパティ値を載せた HTML を生成する。
-fn build_gradient_html(title: &str, background: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-  html, body {{ margin: 0; padding: 0; background: white; }}
-  .g {{
-    width: {w}px;
-    height: {h}px;
-    margin: {m}px;
-    background: {bg};
-  }}
-</style>
-</head>
-<body>
-  <div class="g"></div>
-</body>
-</html>"#,
-        title = title,
-        w = GRADIENT_WIDTH_PX,
-        h = GRADIENT_HEIGHT_PX,
-        m = GRADIENT_MARGIN_PX,
-        bg = background,
-    )
+/// `test_html` と `ref_html` を fulgur で PDF に書き出し、150dpi でラスタライズして
+/// `tol` で diff を取る共通スキャフォルディング。中間成果物は
+/// `target/<work_dir_name>/{test,ref}/` に残り、失敗時の `assert!` メッセージで
+/// 直接参照できる。`label` は assert メッセージ用の人間可読な識別子。
+fn run_gradient_px_stop_reftest(
+    label: &str,
+    work_dir_name: &str,
+    test_html: &str,
+    ref_html: &str,
+    tol: Tolerance,
+) {
+    let spec = RenderSpec {
+        page_size: "A4",
+        margin_pt: Some(0.0),
+        dpi: 150,
+    };
+
+    let test_pdf = render_html_to_pdf(test_html, spec).expect("render test pdf");
+    let ref_pdf = render_html_to_pdf(ref_html, spec).expect("render ref pdf");
+
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let work_dir = crate_root
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .join("target")
+        .join(work_dir_name);
+    fs::create_dir_all(&work_dir).expect("create work dir");
+
+    let test_dir = work_dir.join("test");
+    let ref_dir = work_dir.join("ref");
+    let _ = fs::remove_dir_all(&test_dir);
+    let _ = fs::remove_dir_all(&ref_dir);
+    fs::create_dir_all(&test_dir).expect("create test dir");
+    fs::create_dir_all(&ref_dir).expect("create ref dir");
+
+    let test_pdf_path = test_dir.join("test.pdf");
+    let ref_pdf_path = ref_dir.join("ref.pdf");
+    fs::write(&test_pdf_path, &test_pdf).expect("write test pdf");
+    fs::write(&ref_pdf_path, &ref_pdf).expect("write ref pdf");
+
+    let test_img = pdf_to_rgba(&test_pdf_path, spec.dpi, &test_dir).expect("rasterize test");
+    let ref_img = pdf_to_rgba(&ref_pdf_path, spec.dpi, &ref_dir).expect("rasterize ref");
+
+    let report = diff::compare(&ref_img, &test_img, tol);
+
+    assert!(
+        report.pass,
+        "{label} px-stop test↔ref harness failed: {} of {} pixels differ ({:.3}%), max channel diff = {} (tolerance: max_diff={}, ratio<={:.3}%). \
+         test PDF: {}\n  ref PDF: {}\n  test img: {}\n  ref img:  {}",
+        report.diff_pixels,
+        report.total_pixels,
+        report.ratio() * 100.0,
+        report.max_channel_diff,
+        tol.max_channel_diff,
+        tol.max_diff_pixels_ratio * 100.0,
+        test_pdf_path.display(),
+        ref_pdf_path.display(),
+        test_dir.join("page-1.png").display(),
+        ref_dir.join("page-1.png").display(),
+    );
 }
 
 /// `linear-gradient(to right, red 0px, blue 50px, blue 350px, green 400px)` のような
@@ -214,50 +277,21 @@ fn build_gradient_html(title: &str, background: &str) -> String {
 /// - LengthPx → Fraction の変換そのものに焦点が当たる
 /// - strip 近似では steep transition (12.5% 幅) で量子化誤差が ~33ch まで膨らみ、
 ///   tolerance を緩めざるを得なかった
-/// - Task 6 の radial gradient と同じ哲学 (test=px, ref=%)
 #[test]
 fn linear_gradient_px_stop_matches_percentage_reference() {
     // 400px box の上で 50px = 12.5%, 350px = 87.5% に解決される piecewise gradient
     let test_html = build_gradient_html(
         "VRT test: linear-gradient with px-typed stops",
+        GRADIENT_WIDTH_PX,
+        GRADIENT_HEIGHT_PX,
         "linear-gradient(to right, red 0px, blue 50px, blue 350px, green 400px)",
     );
     let ref_html = build_gradient_html(
         "VRT ref: linear-gradient with percentage-typed stops",
+        GRADIENT_WIDTH_PX,
+        GRADIENT_HEIGHT_PX,
         "linear-gradient(to right, red 0%, blue 12.5%, blue 87.5%, green 100%)",
     );
-
-    let spec = RenderSpec {
-        page_size: "A4",
-        margin_pt: Some(0.0),
-        dpi: 150,
-    };
-
-    let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
-    let ref_pdf = render_html_to_pdf(&ref_html, spec).expect("render ref pdf");
-
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let work_dir = crate_root
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .join("target/vrt-gradient-px-stops-harness");
-    fs::create_dir_all(&work_dir).expect("create work dir");
-
-    let test_dir = work_dir.join("test");
-    let ref_dir = work_dir.join("ref");
-    let _ = fs::remove_dir_all(&test_dir);
-    let _ = fs::remove_dir_all(&ref_dir);
-    fs::create_dir_all(&test_dir).expect("create test dir");
-    fs::create_dir_all(&ref_dir).expect("create ref dir");
-
-    let test_pdf_path = test_dir.join("test.pdf");
-    let ref_pdf_path = ref_dir.join("ref.pdf");
-    fs::write(&test_pdf_path, &test_pdf).expect("write test pdf");
-    fs::write(&ref_pdf_path, &ref_pdf).expect("write ref pdf");
-
-    let test_img = pdf_to_rgba(&test_pdf_path, spec.dpi, &test_dir).expect("rasterize test");
-    let ref_img = pdf_to_rgba(&ref_pdf_path, spec.dpi, &ref_dir).expect("rasterize ref");
 
     // px → fraction 変換が正しければ test と ref は同一の color stop function を
     // 持つので、tolerance はラスタライズ往復のノイズだけ吸収すれば十分。
@@ -268,57 +302,18 @@ fn linear_gradient_px_stop_matches_percentage_reference() {
         max_diff_pixels_ratio: 0.005,
     };
 
-    let report = diff::compare(&ref_img, &test_img, tol);
-
-    assert!(
-        report.pass,
-        "linear-gradient px-stop test↔ref harness failed: {} of {} pixels differ ({:.3}%), max channel diff = {} (tolerance: max_diff={}, ratio<={:.3}%). \
-         test PDF: {}\n  ref PDF: {}\n  test img: {}\n  ref img:  {}",
-        report.diff_pixels,
-        report.total_pixels,
-        report.ratio() * 100.0,
-        report.max_channel_diff,
-        tol.max_channel_diff,
-        tol.max_diff_pixels_ratio * 100.0,
-        test_pdf_path.display(),
-        ref_pdf_path.display(),
-        test_dir.join("page-1.png").display(),
-        ref_dir.join("page-1.png").display(),
+    run_gradient_px_stop_reftest(
+        "linear-gradient",
+        "vrt-gradient-px-stops-harness",
+        &test_html,
+        &ref_html,
+        tol,
     );
-}
-
-/// 200×200 box の上に任意の `background` プロパティ値を載せた HTML を生成する。
-/// radial gradient の reftest 用に正方形固定レイアウトを採用する。
-fn build_radial_gradient_html(title: &str, background: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-  html, body {{ margin: 0; padding: 0; background: white; }}
-  .g {{
-    width: 200px;
-    height: 200px;
-    margin: {m}px;
-    background: {bg};
-  }}
-</style>
-</head>
-<body>
-  <div class="g"></div>
-</body>
-</html>"#,
-        title = title,
-        m = GRADIENT_MARGIN_PX,
-        bg = background,
-    )
 }
 
 /// `radial-gradient(circle 100px at center, red 0px, blue 50px, blue 100px)` のような
 /// `<length>` 型 stop が、対応する `<percentage>` 解決 (CSS Images §3.6.1) と等価な
-/// PDF を生成することを確認する。
+/// PDF を生成することを確認する (fulgur-n3zk)。
 ///
 /// 戦略: test と ref をどちらも fulgur で描画する。test 側は px 指定で
 /// `LengthPx → Fraction` 変換 (radial gradient の場合の基準は ending shape の半径
@@ -326,54 +321,22 @@ fn build_radial_gradient_html(title: &str, background: &str) -> String {
 /// CSS Images §3.6.1 で「radial gradient の gradient line length は ending shape
 /// の中心から境界までの長さ」と定義されており、circle 100px 指定では rx = 100px。
 /// したがって 0px / 50px / 100px はそれぞれ 0% / 50% / 100% に解決される。
-///
-/// このテストは Task 5 で linear path に対して修正された pt → CSS px 変換が
-/// radial path でも正しく機能していることを保証する (`gradient_line_length_px`
-/// は radial の場合は `rx_px` を渡している)。
 #[test]
 fn radial_gradient_px_stop_matches_percentage_reference() {
     // 200×200 box, circle 100px at center: rx = 100 CSS px
     // 0px = 0%, 50px = 50%, 100px = 100% に解決される piecewise gradient
-    let test_html = build_radial_gradient_html(
+    let test_html = build_gradient_html(
         "VRT test: radial-gradient with px-typed stops",
+        200,
+        200,
         "radial-gradient(circle 100px at center, red 0px, blue 50px, blue 100px)",
     );
-    let ref_html = build_radial_gradient_html(
+    let ref_html = build_gradient_html(
         "VRT ref: radial-gradient with percentage-typed stops",
+        200,
+        200,
         "radial-gradient(circle 100px at center, red 0%, blue 50%, blue 100%)",
     );
-
-    let spec = RenderSpec {
-        page_size: "A4",
-        margin_pt: Some(0.0),
-        dpi: 150,
-    };
-
-    let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
-    let ref_pdf = render_html_to_pdf(&ref_html, spec).expect("render ref pdf");
-
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let work_dir = crate_root
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .join("target/vrt-radial-gradient-px-stops-harness");
-    fs::create_dir_all(&work_dir).expect("create work dir");
-
-    let test_dir = work_dir.join("test");
-    let ref_dir = work_dir.join("ref");
-    let _ = fs::remove_dir_all(&test_dir);
-    let _ = fs::remove_dir_all(&ref_dir);
-    fs::create_dir_all(&test_dir).expect("create test dir");
-    fs::create_dir_all(&ref_dir).expect("create ref dir");
-
-    let test_pdf_path = test_dir.join("test.pdf");
-    let ref_pdf_path = ref_dir.join("ref.pdf");
-    fs::write(&test_pdf_path, &test_pdf).expect("write test pdf");
-    fs::write(&ref_pdf_path, &ref_pdf).expect("write ref pdf");
-
-    let test_img = pdf_to_rgba(&test_pdf_path, spec.dpi, &test_dir).expect("rasterize test");
-    let ref_img = pdf_to_rgba(&ref_pdf_path, spec.dpi, &ref_dir).expect("rasterize ref");
 
     // px → fraction 変換が正しければ test と ref は同一の color stop function を
     // 持つので、tolerance はラスタライズ往復のノイズだけ吸収すれば十分。
@@ -385,21 +348,11 @@ fn radial_gradient_px_stop_matches_percentage_reference() {
         max_diff_pixels_ratio: 0.005,
     };
 
-    let report = diff::compare(&ref_img, &test_img, tol);
-
-    assert!(
-        report.pass,
-        "radial-gradient px-stop test↔ref harness failed: {} of {} pixels differ ({:.3}%), max channel diff = {} (tolerance: max_diff={}, ratio<={:.3}%). \
-         test PDF: {}\n  ref PDF: {}\n  test img: {}\n  ref img:  {}",
-        report.diff_pixels,
-        report.total_pixels,
-        report.ratio() * 100.0,
-        report.max_channel_diff,
-        tol.max_channel_diff,
-        tol.max_diff_pixels_ratio * 100.0,
-        test_pdf_path.display(),
-        ref_pdf_path.display(),
-        test_dir.join("page-1.png").display(),
-        ref_dir.join("page-1.png").display(),
+    run_gradient_px_stop_reftest(
+        "radial-gradient",
+        "vrt-radial-gradient-px-stops-harness",
+        &test_html,
+        &ref_html,
+        tol,
     );
 }
