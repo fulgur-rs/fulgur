@@ -237,31 +237,19 @@ fn draw_background_layer(
 
     match &layer.content {
         BgImageContent::LinearGradient { direction, stops } => {
-            // Gradients require uniform tile sizes within a layer because
-            // both this branch (Corner-direction angle hoisted out of the
-            // loop) and the radial branch below (per-tile shape geometry
-            // cx/cy/rx/ry derived from tw/th) treat (tw0, th0) as canonical.
-            // Raster and SVG tiles don't depend on uniformity (each tile
-            // uses its own tw/th independently), so the assert is scoped to
-            // the gradient arms where the invariant is load-bearing — not
-            // run on the raster/SVG hot path. Float tolerance protects
-            // against a future change that accumulates fractional spacing
-            // per tile drifting by sub-ulp without breaking visual output.
-            let (_, _, tw0, th0) = tiles[0];
-            assert!(
-                tiles
-                    .iter()
-                    .all(|&(_, _, w, h)| (w - tw0).abs() < 1e-4 && (h - th0).abs() < 1e-4),
-                "compute_tile_positions emitted non-uniform tile sizes; \
-                 LinearGradient relies on uniformity",
-            );
-            let angle_rad = match direction {
-                crate::pageable::LinearGradientDirection::Angle(a) => *a,
-                crate::pageable::LinearGradientDirection::Corner(corner) => {
-                    corner_to_angle_rad(*corner, tw0, th0)
-                }
-            };
+            // Compute Corner-direction angle per tile rather than hoisting
+            // from tiles[0]. This removes the uniform-tile-size invariant
+            // requirement entirely. The cost is N atan2 calls (a few
+            // hundred nanoseconds total) — negligible compared to the
+            // krilla shading objects emitted per tile, and avoids any
+            // release-mode assert on a non-local invariant.
             for (tx, ty, tw, th) in &tiles {
+                let angle_rad = match direction {
+                    crate::pageable::LinearGradientDirection::Angle(a) => *a,
+                    crate::pageable::LinearGradientDirection::Corner(corner) => {
+                        corner_to_angle_rad(*corner, *tw, *th)
+                    }
+                };
                 draw_linear_gradient(canvas, angle_rad, stops, *tx, *ty, *tw, *th);
             }
         }
@@ -272,15 +260,8 @@ fn draw_background_layer(
             position_y,
             stops,
         } => {
-            // See LinearGradient arm for rationale on this assert.
-            let (_, _, tw0, th0) = tiles[0];
-            assert!(
-                tiles
-                    .iter()
-                    .all(|&(_, _, w, h)| (w - tw0).abs() < 1e-4 && (h - th0).abs() < 1e-4),
-                "compute_tile_positions emitted non-uniform tile sizes; \
-                 RadialGradient relies on uniformity",
-            );
+            // Per-tile shape geometry — uses each tile's own (tw, th)
+            // for cx/cy/rx/ry. No uniformity assumption needed.
             for (tx, ty, tw, th) in &tiles {
                 draw_radial_gradient(
                     canvas, *shape, size, position_x, position_y, stops, *tx, *ty, *tw, *th,
@@ -1536,6 +1517,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_slightly_less_than_clip() {
+        // Reviewer concern (job 439 Medium): Space mode might "center" a
+        // single tile when image is slightly less than clip. Per
+        // resolve_repeat_axis::Space:
+        //   - image_size > clip_size? false (image is less)
+        //   - count = floor(clip / image) = floor(1.000005) = 1
+        //   - count <= 1 → return single tile at *position* (NOT centered)
+        // So Space does not center for count=1. Verify fast and slow agree
+        // for image just under clip where the fast-path 1e-3 epsilon still
+        // triggers.
+        let img = 99.9995_f32;
+        let clip = 100.0_f32;
+        let fast = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow.len(), 1);
+        let (sx, sy, _, _) = slow[0];
+        let (fx, fy, _, _) = fast[0];
+        assert!((sx - fx).abs() < 1e-3 && (sy - fy).abs() < 1e-3);
     }
 
     #[test]
