@@ -2989,89 +2989,87 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
         style.overflow_y = map_overflow(styles.clone_overflow_y());
 
         // Background image layers
-        if let Some(assets) = assets {
-            let bg_images = styles.clone_background_image();
-            let bg_sizes = styles.clone_background_size();
-            let bg_pos_x = styles.clone_background_position_x();
-            let bg_pos_y = styles.clone_background_position_y();
-            let bg_repeats = styles.clone_background_repeat();
-            let bg_origins = styles.clone_background_origin();
-            let bg_clips = styles.clone_background_clip();
+        let bg_images = styles.clone_background_image();
+        let bg_sizes = styles.clone_background_size();
+        let bg_pos_x = styles.clone_background_position_x();
+        let bg_pos_y = styles.clone_background_position_y();
+        let bg_repeats = styles.clone_background_repeat();
+        let bg_origins = styles.clone_background_origin();
+        let bg_clips = styles.clone_background_clip();
 
-            for (i, image) in bg_images.0.iter().enumerate() {
-                use style::values::computed::image::Image;
-                if let Image::Url(url) = image {
+        for (i, image) in bg_images.0.iter().enumerate() {
+            use style::values::computed::image::Image;
+
+            // Resolve `content` + intrinsic size per image kind. URL images
+            // require an `AssetBundle`; gradients are self-contained.
+            let resolved: Option<(BgImageContent, f32, f32)> = match image {
+                Image::Url(url) => assets.and_then(|a| {
                     let raw_src = match url {
                         style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
                         style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
                     };
-                    // Stylo resolves URLs to absolute (e.g. "file:///bg.png").
-                    // Extract the path/filename for AssetBundle lookup.
                     let src = extract_asset_name(raw_src);
-                    if let Some(data) = assets.get_image(src) {
-                        use crate::image::AssetKind;
+                    let data = a.get_image(src)?;
 
-                        // Resolve content + intrinsic size per asset kind.
-                        let resolved: Option<(BgImageContent, f32, f32)> =
-                            match AssetKind::detect(data) {
-                                AssetKind::Raster(format) => {
-                                    let (iw, ih) = ImagePageable::decode_dimensions(data, format)
-                                        .unwrap_or((1, 1));
+                    use crate::image::AssetKind;
+                    match AssetKind::detect(data) {
+                        AssetKind::Raster(format) => {
+                            let (iw, ih) =
+                                ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+                            Some((
+                                BgImageContent::Raster {
+                                    data: Arc::clone(data),
+                                    format,
+                                },
+                                iw as f32,
+                                ih as f32,
+                            ))
+                        }
+                        AssetKind::Svg => {
+                            let opts = usvg::Options::default();
+                            match usvg::Tree::from_data(data, &opts) {
+                                Ok(tree) => {
+                                    let svg_size = tree.size();
                                     Some((
-                                        BgImageContent::Raster {
-                                            data: Arc::clone(data),
-                                            format,
+                                        BgImageContent::Svg {
+                                            tree: Arc::new(tree),
                                         },
-                                        iw as f32,
-                                        ih as f32,
+                                        svg_size.width(),
+                                        svg_size.height(),
                                     ))
                                 }
-                                AssetKind::Svg => {
-                                    let opts = usvg::Options::default();
-                                    match usvg::Tree::from_data(data, &opts) {
-                                        Ok(tree) => {
-                                            let svg_size = tree.size();
-                                            Some((
-                                                BgImageContent::Svg {
-                                                    tree: Arc::new(tree),
-                                                },
-                                                svg_size.width(),
-                                                svg_size.height(),
-                                            ))
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "failed to parse SVG background-image '{src}': {e}"
-                                            );
-                                            None
-                                        }
-                                    }
+                                Err(e) => {
+                                    log::warn!("failed to parse SVG background-image '{src}': {e}");
+                                    None
                                 }
-                                AssetKind::Unknown => None,
-                            };
-
-                        if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
-                            let size = convert_bg_size(&bg_sizes.0, i);
-                            let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                            let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                            let origin = convert_bg_origin(&bg_origins.0, i);
-                            let clip = convert_bg_clip(&bg_clips.0, i);
-
-                            style.background_layers.push(BackgroundLayer {
-                                content,
-                                intrinsic_width,
-                                intrinsic_height,
-                                size,
-                                position_x: px,
-                                position_y: py,
-                                repeat_x: rx,
-                                repeat_y: ry,
-                                origin,
-                                clip,
-                            });
+                            }
                         }
+                        AssetKind::Unknown => None,
                     }
-                }
+                }),
+                Image::Gradient(g) => resolve_linear_gradient(g, &current_color),
+                _ => None,
+            };
+
+            if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
+                let size = convert_bg_size(&bg_sizes.0, i);
+                let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                let origin = convert_bg_origin(&bg_origins.0, i);
+                let clip = convert_bg_clip(&bg_clips.0, i);
+
+                style.background_layers.push(BackgroundLayer {
+                    content,
+                    intrinsic_width,
+                    intrinsic_height,
+                    size,
+                    position_x: px,
+                    position_y: py,
+                    repeat_x: rx,
+                    repeat_y: ry,
+                    origin,
+                    clip,
+                });
             }
         }
     }
@@ -3098,6 +3096,160 @@ fn extract_opacity_visible(node: &Node) -> (f32, bool) {
 /// "bg.png" → "bg.png" (passthrough for unresolved URLs).
 fn extract_asset_name(url: &str) -> &str {
     url.strip_prefix("file:///").unwrap_or(url)
+}
+
+fn absolute_to_rgba(c: style::color::AbsoluteColor) -> [u8; 4] {
+    let r = (c.components.0.clamp(0.0, 1.0) * 255.0) as u8;
+    let g = (c.components.1.clamp(0.0, 1.0) * 255.0) as u8;
+    let b = (c.components.2.clamp(0.0, 1.0) * 255.0) as u8;
+    let a = (c.alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    [r, g, b, a]
+}
+
+/// Convert a Stylo computed `Gradient` into fulgur's `BgImageContent`.
+///
+/// Phase 1 supports `linear-gradient(...)` only:
+/// - Direction via explicit angle, `to top/right/bottom/left` keyword, or
+///   `to <h> <v>` corner. Corner directions are stored as a flag and
+///   resolved against the gradient box at draw time (CSS Images 3 §3.1.1
+///   defines them in terms of W and H).
+/// - Color stops with explicit `<percentage>` positions, plus auto stops
+///   (positions filled in via even spacing between adjacent fixed stops, per
+///   CSS Images §3.5.1).
+/// - Length-typed stops (`linear-gradient(red 50px, blue)`) are unsupported
+///   in Phase 1 because resolving them requires the gradient line length,
+///   which depends on the box dimensions (only known at draw time). Falls
+///   back to `None` for now.
+/// - Repeating gradients, `radial-gradient`, `conic-gradient`, color
+///   interpolation methods, and interpolation hints are unsupported.
+///
+/// Returned tuple: `(content, intrinsic_w, intrinsic_h)`. Gradients have no
+/// intrinsic size, so we return `(0.0, 0.0)` and the draw path special-cases
+/// gradients to fill the origin rect directly (`background.rs` does not
+/// route gradients through `resolve_size` / tiling).
+fn resolve_linear_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::pageable::{GradientStop, LinearGradientDirection};
+    use style::values::computed::image::{Gradient, LineDirection};
+    use style::values::generics::image::{GradientFlags, GradientItem};
+    use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
+
+    let (direction, items, flags) = match g {
+        Gradient::Linear {
+            direction,
+            items,
+            flags,
+            ..
+        } => (direction, items, flags),
+        Gradient::Radial { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    if flags.contains(GradientFlags::REPEATING) {
+        return None;
+    }
+
+    let direction = match direction {
+        LineDirection::Angle(a) => LinearGradientDirection::Angle(a.radians()),
+        LineDirection::Horizontal(HorizontalPositionKeyword::Right) => {
+            LinearGradientDirection::Angle(std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Horizontal(HorizontalPositionKeyword::Left) => {
+            LinearGradientDirection::Angle(3.0 * std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Top) => {
+            LinearGradientDirection::Angle(0.0)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
+            LinearGradientDirection::Angle(std::f32::consts::PI)
+        }
+        LineDirection::Corner(h, v) => LinearGradientDirection::Corner {
+            right: matches!(h, HorizontalPositionKeyword::Right),
+            bottom: matches!(v, VerticalPositionKeyword::Bottom),
+        },
+    };
+
+    // Pass 1: collect color + (optional) % position. Length stops bail.
+    let mut raw: Vec<(Option<f32>, [u8; 4])> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            GradientItem::SimpleColorStop(c) => {
+                let abs = c.resolve_to_absolute(current_color);
+                raw.push((None, absolute_to_rgba(abs)));
+            }
+            GradientItem::ComplexColorStop { color, position } => {
+                let pct = position.to_percentage().map(|p| p.0)?;
+                let abs = color.resolve_to_absolute(current_color);
+                raw.push((Some(pct), absolute_to_rgba(abs)));
+            }
+            GradientItem::InterpolationHint(_) => return None,
+        }
+    }
+
+    if raw.len() < 2 {
+        return None;
+    }
+
+    // Pass 2: fill in `auto` positions per CSS Images §3.5.1.
+    // - First stop defaults to 0%, last to 100%.
+    // - Each fixed stop must be ≥ the previous fixed stop (clamp non-monotonic).
+    // - Auto stops between fixed positions are evenly spaced.
+    let n = raw.len();
+    let mut positions: Vec<Option<f32>> = raw.iter().map(|(p, _)| *p).collect();
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions[n - 1].is_none() {
+        positions[n - 1] = Some(1.0);
+    }
+    // Clamp monotonicity: if a fixed stop's position is less than the previous
+    // resolved position, raise it (CSS spec requires non-decreasing stops).
+    let mut last_resolved = 0.0_f32;
+    for v in positions.iter_mut().flatten() {
+        if *v < last_resolved {
+            *v = last_resolved;
+        }
+        last_resolved = *v;
+    }
+    // Fill auto runs by even spacing between flanking fixed stops.
+    let mut i = 0;
+    while i < n {
+        if positions[i].is_some() {
+            i += 1;
+            continue;
+        }
+        // [start..end) is a run of `None`s; flanked by Some at start-1 and end.
+        let start = i;
+        let mut end = start;
+        while end < n && positions[end].is_none() {
+            end += 1;
+        }
+        // start ≥ 1 and end < n because we set positions[0] and positions[n-1].
+        let p_prev = positions[start - 1].expect("first slot resolved");
+        let p_next = positions[end].expect("last slot resolved");
+        let span = (end - start + 1) as f32; // number of intervals
+        for (k, slot) in positions.iter_mut().enumerate().take(end).skip(start) {
+            let t = (k - start + 1) as f32 / span;
+            *slot = Some(p_prev + (p_next - p_prev) * t);
+        }
+        i = end;
+    }
+
+    let stops: Vec<GradientStop> = raw
+        .into_iter()
+        .zip(positions)
+        .map(|((_, rgba), pos)| GradientStop {
+            offset: pos.unwrap().clamp(0.0, 1.0),
+            rgba,
+        })
+        .collect();
+
+    Some((
+        BgImageContent::LinearGradient { direction, stops },
+        0.0,
+        0.0,
+    ))
 }
 
 fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) -> BgSize {

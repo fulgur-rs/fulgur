@@ -21,11 +21,12 @@ FAIL  css/CSS2/generated-content/before-after-positioned-002.html  # fulgur-vlr3
 PASS  css/css-grid/grid-definition/grid-layout-repeat-notation.html  # fulgur-86fo: regression net (basic repeat() + bg 多 cell)
 PASS  css/css-grid/grid-definition/grid-layout-basic.html             # fulgur-86fo: regression net (basic explicit columns + bg)
 
-# fulgur-yax4: linear-gradient の基本ケース (3-stop / 斜角) は実は fulgur で通る。
-# fulgur-review.html で白地になった原因は height:100vh や page-break 絡みの
-# interaction の可能性。primary repro は custom fixture で要追補。
-PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: regression net (3-stop, axis direction)
-PASS  css/css-images/linear-gradient-non-square.html    # fulgur-yax4: regression net (4 diagonals on non-square)
+# fulgur-yax4: linear-gradient Phase 1 実装 (axis directions + cardinal
+# keywords + %-positioned stops + auto stop spacing) で実描画として PASS。
+# 独立検証用の test↔ref harness は
+# `crates/fulgur-vrt/tests/gradient_harness.rs` に。
+PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: linear-gradient (3-stop axis direction)
+PASS  css/css-images/linear-gradient-non-square.html    # fulgur-yax4: linear-gradient (4 diagonals on non-square)
 
 # fulgur-z2ho: inline-block 末尾要素がブロック兄弟の後に来た時の配置バグ。
 # 本件は fulgur 内部の Pageable handoff バグで厳密一致 reftest は不在。

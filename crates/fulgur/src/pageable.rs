@@ -735,6 +735,32 @@ pub enum BgClip {
     Text,
 }
 
+/// A single color stop in a CSS gradient, after position resolution.
+///
+/// `offset` is the resolved fraction along the gradient line in `[0.0, 1.0]`.
+/// CSS allows `auto` stop positions which `convert::resolve_linear_gradient`
+/// fills in via even spacing between adjacent fixed stops.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub rgba: [u8; 4],
+}
+
+/// Direction of a CSS `linear-gradient(...)` line.
+///
+/// Explicit angles (`30deg`) and the four cardinal `to <side>` keywords
+/// resolve to a fixed angle at convert time. Corner keywords (`to top right`)
+/// produce an angle that depends on the gradient box's aspect ratio per CSS
+/// Images 3 §3.1.1, so they are resolved at draw time when the box
+/// dimensions are known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinearGradientDirection {
+    /// CSS angle in radians: 0 = "to top", increasing clockwise.
+    Angle(f32),
+    /// "to <h> <v>". `right` = +X, `bottom` = +Y (Y-down).
+    Corner { right: bool, bottom: bool },
+}
+
 /// Content payload for a background-image layer.
 #[derive(Clone, Debug)]
 pub enum BgImageContent {
@@ -745,6 +771,11 @@ pub enum BgImageContent {
     },
     /// SVG vector image — rendered via krilla-svg draw_svg.
     Svg { tree: Arc<usvg::Tree> },
+    /// CSS `linear-gradient(...)`.
+    LinearGradient {
+        direction: LinearGradientDirection,
+        stops: Vec<GradientStop>,
+    },
 }
 
 /// A single CSS background image layer with all associated properties.

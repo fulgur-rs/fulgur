@@ -191,30 +191,6 @@ fn draw_background_layer(
         return;
     }
 
-    let (img_w, img_h) = resolve_size(layer, ow, oh);
-    if img_w <= 0.0 || img_h <= 0.0 {
-        return;
-    }
-
-    let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
-    let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
-
-    let tiles = compute_tile_positions(
-        layer.repeat_x,
-        layer.repeat_y,
-        pos_x,
-        pos_y,
-        img_w,
-        img_h,
-        cx,
-        cy,
-        cw,
-        ch,
-    );
-    if tiles.is_empty() {
-        return;
-    }
-
     let clip_path = if style.has_radius() {
         let clip_radii = compute_inner_radii(&style.border_radii, style, &layer.clip);
         crate::pageable::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
@@ -229,43 +205,185 @@ fn draw_background_layer(
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
     match &layer.content {
-        BgImageContent::Raster { data, format } => {
-            let data: krilla::Data = Arc::clone(data).into();
-            let Ok(image) = format.to_krilla_image(data) else {
+        BgImageContent::LinearGradient { direction, stops } => {
+            // Phase 1: gradient covers the full origin rect (no
+            // background-size / background-repeat support yet).
+            let angle_rad = match direction {
+                crate::pageable::LinearGradientDirection::Angle(a) => *a,
+                crate::pageable::LinearGradientDirection::Corner { right, bottom } => {
+                    corner_to_angle_rad(*right, *bottom, ow, oh)
+                }
+            };
+            draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh, cx, cy, cw, ch);
+        }
+        BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => {
+            let (img_w, img_h) = resolve_size(layer, ow, oh);
+            if img_w <= 0.0 || img_h <= 0.0 {
                 canvas.surface.pop();
                 return;
-            };
-            for (tx, ty, tw, th) in &tiles {
-                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-                    continue;
-                };
-                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-                canvas.surface.push_transform(&transform);
-                canvas.surface.draw_image(image.clone(), size);
-                canvas.surface.pop();
             }
-        }
-        BgImageContent::Svg { tree } => {
-            use krilla_svg::{SurfaceExt, SvgSettings};
-            for (tx, ty, tw, th) in &tiles {
-                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
-                    continue;
-                };
-                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
-                canvas.surface.push_transform(&transform);
-                if canvas
-                    .surface
-                    .draw_svg(tree, size, SvgSettings::default())
-                    .is_none()
-                {
-                    log::warn!("failed to draw SVG background tile");
-                }
+
+            let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
+            let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
+
+            let tiles = compute_tile_positions(
+                layer.repeat_x,
+                layer.repeat_y,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                cx,
+                cy,
+                cw,
+                ch,
+            );
+            if tiles.is_empty() {
                 canvas.surface.pop();
+                return;
+            }
+
+            match &layer.content {
+                BgImageContent::Raster { data, format } => {
+                    let data: krilla::Data = Arc::clone(data).into();
+                    let Ok(image) = format.to_krilla_image(data) else {
+                        canvas.surface.pop();
+                        return;
+                    };
+                    for (tx, ty, tw, th) in &tiles {
+                        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                            continue;
+                        };
+                        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                        canvas.surface.push_transform(&transform);
+                        canvas.surface.draw_image(image.clone(), size);
+                        canvas.surface.pop();
+                    }
+                }
+                BgImageContent::Svg { tree } => {
+                    use krilla_svg::{SurfaceExt, SvgSettings};
+                    for (tx, ty, tw, th) in &tiles {
+                        let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                            continue;
+                        };
+                        let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                        canvas.surface.push_transform(&transform);
+                        if canvas
+                            .surface
+                            .draw_svg(tree, size, SvgSettings::default())
+                            .is_none()
+                        {
+                            log::warn!("failed to draw SVG background tile");
+                        }
+                        canvas.surface.pop();
+                    }
+                }
+                BgImageContent::LinearGradient { .. } => unreachable!("handled above"),
             }
         }
     }
 
     canvas.surface.pop();
+}
+
+/// Resolve a `to <h> <v>` corner direction to a CSS gradient angle (radians)
+/// for a `width × height` gradient box.
+///
+/// Per CSS Images 3 §3.1.1, the gradient line is perpendicular to the
+/// diagonal connecting the two corners NOT in the start/end pair, so the
+/// angle depends on the box's aspect ratio. In Y-down coordinates the
+/// gradient direction is `(H · h_sign, W · v_sign)`, then
+/// `θ = atan2(H · h_sign, −W · v_sign)` because CSS measures clockwise from
+/// the +Y-up axis (`direction(θ) = (sin θ, −cos θ)` in Y-down).
+fn corner_to_angle_rad(right: bool, bottom: bool, w: f32, h: f32) -> f32 {
+    let h_sign = if right { 1.0 } else { -1.0 };
+    let v_sign = if bottom { 1.0 } else { -1.0 };
+    (h * h_sign).atan2(-w * v_sign)
+}
+
+/// Draw a CSS linear-gradient over the origin rect.
+///
+/// CSS angle convention (radians): 0 = "to top", π/2 = "to right",
+/// π = "to bottom", 3π/2 = "to left", clockwise. Krilla / fulgur use Y-down
+/// (top-left origin) so "to top" means decreasing Y.
+///
+/// The gradient line passes through the center of the origin rect with length
+/// `|W·sin θ| + |H·cos θ|` — this is the projection of both diagonals onto the
+/// gradient axis, ensuring the line spans corner-to-corner regardless of angle
+/// (CSS Images §3.1).
+#[allow(clippy::too_many_arguments)]
+fn draw_linear_gradient(
+    canvas: &mut Canvas<'_, '_>,
+    angle_rad: f32,
+    stops: &[crate::pageable::GradientStop],
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+    cx: f32,
+    cy: f32,
+    cw: f32,
+    ch: f32,
+) {
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    let sin = angle_rad.sin();
+    // CSS y-axis points up; our Y-down system flips it. "to top" (angle=0)
+    // must produce a line ending at the top of the box (low Y), so we
+    // negate cos to express the direction in Y-down space.
+    let cos_neg = -angle_rad.cos();
+
+    let length = (ow * sin).abs() + (oh * cos_neg).abs();
+    if length <= 0.0 {
+        return;
+    }
+
+    let cx_box = ox + ow * 0.5;
+    let cy_box = oy + oh * 0.5;
+    let half = length * 0.5;
+    let x1 = cx_box - sin * half;
+    let y1 = cy_box - cos_neg * half;
+    let x2 = cx_box + sin * half;
+    let y2 = cy_box + cos_neg * half;
+
+    let krilla_stops: Vec<krilla::paint::Stop> = stops
+        .iter()
+        .map(|s| krilla::paint::Stop {
+            offset: krilla::num::NormalizedF32::new(s.offset.clamp(0.0, 1.0))
+                .unwrap_or(krilla::num::NormalizedF32::ZERO),
+            color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
+            opacity: krilla::num::NormalizedF32::new((s.rgba[3] as f32) / 255.0)
+                .unwrap_or(krilla::num::NormalizedF32::ONE),
+        })
+        .collect();
+
+    let lg = krilla::paint::LinearGradient {
+        x1,
+        y1,
+        x2,
+        y2,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: krilla_stops,
+        anti_alias: false,
+    };
+
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: lg.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    canvas.surface.set_stroke(None);
+
+    // Fill the visible region. The clip path was already pushed by the
+    // caller, so painting a rectangle covering the clip rect's bounding box
+    // produces the gradient exactly inside the (possibly rounded) clip area.
+    let Some(rect_path) = build_rect_path(cx, cy, cw, ch) else {
+        return;
+    };
+    canvas.surface.draw_path(&rect_path);
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
