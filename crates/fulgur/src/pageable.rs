@@ -746,6 +746,16 @@ pub struct GradientStop {
     pub rgba: [u8; 4],
 }
 
+/// CSS `to <h> <v>` corner direction. The four enumerated variants exhaust
+/// the valid CSS combinations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearGradientCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// Direction of a CSS `linear-gradient(...)` line.
 ///
 /// Explicit angles (`30deg`) and the four cardinal `to <side>` keywords
@@ -757,8 +767,7 @@ pub struct GradientStop {
 pub enum LinearGradientDirection {
     /// CSS angle in radians: 0 = "to top", increasing clockwise.
     Angle(f32),
-    /// "to <h> <v>". `right` = +X, `bottom` = +Y (Y-down).
-    Corner { right: bool, bottom: bool },
+    Corner(LinearGradientCorner),
 }
 
 /// Content payload for a background-image layer.
@@ -1448,7 +1457,7 @@ fn stroke_inset_rect(
     }
 }
 
-fn alpha_to_opacity(alpha: u8) -> krilla::num::NormalizedF32 {
+pub(crate) fn alpha_to_opacity(alpha: u8) -> krilla::num::NormalizedF32 {
     krilla::num::NormalizedF32::new(alpha as f32 / 255.0).unwrap_or(krilla::num::NormalizedF32::ONE)
 }
 

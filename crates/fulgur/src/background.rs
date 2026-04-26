@@ -210,8 +210,8 @@ fn draw_background_layer(
             // background-size / background-repeat support yet).
             let angle_rad = match direction {
                 crate::pageable::LinearGradientDirection::Angle(a) => *a,
-                crate::pageable::LinearGradientDirection::Corner { right, bottom } => {
-                    corner_to_angle_rad(*right, *bottom, ow, oh)
+                crate::pageable::LinearGradientDirection::Corner(corner) => {
+                    corner_to_angle_rad(*corner, ow, oh)
                 }
             };
             draw_linear_gradient(canvas, angle_rad, stops, ox, oy, ow, oh);
@@ -286,7 +286,7 @@ fn draw_background_layer(
     canvas.surface.pop();
 }
 
-/// Resolve a `to <h> <v>` corner direction to a CSS gradient angle (radians)
+/// Resolve a `to <corner>` direction to a CSS gradient angle (radians)
 /// for a `width × height` gradient box.
 ///
 /// Per CSS Images 3 §3.1.1, the gradient line is perpendicular to the
@@ -295,9 +295,14 @@ fn draw_background_layer(
 /// gradient direction is `(H · h_sign, W · v_sign)`, then
 /// `θ = atan2(H · h_sign, −W · v_sign)` because CSS measures clockwise from
 /// the +Y-up axis (`direction(θ) = (sin θ, −cos θ)` in Y-down).
-fn corner_to_angle_rad(right: bool, bottom: bool, w: f32, h: f32) -> f32 {
-    let h_sign = if right { 1.0 } else { -1.0 };
-    let v_sign = if bottom { 1.0 } else { -1.0 };
+fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h: f32) -> f32 {
+    use crate::pageable::LinearGradientCorner::*;
+    let (h_sign, v_sign) = match corner {
+        TopLeft => (-1.0_f32, -1.0_f32),
+        TopRight => (1.0, -1.0),
+        BottomLeft => (-1.0, 1.0),
+        BottomRight => (1.0, 1.0),
+    };
     (h * h_sign).atan2(-w * v_sign)
 }
 
@@ -351,9 +356,7 @@ fn draw_linear_gradient(
             offset: krilla::num::NormalizedF32::new(s.offset.clamp(0.0, 1.0))
                 .expect("offset is clamped to [0, 1]"),
             color: krilla::color::rgb::Color::new(s.rgba[0], s.rgba[1], s.rgba[2]).into(),
-            // (u8 / 255.0) is always in [0, 1], so the conversion cannot fail.
-            opacity: krilla::num::NormalizedF32::new((s.rgba[3] as f32) / 255.0)
-                .expect("u8/255 fits NormalizedF32"),
+            opacity: crate::pageable::alpha_to_opacity(s.rgba[3]),
         })
         .collect();
 
@@ -387,9 +390,7 @@ fn draw_linear_gradient(
         return;
     };
     canvas.surface.draw_path(&rect_path);
-    // Clear the gradient fill so callers that don't set their own fill don't
-    // accidentally inherit it. Matches the pattern in `pageable.rs` border
-    // drawing.
+    // Don't leak the gradient paint to the next draw on this surface.
     canvas.surface.set_fill(None);
 }
 

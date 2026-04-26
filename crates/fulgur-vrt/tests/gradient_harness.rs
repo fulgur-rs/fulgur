@@ -14,11 +14,9 @@
 //! diff. The current implementation should match within ~5 channels per
 //! pixel of step-vs-smooth quantization.
 
-use fulgur::config::{Margin, PageSize};
-use fulgur::engine::Engine;
 use fulgur_vrt::diff::{self};
 use fulgur_vrt::manifest::Tolerance;
-use fulgur_vrt::pdf_render::{RenderSpec, pdf_to_rgba};
+use fulgur_vrt::pdf_render::{RenderSpec, pdf_to_rgba, render_html_to_pdf};
 use std::fs;
 use std::path::PathBuf;
 
@@ -95,21 +93,6 @@ fn build_strip_ref_html(c0: (u8, u8, u8), c1: (u8, u8, u8)) -> String {
     )
 }
 
-fn render_html(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Vec<u8>> {
-    let page = match spec.page_size {
-        "A4" => PageSize::A4,
-        other => anyhow::bail!("unsupported page_size: {other}"),
-    };
-    let mut builder = Engine::builder().page_size(page);
-    if let Some(mpt) = spec.margin_pt {
-        builder = builder.margin(Margin::uniform(mpt));
-    }
-    let engine = builder.build();
-    engine
-        .render_html(html)
-        .map_err(|e| anyhow::anyhow!("fulgur render_html failed: {e}"))
-}
-
 #[test]
 fn linear_gradient_horizontal_matches_strip_reference() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -125,8 +108,8 @@ fn linear_gradient_horizontal_matches_strip_reference() {
         dpi: 150,
     };
 
-    let test_pdf = render_html(&test_html, spec).expect("render test pdf");
-    let ref_pdf = render_html(&ref_html, spec).expect("render ref pdf");
+    let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
+    let ref_pdf = render_html_to_pdf(&ref_html, spec).expect("render ref pdf");
 
     let work_dir = crate_root
         .parent()

@@ -2926,12 +2926,8 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                     blur_px
                 );
             }
-            let color_abs = shadow.base.color.resolve_to_absolute(&current_color);
-            let r = (color_abs.components.0.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let g = (color_abs.components.1.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let b = (color_abs.components.2.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let a = (color_abs.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-            if a == 0 {
+            let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(&current_color));
+            if rgba[3] == 0 {
                 continue; // fully transparent — skip
             }
             style.box_shadows.push(crate::pageable::BoxShadow {
@@ -2939,7 +2935,7 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                 offset_y: px_to_pt(shadow.base.vertical.px()),
                 blur: px_to_pt(blur_px),
                 spread: px_to_pt(shadow.spread.px()),
-                color: [r, g, b, a],
+                color: rgba,
                 inset: false,
             });
         }
@@ -2978,88 +2974,98 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
         style.overflow_x = map_overflow(styles.clone_overflow_x());
         style.overflow_y = map_overflow(styles.clone_overflow_y());
 
-        // Background image layers
+        // Background image layers. Skip the six secondary `clone_*` calls
+        // (sizes/positions/repeats/origins/clips) if no layer is actually
+        // populated — the vast majority of DOM nodes have only `Image::None`.
         let bg_images = styles.clone_background_image();
-        let bg_sizes = styles.clone_background_size();
-        let bg_pos_x = styles.clone_background_position_x();
-        let bg_pos_y = styles.clone_background_position_y();
-        let bg_repeats = styles.clone_background_repeat();
-        let bg_origins = styles.clone_background_origin();
-        let bg_clips = styles.clone_background_clip();
+        let has_real_bg_image = bg_images
+            .0
+            .iter()
+            .any(|i| !matches!(i, style::values::computed::image::Image::None));
+        if has_real_bg_image {
+            let bg_sizes = styles.clone_background_size();
+            let bg_pos_x = styles.clone_background_position_x();
+            let bg_pos_y = styles.clone_background_position_y();
+            let bg_repeats = styles.clone_background_repeat();
+            let bg_origins = styles.clone_background_origin();
+            let bg_clips = styles.clone_background_clip();
 
-        for (i, image) in bg_images.0.iter().enumerate() {
-            use style::values::computed::image::Image;
+            for (i, image) in bg_images.0.iter().enumerate() {
+                use style::values::computed::image::Image;
 
-            // Resolve `content` + intrinsic size per image kind. URL images
-            // require an `AssetBundle`; gradients are self-contained.
-            let resolved: Option<(BgImageContent, f32, f32)> = match image {
-                Image::Url(url) => assets.and_then(|a| {
-                    let raw_src = match url {
-                        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-                        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
-                    };
-                    let src = extract_asset_name(raw_src);
-                    let data = a.get_image(src)?;
+                // Resolve `content` + intrinsic size per image kind. URL images
+                // require an `AssetBundle`; gradients are self-contained.
+                let resolved: Option<(BgImageContent, f32, f32)> = match image {
+                    Image::Url(url) => assets.and_then(|a| {
+                        let raw_src = match url {
+                            style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+                            style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+                        };
+                        let src = extract_asset_name(raw_src);
+                        let data = a.get_image(src)?;
 
-                    use crate::image::AssetKind;
-                    match AssetKind::detect(data) {
-                        AssetKind::Raster(format) => {
-                            let (iw, ih) =
-                                ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
-                            Some((
-                                BgImageContent::Raster {
-                                    data: Arc::clone(data),
-                                    format,
-                                },
-                                iw as f32,
-                                ih as f32,
-                            ))
-                        }
-                        AssetKind::Svg => {
-                            let opts = usvg::Options::default();
-                            match usvg::Tree::from_data(data, &opts) {
-                                Ok(tree) => {
-                                    let svg_size = tree.size();
-                                    Some((
-                                        BgImageContent::Svg {
-                                            tree: Arc::new(tree),
-                                        },
-                                        svg_size.width(),
-                                        svg_size.height(),
-                                    ))
-                                }
-                                Err(e) => {
-                                    log::warn!("failed to parse SVG background-image '{src}': {e}");
-                                    None
+                        use crate::image::AssetKind;
+                        match AssetKind::detect(data) {
+                            AssetKind::Raster(format) => {
+                                let (iw, ih) = ImagePageable::decode_dimensions(data, format)
+                                    .unwrap_or((1, 1));
+                                Some((
+                                    BgImageContent::Raster {
+                                        data: Arc::clone(data),
+                                        format,
+                                    },
+                                    iw as f32,
+                                    ih as f32,
+                                ))
+                            }
+                            AssetKind::Svg => {
+                                let opts = usvg::Options::default();
+                                match usvg::Tree::from_data(data, &opts) {
+                                    Ok(tree) => {
+                                        let svg_size = tree.size();
+                                        Some((
+                                            BgImageContent::Svg {
+                                                tree: Arc::new(tree),
+                                            },
+                                            svg_size.width(),
+                                            svg_size.height(),
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "failed to parse SVG background-image '{src}': {e}"
+                                        );
+                                        None
+                                    }
                                 }
                             }
+                            AssetKind::Unknown => None,
                         }
-                        AssetKind::Unknown => None,
-                    }
-                }),
-                Image::Gradient(g) => resolve_linear_gradient(g, &current_color),
-                _ => None,
-            };
+                    }),
+                    Image::Gradient(g) => resolve_linear_gradient(g, &current_color),
+                    _ => None,
+                };
 
-            if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
-                let size = convert_bg_size(&bg_sizes.0, i);
-                let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                let origin = convert_bg_origin(&bg_origins.0, i);
-                let clip = convert_bg_clip(&bg_clips.0, i);
+                if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
+                    let size = convert_bg_size(&bg_sizes.0, i);
+                    let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                    let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                    let origin = convert_bg_origin(&bg_origins.0, i);
+                    let clip = convert_bg_clip(&bg_clips.0, i);
 
-                style.background_layers.push(BackgroundLayer {
-                    content,
-                    intrinsic_width,
-                    intrinsic_height,
-                    size,
-                    position_x: px,
-                    position_y: py,
-                    repeat_x: rx,
-                    repeat_y: ry,
-                    origin,
-                    clip,
-                });
+                    style.background_layers.push(BackgroundLayer {
+                        content,
+                        intrinsic_width,
+                        intrinsic_height,
+                        size,
+                        position_x: px,
+                        position_y: py,
+                        repeat_x: rx,
+                        repeat_y: ry,
+                        origin,
+                        clip,
+                    });
+                }
             }
         }
     }
@@ -3126,7 +3132,7 @@ fn resolve_linear_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,
 ) -> Option<(BgImageContent, f32, f32)> {
-    use crate::pageable::{GradientStop, LinearGradientDirection};
+    use crate::pageable::{GradientStop, LinearGradientCorner, LinearGradientDirection};
     use style::values::computed::image::{Gradient, LineDirection};
     use style::values::generics::image::{GradientFlags, GradientItem};
     use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
@@ -3165,10 +3171,17 @@ fn resolve_linear_gradient(
         LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
             LinearGradientDirection::Angle(std::f32::consts::PI)
         }
-        LineDirection::Corner(h, v) => LinearGradientDirection::Corner {
-            right: matches!(h, HorizontalPositionKeyword::Right),
-            bottom: matches!(v, VerticalPositionKeyword::Bottom),
-        },
+        LineDirection::Corner(h, v) => {
+            use HorizontalPositionKeyword::*;
+            use VerticalPositionKeyword::*;
+            let corner = match (h, v) {
+                (Left, Top) => LinearGradientCorner::TopLeft,
+                (Right, Top) => LinearGradientCorner::TopRight,
+                (Left, Bottom) => LinearGradientCorner::BottomLeft,
+                (Right, Bottom) => LinearGradientCorner::BottomRight,
+            };
+            LinearGradientDirection::Corner(corner)
+        }
     };
 
     // Pass 1: collect color + (optional) % position. Length stops bail.
