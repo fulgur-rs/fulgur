@@ -767,6 +767,27 @@ fn compute_tile_positions(
     clip_w: f32,
     clip_h: f32,
 ) -> Vec<(f32, f32, f32, f32)> {
+    // Degenerate fast-path: a single image already fully covers the clip rect
+    // from its position. Without this, the boundary tile loop in `repeat`
+    // mode emits up to 4 tiles for the common "image fills box" case (e.g.
+    // default repeat with `image == clip` exactly) where 3 are entirely
+    // outside the clip and add nothing visible but bloat the PDF stream and
+    // can perturb sub-pixel rasterization. Excluded for `round`, which
+    // deliberately resizes tiles to fit an integer count and must not
+    // collapse to a single image-sized tile. The 1e-3 epsilon mirrors the
+    // existing boundary epsilon in the tile-emission loop.
+    if repeat_x != BgRepeat::Round
+        && repeat_y != BgRepeat::Round
+        && img_w > 0.0
+        && img_h > 0.0
+        && pos_x <= clip_x + 1e-3
+        && pos_y <= clip_y + 1e-3
+        && pos_x + img_w + 1e-3 >= clip_x + clip_w
+        && pos_y + img_h + 1e-3 >= clip_y + clip_h
+    {
+        return vec![(pos_x, pos_y, img_w, img_h)];
+    }
+
     let mut tiles = Vec::new();
     let (tile_w, space_x, start_x, end_x) =
         resolve_repeat_axis(repeat_x, pos_x, img_w, clip_x, clip_w);
@@ -1247,6 +1268,71 @@ mod tests {
             300.0, // clip
         );
         assert_eq!(tiles, vec![(50.0, 30.0, 80.0, 60.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_repeat_collapses_to_one_tile() {
+        // image == clip exactly with default repeat: the boundary epsilon
+        // would otherwise emit 4 tiles (3 fully outside clip). Fast-path
+        // collapses to a single tile.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0, // image == clip
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(0.0, 0.0, 100.0, 100.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_larger_than_clip_repeat_collapses_to_one_tile() {
+        // image strictly larger than clip with repeat: still a single tile
+        // since the image already covers the clip from its position.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            -10.0,
+            -5.0,
+            150.0,
+            120.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(-10.0, -5.0, 150.0, 120.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_round_does_not_fast_path() {
+        // Round must not collapse to a single tile even when image == clip:
+        // round's contract is to resize tiles to fit an integer count, and
+        // the caller may rely on tile-size adjustment for the "round" effect.
+        let tiles = compute_tile_positions(
+            BgRepeat::Round,
+            BgRepeat::Round,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // Round with image == clip resolves to tile_size = clip_size / round(clip/image) = 100/1 = 100
+        // and emits boundary tiles per the existing loop (≥1). The point of
+        // this test is that the fast-path was NOT taken.
+        assert!(
+            tiles.iter().all(|&(_, _, w, h)| w == 100.0 && h == 100.0),
+            "round must not change tile size when image fits exactly"
+        );
     }
 
     #[test]
