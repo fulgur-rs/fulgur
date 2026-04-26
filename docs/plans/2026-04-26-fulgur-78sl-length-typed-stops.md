@@ -547,23 +547,31 @@ git commit -m "feat(gradient): preserve length-typed stops as LengthPx in conver
 `crates/fulgur/src/background.rs:412-422` の `let krilla_stops: Vec<...> = stops.iter().map(...)` を以下に変更:
 
 ```rust
-let Some(krilla_stops) = resolve_gradient_stops(stops, length, "linear-gradient") else {
+// `length` は pt 単位 (ow, oh が pt) だが、`GradientStopPosition::LengthPx` は
+// CSS px なので、helper の単位契約 (CSS px) に合わせて変換してから渡す。
+// pt のまま渡すと 4/3× ずれる (coordinate-system.md 参照)。
+let length_px = crate::convert::pt_to_px(length);
+let Some(krilla_stops) = resolve_gradient_stops(stops, length_px, "linear-gradient") else {
     return;
 };
 ```
 
-(注: `length` は同関数 line 399 で計算済の gradient line 長さ。)
+(注: `length` は同関数 line 399 で計算済の gradient line 長さ pt 値。)
 
 **Step 2: draw_radial_gradient の stops 構築を置換**
 
 `crates/fulgur/src/background.rs:541-549` も同様に:
 
 ```rust
-// Radial gradient line length = rx (CSS Images §3.6.1, ellipse でも +X 軸)
-let Some(krilla_stops) = resolve_gradient_stops(stops, rx, "radial-gradient") else {
+// Radial gradient line length = rx (CSS Images §3.6.1, ellipse でも +X 軸)。
+// `rx` は draw 内で pt 単位で計算されるので CSS px に揃える。
+let rx_px = crate::convert::pt_to_px(rx);
+let Some(krilla_stops) = resolve_gradient_stops(stops, rx_px, "radial-gradient") else {
     return;
 };
 ```
+
+**注:** Plan の初回ドラフトでは pt 単位の `length` / `rx` をそのまま helper に渡していたが、これは fulgur-78sl 実装中に発見された 4/3× scale バグの原因 (commit `12d707f` で修正)。Helper は CSS px 契約 (`GradientStopPosition::LengthPx` と単位を揃える) なので、call site で `crate::convert::pt_to_px` で変換するのが正しい。
 
 **Step 3: 既存テスト全 PASS 確認**
 
