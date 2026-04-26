@@ -26,7 +26,7 @@ PASS  css/css-grid/grid-definition/grid-layout-basic.html             # fulgur-8
 # 独立検証用の test↔ref harness は
 # `crates/fulgur-vrt/tests/gradient_harness.rs` に。
 PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: linear-gradient (3-stop axis direction)
-FAIL  css/css-images/linear-gradient-non-square.html    # fulgur-woge: latent regression noticed during fulgur-4ono (699/891k pixels max_ch=206); unrelated to bg-property work — diff is in test↔ref path, separate investigation needed
+FAIL  css/css-images/linear-gradient-non-square.html    # fulgur-woge: latent regression — bisected to pre-fulgur-4ono. main HEAD 6dedee0 with forced rebuild (touch lib.rs && cargo build) reproduces 699/891662 pixels max_ch=206, identical to this branch after the fast-path collapse (which restores Phase 1 byte stream — gradient golden hashes match `git show main:`). Therefore not caused by Task 2's corner_to_angle_rad arg change; separate investigation tracked in fulgur-woge.
 
 # fulgur-gm56: radial-gradient Phase 2 実装 (shape/size/position + %-positioned
 # stops + auto stop spacing) は実装済み。視覚比較は VRT

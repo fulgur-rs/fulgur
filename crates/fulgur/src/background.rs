@@ -240,7 +240,14 @@ fn draw_background_layer(
             // All tiles share the same (tw, th) within a layer
             // (compute_tile_positions produces uniform tile sizes), so the
             // gradient angle is constant per layer for Corner directions.
+            // The debug_assert below catches any future change to the tile
+            // generator that violates that invariant.
             let (_, _, tw0, th0) = tiles[0];
+            debug_assert!(
+                tiles.iter().all(|&(_, _, w, h)| w == tw0 && h == th0),
+                "compute_tile_positions emitted non-uniform tile sizes; the \
+                 hoisted Corner-direction angle below would be wrong",
+            );
             let angle_rad = match direction {
                 crate::pageable::LinearGradientDirection::Angle(a) => *a,
                 crate::pageable::LinearGradientDirection::Corner(corner) => {
@@ -780,6 +787,10 @@ fn compute_tile_positions(
     // deliberately resizes tiles to fit an integer count and must not
     // collapse to a single image-sized tile. The 1e-3 epsilon mirrors the
     // existing boundary epsilon in the tile-emission loop.
+    //
+    // Parity with the slow path is enforced by
+    // `tile_positions_*_fast_slow_parity_*` tests below, which call
+    // `compute_tile_positions_slow` directly to compare.
     if repeat_x != BgRepeat::Round
         && repeat_y != BgRepeat::Round
         && img_w > 0.0
@@ -792,6 +803,27 @@ fn compute_tile_positions(
         return vec![(pos_x, pos_y, img_w, img_h)];
     }
 
+    compute_tile_positions_slow(
+        repeat_x, repeat_y, pos_x, pos_y, img_w, img_h, clip_x, clip_y, clip_w, clip_h,
+    )
+}
+
+/// Slow path: emit tiles via the `resolve_repeat_axis`-driven loop.
+/// Extracted from `compute_tile_positions` so tests can compare fast-path
+/// output against this path for the same input.
+#[allow(clippy::too_many_arguments)]
+fn compute_tile_positions_slow(
+    repeat_x: BgRepeat,
+    repeat_y: BgRepeat,
+    pos_x: f32,
+    pos_y: f32,
+    img_w: f32,
+    img_h: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
     let mut tiles = Vec::new();
     let (tile_w, space_x, start_x, end_x) =
         resolve_repeat_axis(repeat_x, pos_x, img_w, clip_x, clip_w);
@@ -1314,11 +1346,51 @@ mod tests {
     }
 
     #[test]
-    fn tile_positions_image_equals_clip_space_parity_with_slow_path() {
-        // Space mode for image >= clip: resolve_repeat_axis returns a single
-        // tile at position (count <= 1 branch). Fast-path also returns one
-        // tile. Verify they agree byte-for-byte so the fast-path is a true
-        // optimization, not a behavior change for Space.
+    fn tile_positions_fast_slow_parity_repeat_image_equals_clip() {
+        // Direct fast-path vs slow-path comparison: same input, the fast
+        // path must produce the same tile set as the slow path would.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // The slow path emits 4 tiles (the +0.01 boundary epsilon); the
+        // fast path emits 1. They cover the same visible area: tile[0] of
+        // slow == fast[0], and the other 3 slow tiles lie entirely outside
+        // the clip rect (right, below, and bottom-right of clip end).
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow[0], fast[0]);
+        for &(tx, ty, _, _) in slow.iter().skip(1) {
+            assert!(
+                tx >= 100.0 - 1e-3 || ty >= 100.0 - 1e-3,
+                "slow-path extra tile ({tx}, {ty}) should be outside clip rect"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_equals_clip() {
+        // For Space×Space with image == clip, the slow path's count <= 1
+        // branch produces a single tile at position. Fast path matches.
         let fast = compute_tile_positions(
             BgRepeat::Space,
             BgRepeat::Space,
@@ -1331,14 +1403,38 @@ mod tests {
             100.0,
             100.0,
         );
-        // Slow-path equivalent: same parameters but skip the fast-path by
-        // making image strictly less than clip on one axis (so Space's
-        // count <= 1 branch fires for the equal axis, but neither falls
-        // into the fast-path). This is a sanity check that the count <= 1
-        // branch indeed yields a single tile.
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast, slow, "fast and slow paths must agree for Space");
         assert_eq!(fast.len(), 1);
-        let (tx, ty, tw, th) = fast[0];
-        assert_eq!((tx, ty, tw, th), (0.0, 0.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_image_larger_than_clip() {
+        // Image strictly larger than clip with negative position: fast path
+        // returns single image-sized tile at position; slow path also
+        // emits a single tile (no-repeat axis logic via Space's image >
+        // clip branch). Compare directly.
+        for repeat in [BgRepeat::Repeat, BgRepeat::Space, BgRepeat::NoRepeat] {
+            let fast = compute_tile_positions(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, 0.0, 0.0, 100.0, 100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, 0.0, 0.0, 100.0, 100.0,
+            );
+            assert_eq!(fast.len(), 1, "{repeat:?}: fast-path must be 1 tile");
+            assert_eq!(slow[0], fast[0], "{repeat:?}: tile[0] must match");
+        }
     }
 
     #[test]
