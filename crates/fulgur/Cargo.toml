@@ -29,6 +29,13 @@ minijinja = { version = "=2.19.0", features = ["unstable_machinery"] }
 serde_json = "1"
 log = "0.4"
 lopdf = "0.40.0"
+# Force-enable `image`'s `png` feature so PNG decoding (used by blitz-dom for
+# `<img>` tags and CSS background-image) works consistently across every fulgur
+# build target. Without this, `blitz-dom-0.2.4`'s `image = { default-features =
+# false }` makes PNG decoding depend on which other workspace member is built
+# alongside fulgur, producing different page-count outputs in CLI vs WPT runner
+# (fulgur-zsn8).
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 
 # WASM (wasm32-unknown-unknown) build support: pulled in transitively by lopdf/rand.

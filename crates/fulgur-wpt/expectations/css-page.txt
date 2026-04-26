@@ -121,8 +121,8 @@ FAIL  css/css-page/monolithic-overflow-030-print.html  # page 1 diff: 12005/8916
 FAIL  css/css-page/monolithic-overflow-031-print.html  # page count mismatch: test=1 ref=2
 FAIL  css/css-page/monolithic-overflow-032-print.tentative.html  # page count mismatch: test=2 ref=3
 PASS  css/css-page/page-background-001-print.html
-PASS  css/css-page/page-background-002-print.html
-PASS  css/css-page/page-background-003-print.html
+FAIL  css/css-page/page-background-002-print.html  # fulgur-zsn8: <img position:absolute> consumes a page (layout fix tracked separately)
+FAIL  css/css-page/page-background-003-print.html  # fulgur-zsn8: <div position:absolute> consumes a page (layout fix tracked separately)
 FAIL  css/css-page/page-background-004-print.html  # page 1 diff: 124867/150000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-background-005-print.html  # page 1 diff: 82120/180000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-background-image-print.html  # page 1 diff: 32446/891662 pixels exceed tol (max_ch=255)
