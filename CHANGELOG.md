@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-04-26
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(gradient): CSS linear-gradient Phase 1 by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/235
+### Bug Fixes
+* fix(vrt): respect CSS @page margin in runner by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/219
+* fix(fulgur-zsn8): force-enable image png feature for build determinism by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/236
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.8.0...v0.9.0
+
 ## [0.8.0] - 2026-04-25
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
