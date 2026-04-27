@@ -870,6 +870,140 @@ mod tests {
         );
     }
 
+    // ---- recalculate_paragraph_line_boxes tests ----
+
+    #[test]
+    fn recalculate_paragraph_line_boxes_empty_slice_is_noop() {
+        // Just verify the helper accepts an empty slice without panicking.
+        let mut lines: Vec<crate::paragraph::ShapedLine> = Vec::new();
+        super::recalculate_paragraph_line_boxes(&mut lines);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn recalculate_paragraph_line_boxes_rebases_multiple_lines() {
+        use crate::paragraph::ShapedLine;
+        // Three lines, each height 20.0 with paragraph-absolute baselines
+        // 16.0 / 36.0 / 56.0 (i.e. line N's baseline = 16.0 + 20*N).
+        // With items: vec![] the helper falls back to default metrics, and
+        // `recalculate_line_box` over an empty `items` is the identity on
+        // (height, baseline). So after the helper round-trips through
+        // line-local and back, every baseline must be **the same** as the
+        // input — the function only converts coordinate system, doesn't
+        // mutate the layout when there are no images.
+        let mut lines = vec![
+            ShapedLine {
+                height: 20.0,
+                baseline: 16.0,
+                items: vec![],
+            },
+            ShapedLine {
+                height: 20.0,
+                baseline: 36.0,
+                items: vec![],
+            },
+            ShapedLine {
+                height: 20.0,
+                baseline: 56.0,
+                items: vec![],
+            },
+        ];
+        super::recalculate_paragraph_line_boxes(&mut lines);
+        assert!((lines[0].baseline - 16.0).abs() < 0.01, "line 0 baseline");
+        assert!((lines[1].baseline - 36.0).abs() < 0.01, "line 1 baseline");
+        assert!((lines[2].baseline - 56.0).abs() < 0.01, "line 2 baseline");
+        // Heights are unchanged when there are no inline images.
+        for (i, l) in lines.iter().enumerate() {
+            assert!(
+                (l.height - 20.0).abs() < 0.01,
+                "line {} height changed: {}",
+                i,
+                l.height,
+            );
+        }
+    }
+
+    #[test]
+    fn recalculate_paragraph_line_boxes_handles_image_computed_y_rebase() {
+        use super::super::tests::sample_png_arc;
+        use crate::image::ImageFormat;
+        use crate::paragraph::{InlineImage, LineItem, ShapedLine, VerticalAlign};
+
+        // Build two identical lines, each carrying a single inline image.
+        // Both lines have height 20.0 and baseline 16.0 (line-local), and
+        // the image is small enough that `recalculate_line_box` does NOT
+        // expand the line box. With identical layouts both lines compute
+        // the SAME line-local img_top in `recalculate_line_box`. The helper
+        // then promotes line 1's `computed_y` by `new_y_acc` (= line 0's
+        // post-expansion height = 20.0) so it lands paragraph-absolute.
+        //
+        // Key invariant: `lines[1].computed_y - lines[0].computed_y` must
+        // equal `lines[0].height` after the helper runs. That's the
+        // line-local → paragraph-absolute rebase contract.
+        fn make_image() -> InlineImage {
+            InlineImage {
+                data: sample_png_arc(),
+                format: ImageFormat::Png,
+                width: 8.0,
+                height: 8.0,
+                x_offset: 0.0,
+                vertical_align: VerticalAlign::Baseline,
+                opacity: 1.0,
+                visible: true,
+                computed_y: 0.0,
+                link: None,
+            }
+        }
+        let mut lines = vec![
+            ShapedLine {
+                height: 20.0,
+                baseline: 16.0,
+                items: vec![LineItem::Image(make_image())],
+            },
+            // Line 1 baseline is paragraph-absolute (= 16.0 + 20.0).
+            ShapedLine {
+                height: 20.0,
+                baseline: 36.0,
+                items: vec![LineItem::Image(make_image())],
+            },
+        ];
+        super::recalculate_paragraph_line_boxes(&mut lines);
+
+        let cy0 = match &lines[0].items[0] {
+            LineItem::Image(img) => img.computed_y,
+            _ => panic!("line 0 image"),
+        };
+        let cy1 = match &lines[1].items[0] {
+            LineItem::Image(img) => img.computed_y,
+            _ => panic!("line 1 image"),
+        };
+        // Expected gap is line 0's expanded height; for an 8pt baseline
+        // image and 16/4/8 fallback metrics the line box is unchanged
+        // (img_top = 16 - 8 = 8 lies inside [0, 20]), so height stays 20.
+        let line0_height_after = lines[0].height;
+        assert!(
+            (line0_height_after - 20.0).abs() < 0.01,
+            "line 0 height should not expand for an 8pt baseline image, got {}",
+            line0_height_after,
+        );
+        let gap = cy1 - cy0;
+        assert!(
+            (gap - line0_height_after).abs() < 0.01,
+            "line 1 image should be rebased by line 0's height (expected gap ~{}, got {})",
+            line0_height_after,
+            gap,
+        );
+        // Sanity: line 0's image is line-local, so its computed_y must lie
+        // within [0, line.height]. (For Baseline align: cy0 = baseline - h
+        // = 16 - 8 = 8, then plus shift=0.)
+        assert!(
+            cy0 >= 0.0 && cy0 <= lines[0].height,
+            "line 0 computed_y should be line-local in [0, {}], got {}",
+            lines[0].height,
+            cy0,
+        );
+    }
+
     // ---- resolve_enclosing_anchor tests ----
 
     #[test]
