@@ -593,3 +593,327 @@ fn escape_attr(s: &str) -> String {
 fn strip_display_none(css: &str) -> String {
     css.replace("display: none", "").replace("display:none", "")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn simple_root() -> Box<dyn Pageable> {
+        use crate::pageable::{BlockPageable, SpacerPageable};
+        Box::new(BlockPageable::new(vec![Box::new(SpacerPageable::new(
+            100.0,
+        ))]))
+    }
+
+    // ── escape_attr ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_attr_no_special_chars() {
+        assert_eq!(escape_attr("plain text"), "plain text");
+    }
+
+    #[test]
+    fn escape_attr_ampersand() {
+        assert_eq!(escape_attr("foo&bar"), "foo&amp;bar");
+    }
+
+    #[test]
+    fn escape_attr_double_quote() {
+        assert_eq!(escape_attr(r#"foo"bar"#), "foo&quot;bar");
+    }
+
+    #[test]
+    fn escape_attr_less_than() {
+        assert_eq!(escape_attr("foo<bar"), "foo&lt;bar");
+    }
+
+    #[test]
+    fn escape_attr_greater_than() {
+        assert_eq!(escape_attr("foo>bar"), "foo&gt;bar");
+    }
+
+    #[test]
+    fn escape_attr_all_specials_combined() {
+        assert_eq!(
+            escape_attr(r#"<"a" & "b">"#),
+            "&lt;&quot;a&quot; &amp; &quot;b&quot;&gt;"
+        );
+    }
+
+    #[test]
+    fn escape_attr_empty_string() {
+        assert_eq!(escape_attr(""), "");
+    }
+
+    // ── strip_display_none ────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_display_none_spaced_variant() {
+        let css = ".x { display: none; color: red; }";
+        let result = strip_display_none(css);
+        assert!(!result.contains("display: none"));
+        assert!(result.contains("color: red"));
+    }
+
+    #[test]
+    fn strip_display_none_unspaced_variant() {
+        let css = ".x { display:none; margin: 0; }";
+        let result = strip_display_none(css);
+        assert!(!result.contains("display:none"));
+        assert!(result.contains("margin: 0"));
+    }
+
+    #[test]
+    fn strip_display_none_no_match_is_noop() {
+        let css = "body { color: blue; }";
+        assert_eq!(strip_display_none(css), css);
+    }
+
+    #[test]
+    fn strip_display_none_both_variants() {
+        let css = "a { display: none; } b { display:none; }";
+        let result = strip_display_none(css);
+        assert!(!result.contains("display: none"));
+        assert!(!result.contains("display:none"));
+    }
+
+    // ── width_key ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn width_key_matches_to_bits() {
+        let w = 42.5_f32;
+        assert_eq!(width_key(w), w.to_bits());
+    }
+
+    #[test]
+    fn width_key_distinct_values_differ() {
+        assert_ne!(width_key(1.0), width_key(2.0));
+    }
+
+    #[test]
+    fn width_key_zero() {
+        assert_eq!(width_key(0.0_f32), 0_f32.to_bits());
+    }
+
+    // ── parse_datetime ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_datetime_valid_year_only() {
+        assert!(parse_datetime("2024").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_year_month() {
+        assert!(parse_datetime("2024-06").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_year_month_day() {
+        assert!(parse_datetime("2024-06-15").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_full_datetime() {
+        assert!(parse_datetime("2024-06-15T10:30:45").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_full_datetime_with_z() {
+        assert!(parse_datetime("2024-06-15T10:30:45Z").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_midnight() {
+        assert!(parse_datetime("2024-01-01T00:00:00").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_hour_only_in_time() {
+        assert!(parse_datetime("2024-01-01T12").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_valid_hour_minute_in_time() {
+        assert!(parse_datetime("2024-01-01T12:30").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_empty_string() {
+        assert!(parse_datetime("").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_year() {
+        assert!(parse_datetime("abcd").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_month() {
+        assert!(parse_datetime("2024-ab").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_day() {
+        assert!(parse_datetime("2024-06-ab").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_hour() {
+        assert!(parse_datetime("2024-06-15Tabc:30:45").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_minute() {
+        assert!(parse_datetime("2024-06-15T10:abc:45").is_none());
+    }
+
+    #[test]
+    fn parse_datetime_invalid_non_numeric_second() {
+        assert!(parse_datetime("2024-06-15T10:30:abc").is_none());
+    }
+
+    // ── render_to_pdf ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_to_pdf_produces_valid_pdf() {
+        let pdf = render_to_pdf(simple_root(), &Config::default()).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_to_pdf_landscape_page() {
+        let config = Config::builder().landscape(true).build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_bookmarks_enabled() {
+        let config = Config::builder().bookmarks(true).build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_all_metadata_fields() {
+        let config = Config::builder()
+            .title("My Title")
+            .author("Alice")
+            .description("A description")
+            .keywords(["rust", "pdf"])
+            .lang("en-US")
+            .creator("my-creator")
+            .producer("my-producer")
+            .creation_date("2024-06-15T10:30:45Z")
+            .build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_creation_date_parse_failure_is_ignored() {
+        let config = Config::builder().creation_date("not-a-date").build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    // ── render_to_pdf_with_gcpm ───────────────────────────────────────────────
+
+    #[test]
+    fn render_to_pdf_with_gcpm_empty_context() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &Config::default(),
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_landscape() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder().landscape(true).build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_bookmarks_enabled() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder().bookmarks(true).build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_page_settings_keyword() {
+        use crate::gcpm::running::RunningElementStore;
+        use crate::gcpm::{GcpmContext, PageSettingsRule, PageSizeDecl};
+        let gcpm = GcpmContext {
+            page_settings: vec![PageSettingsRule {
+                page_selector: None,
+                size: Some(PageSizeDecl::Keyword("A4".into())),
+                margin: None,
+            }],
+            ..GcpmContext::default()
+        };
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &Config::default(),
+            &gcpm,
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert!(!pdf.is_empty());
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_all_metadata_fields() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder()
+            .title("GCPM Title")
+            .author("Author")
+            .description("description")
+            .keywords(["kw1"])
+            .lang("fr")
+            .creator("creator")
+            .producer("producer")
+            .creation_date("2024-01-01")
+            .build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert!(!pdf.is_empty());
+    }
+}
