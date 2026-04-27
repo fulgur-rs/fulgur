@@ -7,8 +7,8 @@ use crate::image::ImagePageable;
 use crate::pageable::{
     BlockPageable, BlockStyle, CounterOpMarkerPageable, CounterOpWrapperPageable, ImageMarker,
     ListItemMarker, ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
-    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable, StringSetWrapperPageable,
-    TablePageable, TransformWrapperPageable,
+    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
+    StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
 };
 use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ParagraphPageable, ShapedGlyph,
