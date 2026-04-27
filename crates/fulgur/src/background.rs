@@ -1146,32 +1146,46 @@ fn normalize_conic_stops(stops: &[crate::pageable::GradientStop]) -> Vec<(f32, [
         .collect()
 }
 
-/// 0..1 fraction を normalized stops で線形補間して RGBA を返す。
+/// fraction `t` を normalized stops で線形補間して RGBA を返す。
+///
+/// 範囲外 `t` は first / last 端点の色を返す。`t` が coincident stop
+/// (hard transition) 境界上に乗った場合は **後ろの色を採用する** — CSS Images
+/// §3.5.1: 同位置の複数 stop は seam を後続 stop の色が占める。
+///
+/// アルゴリズム: stops は position 昇順前提。`p <= t` を満たす最右 stop の
+/// 直後を起点 segment にすれば、coincident pair (p1 == p2 == t) の境界上で
+/// 自動的に「後の色」が拾える ([..., (t, A), (t, B), (next, B)] で t を渡すと
+/// 起点 (t, B) → next 区間の alpha=0 → B が返る)。
 fn sample_conic_color(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
     if stops.is_empty() {
         return [0, 0, 0, 255];
     }
-    if t <= stops[0].0 {
+    if t < stops[0].0 {
         return stops[0].1;
     }
     if t >= stops[stops.len() - 1].0 {
         return stops[stops.len() - 1].1;
     }
-    for w in stops.windows(2) {
-        let (p1, c1) = w[0];
-        let (p2, c2) = w[1];
-        if t >= p1 && t <= p2 {
-            let span = (p2 - p1).max(1e-9);
-            let alpha = ((t - p1) / span).clamp(0.0, 1.0);
-            return [
-                lerp_u8(c1[0], c2[0], alpha),
-                lerp_u8(c1[1], c2[1], alpha),
-                lerp_u8(c1[2], c2[2], alpha),
-                lerp_u8(c1[3], c2[3], alpha),
-            ];
-        }
+
+    // `p <= t` を満たす最右 stop index。stops は昇順なのでこの index 以降
+    // (idx + 1 を含む) は全て p > t。
+    let idx = stops.iter().rposition(|&(p, _)| p <= t).unwrap_or(0);
+    if idx + 1 >= stops.len() {
+        return stops[idx].1;
     }
-    stops[stops.len() - 1].1
+    let (p1, c1) = stops[idx];
+    let (p2, c2) = stops[idx + 1];
+    let span = p2 - p1;
+    if span <= 0.0 {
+        return c2;
+    }
+    let alpha = ((t - p1) / span).clamp(0.0, 1.0);
+    [
+        lerp_u8(c1[0], c2[0], alpha),
+        lerp_u8(c1[1], c2[1], alpha),
+        lerp_u8(c1[2], c2[2], alpha),
+        lerp_u8(c1[3], c2[3], alpha),
+    ]
 }
 
 /// uniform-grid 検出時の Tiling Pattern 描画ヘルパー。
@@ -3520,5 +3534,20 @@ mod conic_helpers_tests {
         let stops = vec![(0.2, [255, 0, 0, 255]), (0.8, [0, 0, 255, 255])];
         assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
         assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_coincident_stops_returns_later_color() {
+        // CSS Images §3.5.1 hard transition: red 0%-50%, blue 50%-100% → t=0.5 should be blue.
+        let stops = vec![
+            (0.0, [255, 0, 0, 255]),
+            (0.5, [255, 0, 0, 255]),
+            (0.5, [0, 0, 255, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        assert_eq!(sample_conic_color(&stops, 0.5), [0, 0, 255, 255]);
+        // Just before/after seam: still in correct half.
+        assert_eq!(sample_conic_color(&stops, 0.499), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 0.501), [0, 0, 255, 255]);
     }
 }
