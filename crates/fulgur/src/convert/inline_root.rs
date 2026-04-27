@@ -870,6 +870,101 @@ mod tests {
         );
     }
 
+    // ---- resolve_enclosing_anchor tests ----
+
+    #[test]
+    fn resolve_enclosing_anchor_returns_none_when_no_ancestor_anchor() {
+        let html = r#"<html><body><p>plain text</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        // Walk to <p>'s first child (the text node) to be sure no ancestor
+        // chain hits an <a>.
+        let text_id = doc
+            .get_node(p_id)
+            .and_then(|n| n.children.first().copied())
+            .expect("text child of <p>");
+
+        let result = super::resolve_enclosing_anchor(doc.deref(), text_id);
+        assert!(
+            result.is_none(),
+            "no <a> ancestor should yield None, got {:?}",
+            result.map(|(id, _)| id),
+        );
+    }
+
+    #[test]
+    fn resolve_enclosing_anchor_returns_external_for_https_href() {
+        let html = r#"<html><body><p>see <a href="https://example.com">here</a></p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let a_id = find_tag(&doc, "a").expect("a exists");
+        // Start the walk from the text node *inside* the anchor so the helper
+        // has to walk up at least one level to find the enclosing <a>.
+        let inner_text_id = doc
+            .get_node(a_id)
+            .and_then(|n| n.children.first().copied())
+            .expect("text child of <a>");
+
+        let (anchor_id, span) =
+            super::resolve_enclosing_anchor(doc.deref(), inner_text_id).expect("anchor resolved");
+        assert_eq!(anchor_id, a_id, "returned id should be the <a> element");
+        match &span.target {
+            LinkTarget::External(arc) => {
+                assert_eq!(arc.as_str(), "https://example.com");
+            }
+            other => panic!("expected External link target, got {:?}", other),
+        }
+        assert_eq!(span.alt_text.as_deref(), Some("here"));
+    }
+
+    #[test]
+    fn resolve_enclosing_anchor_returns_internal_for_fragment_href() {
+        let html = r##"<html><body><p>see <a href="#sec1">section</a></p></body></html>"##;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let a_id = find_tag(&doc, "a").expect("a exists");
+        let inner_text_id = doc
+            .get_node(a_id)
+            .and_then(|n| n.children.first().copied())
+            .expect("text child of <a>");
+
+        let (anchor_id, span) = super::resolve_enclosing_anchor(doc.deref(), inner_text_id)
+            .expect("internal anchor resolved");
+        assert_eq!(anchor_id, a_id);
+        match &span.target {
+            LinkTarget::Internal(arc) => {
+                // The leading '#' must be stripped per the helper's contract.
+                assert_eq!(arc.as_str(), "sec1");
+            }
+            other => panic!("expected Internal link target, got {:?}", other),
+        }
+        assert_eq!(span.alt_text.as_deref(), Some("section"));
+    }
+
+    #[test]
+    fn resolve_enclosing_anchor_returns_none_for_empty_href() {
+        let html = r#"<html><body><p><a href="">x</a></p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let a_id = find_tag(&doc, "a").expect("a exists");
+        let inner_text_id = doc
+            .get_node(a_id)
+            .and_then(|n| n.children.first().copied())
+            .expect("text child of <a>");
+
+        let result = super::resolve_enclosing_anchor(doc.deref(), inner_text_id);
+        assert!(
+            result.is_none(),
+            "empty href should yield None, got {:?}",
+            result.map(|(id, _)| id),
+        );
+    }
+
     #[test]
     fn inline_block_baseline_aligns_with_surrounding_text() {
         // An inline-block with text "boxed" inside, surrounded by "before" /
