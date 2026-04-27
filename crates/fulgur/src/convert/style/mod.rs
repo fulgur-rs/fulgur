@@ -8,24 +8,13 @@ use crate::pageable::{
 use blitz_dom::Node;
 use std::sync::Arc;
 
+mod box_metrics;
+
 /// Extract visual style (background, borders, padding, background-image) from a node.
 pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle {
     let layout = node.final_layout;
-    let mut style = BlockStyle {
-        border_widths: [
-            px_to_pt(layout.border.top),
-            px_to_pt(layout.border.right),
-            px_to_pt(layout.border.bottom),
-            px_to_pt(layout.border.left),
-        ],
-        padding: [
-            px_to_pt(layout.padding.top),
-            px_to_pt(layout.padding.right),
-            px_to_pt(layout.padding.bottom),
-            px_to_pt(layout.padding.left),
-        ],
-        ..Default::default()
-    };
+    let mut style = BlockStyle::default();
+    box_metrics::apply_to(&mut style, &layout);
 
     // Extract colors from computed styles
     if let Some(styles) = node.primary_styles() {
