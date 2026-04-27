@@ -3048,7 +3048,7 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                         match g.as_ref() {
                             Gradient::Linear { .. } => resolve_linear_gradient(g, &current_color),
                             Gradient::Radial { .. } => resolve_radial_gradient(g, &current_color),
-                            Gradient::Conic { .. } => None,
+                            Gradient::Conic { .. } => resolve_conic_gradient(g, &current_color),
                         }
                     }
                     _ => None,
@@ -3348,6 +3348,93 @@ fn resolve_radial_gradient(
         BgImageContent::RadialGradient {
             shape: out_shape,
             size: out_size,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+/// Convert Stylo `Gradient::Conic` into `BgImageContent::ConicGradient`.
+///
+/// stop position は `<angle>` を `angle / 2π` で fraction 化、`<percentage>` は
+/// そのまま fraction として `GradientStopPosition::Fraction(f32)` に格納する。
+/// `[0, 1]` 範囲外の生値もそのまま許容し (例: `-30deg → -0.083`, `120% → 1.2`)、
+/// 最終的な周期展開 / 範囲ハンドリングは `background.rs::draw_conic_gradient`
+/// と `sample_conic_color` 側に委ねる。
+fn resolve_conic_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use style::values::computed::AngleOrPercentage;
+    use style::values::computed::image::Gradient;
+    use style::values::generics::image::{GradientFlags, GradientItem};
+
+    let (angle, position, items, flags) = match g {
+        Gradient::Conic {
+            angle,
+            position,
+            items,
+            flags,
+            ..
+        } => (angle, position, items, flags),
+        Gradient::Linear { .. } | Gradient::Radial { .. } => return None,
+    };
+
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        log::warn!(
+            "conic-gradient: non-default color-interpolation-method is not yet \
+             supported. Layer dropped."
+        );
+        return None;
+    }
+
+    let from_angle = angle.radians();
+    let position_x = try_convert_lp_to_bg(&position.horizontal)?;
+    let position_y = try_convert_lp_to_bg(&position.vertical)?;
+    let repeating = flags.contains(GradientFlags::REPEATING);
+
+    let mut stops: Vec<crate::pageable::GradientStop> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        use crate::pageable::{GradientStop, GradientStopPosition};
+        match item {
+            GradientItem::SimpleColorStop(c) => {
+                let abs = c.resolve_to_absolute(current_color);
+                stops.push(GradientStop {
+                    position: GradientStopPosition::Auto,
+                    rgba: absolute_to_rgba(abs),
+                });
+            }
+            GradientItem::ComplexColorStop { color, position } => {
+                let abs = color.resolve_to_absolute(current_color);
+                let frac = match position {
+                    AngleOrPercentage::Percentage(p) => p.0,
+                    AngleOrPercentage::Angle(a) => a.radians() / std::f32::consts::TAU,
+                };
+                stops.push(GradientStop {
+                    position: GradientStopPosition::Fraction(frac),
+                    rgba: absolute_to_rgba(abs),
+                });
+            }
+            GradientItem::InterpolationHint(_) => {
+                log::warn!(
+                    "conic-gradient: interpolation hints are not yet supported. \
+                     Layer dropped."
+                );
+                return None;
+            }
+        }
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+
+    Some((
+        BgImageContent::ConicGradient {
+            from_angle,
             position_x,
             position_y,
             stops,

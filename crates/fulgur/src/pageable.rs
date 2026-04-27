@@ -842,6 +842,22 @@ pub enum BgImageContent {
         stops: Vec<GradientStop>,
         repeating: bool,
     },
+    /// CSS `conic-gradient(...)` / `repeating-conic-gradient(...)`.
+    ///
+    /// stops の position は convert 時に **生 fraction** として保持する
+    /// (`<percentage>` はそのまま、`<angle>` は `angle / 2π`)。`[0, 1]` を
+    /// 跨ぐ値 (例: `-30deg → -0.083`, `120% → 1.2`) もそのまま許容し、
+    /// 最終的な範囲ハンドリングと repeating の周期展開は draw 時に行う。
+    /// draw 経路は PostScript shading を使わず path wedge 分解で発行する
+    /// ため PDF/A-1, A-2 適合 (`background.rs::draw_conic_gradient`)。
+    ConicGradient {
+        /// CSS `from <angle>` を radians で保持 (規約: 0=top, CW)。
+        from_angle: f32,
+        position_x: BgLengthPercentage,
+        position_y: BgLengthPercentage,
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
 }
 
 /// A single CSS background image layer with all associated properties.

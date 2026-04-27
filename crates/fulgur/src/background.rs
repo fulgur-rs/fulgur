@@ -205,9 +205,9 @@ fn draw_background_layer(
         .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
 
     let (img_w, img_h) = match &layer.content {
-        BgImageContent::LinearGradient { .. } | BgImageContent::RadialGradient { .. } => {
-            resolve_gradient_size(&layer.size, ow, oh)
-        }
+        BgImageContent::LinearGradient { .. }
+        | BgImageContent::RadialGradient { .. }
+        | BgImageContent::ConicGradient { .. } => resolve_gradient_size(&layer.size, ow, oh),
         BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => resolve_size(layer, ow, oh),
     };
     if img_w <= 0.0 || img_h <= 0.0 {
@@ -330,6 +330,48 @@ fn draw_background_layer(
                         canvas.surface,
                         *shape,
                         size,
+                        position_x,
+                        position_y,
+                        stops,
+                        *repeating,
+                        *tx,
+                        *ty,
+                        *tw,
+                        *th,
+                    );
+                }
+            }
+        }
+        BgImageContent::ConicGradient {
+            from_angle,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        } => {
+            // Linear/Radial と同じく uniform-tile grid なら 1 個の Tiling Pattern
+            // resource に集約する。Conic は wedge path 群 (~数百 byte/conic) が
+            // 各 tile で完全同一になるため、特に N×M タイルで効果が大きい。
+            if let Some(grid) = try_uniform_grid(&tiles) {
+                draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
+                    draw_conic_gradient(
+                        surface,
+                        *from_angle,
+                        position_x,
+                        position_y,
+                        stops,
+                        *repeating,
+                        0.0,
+                        0.0,
+                        tw,
+                        th,
+                    );
+                });
+            } else {
+                for (tx, ty, tw, th) in &tiles {
+                    draw_conic_gradient(
+                        canvas.surface,
+                        *from_angle,
                         position_x,
                         position_y,
                         stops,
@@ -893,6 +935,257 @@ fn draw_radial_gradient(
     };
     surface.draw_path(&rect_path);
     surface.set_fill(None);
+}
+
+/// Draw a CSS conic-gradient as N=360 triangular path wedges, sampling color
+/// at each wedge's mid-angle and merging adjacent same-color wedges into
+/// single polygons. PostScript shading を使わないため PDF/A-1, A-2 適合。
+///
+/// 三角形の外周頂点は中心から放射した ray と box 辺の交点で計算する
+/// (`box_edge_at_angle`)。merge により hard step (pie chart) は色変化点数まで
+/// path が減り、見た目の境界 AA も同色 wedge 間で消失する。
+#[allow(clippy::too_many_arguments)]
+fn draw_conic_gradient(
+    surface: &mut krilla::surface::Surface<'_>,
+    from_angle_rad: f32,
+    position_x: &BgLengthPercentage,
+    position_y: &BgLengthPercentage,
+    stops: &[crate::pageable::GradientStop],
+    repeating: bool,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) {
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    // origin rect への追加クリップ。`at <position>` が origin 外に解決された場合、
+    // wedge polygon の中心頂点 `(cx, cy)` が origin 外でも頂点として含まれてしまい、
+    // 既存 BgClip 用 `clip_path` だけでは `clip \ origin` 領域に塗りが漏れる
+    // (CSS Images §3 では origin の外は当該レイヤーで透明)。linear/radial は
+    // gradient 自体が origin 内で減衰するため顕在化しないが、conic は
+    // 中心からの放射なので明示的に origin で再クリップする。
+    let Some(origin_clip) = build_rect_path(ox, oy, ow, oh) else {
+        return;
+    };
+    surface.push_clip_path(&origin_clip, &krilla::paint::FillRule::default());
+
+    let cx = ox + resolve_point(position_x, ow);
+    let cy = oy + resolve_point(position_y, oh);
+
+    let normalized = normalize_conic_stops(stops);
+    if normalized.len() < 2 {
+        surface.pop();
+        return;
+    }
+    let first = normalized.first().unwrap().0;
+    let last = normalized.last().unwrap().0;
+    let period = (last - first).max(1e-6);
+
+    const N: usize = 360;
+
+    // 各 wedge の中点角度 (CSS fraction) で色をサンプル。repeating 時は
+    // CSS Images 4 §3.x の周期展開で fraction を [first, last] にラップする。
+    // `mid_t` は意図的に clamp しない: stops は seam を跨いで負 / 1 超過しうる
+    // (例: `repeating-conic-gradient(red -30deg, blue 30deg)`)。
+    // `sample_conic_color` 側が範囲外を first / last 端点として吸収する。
+    let colors: Vec<[u8; 4]> = (0..N)
+        .map(|i| {
+            let mid_f = (i as f32 + 0.5) / N as f32;
+            let mid_t = if repeating {
+                first + (mid_f - first).rem_euclid(period)
+            } else {
+                mid_f
+            };
+            sample_conic_color(&normalized, mid_t)
+        })
+        .collect();
+
+    // box 辺との交点を 0..=N でキャッシュ (隣接 wedge で同じ点を 2 回計算するのを避ける)。
+    let edge_points: Vec<(f32, f32)> = (0..=N)
+        .map(|k| {
+            let theta = from_angle_rad + (k as f32 / N as f32) * std::f32::consts::TAU;
+            box_edge_at_angle(theta, cx, cy, ox, oy, ow, oh)
+        })
+        .collect();
+
+    surface.set_stroke(None);
+
+    let mut i = 0usize;
+    while i < N {
+        let color = colors[i];
+        let mut j = i + 1;
+        while j < N && colors[j] == color {
+            j += 1;
+        }
+        // [i, j) の同色 wedge 群を 1 個の多角形にまとめる:
+        //   center → edge_points[i] → edge_points[i+1] → ... → edge_points[j]
+        let mut pb = krilla::geom::PathBuilder::new();
+        pb.move_to(cx, cy);
+        for &(px, py) in &edge_points[i..=j] {
+            pb.line_to(px, py);
+        }
+        pb.close();
+
+        let Some(path) = pb.finish() else {
+            i = j;
+            continue;
+        };
+        surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(color[0], color[1], color[2]).into(),
+            rule: Default::default(),
+            opacity: crate::pageable::alpha_to_opacity(color[3]),
+        }));
+        surface.draw_path(&path);
+
+        i = j;
+    }
+    surface.set_fill(None);
+    surface.pop();
+}
+
+/// CSS conic ray angle θ から box 辺との交点 (cx + t·sin θ, cy − t·cos θ) を返す
+/// (CSS 規約: θ=0 は top, increasing CW)。
+fn box_edge_at_angle(
+    theta_rad: f32,
+    cx: f32,
+    cy: f32,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) -> (f32, f32) {
+    // CSS Y-down: 0deg = top (-Y) → ray dir (sin θ, -cos θ)
+    let dx = theta_rad.sin();
+    let dy = -theta_rad.cos();
+
+    let tx = if dx > 1e-9 {
+        (ox + ow - cx) / dx
+    } else if dx < -1e-9 {
+        (ox - cx) / dx
+    } else {
+        f32::INFINITY
+    };
+    let ty = if dy > 1e-9 {
+        (oy + oh - cy) / dy
+    } else if dy < -1e-9 {
+        (oy - cy) / dy
+    } else {
+        f32::INFINITY
+    };
+    let t = tx.min(ty).max(0.0);
+    (cx + t * dx, cy + t * dy)
+}
+
+/// stop position fixup. GradientStop の Auto を線形補間で埋める。
+///
+/// CSS では conic の position は `<angle>|<percentage>` のみで `LengthPx` は
+/// 出ないが、共通 `GradientStop` 経由のため変種が来た場合は無視する。
+fn normalize_conic_stops(stops: &[crate::pageable::GradientStop]) -> Vec<(f32, [u8; 4])> {
+    use crate::pageable::GradientStopPosition;
+    if stops.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<(Option<f32>, [u8; 4])> = stops
+        .iter()
+        .map(|s| {
+            let p = match s.position {
+                GradientStopPosition::Auto => None,
+                GradientStopPosition::Fraction(f) => Some(f),
+                GradientStopPosition::LengthPx(_) => None,
+            };
+            (p, s.rgba)
+        })
+        .collect();
+
+    if out[0].0.is_none() {
+        out[0].0 = Some(0.0);
+    }
+    let last = out.len() - 1;
+    if out[last].0.is_none() {
+        out[last].0 = Some(1.0);
+    }
+
+    let mut prev: f32 = out[0].0.unwrap();
+    for s in out.iter_mut().skip(1) {
+        if let Some(p) = s.0
+            && p < prev
+        {
+            s.0 = Some(prev);
+        }
+        if let Some(p) = s.0 {
+            prev = p;
+        }
+    }
+
+    let mut i = 0usize;
+    while i < out.len() {
+        if out[i].0.is_some() {
+            i += 1;
+            continue;
+        }
+        let prev_pos = out[i - 1].0.unwrap();
+        let mut j = i;
+        while j < out.len() && out[j].0.is_none() {
+            j += 1;
+        }
+        let next_pos = out[j].0.unwrap();
+        let count = j - i + 1;
+        for k in 0..(j - i) {
+            let t = (k + 1) as f32 / count as f32;
+            out[i + k].0 = Some(prev_pos + (next_pos - prev_pos) * t);
+        }
+        i = j;
+    }
+
+    out.into_iter()
+        .map(|(p, rgba)| (p.unwrap(), rgba))
+        .collect()
+}
+
+/// fraction `t` を normalized stops で線形補間して RGBA を返す。
+///
+/// 範囲外 `t` は first / last 端点の色を返す。`t` が coincident stop
+/// (hard transition) 境界上に乗った場合は **後ろの色を採用する** — CSS Images
+/// §3.5.1: 同位置の複数 stop は seam を後続 stop の色が占める。
+///
+/// アルゴリズム: stops は position 昇順前提。`p <= t` を満たす最右 stop の
+/// 直後を起点 segment にすれば、coincident pair (p1 == p2 == t) の境界上で
+/// 自動的に「後の色」が拾える ([..., (t, A), (t, B), (next, B)] で t を渡すと
+/// 起点 (t, B) → next 区間の alpha=0 → B が返る)。
+fn sample_conic_color(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
+    if stops.is_empty() {
+        return [0, 0, 0, 255];
+    }
+    if t < stops[0].0 {
+        return stops[0].1;
+    }
+    if t >= stops[stops.len() - 1].0 {
+        return stops[stops.len() - 1].1;
+    }
+
+    // `p <= t` を満たす最右 stop index。stops は昇順なのでこの index 以降
+    // (idx + 1 を含む) は全て p > t。
+    let idx = stops.iter().rposition(|&(p, _)| p <= t).unwrap_or(0);
+    if idx + 1 >= stops.len() {
+        return stops[idx].1;
+    }
+    let (p1, c1) = stops[idx];
+    let (p2, c2) = stops[idx + 1];
+    let span = p2 - p1;
+    if span <= 0.0 {
+        return c2;
+    }
+    let alpha = ((t - p1) / span).clamp(0.0, 1.0);
+    [
+        lerp_u8(c1[0], c2[0], alpha),
+        lerp_u8(c1[1], c2[1], alpha),
+        lerp_u8(c1[2], c2[2], alpha),
+        lerp_u8(c1[3], c2[3], alpha),
+    ]
 }
 
 /// uniform-grid 検出時の Tiling Pattern 描画ヘルパー。
@@ -3077,5 +3370,184 @@ mod renormalize_stops_to_unit_range_tests {
                 (1.0, [128, 255, 0, 255]),
             ],
         );
+    }
+}
+
+#[cfg(test)]
+mod conic_helpers_tests {
+    use super::{box_edge_at_angle, normalize_conic_stops, sample_conic_color};
+    use crate::pageable::{GradientStop, GradientStopPosition};
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() < eps
+    }
+
+    #[test]
+    fn box_edge_top() {
+        // CSS 0deg = top → 中心 (50,50) から (50, 0) に向かう
+        let (x, y) = box_edge_at_angle(0.0, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 0.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_right() {
+        // CSS 90deg = right → 中心から (100, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 100.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_bottom() {
+        // CSS 180deg = bottom → 中心から (50, 100) に向かう
+        let (x, y) = box_edge_at_angle(std::f32::consts::PI, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 100.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_left() {
+        // CSS 270deg = left → 中心から (0, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            3.0 * std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 0.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_top_right_corner() {
+        // CSS 45deg = top-right corner direction → ray が top と right の交点に
+        // 当たる前にどちらかの edge にヒット。中心 (50,50)、box (0,0)-(100,100) で
+        // 45deg なら top-right 角 (100, 0) と原点距離が等しいので、辺の早い方に。
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_4,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // 中心から 45deg = (sin, -cos) = (0.707, -0.707)。tx = (100-50)/0.707 = 70.7、
+        // ty = (0-50)/-0.707 = 70.7 → tie。両方の辺に到達 → corner (100, 0) または近傍。
+        assert!(approx_eq(x, 100.0, 0.5));
+        assert!(approx_eq(y, 0.0, 0.5));
+    }
+
+    #[test]
+    fn normalize_with_explicit_fractions() {
+        // 全 stop が Fraction で position 順 → そのまま fraction 化される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [0, 255, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert_eq!(n[0], (0.0, [255, 0, 0, 255]));
+        assert_eq!(n[1], (0.5, [0, 255, 0, 255]));
+        assert_eq!(n[2], (1.0, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn normalize_auto_endpoints_filled() {
+        // Auto Auto Auto → 0.0, 0.5, 1.0 に補間される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 255, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 0, 255, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert!(approx_eq(n[0].0, 0.0, 1e-6));
+        assert!(approx_eq(n[1].0, 0.5, 1e-6));
+        assert!(approx_eq(n[2].0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn normalize_monotonic_clamp() {
+        // 後ろの stop が前より小さい → 前に合わせる (CSS Images L4 fixup)
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [255, 0, 0, 255],
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.3),
+                rgba: [0, 255, 0, 255],
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n[1].0, 0.5);
+    }
+
+    #[test]
+    fn sample_at_endpoints() {
+        let stops = vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_midpoint_lerps() {
+        let stops = vec![(0.0, [0, 0, 0, 255]), (1.0, [200, 100, 50, 255])];
+        let mid = sample_conic_color(&stops, 0.5);
+        assert_eq!(mid, [100, 50, 25, 255]);
+    }
+
+    #[test]
+    fn sample_clamp_outside_range() {
+        let stops = vec![(0.2, [255, 0, 0, 255]), (0.8, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_coincident_stops_returns_later_color() {
+        // CSS Images §3.5.1 hard transition: red 0%-50%, blue 50%-100% → t=0.5 should be blue.
+        let stops = vec![
+            (0.0, [255, 0, 0, 255]),
+            (0.5, [255, 0, 0, 255]),
+            (0.5, [0, 0, 255, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        assert_eq!(sample_conic_color(&stops, 0.5), [0, 0, 255, 255]);
+        // Just before/after seam: still in correct half.
+        assert_eq!(sample_conic_color(&stops, 0.499), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 0.501), [0, 0, 255, 255]);
     }
 }
