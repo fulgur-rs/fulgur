@@ -612,6 +612,69 @@ fn strip_display_none(css: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn simple_root() -> Box<dyn Pageable> {
+        use crate::pageable::{BlockPageable, SpacerPageable};
+        Box::new(BlockPageable::new(vec![Box::new(SpacerPageable::new(
+            100.0,
+        ))]))
+    }
+
+    fn assert_pdf_header(pdf: &[u8]) {
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    fn pdf_info_field(pdf: &[u8], key: &[u8]) -> Option<String> {
+        use std::io::Cursor;
+        let doc = lopdf::Document::load_from(Cursor::new(pdf)).ok()?;
+        let info_id = doc.trailer.get(b"Info").ok()?.as_reference().ok()?;
+        let info = match doc.get_object(info_id) {
+            Ok(lopdf::Object::Dictionary(d)) => d.clone(),
+            _ => return None,
+        };
+        let bytes = info.get(key).ok()?.as_str().ok()?;
+        Some(
+            if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+                let chars: Vec<u16> = bytes[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&chars).to_owned()
+            } else {
+                bytes.iter().map(|&b| b as char).collect()
+            },
+        )
+    }
+
+    fn pdf_page1_size(pdf: &[u8]) -> (f32, f32) {
+        use std::io::Cursor;
+        let doc = lopdf::Document::load_from(Cursor::new(pdf)).expect("valid PDF");
+        let pages = doc.get_pages();
+        let &page_id = pages.get(&1).expect("page 1 exists");
+        let page_dict = match doc.get_object(page_id).expect("page object") {
+            lopdf::Object::Dictionary(d) => d.clone(),
+            _ => panic!("page is not a dictionary"),
+        };
+        let arr = page_dict
+            .get(b"MediaBox")
+            .expect("MediaBox")
+            .as_array()
+            .expect("MediaBox is array")
+            .clone();
+        let to_f32 = |o: &lopdf::Object| match o {
+            lopdf::Object::Integer(i) => *i as f32,
+            lopdf::Object::Real(f) => *f,
+            _ => 0.0,
+        };
+        (
+            to_f32(&arr[2]) - to_f32(&arr[0]),
+            to_f32(&arr[3]) - to_f32(&arr[1]),
+        )
+    }
 
     // --- escape_attr ---
 
@@ -791,5 +854,178 @@ mod tests {
     #[test]
     fn parse_datetime_invalid_non_numeric_second() {
         assert!(parse_datetime("2024-06-15T10:30:abc").is_none());
+    }
+
+    // ── render_to_pdf ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_to_pdf_produces_valid_pdf() {
+        let pdf = render_to_pdf(simple_root(), &Config::default()).unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_landscape_page() {
+        let config = Config::builder().landscape(true).build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_bookmarks_enabled() {
+        let config = Config::builder().bookmarks(true).build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_all_metadata_fields() {
+        let config = Config::builder()
+            .title("My Title")
+            .author("Alice")
+            .description("A description")
+            .keywords(["rust", "pdf"])
+            .lang("en-US")
+            .creator("my-creator")
+            .producer("my-producer")
+            .creation_date("2024-06-15T10:30:45Z")
+            .build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert_pdf_header(&pdf);
+        assert_eq!(pdf_info_field(&pdf, b"Title").as_deref(), Some("My Title"));
+        assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Alice"));
+        assert_eq!(
+            pdf_info_field(&pdf, b"Producer").as_deref(),
+            Some("my-producer")
+        );
+        assert_eq!(
+            pdf_info_field(&pdf, b"Creator").as_deref(),
+            Some("my-creator")
+        );
+        assert!(pdf_info_field(&pdf, b"CreationDate").is_some());
+    }
+
+    #[test]
+    fn render_to_pdf_creation_date_parse_failure_is_ignored() {
+        let config = Config::builder().creation_date("not-a-date").build();
+        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    // ── render_to_pdf_with_gcpm ───────────────────────────────────────────────
+
+    #[test]
+    fn render_to_pdf_with_gcpm_empty_context() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &Config::default(),
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_landscape() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder().landscape(true).build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_bookmarks_enabled() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder().bookmarks(true).build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert_pdf_header(&pdf);
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_page_settings_keyword() {
+        use crate::gcpm::running::RunningElementStore;
+        use crate::gcpm::{GcpmContext, PageSettingsRule, PageSizeDecl};
+        let gcpm = GcpmContext {
+            page_settings: vec![PageSettingsRule {
+                page_selector: None,
+                size: Some(PageSizeDecl::Keyword("A4".into())),
+                margin: None,
+            }],
+            ..GcpmContext::default()
+        };
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &Config::default(),
+            &gcpm,
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert_pdf_header(&pdf);
+        let (w, h) = pdf_page1_size(&pdf);
+        assert!(
+            (w - 595.28).abs() < 1.0,
+            "expected A4 width ≈ 595.28 pt, got {w}"
+        );
+        assert!(
+            (h - 841.89).abs() < 1.0,
+            "expected A4 height ≈ 841.89 pt, got {h}"
+        );
+    }
+
+    #[test]
+    fn render_to_pdf_with_gcpm_all_metadata_fields() {
+        use crate::gcpm::GcpmContext;
+        use crate::gcpm::running::RunningElementStore;
+        let config = Config::builder()
+            .title("GCPM Title")
+            .author("Author")
+            .description("description")
+            .keywords(["kw1"])
+            .lang("fr")
+            .creator("creator")
+            .producer("producer")
+            .creation_date("2024-01-01")
+            .build();
+        let pdf = render_to_pdf_with_gcpm(
+            simple_root(),
+            &config,
+            &GcpmContext::default(),
+            &RunningElementStore::new(),
+            &[],
+        )
+        .unwrap();
+        assert_pdf_header(&pdf);
+        assert_eq!(
+            pdf_info_field(&pdf, b"Title").as_deref(),
+            Some("GCPM Title")
+        );
+        assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Author"));
+        assert_eq!(
+            pdf_info_field(&pdf, b"Producer").as_deref(),
+            Some("producer")
+        );
+        assert_eq!(pdf_info_field(&pdf, b"Creator").as_deref(), Some("creator"));
+        assert!(pdf_info_field(&pdf, b"CreationDate").is_some());
     }
 }
