@@ -623,6 +623,10 @@ mod tests {
         ))]))
     }
 
+    fn assert_pdf_header(pdf: &[u8]) {
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // --- escape_attr ---
 
     #[test]
@@ -808,21 +812,21 @@ mod tests {
     #[test]
     fn render_to_pdf_produces_valid_pdf() {
         let pdf = render_to_pdf(simple_root(), &Config::default()).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_landscape_page() {
         let config = Config::builder().landscape(true).build();
         let pdf = render_to_pdf(simple_root(), &config).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_bookmarks_enabled() {
         let config = Config::builder().bookmarks(true).build();
         let pdf = render_to_pdf(simple_root(), &config).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
@@ -838,14 +842,14 @@ mod tests {
             .creation_date("2024-06-15T10:30:45Z")
             .build();
         let pdf = render_to_pdf(simple_root(), &config).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_creation_date_parse_failure_is_ignored() {
         let config = Config::builder().creation_date("not-a-date").build();
         let pdf = render_to_pdf(simple_root(), &config).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     // ── render_to_pdf_with_gcpm ───────────────────────────────────────────────
@@ -862,7 +866,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
@@ -878,7 +882,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
@@ -894,7 +898,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
@@ -917,7 +921,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 
     #[test]
@@ -942,6 +946,6 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        assert_pdf_header(&pdf);
     }
 }
