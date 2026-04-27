@@ -221,6 +221,16 @@ enum Commands {
         #[arg(long)]
         bookmarks: bool,
     },
+    /// Inspect a PDF and extract text positions, images, and metadata as JSON
+    Inspect {
+        /// Input PDF file
+        #[arg()]
+        input: PathBuf,
+
+        /// Output JSON file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Template utilities (powered by MiniJinja)
     Template {
         #[command(subcommand)]
@@ -537,6 +547,25 @@ fn main() {
                     std::process::exit(1);
                 });
                 eprintln!("PDF written to {}", output.display());
+            }
+        }
+        Commands::Inspect { input, output } => {
+            let result = fulgur::inspect::inspect(&input).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
+            let json = serde_json::to_string_pretty(&result).unwrap_or_else(|e| {
+                eprintln!("Error serializing JSON: {e}");
+                std::process::exit(1);
+            });
+            if let Some(ref output_path) = output {
+                std::fs::write(output_path, &json).unwrap_or_else(|e| {
+                    eprintln!("Error writing to {}: {e}", output_path.display());
+                    std::process::exit(1);
+                });
+                eprintln!("Inspection JSON written to {}", output_path.display());
+            } else {
+                println!("{json}");
             }
         }
         Commands::Template { command } => match command {

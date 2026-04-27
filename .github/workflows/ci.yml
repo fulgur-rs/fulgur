@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Default least-privilege token scope. Jobs that need more (e.g. test's
+# id-token: write for Codecov OIDC, octocov's pull-requests: write) override
+# this with their own `permissions:` block — job-level permissions fully
+# replace the workflow-level set, they do not merge.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,17 +24,19 @@ jobs:
   markdownlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19
+      - uses: actions/checkout@v6
+      - uses: DavidAnson/markdownlint-cli2-action@ce4853d43830c74c1753b39f3cf40f71c2031eb9 # v23.0.0
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -65,11 +74,12 @@ jobs:
             cache-key: windows-latest-fulgur
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.cache-key }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
@@ -85,7 +95,7 @@ jobs:
         uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
       - name: Install cargo-nextest
         uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
-      # NOTE: fulgur-wpt integration tests (wpt_css_page, wpt_css_multicol)
+      # NOTE: fulgur-wpt integration tests (wpt_css_page, wpt_lists)
       # silently skip here because target/wpt is not fetched in the coverage
       # cell — fetching + running all phases would add ~4-5 min to PR CI.
       # That leaves `crates/fulgur-wpt/src/runner.rs` under-reported in
@@ -103,7 +113,7 @@ jobs:
         run: cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: lcov.info
@@ -123,24 +133,47 @@ jobs:
           use_oidc: true
           fail_ci_if_error: false
 
+  wasm-check:
+    name: WASM build check
+    runs-on: ubuntu-latest
+    # Strategic gate: keeps the `fulgur` library buildable on
+    # `wasm32-unknown-unknown` so the future `fulgur-wasm` wrapper crate
+    # (browser HTML→PDF, AI agent sandboxes) stays one step away.
+    # Failure means a dependency or new code added a non-WASM-compatible
+    # surface (filesystem, native-only API, missing target cfg) — fix or
+    # cfg-gate it before merging. Tracking: fulgur-iym, fulgur-g5bn.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Do NOT set RUSTFLAGS=-C link-arg=-fuse-ld=mold here; env RUSTFLAGS
+      # is target-agnostic and would force mold onto the wasm32 build.
+      - run: cargo check --target wasm32-unknown-unknown -p fulgur -p fulgur-wasm
+
   vrt:
     name: Visual Regression Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install poppler-utils
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-latest-fulgur
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Configure mold linker
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
       - name: Run VRT
-        run: cargo test -p fulgur-vrt
+        run: FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt
       - name: Upload diff artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vrt-diffs
           path: target/vrt-diff/
@@ -154,8 +187,8 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: lcov
       - uses: k1LoW/octocov-action@73d561f65d59e66899ed5c87e4621a913b5d5c20 # v1
@@ -172,14 +205,31 @@ jobs:
         include:
           - phase: css-page
             test: wpt_css_page
-          - phase: css-multicol
-            test: wpt_css_multicol
+          - phase: multicol-1
+            test: wpt_lists
+            filter: wpt_list_multicol_1
+          - phase: multicol-2
+            test: wpt_lists
+            filter: wpt_list_multicol_2
+          - phase: multicol-3
+            test: wpt_lists
+            filter: wpt_list_multicol_3
+          - phase: bugs
+            test: wpt_lists
+            filter: wpt_list_bugs
+          - phase: opacity-visibility
+            test: wpt_lists
+            filter: wpt_list_opacity_visibility
+          - phase: smoke
+            test: wpt_lists
+            filter: wpt_list_smoke
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-latest-fulgur
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install poppler-utils
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - name: Configure mold linker
@@ -193,7 +243,7 @@ jobs:
           # if run_phase returns None — this job IS the WPT job, so missing
           # prerequisites are a real bug here.
           FULGUR_WPT_REQUIRED: "1"
-        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- --nocapture
+        run: cargo test -p fulgur-wpt --test ${{ matrix.test }} -- ${{ matrix.filter }} --nocapture
       - name: Append step summary
         if: always()
         run: |
@@ -205,8 +255,35 @@ jobs:
           fi
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wpt-${{ matrix.phase }}-report
           path: target/wpt-report/${{ matrix.phase }}
           if-no-files-found: warn
+
+  bindings-check:
+    name: Bindings type-check
+    # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
+    # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
+    # `cargo check --workspace` / clippy では空コンパイルされるため型エラーが
+    # 検出されない。0.6.0 release で `fulgur::Error::Other` の match arm 不足が
+    # release-* job まで気付かれなかった問題 (PR #217) の再発防止。
+    # 型エラー検出が目的のため Linux 単一・matrix 無し。クロス OS build/link
+    # 検証は release-python.yml / release-ruby.yml の責務。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+        with:
+          ruby-version: "3.3"
+          rustup-toolchain: stable
+          bundler-cache: false
+          cargo-cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur-bindings
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo clippy pyfulgur (extension-module)
+        run: cargo clippy -p pyfulgur --features extension-module --all-targets -- -D warnings
+      - name: cargo clippy fulgur-ruby (ruby-api)
+        run: cargo clippy -p fulgur-ruby --features ruby-api --all-targets -- -D warnings

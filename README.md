@@ -194,6 +194,31 @@ cargo test
 cargo run -p fulgur-cli -- render -o output.pdf input.html
 ```
 
+## Versioning
+
+Fulgur follows the [ZeroVer](https://0ver.org) convention while still in
+the `0.x` line. The number after the leading zero — the **minor** — is
+what we treat as a release boundary; the patch field exists only to ship
+hotfixes between minors.
+
+- **Each normal release bumps the minor** (`0.5.x` → `0.6` → `0.7`). We
+  refer to it as "Fulgur 0.6" externally; internal artefacts (Cargo.toml,
+  PyPI, RubyGems, npm, git tag) carry the full semver string `0.6.0`
+  because those registries require it.
+- **Patch numbers are reserved for hotfixes** off a previous minor
+  (e.g. `0.6.1` to fix a regression in `0.6.0`). They are not used for
+  routine releases.
+- **`fulgur`, `fulgur-cli`, `fulgur-wasm`, `fulgur-ruby`, `pyfulgur` share
+  the same version**. Independent binding versioning is tracked as future
+  work.
+- **API stability is not guaranteed in `0.x`**. Each minor may introduce
+  breaking changes. The 1.0 line will be cut once the public surface
+  stabilises (criteria TBD).
+
+If you depend on Fulgur from another Rust crate or a binding, pin the
+exact minor (`fulgur = "0.6"` resolves to `>=0.6.0, <0.7.0` under Cargo's
+default caret behaviour) until you are ready to absorb a breaking change.
+
 ## Release
 
 See [docs/RELEASE_SETUP.md](docs/RELEASE_SETUP.md) for PyPI / RubyGems

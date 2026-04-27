@@ -13,19 +13,17 @@ fn run_fulgur_vrt() {
 
     if !result.failed.is_empty() {
         let mut msg = format!(
-            "VRT failed: {} of {} fixtures differ\n",
+            "VRT failed: {} of {} fixtures differ (PDF byte-wise)\n",
             result.failed.len(),
             result.total
         );
         for f in &result.failed {
             let _ = writeln!(
                 msg,
-                "  - {} (max_channel_diff={}, diff_pixels={}/{} = {:.3}%)",
+                "  - {} (reference={} bytes, actual={} bytes)",
                 f.path.display(),
-                f.report.max_channel_diff,
-                f.report.diff_pixels,
-                f.report.total_pixels,
-                f.report.ratio() * 100.0,
+                f.reference_size,
+                f.actual_size,
             );
         }
         msg.push_str("\nTo update all goldens:    FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt\n");

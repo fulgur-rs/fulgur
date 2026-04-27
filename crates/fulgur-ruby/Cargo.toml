@@ -1,6 +1,6 @@
 [package]
 name = "fulgur-ruby"
-version = "0.5.12"
+version = "0.9.0"
 # rb_sys cross-gem-action は `directory: crates/fulgur-ruby` のみをコンテナに
 # マウントするため、この Cargo.toml は workspace root 不在でも cargo metadata
 # を解決できる必要がある。したがって workspace 継承 (`.workspace = true`) は
@@ -23,7 +23,7 @@ ruby-api = ["dep:magnus", "dep:rb-sys"]
 [dependencies]
 fulgur = { path = "../fulgur" }
 base64 = "0.22"
-magnus = { version = "0.7", optional = true }
+magnus = { version = "0.8", optional = true }
 rb-sys = { version = "0.9", optional = true }
 # Send/Sync 保証 (Engine) のコンパイル時 assertion で使用。
 # ext/fulgur/Cargo.toml にも同じ依存を追加していること。

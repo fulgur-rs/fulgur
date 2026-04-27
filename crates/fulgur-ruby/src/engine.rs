@@ -36,8 +36,9 @@ impl RbEngineBuilder {
 
     fn take(&self) -> Result<EngineBuilder, Error> {
         self.inner.borrow_mut().take().ok_or_else(|| {
+            let ruby = Ruby::get().expect("ruby vm");
             Error::new(
-                magnus::exception::runtime_error(),
+                ruby.exception_runtime_error(),
                 "EngineBuilder has already been built",
             )
         })
@@ -273,8 +274,8 @@ fn engine_builder() -> RbEngineBuilder {
     RbEngineBuilder::new()
 }
 
-pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
-    let engine = fulgur.define_class("Engine", magnus::class::object())?;
+pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
+    let engine = fulgur.define_class("Engine", ruby.class_object())?;
     engine.define_singleton_method("new", function!(engine_new, -1))?;
     engine.define_singleton_method("builder", function!(engine_builder, 0))?;
     engine.define_method("render_html", method!(RbEngine::render_html, 1))?;
@@ -283,7 +284,7 @@ pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
         method!(RbEngine::render_html_to_file, 2),
     )?;
 
-    let builder = fulgur.define_class("EngineBuilder", magnus::class::object())?;
+    let builder = fulgur.define_class("EngineBuilder", ruby.class_object())?;
     builder.define_method("page_size", method!(builder_page_size, 1))?;
     builder.define_method("margin", method!(builder_margin, 1))?;
     builder.define_method("assets", method!(builder_assets, 1))?;

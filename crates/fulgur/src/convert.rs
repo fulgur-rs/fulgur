@@ -488,8 +488,14 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            let needs_wrapper = style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default();
+            if needs_wrapper {
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
                 p.visible = visible;
@@ -498,14 +504,15 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -536,22 +543,29 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node));
@@ -564,16 +578,11 @@ fn build_list_item_body(
         } else {
             // Inline root with no text and no inline pseudo images —
             // fall through to the non-inline-root path below.
-            let children: &[usize] = &node.children;
+            let layout_children_guard_1 = node.layout_children.borrow();
+            let children: &[usize] = layout_children_guard_1.as_deref().unwrap_or(&node.children);
             let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let positioned_children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                positioned_children,
-            );
+            let (positioned_children, _has_pseudo) =
+                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
@@ -583,16 +592,11 @@ fn build_list_item_body(
             Box::new(block)
         }
     } else {
-        let children: &[usize] = &node.children;
+        let layout_children_guard_2 = node.layout_children.borrow();
+        let children: &[usize] = layout_children_guard_2.as_deref().unwrap_or(&node.children);
         let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let positioned_children = wrap_with_block_pseudo_images(
-            before_pseudo,
-            after_pseudo,
-            content_box,
-            positioned_children,
-        );
+        let (positioned_children, _has_pseudo) =
+            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
         let mut block = BlockPageable::with_positioned_children(positioned_children)
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
@@ -768,7 +772,10 @@ fn convert_node_inner(
 
         let color = get_text_color(doc, node_id);
 
-        let children: &[usize] = &node.children;
+        let layout_children_guard_inside = node.layout_children.borrow();
+        let children: &[usize] = layout_children_guard_inside
+            .as_deref()
+            .unwrap_or(&node.children);
         if children.is_empty() {
             // Empty <li>: create a standalone paragraph with just the marker.
             // Try image marker first (list-style-image), then text fallback.
@@ -786,17 +793,17 @@ fn convert_node_inner(
                     baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
                     items: vec![item],
                 }]);
-                let (before_pseudo, after_pseudo) =
-                    build_block_pseudo_images(doc, node, content_box, ctx.assets);
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
                 }];
-                let positioned_children = wrap_with_block_pseudo_images(
-                    before_pseudo,
-                    after_pseudo,
+                let (positioned_children, _has_pseudo) = wrap_with_pseudo_content(
+                    doc,
+                    node,
+                    ctx,
+                    depth,
                     content_box,
                     paragraph_children,
                 );
@@ -849,14 +856,8 @@ fn convert_node_inner(
                 }
             }
 
-            let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let positioned_children = wrap_with_block_pseudo_images(
-                before_pseudo,
-                after_pseudo,
-                content_box,
-                positioned_children,
-            );
+            let (positioned_children, _has_pseudo) =
+                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
             let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
@@ -972,8 +973,14 @@ fn convert_node_inner(
             // Then existing block pseudo check
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
                 // but the node's own text content, so it must respect the node's visibility.
@@ -985,14 +992,15 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1028,22 +1036,29 @@ fn convert_node_inner(
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
                 build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-            if style.needs_block_wrapper() || has_pseudo {
+            let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
+            let has_pseudo =
+                before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
+            let pagination = extract_pagination_from_column_css(ctx, node);
+            if style.needs_block_wrapper()
+                || has_pseudo
+                || pagination != crate::pageable::Pagination::default()
+            {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
                 }];
-                let children = wrap_with_block_pseudo_images(
+                let mut children = wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
                     paragraph_children,
                 );
+                children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
+                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -1057,7 +1072,8 @@ fn convert_node_inner(
         // Fall through: inline root with no text and no inline pseudo images
     }
 
-    let children: &[usize] = &node.children;
+    let layout_children_guard = node.layout_children.borrow();
+    let children: &[usize] = layout_children_guard.as_deref().unwrap_or(&node.children);
 
     if children.is_empty() {
         let style = extract_block_style(node, ctx.assets);
@@ -1065,15 +1081,16 @@ fn convert_node_inner(
         // Check for pseudo images even on childless elements — e.g.
         // `<div class="icon"></div>` with `.icon::before { content: url(...) }`
         // should emit the image. Without this the pseudo is silently dropped.
-        let (before_pseudo, after_pseudo) =
-            build_block_pseudo_images(doc, node, content_box, ctx.assets);
-        let has_pseudo = before_pseudo.is_some() || after_pseudo.is_some();
-        if style.needs_block_wrapper() || has_pseudo {
+        let (positioned_children, has_pseudo) =
+            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, Vec::new());
+        let pagination = extract_pagination_from_column_css(ctx, node);
+        if style.needs_block_wrapper()
+            || has_pseudo
+            || pagination != crate::pageable::Pagination::default()
+        {
             let (opacity, visible) = extract_opacity_visible(node);
-            let positioned_children =
-                wrap_with_block_pseudo_images(before_pseudo, after_pseudo, content_box, Vec::new());
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_pagination(extract_pagination_from_column_css(ctx, node))
+                .with_pagination(pagination)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -1092,14 +1109,8 @@ fn convert_node_inner(
     let positioned_children = collect_positioned_children(doc, children, ctx, depth);
     let style = extract_block_style(node, ctx.assets);
     let content_box = compute_content_box(node, &style);
-    let (before_pseudo, after_pseudo) =
-        build_block_pseudo_images(doc, node, content_box, ctx.assets);
-    let positioned_children = wrap_with_block_pseudo_images(
-        before_pseudo,
-        after_pseudo,
-        content_box,
-        positioned_children,
-    );
+    let (positioned_children, _has_pseudo) =
+        wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
 
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
@@ -1158,11 +1169,20 @@ fn collect_positioned_children(
         // branch can emit it. Without this, `<span class="icon"></span>`
         // + `span::before { content: url(...); display: block }` silently
         // drops the image even though the empty-children branch is wired up.
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+
         if ch == 0.0
             && cw == 0.0
-            && child_node.children.is_empty()
+            && child_effective_is_empty
             && !node_has_block_pseudo_image(doc, child_node)
             && !node_has_inline_pseudo_image(doc, child_node)
+            && !ctx.column_styles.contains_key(&child_id)
+            && !node_has_absolute_pseudo(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -1176,14 +1196,28 @@ fn collect_positioned_children(
         // Zero-size container (thead, tbody, tr, etc.) — flatten children
         // into the parent. Harvest the container's own string-set entries
         // before recursing so they aren't dropped.
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        //
+        // Exception: when the container has its own `::before` / `::after`
+        // with `position: absolute|fixed`, flattening would drop those
+        // pseudos since `build_absolute_pseudo_children` only runs inside
+        // `convert_node` for the container itself. Fall through to
+        // `convert_node` in that case so the pseudos survive.
+        if ch == 0.0
+            && cw == 0.0
+            && !child_effective_is_empty
+            && !node_has_absolute_pseudo(doc, child_node)
+        {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
             emit_orphan_bookmark_marker(child_id, cx, cy, ctx, &mut result);
             if let Some(marker) = take_running_marker(child_id, ctx) {
                 pending_running_markers.push(marker);
             }
-            let mut nested = collect_positioned_children(doc, &child_node.children, ctx, depth + 1);
+            let child_lc_guard = child_node.layout_children.borrow();
+            let child_effective_children =
+                child_lc_guard.as_deref().unwrap_or(&child_node.children);
+            let mut nested =
+                collect_positioned_children(doc, child_effective_children, ctx, depth + 1);
             // Flush pending running markers to the first real nested child so
             // they travel with the flattened content on page break. Without
             // this, the markers would skip over the container's children and
@@ -1252,10 +1286,9 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
 
 /// Build a [`Pagination`] for `node` from the fulgur-ftp column_css sniffer.
 ///
-/// Only `break-inside` flows through today — `break-before` / `break-after` /
-/// `orphans` / `widows` stay at their defaults (see
-/// [`Pagination::default`]). Absence of the node from `ctx.column_styles`
-/// collapses cleanly to [`BreakInside::Auto`], so every
+/// Maps `break-inside`, `break-after`, and `break-before` from the column CSS
+/// props into [`Pagination`]. Absence of the node from `ctx.column_styles`
+/// collapses cleanly to the `Auto` variants, so every
 /// `BlockPageable::with_positioned_children` site can call this
 /// unconditionally without regressing the baseline behaviour that the
 /// existing test suite depends on.
@@ -1263,10 +1296,12 @@ fn extract_pagination_from_column_css(
     ctx: &ConvertContext<'_>,
     node: &Node,
 ) -> crate::pageable::Pagination {
-    use crate::pageable::{BreakInside, Pagination};
+    use crate::pageable::{BreakAfter, BreakBefore, BreakInside, Pagination};
     let props = ctx.column_styles.get(&node.id).copied().unwrap_or_default();
     Pagination {
         break_inside: props.break_inside.unwrap_or(BreakInside::Auto),
+        break_after: props.break_after.unwrap_or(BreakAfter::Auto),
+        break_before: props.break_before.unwrap_or(BreakBefore::Auto),
         ..Pagination::default()
     }
 }
@@ -1292,6 +1327,7 @@ where
 
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
+    let pagination = extract_pagination_from_column_css(ctx, node);
 
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
@@ -1310,8 +1346,27 @@ where
             y: cy,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_pagination(extract_pagination_from_column_css(ctx, node))
+            .with_pagination(pagination)
             .with_style(style)
+            .with_opacity(opacity)
+            .with_visible(visible)
+            .with_id(extract_block_id(node));
+        block.wrap(width, height);
+        block.layout_size = Some(Size { width, height });
+        Box::new(block)
+    } else if pagination != crate::pageable::Pagination::default() {
+        // Replaced element with no visual style but a non-default Pagination
+        // (e.g. `<img style="break-before: page">`): wrap in a thin
+        // BlockPageable so paginate() honours the break.
+        // Match the styled branch: the wrapper owns opacity, the inner keeps visibility.
+        let inner = build_inner(width, height, 1.0, visible);
+        let child = PositionedChild {
+            child: inner,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut block = BlockPageable::with_positioned_children(vec![child])
+            .with_pagination(pagination)
             .with_opacity(opacity)
             .with_visible(visible)
             .with_id(extract_block_id(node));
@@ -1426,6 +1481,447 @@ fn is_block_pseudo(pseudo: &Node) -> bool {
         .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Block)
 }
 
+/// Whether `node`'s computed `position` is `absolute` or `fixed`.
+///
+/// Used to reroute pseudo-elements that Blitz/Parley would otherwise place
+/// inline at (0, 0) of the surrounding flow: absolute/fixed pseudos have a
+/// Taffy-computed `final_layout.location` we want to honor instead.
+fn is_absolutely_positioned(node: &Node) -> bool {
+    node.primary_styles()
+        .is_some_and(|s| s.get_box().clone_position().is_absolutely_positioned())
+}
+
+/// Whether `node`'s computed `position` is `fixed` (as opposed to `absolute`).
+///
+/// CSS 2.1 §10.1.5: `position: fixed` establishes the *initial* containing
+/// block (page / viewport) as the CB, not the nearest positioned ancestor.
+fn is_position_fixed(node: &Node) -> bool {
+    use style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed))
+}
+
+/// Whether `node`'s computed `position` is `static` (the default — does not
+/// establish a containing block for absolute descendants).
+fn is_position_static(node: &Node) -> bool {
+    use style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_none_or(|s| matches!(s.get_box().clone_position(), Pos::Static))
+}
+
+/// Whether `node` is a `::before` / `::after` pseudo-element, detected by
+/// checking that its parent's `before` / `after` slot points back to it.
+///
+/// Blitz doesn't expose a direct "is pseudo" flag on `Node`; pseudo element
+/// nodes look like synthetic `<div>` / `<span>` elements. This helper is
+/// used to scope behavior that is only correct for pseudos — notably the
+/// `convert_inline_box_node` guard that suppresses absolutely-positioned
+/// pseudos so `build_absolute_pseudo_children` can re-emit them at the
+/// right place. Regular absolutely-positioned elements do not have a
+/// corresponding re-emit path yet and must fall through to
+/// `convert_node` instead of being silently dropped.
+fn is_pseudo_node(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    node.parent
+        .and_then(|pid| doc.get_node(pid))
+        .is_some_and(|p| p.before == Some(node.id) || p.after == Some(node.id))
+}
+
+/// Resolved containing block for an absolutely-positioned descendant.
+///
+/// Per CSS 2.1 §10.3.7 / §10.6.4, the CB for `position: absolute` is the
+/// **padding box** of the nearest positioned ancestor (or the initial CB
+/// at the root). Inset longhands (`top` / `right` / `bottom` / `left`)
+/// are resolved against the padding-box dimensions, and the resulting
+/// coordinates are in the padding-box frame. We carry the CB's
+/// `(border_left, border_top)` separately so callers can convert between
+/// the padding-box frame and the CB's border-box frame — which is the
+/// frame Taffy's `final_layout.location` values are expressed in.
+#[derive(Clone, Copy)]
+struct AbsCb {
+    /// Padding-box dimensions in CSS px.
+    padding_box_size: (f32, f32),
+    /// CB's `(border_left, border_top)` in CSS px. Padding-box origin
+    /// is offset by this amount from the CB's border-box origin.
+    border_top_left: (f32, f32),
+    /// Pseudo's parent expressed in the CB's border-box frame
+    /// (accumulated Taffy `final_layout.location` while climbing).
+    parent_offset_in_cb_bp: (f32, f32),
+}
+
+/// Compute `(padding_box_size, border_top_left)` for a CB node, both in
+/// CSS px. `extract_block_style` returns values in PDF pt (fulgur's
+/// internal convention), so we convert back to px because the rest of
+/// the absolute-positioning math — Taffy `final_layout`, stylo inset
+/// resolution — operates in px.
+fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
+    let style = extract_block_style(node, None);
+    // border_widths = [top, right, bottom, left] in pt.
+    let bl_pt = style.border_widths[3];
+    let br_pt = style.border_widths[1];
+    let bt_pt = style.border_widths[0];
+    let bb_pt = style.border_widths[2];
+    let sz = node.final_layout.size;
+    let pb_w = (sz.width - pt_to_px(bl_pt + br_pt)).max(0.0);
+    let pb_h = (sz.height - pt_to_px(bt_pt + bb_pt)).max(0.0);
+    ((pb_w, pb_h), (pt_to_px(bl_pt), pt_to_px(bt_pt)))
+}
+
+/// Walk ancestors starting at `parent` (the absolutely-positioned descendant's
+/// parent) to find the containing block.
+///
+/// - When `is_fixed` is `false` (`position: absolute`): the first
+///   `position: relative | absolute | fixed | sticky` ancestor wins, per
+///   CSS 2.1 §10.1.4.
+/// - When `is_fixed` is `true` (`position: fixed`): positioned ancestors
+///   are ignored and the CB is the initial containing block per CSS 2.1
+///   §10.1.5. Fulgur approximates the initial CB with the nearest `<body>`
+///   ancestor (the largest box that matches the page content area for
+///   the single-page reftests that exercise this path). True per-page
+///   viewport anchoring for paginated output is out of scope here.
+/// - In both modes we fall back to `<body>` if no stronger match is
+///   found. Returns `None` only for truly detached parent chains (no
+///   reachable `<body>`).
+///
+/// A `MAX_DOM_DEPTH` guard protects against pathological / malformed
+/// parent chains, matching the defensive bounds applied elsewhere in
+/// `convert.rs` (`debug_print_tree`, `collect_positioned_children`,
+/// `resolve_enclosing_anchor`).
+fn resolve_cb_for_absolute(
+    doc: &blitz_dom::BaseDocument,
+    parent: &Node,
+    is_fixed: bool,
+) -> Option<AbsCb> {
+    let mut offset_x = parent.final_layout.location.x;
+    let mut offset_y = parent.final_layout.location.y;
+    let mut cur_id = parent.parent;
+    let mut body_fallback: Option<AbsCb> = None;
+    let mut depth: usize = 0;
+
+    while let Some(id) = cur_id {
+        if depth >= MAX_DOM_DEPTH {
+            break;
+        }
+        let Some(cur) = doc.get_node(id) else {
+            break;
+        };
+        // `(offset_x, offset_y)` = `parent`'s position expressed in `cur`'s
+        // Taffy frame (border-box-origin-relative).
+        if !is_fixed && !is_position_static(cur) {
+            let (padding_box_size, border_top_left) = cb_padding_box(cur);
+            return Some(AbsCb {
+                padding_box_size,
+                border_top_left,
+                parent_offset_in_cb_bp: (offset_x, offset_y),
+            });
+        }
+        if let Some(elem) = cur.element_data() {
+            if elem.name.local.as_ref() == "body" {
+                let (padding_box_size, border_top_left) = cb_padding_box(cur);
+                body_fallback = Some(AbsCb {
+                    padding_box_size,
+                    border_top_left,
+                    parent_offset_in_cb_bp: (offset_x, offset_y),
+                });
+            }
+        }
+        offset_x += cur.final_layout.location.x;
+        offset_y += cur.final_layout.location.y;
+        cur_id = cur.parent;
+        depth += 1;
+    }
+    body_fallback
+}
+
+/// Resolve a stylo `Inset` value against a CSS-px basis. Returns `None` for
+/// `auto` and other non-length variants.
+fn resolve_inset_px(
+    inset: &style::values::computed::position::Inset,
+    basis_px: f32,
+) -> Option<f32> {
+    use style::values::computed::Length;
+    use style::values::generics::position::GenericInset;
+    match inset {
+        GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
+        _ => None,
+    }
+}
+
+/// Build `PositionedChild` entries for any `::before` / `::after` pseudo whose
+/// computed `position` is `absolute` or `fixed`. Each child is placed at the
+/// position resolved against the appropriate containing block (see below),
+/// converted to pt and expressed relative to the pseudo's parent.
+///
+/// **Why this isn't just `pseudo.final_layout.location`**: Blitz/Taffy
+/// compute the pseudo's layout with its Taffy parent as the containing block.
+/// When that parent is `position: static` (the CSS default) the result is
+/// wrong: CSS specifies that absolute elements resolve against the nearest
+/// `position: relative|absolute|fixed|sticky` ancestor, not the immediate
+/// parent. For the before-after-positioned-{002,003} WPT reftests, the
+/// pseudo's parent is static, so Taffy places the pseudos at `y=0` relative
+/// to that parent (origin of parent's box), while the corresponding ref div
+/// is placed by Taffy at `y = body.height - 100`. We recover the correct
+/// position here by walking up to the real CB and resolving the pseudo's
+/// `top`/`right`/`bottom`/`left` against it. When the parent IS positioned,
+/// Taffy's answer is correct and we keep it verbatim.
+///
+/// Runs ALONGSIDE `wrap_with_block_pseudo_images` at the call sites that
+/// construct a `BlockPageable` wrapping a node with pseudos; see
+/// fulgur-vlr3 for the full investigation.
+fn build_absolute_pseudo_children(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Vec<PositionedChild> {
+    let mut out = Vec::new();
+    let parent_is_static = is_position_static(node);
+    // `resolve_cb_for_absolute` only depends on `node` and `is_fixed`, so
+    // memoize the two possible results we might need to avoid walking the
+    // ancestor chain repeatedly when both `::before` and `::after` hit.
+    let mut cb_absolute: Option<Option<AbsCb>> = None;
+    let mut cb_fixed: Option<Option<AbsCb>> = None;
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        let Some(pseudo) = doc.get_node(pseudo_id) else {
+            continue;
+        };
+        if !is_absolutely_positioned(pseudo) {
+            continue;
+        }
+        // CB selection:
+        //   - `position: fixed` → skip positioned ancestors, use the
+        //     initial CB (body approximation). This holds whether or not
+        //     the parent is itself positioned.
+        //   - `position: absolute` + static parent → walk to nearest
+        //     positioned ancestor, else body.
+        //   - `position: absolute` + positioned parent → parent IS the CB;
+        //     construct an `AbsCb` from the parent directly so inset
+        //     resolution can correct for textless `content:url(...)`
+        //     pseudos whose `final_layout.size` is `(0, 0)` (Taffy gives
+        //     a wrong location for `right` / `bottom` in that case).
+        let cb = if is_position_fixed(pseudo) {
+            *cb_fixed.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, true))
+        } else if parent_is_static {
+            *cb_absolute.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, false))
+        } else {
+            let (padding_box_size, border_top_left) = cb_padding_box(node);
+            Some(AbsCb {
+                padding_box_size,
+                border_top_left,
+                parent_offset_in_cb_bp: (0.0, 0.0),
+            })
+        };
+        let (x_pt, y_pt) = if let Some(cb) = cb {
+            // Resolve pseudo position against the real CB (body or nearest
+            // positioned ancestor), then express relative to the pseudo's
+            // parent.
+            if let Some(styles) = pseudo.primary_styles() {
+                let pos = styles.get_position();
+                let (cb_w, cb_h) = cb.padding_box_size;
+                // `right` / `bottom` resolve against the pseudo's effective
+                // size (`cb_w - pw - r` etc). For textless `content:url(...)`
+                // pseudos Taffy leaves `final_layout.size` at `(0, 0)` and
+                // the real size only materializes inside `build_pseudo_image`,
+                // so reading `final_layout` here would shift the pseudo by
+                // its own width/height. `effective_pseudo_size_px` consults
+                // the same fallback `build_absolute_pseudo_child` uses so
+                // both stay in sync.
+                let (pw, ph) = effective_pseudo_size_px(pseudo, node, Some(cb), ctx.assets);
+                let left = resolve_inset_px(&pos.left, cb_w);
+                let right = resolve_inset_px(&pos.right, cb_w);
+                let top = resolve_inset_px(&pos.top, cb_h);
+                let bottom = resolve_inset_px(&pos.bottom, cb_h);
+                // Over-constrained inset resolution per CSS 2.1 §10.3.7
+                // (horizontal) and §10.6.4 (vertical): when both inset
+                // properties on an axis are specified, `left` wins over
+                // `right` (LTR only — we don't support RTL yet) and `top`
+                // wins over `bottom`. Only when the start-side inset is
+                // `auto` does the end-side inset determine position.
+                //
+                // `x_in_pp` / `y_in_pp` are in the CB's padding-box frame
+                // (where CSS insets live).
+                //
+                // **Simplification**: when BOTH inset properties on an axis
+                // are `auto`, CSS 2.1 says the element takes its
+                // "static position" (where it would sit in normal flow).
+                // Computing that correctly requires tracking the pseudo's
+                // in-flow position before absolute hoisting, which fulgur
+                // does not yet do for pseudo-elements. We fall back to 0 —
+                // callers today always specify at least one inset (both
+                // WPT before-after-positioned-{002,003} tests specify
+                // `right`/`bottom`, and typical UI patterns like
+                // `::before { position:absolute; left:-9px; }` specify
+                // `left` or `right`). Deviation from spec is tracked
+                // alongside the rest of fulgur's position:absolute work.
+                let x_in_pp = if let Some(l) = left {
+                    l
+                } else if let Some(r) = right {
+                    cb_w - pw - r
+                } else {
+                    0.0
+                };
+                let y_in_pp = if let Some(t) = top {
+                    t
+                } else if let Some(b) = bottom {
+                    cb_h - ph - b
+                } else {
+                    0.0
+                };
+                // Convert padding-box frame → CB's border-box frame by
+                // adding CB's `(border_left, border_top)`, then subtract
+                // the parent's border-box offset in CB's frame to get the
+                // pseudo's position relative to its parent's border-box
+                // (which is what `PositionedChild` expects).
+                let (bl, bt) = cb.border_top_left;
+                let (ox, oy) = cb.parent_offset_in_cb_bp;
+                (px_to_pt(x_in_pp + bl - ox), px_to_pt(y_in_pp + bt - oy))
+            } else {
+                let (x, y, _, _) = layout_in_pt(&pseudo.final_layout);
+                (x, y)
+            }
+        } else {
+            // Parent IS positioned (or CB couldn't be resolved) — Taffy's
+            // pseudo.final_layout.location is already correct.
+            let (x, y, _, _) = layout_in_pt(&pseudo.final_layout);
+            (x, y)
+        };
+        let child = build_absolute_pseudo_child(doc, node, pseudo, pseudo_id, cb, ctx, depth);
+        out.push(PositionedChild {
+            child,
+            x: x_pt,
+            y: y_pt,
+        });
+    }
+    out
+}
+
+/// Build the `Pageable` for a single absolutely-positioned pseudo.
+///
+/// For a textless `content: url(...)` pseudo, Blitz never assigns a
+/// non-zero `final_layout.size` (see `build_pseudo_image`'s comment), so
+/// the generic `convert_node → convert_content_url` path would size the
+/// image to zero and silently drop it. Detect that shape here and route
+/// through `build_pseudo_image` so computed `width` / `height` (or the
+/// image's intrinsic dimensions) drive the size instead.
+///
+/// Pseudos with visual style (background, border, padding, box-shadow)
+/// fall back to `convert_node` because `build_pseudo_image` produces a
+/// bare `ImagePageable` that would drop those decorations. That edge case
+/// (absolute pseudo + content:url + visual style + zero final_layout) is
+/// narrow enough to defer to a follow-up.
+fn build_absolute_pseudo_child(
+    doc: &blitz_dom::BaseDocument,
+    parent: &Node,
+    pseudo: &Node,
+    pseudo_id: usize,
+    cb: Option<AbsCb>,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Box<dyn Pageable> {
+    if let Some(img) = try_build_absolute_pseudo_image(pseudo, parent, cb, ctx.assets) {
+        return Box::new(img);
+    }
+    convert_node(doc, pseudo_id, ctx, depth + 1)
+}
+
+/// Shortcut for the textless `content: url(...)` abs pseudo case shared by
+/// both child construction (`build_absolute_pseudo_child`) and inset
+/// resolution (`effective_pseudo_size_px`). Returns `None` when the pseudo
+/// is not a content:url shape, has visual style that requires the wrapping
+/// path, or `build_pseudo_image` itself returns `None`.
+///
+/// `cb` must be the same value the caller will use for inset resolution so
+/// the size and position stay in sync.
+fn try_build_absolute_pseudo_image(
+    pseudo: &Node,
+    parent: &Node,
+    cb: Option<AbsCb>,
+    assets: Option<&AssetBundle>,
+) -> Option<ImagePageable> {
+    crate::blitz_adapter::extract_content_image_url(pseudo)?;
+    let pseudo_style = extract_block_style(pseudo, assets);
+    if pseudo_style.has_visual_style() {
+        return None;
+    }
+    // CSS spec: percentage `width` / `height` on an absolutely-positioned
+    // element resolve against the CB's padding-box.
+    // - cb=Some: we already resolved the CB → use its padding-box.
+    // - cb=None: parent is the CB; approximate with the parent's border-box
+    //   dims. Percentage width/height on an absolute pseudo whose parent has
+    //   padding resolves slightly off, but content:url() pseudos typically
+    //   use pixel sizing so the common case is handled correctly.
+    //
+    // `build_pseudo_image` expects `parent_*` arguments in PDF pt (it runs
+    // them back through `pt_to_px` to set the percentage basis).
+    // `AbsCb::padding_box_size` and Taffy's `final_layout.size` are both in
+    // CSS px, so convert before calling.
+    let (basis_w_pt, basis_h_pt) = if let Some(cb) = cb {
+        let (w_px, h_px) = cb.padding_box_size;
+        (px_to_pt(w_px), px_to_pt(h_px))
+    } else {
+        (
+            px_to_pt(parent.final_layout.size.width),
+            px_to_pt(parent.final_layout.size.height),
+        )
+    };
+    build_pseudo_image(pseudo, basis_w_pt, basis_h_pt, assets)
+}
+
+/// Effective `(width, height)` of `pseudo` in CSS px, for inset resolution.
+///
+/// Taffy's `final_layout.size` is `(0, 0)` for textless `content:url(...)`
+/// pseudos (Blitz limitation documented in `build_pseudo_image`). Naively
+/// using it for `right` / `bottom` resolution makes the pseudo land at
+/// `cb_w - 0 - r = cb_w - r` instead of `cb_w - img_w - r`, shifting the
+/// pseudo by its own width.
+///
+/// We mirror the same shortcut `build_absolute_pseudo_child` takes for the
+/// child Pageable so the inset basis matches the rendered size. For pseudos
+/// where the shortcut does not apply (text content, visual style + content
+/// url, etc.), Taffy's `final_layout.size` is reliable and we use it
+/// directly.
+fn effective_pseudo_size_px(
+    pseudo: &Node,
+    parent: &Node,
+    cb: Option<AbsCb>,
+    assets: Option<&AssetBundle>,
+) -> (f32, f32) {
+    let layout = pseudo.final_layout.size;
+    if layout.width > 0.0 || layout.height > 0.0 {
+        return (layout.width, layout.height);
+    }
+    if let Some(img) = try_build_absolute_pseudo_image(pseudo, parent, cb, assets) {
+        return (pt_to_px(img.width), pt_to_px(img.height));
+    }
+    (layout.width, layout.height)
+}
+
+/// Orchestrator that combines block-pseudo-image wrapping with absolute
+/// pseudo positioning. Returns `(positioned_children, has_pseudo)` where
+/// `has_pseudo` is true if EITHER a block-pseudo image OR an
+/// absolutely-positioned pseudo contributed to the child vec.
+///
+/// Call sites previously did `build_block_pseudo_images` +
+/// `wrap_with_block_pseudo_images` back to back and computed `has_pseudo`
+/// from the pair of `Option<ImagePageable>`; that two-step is folded here
+/// so the absolute-pseudo path is picked up uniformly without duplicating
+/// boilerplate at every construction site.
+fn wrap_with_pseudo_content(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+    parent_cb: ContentBox,
+    children: Vec<PositionedChild>,
+) -> (Vec<PositionedChild>, bool) {
+    let (before_img, after_img) = build_block_pseudo_images(doc, node, parent_cb, ctx.assets);
+    let has_img_pseudo = before_img.is_some() || after_img.is_some();
+    let mut out = wrap_with_block_pseudo_images(before_img, after_img, parent_cb, children);
+    let abs = build_absolute_pseudo_children(doc, node, ctx, depth);
+    let has_any_pseudo = has_img_pseudo || !abs.is_empty();
+    out.extend(abs);
+    (out, has_any_pseudo)
+}
+
 /// Cheap probe: does `node` have at least one `::before` / `::after` pseudo
 /// slot whose computed `content` resolves to a block-display image URL?
 ///
@@ -1460,6 +1956,38 @@ fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> b
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
             && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` if `node` has a `::before` or `::after` pseudo-element
+/// whose computed `position` is `absolute` or `fixed`. Such a pseudo is
+/// emitted by `build_absolute_pseudo_children` when the node reaches
+/// `convert_node_inner`; we need `collect_positioned_children`'s zero-size
+/// leaf / container filter to NOT drop the node on the way there.
+///
+/// Without this probe, a pattern like
+///
+/// ```html
+/// <style>
+///   .marker { position: relative; width: 0; height: 0; }
+///   .marker::before {
+///     content: ""; position: absolute;
+///     width: 8px; height: 8px; background: red;
+///   }
+/// </style>
+/// <div class="marker"></div>
+/// ```
+///
+/// would be skipped by the zero-size-leaf branch of
+/// `collect_positioned_children` and the pseudo would never paint.
+fn node_has_absolute_pseudo(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+        if let Some(pseudo) = doc.get_node(pseudo_id)
+            && is_absolutely_positioned(pseudo)
         {
             return true;
         }
@@ -1533,6 +2061,15 @@ fn build_block_pseudo_images(
     let load = |pseudo_id: Option<usize>| -> Option<ImagePageable> {
         let pseudo = doc.get_node(pseudo_id?)?;
         if !is_block_pseudo(pseudo) {
+            return None;
+        }
+        // Absolutely-positioned pseudos are handled by
+        // `build_absolute_pseudo_children`. CSS §9.7 blockifies them, so
+        // `is_block_pseudo` is true even with `position: absolute`, and
+        // without this guard a pseudo with both `content: url(...)` and
+        // `position: absolute` would be emitted twice (once as an
+        // `ImagePageable` here and once via the absolute path).
+        if is_absolutely_positioned(pseudo) {
             return None;
         }
         build_pseudo_image(pseudo, parent_cb.width, parent_cb.height, assets)
@@ -1961,7 +2498,9 @@ fn collect_table_cells(
         emit_orphan_bookmark_marker(node_id, x, y, ctx, out);
     }
 
-    for &child_id in &node.children {
+    let layout_children_guard = node.layout_children.borrow();
+    let effective_children = layout_children_guard.as_deref().unwrap_or(&node.children);
+    for &child_id in effective_children {
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
         };
@@ -1975,7 +2514,13 @@ fn collect_table_cells(
         let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
 
         // Zero-size container (tr, thead, tbody) — recurse into children
-        if ch == 0.0 && cw == 0.0 && !child_node.children.is_empty() {
+        let child_effective_is_empty = child_node
+            .layout_children
+            .borrow()
+            .as_deref()
+            .unwrap_or(&child_node.children)
+            .is_empty();
+        if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
             collect_table_cells(
                 doc,
@@ -2113,6 +2658,26 @@ fn convert_inline_box_node(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
 ) -> crate::paragraph::InlineBoxContent {
+    // This function processes an inline box emitted by Parley during
+    // paragraph layout. Per CSS, `position: absolute | fixed` elements are
+    // out of normal flow and should never appear in Parley's inline
+    // sequence, but Blitz currently routes absolutely-positioned pseudo
+    // elements (`::before` / `::after`) through Parley's inline layout
+    // anyway, which would paint them at `(0, 0)` of the surrounding flow.
+    //
+    // Suppress that rendering path ONLY for pseudos (detected by
+    // `is_pseudo_node`), because `build_absolute_pseudo_children` re-emits
+    // pseudos at the CSS-correct position by walking to the containing
+    // block. It does NOT handle regular (non-pseudo) absolute children —
+    // those have no re-emit path, so letting them fall through to
+    // `convert_node` at least preserves their content (even if they end up
+    // at Parley's inline position). Suppressing non-pseudos here would
+    // silently drop them, which is worse.
+    if let Some(node) = doc.get_node(node_id) {
+        if is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
+            return Box::new(SpacerPageable::new(0.0));
+        }
+    }
     convert_node(doc, node_id, ctx, depth + 1)
 }
 
@@ -2195,6 +2760,22 @@ fn extract_paragraph(
                 }
                 parley::PositionedLayoutItem::InlineBox(positioned) => {
                     let node_id = positioned.id as usize;
+                    // Absolute/fixed pseudos are out of normal flow and must
+                    // NOT reserve inline width or contribute to line metrics.
+                    // Returning a `SpacerPageable` from
+                    // `convert_inline_box_node` alone is insufficient because
+                    // this branch would still push an `InlineBoxItem` built
+                    // from Parley's `positioned.width` / `positioned.height`,
+                    // which reserves space even when the content is blank.
+                    // Skip the whole `items.push` for such pseudos — the
+                    // containing block's converter re-emits them at their
+                    // CSS-correct position via
+                    // `build_absolute_pseudo_children`.
+                    if let Some(box_node) = doc.get_node(node_id) {
+                        if is_absolutely_positioned(box_node) && is_pseudo_node(doc, box_node) {
+                            continue;
+                        }
+                    }
                     let content = convert_inline_box_node(doc, node_id, ctx, depth);
                     let link = ctx.link_cache.lookup(doc, node_id);
                     // Parley's `PositionedInlineBox` has no baseline field
@@ -2281,24 +2862,14 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
 
         // Background color — access the computed value directly
         let bg = styles.clone_background_color();
-        let bg_abs = bg.resolve_to_absolute(&current_color);
-        let r = (bg_abs.components.0.clamp(0.0, 1.0) * 255.0) as u8;
-        let g = (bg_abs.components.1.clamp(0.0, 1.0) * 255.0) as u8;
-        let b = (bg_abs.components.2.clamp(0.0, 1.0) * 255.0) as u8;
-        let a = (bg_abs.alpha.clamp(0.0, 1.0) * 255.0) as u8;
-        if a > 0 {
-            style.background_color = Some([r, g, b, a]);
+        let bg_rgba = absolute_to_rgba(bg.resolve_to_absolute(&current_color));
+        if bg_rgba[3] > 0 {
+            style.background_color = Some(bg_rgba);
         }
 
         // Border color (use top border color for all sides for simplicity)
         let bc = styles.clone_border_top_color();
-        let bc_abs = bc.resolve_to_absolute(&current_color);
-        style.border_color = [
-            (bc_abs.components.0.clamp(0.0, 1.0) * 255.0) as u8,
-            (bc_abs.components.1.clamp(0.0, 1.0) * 255.0) as u8,
-            (bc_abs.components.2.clamp(0.0, 1.0) * 255.0) as u8,
-            (bc_abs.alpha.clamp(0.0, 1.0) * 255.0) as u8,
-        ];
+        style.border_color = absolute_to_rgba(bc.resolve_to_absolute(&current_color));
 
         // Border radii. Stylo evaluates length-percentage values in CSS px
         // space, so we feed it the CSS-px border-box basis and convert the
@@ -2355,12 +2926,8 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                     blur_px
                 );
             }
-            let color_abs = shadow.base.color.resolve_to_absolute(&current_color);
-            let r = (color_abs.components.0.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let g = (color_abs.components.1.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let b = (color_abs.components.2.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let a = (color_abs.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-            if a == 0 {
+            let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(&current_color));
+            if rgba[3] == 0 {
                 continue; // fully transparent — skip
             }
             style.box_shadows.push(crate::pageable::BoxShadow {
@@ -2368,7 +2935,7 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
                 offset_y: px_to_pt(shadow.base.vertical.px()),
                 blur: px_to_pt(blur_px),
                 spread: px_to_pt(shadow.spread.px()),
-                color: [r, g, b, a],
+                color: rgba,
                 inset: false,
             });
         }
@@ -2407,9 +2974,15 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
         style.overflow_x = map_overflow(styles.clone_overflow_x());
         style.overflow_y = map_overflow(styles.clone_overflow_y());
 
-        // Background image layers
-        if let Some(assets) = assets {
-            let bg_images = styles.clone_background_image();
+        // Background image layers. Skip the six secondary `clone_*` calls
+        // (sizes/positions/repeats/origins/clips) if no layer is actually
+        // populated — the vast majority of DOM nodes have only `Image::None`.
+        let bg_images = styles.clone_background_image();
+        let has_real_bg_image = bg_images
+            .0
+            .iter()
+            .any(|i| !matches!(i, style::values::computed::image::Image::None));
+        if has_real_bg_image {
             let bg_sizes = styles.clone_background_size();
             let bg_pos_x = styles.clone_background_position_x();
             let bg_pos_y = styles.clone_background_position_y();
@@ -2419,77 +2992,87 @@ fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle 
 
             for (i, image) in bg_images.0.iter().enumerate() {
                 use style::values::computed::image::Image;
-                if let Image::Url(url) = image {
-                    let raw_src = match url {
-                        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-                        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
-                    };
-                    // Stylo resolves URLs to absolute (e.g. "file:///bg.png").
-                    // Extract the path/filename for AssetBundle lookup.
-                    let src = extract_asset_name(raw_src);
-                    if let Some(data) = assets.get_image(src) {
-                        use crate::image::AssetKind;
 
-                        // Resolve content + intrinsic size per asset kind.
-                        let resolved: Option<(BgImageContent, f32, f32)> =
-                            match AssetKind::detect(data) {
-                                AssetKind::Raster(format) => {
-                                    let (iw, ih) = ImagePageable::decode_dimensions(data, format)
-                                        .unwrap_or((1, 1));
-                                    Some((
-                                        BgImageContent::Raster {
-                                            data: Arc::clone(data),
-                                            format,
-                                        },
-                                        iw as f32,
-                                        ih as f32,
-                                    ))
-                                }
-                                AssetKind::Svg => {
-                                    let opts = usvg::Options::default();
-                                    match usvg::Tree::from_data(data, &opts) {
-                                        Ok(tree) => {
-                                            let svg_size = tree.size();
-                                            Some((
-                                                BgImageContent::Svg {
-                                                    tree: Arc::new(tree),
-                                                },
-                                                svg_size.width(),
-                                                svg_size.height(),
-                                            ))
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "failed to parse SVG background-image '{src}': {e}"
-                                            );
-                                            None
-                                        }
+                // Resolve `content` + intrinsic size per image kind. URL images
+                // require an `AssetBundle`; gradients are self-contained.
+                let resolved: Option<(BgImageContent, f32, f32)> = match image {
+                    Image::Url(url) => assets.and_then(|a| {
+                        let raw_src = match url {
+                            style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+                            style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+                        };
+                        let src = extract_asset_name(raw_src);
+                        let data = a.get_image(src)?;
+
+                        use crate::image::AssetKind;
+                        match AssetKind::detect(data) {
+                            AssetKind::Raster(format) => {
+                                let (iw, ih) = ImagePageable::decode_dimensions(data, format)
+                                    .unwrap_or((1, 1));
+                                Some((
+                                    BgImageContent::Raster {
+                                        data: Arc::clone(data),
+                                        format,
+                                    },
+                                    iw as f32,
+                                    ih as f32,
+                                ))
+                            }
+                            AssetKind::Svg => {
+                                let opts = usvg::Options::default();
+                                match usvg::Tree::from_data(data, &opts) {
+                                    Ok(tree) => {
+                                        let svg_size = tree.size();
+                                        Some((
+                                            BgImageContent::Svg {
+                                                tree: Arc::new(tree),
+                                            },
+                                            svg_size.width(),
+                                            svg_size.height(),
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "failed to parse SVG background-image '{src}': {e}"
+                                        );
+                                        None
                                     }
                                 }
-                                AssetKind::Unknown => None,
-                            };
-
-                        if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
-                            let size = convert_bg_size(&bg_sizes.0, i);
-                            let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
-                            let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
-                            let origin = convert_bg_origin(&bg_origins.0, i);
-                            let clip = convert_bg_clip(&bg_clips.0, i);
-
-                            style.background_layers.push(BackgroundLayer {
-                                content,
-                                intrinsic_width,
-                                intrinsic_height,
-                                size,
-                                position_x: px,
-                                position_y: py,
-                                repeat_x: rx,
-                                repeat_y: ry,
-                                origin,
-                                clip,
-                            });
+                            }
+                            AssetKind::Unknown => None,
+                        }
+                    }),
+                    Image::Gradient(g) => {
+                        use style::values::computed::image::Gradient;
+                        // g: &Box<Gradient> なので as_ref() で &Gradient を取って match。
+                        match g.as_ref() {
+                            Gradient::Linear { .. } => resolve_linear_gradient(g, &current_color),
+                            Gradient::Radial { .. } => resolve_radial_gradient(g, &current_color),
+                            Gradient::Conic { .. } => None,
                         }
                     }
+                    _ => None,
+                };
+
+                if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
+                    let size = convert_bg_size(&bg_sizes.0, i);
+                    let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                    let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                    let origin = convert_bg_origin(&bg_origins.0, i);
+                    let clip = convert_bg_clip(&bg_clips.0, i);
+
+                    style.background_layers.push(BackgroundLayer {
+                        content,
+                        intrinsic_width,
+                        intrinsic_height,
+                        size,
+                        position_x: px,
+                        position_y: py,
+                        repeat_x: rx,
+                        repeat_y: ry,
+                        origin,
+                        clip,
+                    });
                 }
             }
         }
@@ -2517,6 +3100,276 @@ fn extract_opacity_visible(node: &Node) -> (f32, bool) {
 /// "bg.png" → "bg.png" (passthrough for unresolved URLs).
 fn extract_asset_name(url: &str) -> &str {
     url.strip_prefix("file:///").unwrap_or(url)
+}
+
+fn absolute_to_rgba(c: style::color::AbsoluteColor) -> [u8; 4] {
+    // `.round()` (not `as u8` truncation) so e.g. `rgb(127.5,…)` lands on 128
+    // instead of 127. Truncation introduces a half-channel down-bias for
+    // every fractional component, which is most visible in gradient stops.
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        q(c.components.0),
+        q(c.components.1),
+        q(c.components.2),
+        q(c.alpha),
+    ]
+}
+
+/// Convert a Stylo computed `Gradient` into fulgur's `BgImageContent`.
+///
+/// Phase 1 supports `linear-gradient(...)` only:
+/// - Direction via explicit angle, `to top/right/bottom/left` keyword, or
+///   `to <h> <v>` corner. Corner directions are stored as a flag and
+///   resolved against the gradient box at draw time (CSS Images 3 §3.1.1
+///   defines them in terms of W and H).
+/// - Color stops with explicit `<percentage>` positions, plus auto stops
+///   (positions filled in via even spacing between adjacent fixed stops, per
+///   CSS Images §3.5.1).
+/// - Length-typed stops (`linear-gradient(red 50px, blue)`) are unsupported
+///   in Phase 1 because resolving them requires the gradient line length,
+///   which depends on the box dimensions (only known at draw time). Falls
+///   back to `None` for now.
+/// - Repeating gradients, `radial-gradient`, `conic-gradient`, color
+///   interpolation methods, and interpolation hints are unsupported.
+///
+/// Returned tuple: `(content, intrinsic_w, intrinsic_h)`. Gradients have no
+/// intrinsic size, so we return `(0.0, 0.0)` and the draw path special-cases
+/// gradients to fill the origin rect directly (`background.rs` does not
+/// route gradients through `resolve_size` / tiling).
+fn resolve_linear_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::pageable::{LinearGradientCorner, LinearGradientDirection};
+    use style::values::computed::image::{Gradient, LineDirection};
+    use style::values::generics::image::GradientFlags;
+    use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
+
+    let (direction, items, flags) = match g {
+        Gradient::Linear {
+            direction,
+            items,
+            flags,
+            ..
+        } => (direction, items, flags),
+        Gradient::Radial { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    let repeating = flags.contains(GradientFlags::REPEATING);
+    // Non-default `color_interpolation_method` (e.g. `in oklch`) would change
+    // the rendered colors. Phase 1 interpolates in sRGB only, so bail rather
+    // than silently misrender.
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        return None;
+    }
+
+    let direction = match direction {
+        LineDirection::Angle(a) => LinearGradientDirection::Angle(a.radians()),
+        LineDirection::Horizontal(HorizontalPositionKeyword::Right) => {
+            LinearGradientDirection::Angle(std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Horizontal(HorizontalPositionKeyword::Left) => {
+            LinearGradientDirection::Angle(3.0 * std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Top) => {
+            LinearGradientDirection::Angle(0.0)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
+            LinearGradientDirection::Angle(std::f32::consts::PI)
+        }
+        LineDirection::Corner(h, v) => {
+            use HorizontalPositionKeyword::*;
+            use VerticalPositionKeyword::*;
+            let corner = match (h, v) {
+                (Left, Top) => LinearGradientCorner::TopLeft,
+                (Right, Top) => LinearGradientCorner::TopRight,
+                (Left, Bottom) => LinearGradientCorner::BottomLeft,
+                (Right, Bottom) => LinearGradientCorner::BottomRight,
+            };
+            LinearGradientDirection::Corner(corner)
+        }
+    };
+
+    let stops = resolve_color_stops(items, current_color, "linear-gradient")?;
+
+    Some((
+        BgImageContent::LinearGradient {
+            direction,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+/// CSS gradient items から GradientStop ベクタを解決する。linear / radial 共通。
+///
+/// position は `GradientStopPosition` で保持され (Auto / Fraction / LengthPx)、
+/// draw 時に `background::resolve_gradient_stops` で gradient line 長さを
+/// 使って fraction 化される。convert 時の fixup は行わない。
+///
+/// Bail 条件:
+/// - stops.len() < 2 (規定上 invalid)
+/// - interpolation hint (Phase 2 別 issue)
+/// - position が percentage でも length でもない (calc() 等 — Phase 2)
+fn resolve_color_stops(
+    items: &[style::values::generics::image::GenericGradientItem<
+        style::values::computed::Color,
+        style::values::computed::LengthPercentage,
+    >],
+    current_color: &style::color::AbsoluteColor,
+    gradient_kind: &'static str,
+) -> Option<Vec<crate::pageable::GradientStop>> {
+    use crate::pageable::{GradientStop, GradientStopPosition};
+    use style::values::generics::image::GradientItem;
+
+    let mut out: Vec<GradientStop> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            GradientItem::SimpleColorStop(c) => {
+                let abs = c.resolve_to_absolute(current_color);
+                out.push(GradientStop {
+                    position: GradientStopPosition::Auto,
+                    rgba: absolute_to_rgba(abs),
+                });
+            }
+            GradientItem::ComplexColorStop { color, position } => {
+                let abs = color.resolve_to_absolute(current_color);
+                let pos = if let Some(pct) = position.to_percentage() {
+                    GradientStopPosition::Fraction(pct.0)
+                } else if let Some(len) = position.to_length() {
+                    GradientStopPosition::LengthPx(len.px())
+                } else {
+                    log::warn!(
+                        "{gradient_kind}: stop position is neither percentage \
+                         nor length (calc() etc.). Layer dropped."
+                    );
+                    return None;
+                };
+                out.push(GradientStop {
+                    position: pos,
+                    rgba: absolute_to_rgba(abs),
+                });
+            }
+            GradientItem::InterpolationHint(_) => {
+                log::warn!(
+                    "{gradient_kind}: interpolation hints are not yet supported \
+                     (Phase 2). Layer dropped."
+                );
+                return None;
+            }
+        }
+    }
+
+    if out.len() < 2 {
+        return None;
+    }
+
+    Some(out)
+}
+
+/// Convert a Stylo computed `Gradient::Radial` into fulgur's `BgImageContent::RadialGradient`.
+///
+/// Phase 1 scope (per beads issue fulgur-gm56 design):
+/// - shape: circle / ellipse
+/// - size: extent keyword (closest-side / farthest-side / closest-corner / farthest-corner) or
+///   explicit length / length-percentage radii (resolved at draw time against gradient box)
+/// - position: keyword + length-percentage の組合せ (BgLengthPercentage 経由)
+/// - stops: linear と共通の resolve_color_stops を使用
+///
+/// Bail conditions (return None) — match resolve_linear_gradient:
+/// - non-default color interpolation method
+/// - length-typed / 範囲外 stop position, interpolation hint (resolve_color_stops 内)
+///
+/// `repeating-radial-gradient(...)` は `repeating: true` で受け、draw 時に
+/// stop の周期展開で表現する (Krilla の RadialGradient は SpreadMethod::Pad のみ)。
+fn resolve_radial_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::pageable::{RadialGradientShape, RadialGradientSize};
+    use style::values::computed::image::Gradient;
+    use style::values::generics::image::{Circle, Ellipse, EndingShape, GradientFlags};
+
+    let (shape, position, items, flags) = match g {
+        Gradient::Radial {
+            shape,
+            position,
+            items,
+            flags,
+            ..
+        } => (shape, position, items, flags),
+        Gradient::Linear { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    let repeating = flags.contains(GradientFlags::REPEATING);
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        return None;
+    }
+
+    let (out_shape, out_size) = match shape {
+        EndingShape::Circle(Circle::Radius(r)) => {
+            // r: NonNegativeLength = NonNegative<Length>。.0.px() で CSS px、px_to_pt() で pt 化。
+            let len_pt = px_to_pt(r.0.px());
+            (
+                RadialGradientShape::Circle,
+                RadialGradientSize::Explicit {
+                    rx: BgLengthPercentage::Length(len_pt),
+                    ry: BgLengthPercentage::Length(len_pt),
+                },
+            )
+        }
+        EndingShape::Circle(Circle::Extent(ext)) => (
+            RadialGradientShape::Circle,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+        EndingShape::Ellipse(Ellipse::Radii(rx, ry)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Explicit {
+                rx: try_convert_lp_to_bg(&rx.0)?,
+                ry: try_convert_lp_to_bg(&ry.0)?,
+            },
+        ),
+        EndingShape::Ellipse(Ellipse::Extent(ext)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+    };
+
+    // computed::Position::horizontal / vertical はどちらも LengthPercentage 直接 (wrapper なし)。
+    // calc() 等 resolve 不能な値は silent 0 で誤描画させずに layer drop する。
+    let position_x = try_convert_lp_to_bg(&position.horizontal)?;
+    let position_y = try_convert_lp_to_bg(&position.vertical)?;
+
+    let stops = resolve_color_stops(items, current_color, "radial-gradient")?;
+
+    Some((
+        BgImageContent::RadialGradient {
+            shape: out_shape,
+            size: out_size,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+fn map_extent(e: style::values::generics::image::ShapeExtent) -> crate::pageable::RadialExtent {
+    use crate::pageable::RadialExtent;
+    use style::values::generics::image::ShapeExtent;
+    match e {
+        ShapeExtent::ClosestSide => RadialExtent::ClosestSide,
+        ShapeExtent::FarthestSide => RadialExtent::FarthestSide,
+        ShapeExtent::ClosestCorner => RadialExtent::ClosestCorner,
+        ShapeExtent::FarthestCorner => RadialExtent::FarthestCorner,
+        // CSS Images §3.6.1: Contain == ClosestSide のエイリアス、Cover == FarthestCorner のエイリアス。
+        ShapeExtent::Contain => RadialExtent::ClosestSide,
+        ShapeExtent::Cover => RadialExtent::FarthestCorner,
+    }
 }
 
 fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) -> BgSize {
@@ -2547,11 +3400,28 @@ fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) 
 /// Convert Stylo LengthPercentage to BgLengthPercentage.
 /// Note: calc() values (e.g. `calc(50% + 10px)`) are not fully supported —
 /// they fall back to 0.0 if neither pure percentage nor pure length.
+/// 呼び出し側が "silent 0.0 で良い" 場面 (background-position / -size の Phase 1) のみ
+/// 使うこと。radial-gradient の半径や中心位置のように 0 が誤描画になる場面では
+/// `try_convert_lp_to_bg` を使って calc() を None にして bail する。
 fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthPercentage {
     if let Some(pct) = lp.to_percentage() {
         BgLengthPercentage::Percentage(pct.0)
     } else {
         BgLengthPercentage::Length(lp.to_length().map(|l| px_to_pt(l.px())).unwrap_or(0.0))
+    }
+}
+
+/// `convert_lp_to_bg` の Option 版。calc() 等の resolve 不能な値で `None` を返す。
+/// silent 0.0 fallback では誤描画になる radial-gradient の半径 / 中心位置で使う
+/// (CodeRabbit #238 で指摘)。
+fn try_convert_lp_to_bg(
+    lp: &style::values::computed::LengthPercentage,
+) -> Option<BgLengthPercentage> {
+    if let Some(pct) = lp.to_percentage() {
+        Some(BgLengthPercentage::Percentage(pct.0))
+    } else {
+        lp.to_length()
+            .map(|l| BgLengthPercentage::Length(px_to_pt(l.px())))
     }
 }
 
@@ -3077,12 +3947,7 @@ fn get_text_color(doc: &blitz_dom::BaseDocument, node_id: usize) -> [u8; 4] {
     if let Some(node) = doc.get_node(node_id)
         && let Some(styles) = node.primary_styles()
     {
-        let color = styles.clone_color();
-        let r = (color.components.0.clamp(0.0, 1.0) * 255.0) as u8;
-        let g = (color.components.1.clamp(0.0, 1.0) * 255.0) as u8;
-        let b = (color.components.2.clamp(0.0, 1.0) * 255.0) as u8;
-        let a = (color.alpha.clamp(0.0, 1.0) * 255.0) as u8;
-        return [r, g, b, a];
+        return absolute_to_rgba(styles.clone_color());
     }
     [0, 0, 0, 255] // Default: black
 }
@@ -3120,13 +3985,7 @@ fn get_text_decoration(doc: &blitz_dom::BaseDocument, node_id: usize) -> TextDec
 
         // text-decoration-color (resolve currentcolor)
         let deco_color = styles.clone_text_decoration_color();
-        let resolved = deco_color.resolve_to_absolute(&current_color);
-        let color = [
-            (resolved.components.0.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.components.1.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.components.2.clamp(0.0, 1.0) * 255.0) as u8,
-            (resolved.alpha.clamp(0.0, 1.0) * 255.0) as u8,
-        ];
+        let color = absolute_to_rgba(deco_color.resolve_to_absolute(&current_color));
 
         return TextDecoration { line, style, color };
     }

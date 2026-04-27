@@ -232,8 +232,23 @@ pub fn render_to_pdf_with_gcpm(
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
 ) -> Result<Vec<u8>> {
-    let content_width = config.content_width();
-    let content_height = config.content_height();
+    // Resolve the default (no-selector) CSS @page margin for initial pagination.
+    // :first/:left/:right overrides are applied per-page during rendering below.
+    let default_page_rules: Vec<_> = gcpm
+        .page_settings
+        .iter()
+        .filter(|r| r.page_selector.is_none())
+        .cloned()
+        .collect();
+    let (init_size, init_margin, init_landscape) =
+        crate::gcpm::page_settings::resolve_page_settings(&default_page_rules, 1, 0, config);
+    let init_size = if init_landscape {
+        init_size.landscape()
+    } else {
+        init_size
+    };
+    let content_width = init_size.width - init_margin.left - init_margin.right;
+    let content_height = init_size.height - init_margin.top - init_margin.bottom;
 
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
@@ -608,7 +623,7 @@ mod tests {
         ))]))
     }
 
-    // ── escape_attr ───────────────────────────────────────────────────────────
+    // --- escape_attr ---
 
     #[test]
     fn escape_attr_no_special_chars() {
@@ -648,22 +663,34 @@ mod tests {
         assert_eq!(escape_attr(""), "");
     }
 
-    // ── strip_display_none ────────────────────────────────────────────────────
+    // --- strip_display_none ---
 
     #[test]
     fn strip_display_none_spaced_variant() {
         let css = ".x { display: none; color: red; }";
         let result = strip_display_none(css);
-        assert!(!result.contains("display: none"));
-        assert!(result.contains("color: red"));
+        assert!(
+            !result.contains("display: none"),
+            "should remove 'display: none'"
+        );
+        assert!(
+            result.contains("color: red"),
+            "should preserve other properties"
+        );
     }
 
     #[test]
     fn strip_display_none_unspaced_variant() {
         let css = ".x { display:none; margin: 0; }";
         let result = strip_display_none(css);
-        assert!(!result.contains("display:none"));
-        assert!(result.contains("margin: 0"));
+        assert!(
+            !result.contains("display:none"),
+            "should remove 'display:none'"
+        );
+        assert!(
+            result.contains("margin: 0"),
+            "should preserve other properties"
+        );
     }
 
     #[test]
@@ -673,14 +700,14 @@ mod tests {
     }
 
     #[test]
-    fn strip_display_none_both_variants() {
+    fn strip_display_none_both_variants_in_same_string() {
         let css = "a { display: none; } b { display:none; }";
         let result = strip_display_none(css);
         assert!(!result.contains("display: none"));
         assert!(!result.contains("display:none"));
     }
 
-    // ── width_key ─────────────────────────────────────────────────────────────
+    // --- width_key ---
 
     #[test]
     fn width_key_matches_to_bits() {
@@ -698,7 +725,7 @@ mod tests {
         assert_eq!(width_key(0.0_f32), 0_f32.to_bits());
     }
 
-    // ── parse_datetime ────────────────────────────────────────────────────────
+    // --- parse_datetime ---
 
     #[test]
     fn parse_datetime_valid_year_only() {
@@ -732,6 +759,7 @@ mod tests {
 
     #[test]
     fn parse_datetime_valid_hour_only_in_time() {
+        // only hour field present in time part → still valid
         assert!(parse_datetime("2024-01-01T12").is_some());
     }
 

@@ -19,12 +19,15 @@ name: VRT Chrome Golden Update
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   chrome-goldens:
     name: Regenerate Chromium goldens
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -43,9 +46,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Chromium download
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/fulgur-vrt/
           key: chromium-${{ hashFiles('crates/fulgur-vrt/src/chrome.rs') }}
@@ -54,7 +59,7 @@ jobs:
         run: cargo test -p fulgur-vrt --features chrome-golden -- --ignored
 
       - name: Upload regenerated goldens
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chrome-goldens
           path: crates/fulgur-vrt/goldens/chrome/

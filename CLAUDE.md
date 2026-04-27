@@ -79,6 +79,12 @@ callers don't get this guarantee by default — see the tracking issue
 
 ### Gotchas
 
+- **Coordinate system and unit conversion**: fulgur uses three distinct unit spaces
+  (Blitz/Taffy in CSS px, Pageable/Krilla in PDF pt, `PageSize::custom` in mm).
+  Forgetting a conversion is the most common source of scale bugs (4/3× or 3/4× off).
+  See `.claude/rules/coordinate-system.md` for the full rules, conversion helpers,
+  and known pitfalls (Krilla Y-down, Stylo px basis, CSS transform composition,
+  PDF text-space operators).
 - **Blitz is thread-safe** (contrary to earlier belief). Multiple threads can
   call `blitz_adapter::parse` / `resolve` / `apply_passes` concurrently on
   independent documents. The previous "Blitz not thread-safe" note was based
@@ -110,8 +116,31 @@ callers don't get this guarantee by default — see the tracking issue
   - Short version: **touch fd 1 only from a crate that can guarantee
     single-threaded semantics**. That's CLI today; bindings are
     multi-threaded by design and must leave fd 1 alone.
+- **Worktree sparse-checkout**: `git worktree add` inherits a `/.beads/`-only
+  sparse-checkout pattern, which makes `git add` refuse modifications to
+  source files (`paths ... outside of your sparse-checkout definition`).
+  Two ways to deal with this:
+  - Right after `git worktree add <path> -b <branch>`, run
+    `git -C <path> sparse-checkout disable`. This is the recommended fix —
+    it sets `core.sparseCheckout=false` for that worktree only.
+  - If you've already started work and only need a one-off commit, use
+    `git add --sparse <files>` to force the index update.
+  The `EnterWorktree` tool's PostToolUse hook in `.claude/settings.json`
+  handles this automatically when it's used to enter a worktree, but
+  Bash-driven `git worktree add` (used by the `using-git-worktrees` skill)
+  doesn't trigger that hook.
 - Use `BTreeMap` (not `HashMap`) for iteration that affects PDF output (determinism)
 - Blitz: `!important` unreliable, `padding-top` on inline roots ignored (use `margin-top`)
 - `cargo fmt --check` enforced by CI
+- **Coverage scope**: CI の coverage job は `cargo llvm-cov nextest --workspace --exclude fulgur-vrt`
+  で動いている (`.github/workflows/ci.yml`)。`crates/fulgur-vrt` は別ジョブで実行されるため、
+  **VRT reftest だけでカバーした draw 経路は codecov の patch coverage に乗らない**。
+  新しい draw / convert / pageable ロジックを書くときは VRT に加えて lib 側にもテストを置く:
+  - 純関数 (helper, fixup, math) → 当該モジュールの `#[cfg(test)] mod tests` に unit test
+  - レンダリング経路 (`draw_background_layer` の match arm 等、`Engine::render_html` を通って初めて
+    叩かれる箇所) → `crates/fulgur/tests/render_smoke.rs` に end-to-end smoke test
+    (`Engine::builder().build().render_html(html)` で `assert!(!pdf.is_empty())`)
+  VRT を後付けで足すと codecov に再指摘されて lib 側 smoke test を追加する手戻りが発生する
+  (PR #244 で実例)。最初から両方書くこと。
 - **`Engine` is a builder**: `Engine::builder().page_size(PageSize::A4).base_path(root).build()` + single-arg `render_html(html)`. There is no `Engine::new().with_*()`.
-- **PDF → PNG for visual tests**: `pdftocairo -png -r 100 -f 1 -l 1 <pdf> <prefix>` (poppler-utils). Installed in CI; gate with skip-if-missing for local dev. `fulgur-vrt::pdf_render::render_html_to_rgba` wraps this but does not accept `base_path`, so integration tests that load local CSS must inline the call.
+- **VRT は PDF byte 比較**: `crates/fulgur-vrt` は HTML → PDF を生成して `goldens/fulgur/**/*.pdf` と byte-wise 比較する (`crates/fulgur-cli/tests/examples_determinism.rs` と同じ哲学)。pdftocairo は失敗時の diff 画像生成のみで使う。golden 更新は `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt`。

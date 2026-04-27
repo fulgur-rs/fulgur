@@ -23,6 +23,9 @@ pub enum Error {
 
     #[error("Unsupported font format: {0}")]
     UnsupportedFontFormat(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl From<minijinja::Error> for Error {

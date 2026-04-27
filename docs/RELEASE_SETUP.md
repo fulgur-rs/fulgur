@@ -1,7 +1,80 @@
 # Release Setup: Trusted Publishing
 
-pyfulgur (PyPI) と fulgur (RubyGems) を OIDC Trusted Publishing で publish するための、
-一度だけ必要な設定手順。
+One-time configuration for publishing pyfulgur (PyPI) and fulgur (RubyGems) via
+OIDC Trusted Publishing, plus Fulgur's versioning policy and day-to-day release
+procedure.
+
+## Versioning policy (ZeroVer)
+
+Fulgur follows [ZeroVer](https://0ver.org) while on the `0.x` line. See
+[`docs/plans/2026-04-26-versioning-and-release-simplification-design.md`](plans/2026-04-26-versioning-and-release-simplification-design.md)
+for the full rationale.
+
+Key points:
+
+- **Each normal release bumps the minor** (`0.5.14` → `0.6.0` → `0.7.0`). This
+  matches `release-prepare.yml`'s auto-bump behaviour when the `version` input
+  is left empty.
+- **Patch numbers are reserved for hotfixes.** If `0.6.0` ships with a critical
+  bug, cut `0.6.1` by passing `version=0.6.1` explicitly to
+  `release-prepare.yml`'s `workflow_dispatch`.
+- **External form: `0.6`. Internal form: `0.6.0`.**
+  - Internal (Cargo.toml, npm, PyPI, RubyGems, git tag, CHANGELOG section
+    header): `0.6.0` — required by semver / registry validators.
+  - External (README, blog, announcements, branding): "Fulgur 0.6".
+- **Workspace stays in lockstep** — `fulgur`, `fulgur-cli`, `fulgur-wasm`,
+  `fulgur-ruby`, and `pyfulgur` share the same version string. Independent
+  binding versioning is future work.
+- **No API stability guarantees until `1.0`.** Each minor on the `0.x` line is
+  free to introduce breaking changes.
+
+## Skip bindings (core-only release)
+
+To ship a core-only release (crates.io + GitHub Release + CLI binary) and
+suppress PyPI / RubyGems / npm publish, run `release-prepare.yml` with
+`skip_bindings=true`:
+
+```bash
+gh workflow run release-prepare.yml --field version=0.6.1 --field skip_bindings=true
+```
+
+What happens:
+
+- `release-prepare.yml` attaches the `release:skip-bindings` label to the
+  release PR.
+- After merge, `release.yml` skips `publish-npm` via an `if:` guard.
+- `release-python.yml` and `release-ruby.yml` run a `check-skip-label` job that
+  resolves tag → commit → associated PR labels and skips the `publish` job when
+  the label is present.
+- crates.io publish, GitHub Release publish, and CLI binary uploads are
+  unconditional — the CLI binary is treated as a core release artifact.
+
+If you later need to publish bindings against an already-tagged core release,
+trigger `release-python.yml` / `release-ruby.yml` via `workflow_dispatch`. That
+escape hatch is intentionally left in place but not yet documented as a first-
+class flow.
+
+## PR-based changelog (`release-notes:*` labels)
+
+CHANGELOG and GitHub Release notes are generated **from merged PRs**, not from
+commits. `.github/release.yml` defines the category mapping.
+
+| Label | Category |
+|-------|----------|
+| `release-notes:feature` | Features |
+| `release-notes:fix` | Bug Fixes |
+| `release-notes:docs` | Documentation |
+| `release-notes:internal` | Excluded (CI / refactor / chore / test) |
+| `dependencies` | Excluded (Dependabot) |
+| (no label) | Other Changes |
+
+Labelling responsibility sits with the **PR author and reviewer**. CI does not
+enforce a `release-notes:*` label — unlabelled PRs fall through to "Other
+Changes".
+
+`release-prepare.yml` calls `gh api repos/.../releases/generate-notes`, prepends
+the resulting body to `CHANGELOG.md`, and reuses the same body for the draft
+GitHub Release. git-cliff has been removed.
 
 ## 初回公開時の注意
 
@@ -99,26 +172,48 @@ OIDC claim (repo + workflow + environment) で自動照合されるため、`rol
 
 ### Required reviewers (approval gate)
 
-release は irreversible 操作が多いため、`release` / `pypi` / `rubygems` の
-3 環境すべてで **Required reviewers** を設定する (`testpypi` は dry-run のため不要)。
+The approval gate is **consolidated to the `release` environment only** as of
+2026-04-26 (PR #213). `pypi` and `rubygems` environments are kept for OIDC
+subject claims but no longer set `Required reviewers`.
 
-各 Environment の設定画面 (Settings → Environments → `<name>`) で:
+Rationale: creating a GitHub Release already implies the `release` env approval
+was granted. Adding further approvals downstream collapses cleanly into a
+single gate. Compressing the previous 3-stage gate into 1 substantially reduces
+per-release friction.
 
-- "Required reviewers" にチェック
-- reviewer として自分 (および必要ならリリース権限を持つ共同メンテナ) を追加
+Per-environment configuration (Settings → Environments → `<name>`):
 
-3 段ゲートになるため、release flow で:
+| Environment | Required reviewers | Purpose |
+|-------------|--------------------|---------|
+| `release`   | **Set** (yourself / co-maintainers) | crates.io / GitHub Release / npm publish gate |
+| `pypi`      | Not set | OIDC subject claim (PyPI Trusted Publisher) |
+| `rubygems`  | Not set | OIDC subject claim (RubyGems Trusted Publisher) |
+| `testpypi`  | Not set | Dry-run only |
 
-1. PR merge → `release.yml` の `publish` job が `release` env で pause → 承認
-2. crates.io + tag push + GitHub Release publish が完走 (App token で `release:published` 発火)
-3. `release-python.yml` の `publish` job が `pypi` env で pause → 承認
-4. `release-ruby.yml` の `publish` job が `rubygems` env で pause → 承認
-5. PyPI / RubyGems へ反映
+To remove `required_reviewers` from `pypi` / `rubygems` after the fact:
 
-途中で publish job が失敗した際の re-run も承認を経由する。
+1. GitHub repo → Settings → Environments → `pypi` (or `rubygems`).
+2. Untick "Required reviewers" under "Deployment protection rules".
+3. Click "Save protection rules".
+4. Repeat for the other environment.
 
-OIDC claim による scope (repo + workflow + environment) は reviewer 設定と独立して
-機能するため、両方併用してよい。
+New flow (without `skip_bindings`):
+
+1. PR merge → `release.yml`'s `publish` job pauses on `release` env → approve.
+2. crates.io publish + tag push + GitHub Release publish + npm publish run to
+   completion (App token fires `release:published`).
+3. `release-python.yml` and `release-ruby.yml`'s `publish` jobs run **without
+   any further approval** → PyPI / RubyGems updated.
+
+With `skip_bindings=true`: step 3's `publish` job is skipped via
+`check-skip-label` (`needs.check-skip-label.outputs.skip != 'true'` gate).
+
+A failed re-run still re-prompts for the `release` env approval.
+
+The OIDC claim scope (repo + workflow + environment) is independent of reviewer
+settings, so removing reviewers from `pypi` / `rubygems` does not weaken
+publish authenticity — `if: github.event_name == 'release'` separately blocks
+publishing from arbitrary refs.
 
 ## GitHub App (release publisher)
 
@@ -164,10 +259,48 @@ Settings → Secrets and variables → Actions → New repository secret:
 Actions タブで `release-python.yml` / `release-ruby.yml` が自動的に `release` イベントで
 起動することを確認する。
 
-## Release 手順
+## Release procedure
 
-1. `release-prepare.yml` を `workflow_dispatch` で起動 (version 入力)
-2. 作成された `release/vX.Y.Z` PR を merge
-3. `release.yml` が tag + crates.io publish + GitHub Release publish (App token)
-4. `release: published` で `release-python.yml` と `release-ruby.yml` が並行発火
-5. 数分〜十数分後に PyPI / RubyGems へ反映
+### Normal release (minor bump)
+
+1. Trigger `release-prepare.yml` via `workflow_dispatch`.
+   - Leave `version` **empty** to let auto-bump pick the next minor (`0.x.0`).
+   - For a hotfix, pass an explicit value such as `version=0.6.1`.
+2. Inspect the generated `release/vX.Y.Z` PR (CHANGELOG diff, Cargo.toml
+   bumps).
+3. Merge the PR → `release.yml`'s `publish` job pauses on the `release` env.
+4. Approve from the GitHub Actions UI.
+5. crates.io publish + tag push + GitHub Release publish + npm publish all
+   complete.
+6. `release: published` fires `release-python.yml` and `release-ruby.yml` in
+   parallel.
+7. `check-skip-label` confirms the label is absent → `publish` proceeds.
+8. PyPI / RubyGems reflect the new version within minutes.
+
+### Core-only release (skip bindings)
+
+```bash
+gh workflow run release-prepare.yml \
+  --field version=0.6.1 \
+  --field skip_bindings=true
+```
+
+- The generated PR is auto-labelled `release:skip-bindings`.
+- After merge, `release.yml` skips npm publish (crates.io / GitHub Release /
+  CLI binary still ship).
+- `release-python.yml` / `release-ruby.yml` still run build + smoke tests but
+  `check-skip-label` skips the `publish` job only.
+
+### Previewing release notes
+
+Before triggering `release-prepare.yml`, you can dry-run the notes:
+
+```bash
+gh api repos/fulgur-rs/fulgur/releases/generate-notes \
+  -f tag_name=v0.6.0 \
+  --jq .body
+```
+
+Verify categorisation matches expectations (i.e. that the relevant
+`release-notes:*` labels are attached). Add missing labels with
+`gh pr edit <num> --add-label release-notes:fix` (etc.) and re-run to confirm.

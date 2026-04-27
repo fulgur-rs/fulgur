@@ -1,0 +1,3 @@
+# Sanity check for the lists/ runner — one known-PASS test.
+# If this fails, wpt_lists infrastructure is broken (not the test).
+PASS  css/css-page/background-image-only-for-print.html

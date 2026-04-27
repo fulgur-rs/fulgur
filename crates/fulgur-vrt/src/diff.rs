@@ -27,6 +27,15 @@ fn channel_diff(a: &Rgba<u8>, b: &Rgba<u8>) -> u8 {
     dr.max(dg).max(db)
 }
 
+/// Byte-wise equality check for fulgur's deterministic PDF output.
+///
+/// fulgur produces byte-identical PDFs for the same input (verified by
+/// `examples_determinism.rs`), so any difference is a real regression —
+/// no tolerance, no normalization.
+pub fn pdf_bytes_equal(reference: &[u8], actual: &[u8]) -> bool {
+    reference == actual
+}
+
 pub fn compare(reference: &RgbaImage, actual: &RgbaImage, tol: Tolerance) -> DiffReport {
     let (rw, rh) = reference.dimensions();
     let (aw, ah) = actual.dimensions();
@@ -193,5 +202,26 @@ mod tests {
         assert!(out.exists());
         let loaded = load_png(&out).unwrap();
         assert_eq!(loaded.dimensions(), (4, 4));
+    }
+
+    #[test]
+    fn pdf_bytes_equal_returns_true_for_identical_bytes() {
+        let a = b"%PDF-1.7\nfoo".to_vec();
+        let b = a.clone();
+        assert!(pdf_bytes_equal(&a, &b));
+    }
+
+    #[test]
+    fn pdf_bytes_equal_returns_false_for_different_bytes() {
+        let a = b"%PDF-1.7\nfoo".to_vec();
+        let b = b"%PDF-1.7\nbar".to_vec();
+        assert!(!pdf_bytes_equal(&a, &b));
+    }
+
+    #[test]
+    fn pdf_bytes_equal_returns_false_for_size_mismatch() {
+        let a = b"%PDF-1.7\nfoo".to_vec();
+        let b = b"%PDF-1.7\nfoo extra".to_vec();
+        assert!(!pdf_bytes_equal(&a, &b));
     }
 }

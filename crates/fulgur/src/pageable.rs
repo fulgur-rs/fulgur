@@ -256,7 +256,7 @@ pub enum BreakInside {
     Avoid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pagination {
     pub break_before: BreakBefore,
     pub break_after: BreakAfter,
@@ -588,6 +588,14 @@ pub trait Pageable: Send + Sync {
     /// if you intend to run `find_split_point` on a freshly-split fragment
     /// directly (outside the `paginate` loop, which already re-propagates).
     fn propagate_page_height(&mut self, _page_height: Pt) {}
+
+    /// Returns `true` if any descendant has a forced page break that is not
+    /// visible from the direct-child level (i.e. nested inside another block).
+    /// Used by `BlockPageable::find_split_point` to detect that a child needs
+    /// recursive splitting even when the child fits within `avail_height`.
+    fn has_forced_break_below(&self) -> bool {
+        false
+    }
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -727,6 +735,85 @@ pub enum BgClip {
     Text,
 }
 
+/// CSS gradient color stop の位置。
+///
+/// - `Fraction` は `%` 由来の比率値 (convert 時に `pct.0` として保持)。
+///   convert は値域チェックを行わないため範囲外も入りうる。最終的な
+///   範囲検証 (`[0, 1]` 外なら Layer drop) は draw 時の
+///   `background::resolve_gradient_stops` が担う (CSS Images §3.5.1)。
+/// - `LengthPx` は `<length>` 形式で記述された値 (例 `50px`)。draw 時に
+///   gradient line 長さで割って fraction 化する。
+/// - `Auto` は CSS auto。draw 時に CSS Images §3.5.1 fixup で前後の fixed
+///   stop から補間される。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientStopPosition {
+    Auto,
+    Fraction(f32),
+    LengthPx(f32),
+}
+
+/// A single color stop in a CSS gradient. Position は `GradientStopPosition`
+/// で保持され、draw 時に gradient line 長さで fraction に解決される。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientStop {
+    pub position: GradientStopPosition,
+    pub rgba: [u8; 4],
+}
+
+/// CSS `to <h> <v>` corner direction. The four enumerated variants exhaust
+/// the valid CSS combinations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearGradientCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Direction of a CSS `linear-gradient(...)` line.
+///
+/// Explicit angles (`30deg`) and the four cardinal `to <side>` keywords
+/// resolve to a fixed angle at convert time. Corner keywords (`to top right`)
+/// produce an angle that depends on the gradient box's aspect ratio per CSS
+/// Images 3 §3.1.1, so they are resolved at draw time when the box
+/// dimensions are known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinearGradientDirection {
+    /// CSS angle in radians: 0 = "to top", increasing clockwise.
+    Angle(f32),
+    Corner(LinearGradientCorner),
+}
+
+/// CSS `radial-gradient(<shape>?, ...)` の shape 部分。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadialGradientShape {
+    Circle,
+    Ellipse,
+}
+
+/// CSS `radial-gradient(... <extent>, ...)` keyword。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadialExtent {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+}
+
+/// CSS `radial-gradient(<shape>? <size>?, ...)` の size 部分。
+///
+/// extent keyword は draw 時に gradient box から半径を計算する。
+/// 明示半径も length-percentage を含むため draw 時に解決する。
+#[derive(Clone, Debug)]
+pub enum RadialGradientSize {
+    Extent(RadialExtent),
+    /// circle の場合は rx == ry とする。ellipse は独立。
+    Explicit {
+        rx: BgLengthPercentage,
+        ry: BgLengthPercentage,
+    },
+}
+
 /// Content payload for a background-image layer.
 #[derive(Clone, Debug)]
 pub enum BgImageContent {
@@ -737,6 +824,24 @@ pub enum BgImageContent {
     },
     /// SVG vector image — rendered via krilla-svg draw_svg.
     Svg { tree: Arc<usvg::Tree> },
+    /// CSS `linear-gradient(...)` / `repeating-linear-gradient(...)`.
+    /// `repeating=true` の場合、stops は draw 時に CSS Images 3 §3.6 の
+    /// 周期展開 (period = last_pos - first_pos) を経て [0, 1] に正規化される。
+    LinearGradient {
+        direction: LinearGradientDirection,
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
+    /// CSS `radial-gradient(...)` / `repeating-radial-gradient(...)`.
+    /// position は origin rect 内の中心。`repeating` の意味は LinearGradient と同じ。
+    RadialGradient {
+        shape: RadialGradientShape,
+        size: RadialGradientSize,
+        position_x: BgLengthPercentage,
+        position_y: BgLengthPercentage,
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
 }
 
 /// A single CSS background image layer with all associated properties.
@@ -815,8 +920,20 @@ enum SplitDecision {
     /// fragment, the rest go to the second.
     AtIndex(usize),
     /// Split *within* the child at `usize`; the contained pair is the child's
-    /// first and second fragments.
-    WithinChild(usize, SplitPair),
+    /// first and second fragments. `consumed_height` is the height used by
+    /// the first fragment, so tail siblings on page 2 can be rebased by
+    /// `pc.y + consumed_height` (not just `pc.y`) and avoid leaving a gap.
+    WithinChild(usize, SplitPair, Pt),
+}
+
+impl std::fmt::Debug for SplitDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SplitDecision::NoSplit => write!(f, "NoSplit"),
+            SplitDecision::AtIndex(i) => write!(f, "AtIndex({i})"),
+            SplitDecision::WithinChild(i, _, h) => write!(f, "WithinChild({i}, ..., {h})"),
+        }
+    }
 }
 
 // ─── BlockPageable ───────────────────────────────────────
@@ -928,7 +1045,21 @@ impl BlockPageable {
             // page_height == 0.0 means `propagate_page_height` was never called
             // (defensive) — treat as "honour avoid, no fallback available".
             if self.page_height <= 0.0 || total_height <= self.page_height {
-                return SplitDecision::NoSplit;
+                // CSS Fragmentation Level 3 §5.4: forced breaks override break-inside: avoid.
+                // Check direct children and recurse into descendants before returning NoSplit.
+                let has_forced_break = self.children.iter().enumerate().any(|(i, pc)| {
+                    (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
+                        || (pc.child.pagination().break_after == BreakAfter::Page
+                            && i < self.children.len() - 1)
+                        || {
+                            let child_avail = self.page_height - pc.y;
+                            child_avail > 0.0 && pc.child.split(0.0, child_avail).is_some()
+                        }
+                });
+                if !has_forced_break {
+                    return SplitDecision::NoSplit;
+                }
+                // Fall through — forced break overrides avoid.
             }
             // Fall through to normal splitting logic.
         }
@@ -937,11 +1068,30 @@ impl BlockPageable {
             (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
                 || (pc.child.pagination().break_after == BreakAfter::Page
                     && i < self.children.len() - 1)
+                || pc.child.has_forced_break_below()
         });
 
         let total_height = self.cached_size.map(|s| s.height).unwrap_or(0.0);
-        if total_height <= avail_height && !has_forced_break {
-            return SplitDecision::NoSplit;
+        // NOTE: We do not early-return NoSplit here even when total_height <= avail_height
+        // and !has_forced_break, because a descendant (not a direct child) may carry a
+        // forced break. The for loop below calls split() on each child so those inner
+        // forced breaks are detected. split() returns None quickly when there is nothing
+        // to split, keeping the overhead O(N) across the tree.
+        if total_height > avail_height || has_forced_break {
+            // Fall through to the loop below.
+        } else {
+            // No overflow and no direct-child forced breaks — check descendants.
+            let mut has_descendant_forced_break = false;
+            for pc in &self.children {
+                let child_avail = avail_height - pc.y;
+                if child_avail > 0.0 && pc.child.split(0.0, child_avail).is_some() {
+                    has_descendant_forced_break = true;
+                    break;
+                }
+            }
+            if !has_descendant_forced_break {
+                return SplitDecision::NoSplit;
+            }
         }
 
         for (i, pc) in self.children.iter().enumerate() {
@@ -956,11 +1106,33 @@ impl BlockPageable {
                     .then(|| pc.child.split(0.0, child_avail))
                     .flatten()
                 {
-                    return SplitDecision::WithinChild(i, parts);
+                    let consumed = parts.0.height();
+                    return SplitDecision::WithinChild(i, parts, consumed);
                 } else if i == 0 && self.children.len() == 1 {
                     return SplitDecision::NoSplit;
                 } else {
                     return SplitDecision::AtIndex(i.max(1));
+                }
+            } else {
+                // Child fits on this page, but may contain a descendant forced break.
+                let child_avail = avail_height - pc.y;
+                if child_avail > 0.0 {
+                    if let Some(parts) = pc.child.split(0.0, child_avail) {
+                        let consumed = parts.0.height();
+                        return SplitDecision::WithinChild(i, parts, consumed);
+                    }
+                }
+            }
+
+            // Child fits within avail_height but contains a nested forced break:
+            // delegate splitting to the child so the break is honoured.
+            if pc.child.has_forced_break_below() {
+                let child_avail = avail_height - pc.y;
+                if child_avail > 0.0 {
+                    if let Some(parts) = pc.child.split(0.0, child_avail) {
+                        let consumed = parts.0.height();
+                        return SplitDecision::WithinChild(i, parts, consumed);
+                    }
                 }
             }
 
@@ -1177,12 +1349,16 @@ fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) ->
 /// When `y_offset` is 0.0, children are cloned as-is.
 /// A negative `y_offset` shifts children upward (subtracts from y).
 fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<PositionedChild> {
+    // Clamp at 0.0 so parallel siblings (grid/flex children sharing the same
+    // y as a split-causing child) don't end up at negative y on the second
+    // fragment, which would push their background+border above the page top
+    // and silently drop them. fulgur-86fo.
     children
         .iter()
         .map(|pc| PositionedChild {
             child: pc.child.clone_box(),
             x: pc.x,
-            y: pc.y - y_offset,
+            y: (pc.y - y_offset).max(0.0),
         })
         .collect()
 }
@@ -1338,7 +1514,7 @@ fn stroke_inset_rect(
     }
 }
 
-fn alpha_to_opacity(alpha: u8) -> krilla::num::NormalizedF32 {
+pub(crate) fn alpha_to_opacity(alpha: u8) -> krilla::num::NormalizedF32 {
     krilla::num::NormalizedF32::new(alpha as f32 / 255.0).unwrap_or(krilla::num::NormalizedF32::ONE)
 }
 
@@ -1611,8 +1787,20 @@ impl Pageable for BlockPageable {
         match self.find_split_point(avail_height) {
             SplitDecision::NoSplit => None,
 
-            SplitDecision::WithinChild(idx, (first_part, second_part)) => {
+            SplitDecision::WithinChild(idx, (first_part, second_part), consumed_height) => {
                 let pc = &self.children[idx];
+                let first_height = pc.y + consumed_height;
+                let total_height = self
+                    .layout_size
+                    .or(self.cached_size)
+                    .map(|s| s.height)
+                    .unwrap_or(0.0);
+                let total_width = self
+                    .layout_size
+                    .or(self.cached_size)
+                    .map(|s| s.width)
+                    .unwrap_or(0.0);
+
                 let mut first = clone_children(&self.children[..idx], 0.0);
                 first.push(PositionedChild {
                     child: first_part,
@@ -1625,26 +1813,34 @@ impl Pageable for BlockPageable {
                     x: pc.x,
                     y: 0.0,
                 }];
-                second.extend(clone_children(&self.children[idx + 1..], pc.y));
+                second.extend(clone_children(
+                    &self.children[idx + 1..],
+                    pc.y + consumed_height,
+                ));
 
-                Some((
-                    Box::new(
-                        BlockPageable::with_positioned_children(first)
-                            .with_pagination(self.pagination)
-                            .with_style(self.style.clone())
-                            .with_opacity(self.opacity)
-                            .with_visible(self.visible)
-                            .with_id(self.id.clone()),
-                    ),
-                    Box::new(
-                        BlockPageable::with_positioned_children(second)
-                            .with_pagination(self.pagination)
-                            .with_style(self.style.clone())
-                            .with_opacity(self.opacity)
-                            .with_visible(self.visible)
-                            .with_id(self.id.clone()),
-                    ),
-                ))
+                let mut first_block = BlockPageable::with_positioned_children(first)
+                    .with_pagination(self.pagination)
+                    .with_style(self.style.clone())
+                    .with_opacity(self.opacity)
+                    .with_visible(self.visible)
+                    .with_id(self.id.clone());
+                first_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: first_height,
+                });
+
+                let mut second_block = BlockPageable::with_positioned_children(second)
+                    .with_pagination(self.pagination)
+                    .with_style(self.style.clone())
+                    .with_opacity(self.opacity)
+                    .with_visible(self.visible)
+                    .with_id(self.id.clone());
+                second_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: (total_height - first_height).max(0.0),
+                });
+
+                Some((Box::new(first_block), Box::new(second_block)))
             }
 
             SplitDecision::AtIndex(split_index) => {
@@ -1653,27 +1849,43 @@ impl Pageable for BlockPageable {
                 }
 
                 let split_y = self.children[split_index].y;
+                let total_height = self
+                    .layout_size
+                    .or(self.cached_size)
+                    .map(|s| s.height)
+                    .unwrap_or(0.0);
+                let total_width = self
+                    .layout_size
+                    .or(self.cached_size)
+                    .map(|s| s.width)
+                    .unwrap_or(0.0);
+
                 let first = clone_children(&self.children[..split_index], 0.0);
                 let second = clone_children(&self.children[split_index..], split_y);
 
-                Some((
-                    Box::new(
-                        BlockPageable::with_positioned_children(first)
-                            .with_pagination(self.pagination)
-                            .with_style(self.style.clone())
-                            .with_opacity(self.opacity)
-                            .with_visible(self.visible)
-                            .with_id(self.id.clone()),
-                    ),
-                    Box::new(
-                        BlockPageable::with_positioned_children(second)
-                            .with_pagination(self.pagination)
-                            .with_style(self.style.clone())
-                            .with_opacity(self.opacity)
-                            .with_visible(self.visible)
-                            .with_id(self.id.clone()),
-                    ),
-                ))
+                let mut first_block = BlockPageable::with_positioned_children(first)
+                    .with_pagination(self.pagination)
+                    .with_style(self.style.clone())
+                    .with_opacity(self.opacity)
+                    .with_visible(self.visible)
+                    .with_id(self.id.clone());
+                first_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: split_y,
+                });
+
+                let mut second_block = BlockPageable::with_positioned_children(second)
+                    .with_pagination(self.pagination)
+                    .with_style(self.style.clone())
+                    .with_opacity(self.opacity)
+                    .with_visible(self.visible)
+                    .with_id(self.id.clone());
+                second_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: (total_height - split_y).max(0.0),
+                });
+
+                Some((Box::new(first_block), Box::new(second_block)))
             }
         }
     }
@@ -1682,10 +1894,21 @@ impl Pageable for BlockPageable {
         match self.find_split_point(avail_height) {
             SplitDecision::NoSplit => Err(self),
 
-            SplitDecision::WithinChild(idx, (first_part, second_part)) => {
+            SplitDecision::WithinChild(idx, (first_part, second_part), consumed_height) => {
                 let mut me = *self;
                 let split_child_x = me.children[idx].x;
                 let split_child_y = me.children[idx].y;
+                let first_height = split_child_y + consumed_height;
+                let total_height = me
+                    .layout_size
+                    .or(me.cached_size)
+                    .map(|s| s.height)
+                    .unwrap_or(0.0);
+                let total_width = me
+                    .layout_size
+                    .or(me.cached_size)
+                    .map(|s| s.width)
+                    .unwrap_or(0.0);
 
                 let mut tail = me.children.split_off(idx + 1);
                 let _split_child = me.children.pop().unwrap(); // remove the split child
@@ -1697,9 +1920,14 @@ impl Pageable for BlockPageable {
                     y: split_child_y,
                 });
 
-                // Shift tail y coordinates
+                // Rebase tail by split_y + consumed_height so siblings sit
+                // flush against the second fragment on page 2, with no extra
+                // gap equal to the first fragment's height. Clamp at 0.0 for
+                // parallel siblings (grid/flex same-row) so they don't end up
+                // above the page top — see clone_children for fulgur-86fo.
+                let tail_offset = split_child_y + consumed_height;
                 for pc in &mut tail {
-                    pc.y -= split_child_y;
+                    pc.y = (pc.y - tail_offset).max(0.0);
                 }
 
                 let mut second = vec![PositionedChild {
@@ -1709,24 +1937,29 @@ impl Pageable for BlockPageable {
                 }];
                 second.append(&mut tail);
 
-                Ok((
-                    Box::new(
-                        BlockPageable::with_positioned_children(first)
-                            .with_pagination(me.pagination)
-                            .with_style(me.style.clone())
-                            .with_opacity(me.opacity)
-                            .with_visible(me.visible)
-                            .with_id(me.id.clone()),
-                    ),
-                    Box::new(
-                        BlockPageable::with_positioned_children(second)
-                            .with_pagination(me.pagination)
-                            .with_style(me.style)
-                            .with_opacity(me.opacity)
-                            .with_visible(me.visible)
-                            .with_id(me.id),
-                    ),
-                ))
+                let mut first_block = BlockPageable::with_positioned_children(first)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style.clone())
+                    .with_opacity(me.opacity)
+                    .with_visible(me.visible)
+                    .with_id(me.id.clone());
+                first_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: first_height,
+                });
+
+                let mut second_block = BlockPageable::with_positioned_children(second)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style)
+                    .with_opacity(me.opacity)
+                    .with_visible(me.visible)
+                    .with_id(me.id);
+                second_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: (total_height - first_height).max(0.0),
+                });
+
+                Ok((Box::new(first_block), Box::new(second_block)))
             }
 
             SplitDecision::AtIndex(split_index) => {
@@ -1737,32 +1970,49 @@ impl Pageable for BlockPageable {
                 }
 
                 let split_y = me.children[split_index].y;
+                let total_height = me
+                    .layout_size
+                    .or(me.cached_size)
+                    .map(|s| s.height)
+                    .unwrap_or(0.0);
+                let total_width = me
+                    .layout_size
+                    .or(me.cached_size)
+                    .map(|s| s.width)
+                    .unwrap_or(0.0);
+
                 let mut second_children = me.children.split_off(split_index);
                 let first_children = me.children;
 
-                // Shift y coordinates on second fragment
+                // Shift y coordinates on second fragment. Clamp at 0.0 for
+                // parallel siblings — see clone_children for fulgur-86fo.
                 for pc in &mut second_children {
-                    pc.y -= split_y;
+                    pc.y = (pc.y - split_y).max(0.0);
                 }
 
-                Ok((
-                    Box::new(
-                        BlockPageable::with_positioned_children(first_children)
-                            .with_pagination(me.pagination)
-                            .with_style(me.style.clone())
-                            .with_opacity(me.opacity)
-                            .with_visible(me.visible)
-                            .with_id(me.id.clone()),
-                    ),
-                    Box::new(
-                        BlockPageable::with_positioned_children(second_children)
-                            .with_pagination(me.pagination)
-                            .with_style(me.style)
-                            .with_opacity(me.opacity)
-                            .with_visible(me.visible)
-                            .with_id(me.id),
-                    ),
-                ))
+                let mut first_block = BlockPageable::with_positioned_children(first_children)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style.clone())
+                    .with_opacity(me.opacity)
+                    .with_visible(me.visible)
+                    .with_id(me.id.clone());
+                first_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: split_y,
+                });
+
+                let mut second_block = BlockPageable::with_positioned_children(second_children)
+                    .with_pagination(me.pagination)
+                    .with_style(me.style)
+                    .with_opacity(me.opacity)
+                    .with_visible(me.visible)
+                    .with_id(me.id);
+                second_block.cached_size = Some(Size {
+                    width: total_width,
+                    height: (total_height - split_y).max(0.0),
+                });
+
+                Ok((Box::new(first_block), Box::new(second_block)))
             }
         }
     }
@@ -1872,6 +2122,14 @@ impl Pageable for BlockPageable {
 
     fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.children.iter().any(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.pagination().break_after == BreakAfter::Page
+                || pc.child.has_forced_break_below()
+        })
     }
 }
 
@@ -2097,6 +2355,10 @@ impl Pageable for BookmarkMarkerWrapperPageable {
 
     fn is_visible(&self) -> bool {
         self.child.is_visible()
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.child.has_forced_break_below()
     }
 }
 
@@ -2341,6 +2603,10 @@ impl Pageable for CounterOpWrapperPageable {
     fn is_visible(&self) -> bool {
         self.child.is_visible()
     }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.child.has_forced_break_below()
+    }
 }
 
 // ─── TransformWrapperPageable ──────────────────────────────
@@ -2460,6 +2726,10 @@ impl Pageable for TransformWrapperPageable {
     fn is_visible(&self) -> bool {
         self.inner.is_visible()
     }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.inner.has_forced_break_below()
+    }
 }
 
 // ─── StringSetWrapperPageable ──────────────────────────────
@@ -2544,6 +2814,10 @@ impl Pageable for StringSetWrapperPageable {
 
     fn is_visible(&self) -> bool {
         self.child.is_visible()
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.child.has_forced_break_below()
     }
 }
 
@@ -2631,6 +2905,10 @@ impl Pageable for RunningElementWrapperPageable {
 
     fn is_visible(&self) -> bool {
         self.child.is_visible()
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.child.has_forced_break_below()
     }
 }
 
@@ -2864,6 +3142,10 @@ impl Pageable for MulticolRulePageable {
     ) {
         self.child
             .collect_ids(x, y, avail_width, avail_height, registry);
+    }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.child.has_forced_break_below()
     }
 }
 
@@ -3143,6 +3425,10 @@ impl Pageable for ListItemPageable {
         self.body
             .collect_ids(x, y, avail_width, avail_height, registry);
     }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.body.has_forced_break_below()
+    }
 }
 
 // ─── TablePageable ─────────────────────────────────────
@@ -3204,23 +3490,36 @@ impl Pageable for TablePageable {
         _avail_width: Pt,
         avail_height: Pt,
     ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Find the first body cell that overflows the available height
+        // A forced break inside a cell (break-before:page on the cell itself
+        // or a nested forced break below it) must split the table even when
+        // the entire table fits in avail_height. Pick the earliest candidate
+        // between forced-break and overflow.
+        let forced_index = self.body_cells.iter().position(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.has_forced_break_below()
+        });
         let overflow_index = self
             .body_cells
             .iter()
             .position(|pc| pc.y + pc.child.height() > avail_height);
+        let candidate = match (forced_index, overflow_index) {
+            (Some(b), Some(o)) => Some(b.min(o)),
+            (Some(b), None) => Some(b),
+            (None, Some(o)) => Some(o),
+            (None, None) => None,
+        };
 
-        let overflow_index = match overflow_index {
+        let candidate_index = match candidate {
             Some(0) | None => return None,
             Some(i) => i,
         };
 
-        // Snap to the start of the row containing the overflow cell.
+        // Snap to the start of the row containing the candidate cell.
         // Cells in the same row share the same y coordinate.
-        let overflow_y = self.body_cells[overflow_index].y;
-        let split_index = self.body_cells[..overflow_index]
+        let candidate_y = self.body_cells[candidate_index].y;
+        let split_index = self.body_cells[..candidate_index]
             .iter()
-            .rposition(|pc| pc.y < overflow_y)
+            .rposition(|pc| pc.y < candidate_y)
             .map(|i| i + 1)
             .unwrap_or(0);
 
@@ -3272,22 +3571,35 @@ impl Pageable for TablePageable {
     }
 
     fn split_boxed(self: Box<Self>, _avail_width: Pt, avail_height: Pt) -> SplitResult {
-        // Find the first body cell that overflows the available height
+        // A forced break inside a cell (break-before:page on the cell itself
+        // or a nested forced break below it) must split the table even when
+        // the entire table fits in avail_height. Pick the earliest candidate
+        // between forced-break and overflow.
+        let forced_index = self.body_cells.iter().position(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.has_forced_break_below()
+        });
         let overflow_index = self
             .body_cells
             .iter()
             .position(|pc| pc.y + pc.child.height() > avail_height);
+        let candidate = match (forced_index, overflow_index) {
+            (Some(b), Some(o)) => Some(b.min(o)),
+            (Some(b), None) => Some(b),
+            (None, Some(o)) => Some(o),
+            (None, None) => None,
+        };
 
-        let overflow_index = match overflow_index {
+        let candidate_index = match candidate {
             Some(0) | None => return Err(self),
             Some(i) => i,
         };
 
-        // Snap to the start of the row containing the overflow cell.
-        let overflow_y = self.body_cells[overflow_index].y;
-        let split_index = self.body_cells[..overflow_index]
+        // Snap to the start of the row containing the candidate cell.
+        let candidate_y = self.body_cells[candidate_index].y;
+        let split_index = self.body_cells[..candidate_index]
             .iter()
-            .rposition(|pc| pc.y < overflow_y)
+            .rposition(|pc| pc.y < candidate_y)
             .map(|i| i + 1)
             .unwrap_or(0);
 
@@ -3430,6 +3742,18 @@ impl Pageable for TablePageable {
                 .collect_ids(x + pc.x, y + pc.y, total_width, pc.child.height(), registry);
         }
     }
+
+    fn has_forced_break_below(&self) -> bool {
+        self.header_cells.iter().any(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.pagination().break_after == BreakAfter::Page
+                || pc.child.has_forced_break_below()
+        }) || self.body_cells.iter().any(|pc| {
+            pc.child.pagination().break_before == BreakBefore::Page
+                || pc.child.pagination().break_after == BreakAfter::Page
+                || pc.child.has_forced_break_below()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3487,6 +3811,49 @@ mod tests {
         // Even though everything fits in 1000pt, break-before should force split
         let result = block.split(200.0, 1000.0);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_split_clamps_parallel_sibling_y_to_zero() {
+        // Regression for fulgur-86fo: in grid/flex layouts, sibling children
+        // share the same y. When the first child gets split (WithinChild), the
+        // second child must end up at y=0 in the second fragment, not at a
+        // negative y (which causes its background+border to render above the
+        // page top and disappear).
+        let mut card_a = BlockPageable::new(vec![make_spacer(31.0), make_spacer(49.0)]);
+        card_a.wrap(80.0, 1000.0);
+        let card_b = BlockPageable::new(vec![make_spacer(80.0)]);
+        // Place both cards at y=0 (parallel grid row layout)
+        let mut grid = BlockPageable::with_positioned_children(vec![
+            PositionedChild {
+                child: Box::new(card_a),
+                x: 0.0,
+                y: 0.0,
+            },
+            PositionedChild {
+                child: Box::new(card_b),
+                x: 100.0,
+                y: 0.0,
+            },
+        ]);
+        grid.wrap(200.0, 1000.0);
+
+        // Force a split where only card_a's first spacer (31pt) fits; the rest
+        // of card_a (49pt) plus the entire card_b must land on the second fragment.
+        let result = grid.split(200.0, 31.0);
+        assert!(result.is_some(), "expected split to occur");
+        let (_first, second) = result.unwrap();
+        let second_block = second
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("second fragment must be a BlockPageable");
+        for pc in &second_block.children {
+            assert!(
+                pc.y >= 0.0,
+                "parallel sibling y must be clamped to >= 0, got {}",
+                pc.y,
+            );
+        }
     }
 
     #[test]
@@ -4322,6 +4689,32 @@ mod affine_tests {
         let q = Affine2D::rotation(std::f32::consts::FRAC_PI_4).transform_rect(&r);
         assert!(!q.is_degenerate(), "rotated rect should not be degenerate");
     }
+
+    #[test]
+    fn skew_x_shears_point_along_x_axis() {
+        use std::f32::consts::FRAC_PI_4;
+        // skew(ax=π/4, ay=0): x' = x + tan(π/4)·y = x + y, y' = y
+        let m = Affine2D::skew(FRAC_PI_4, 0.0);
+        let (x, y) = m.transform_point(1.0, 1.0);
+        assert!((x - 2.0).abs() < 1e-5, "x should equal x+y=2, got {x}");
+        assert!((y - 1.0).abs() < 1e-5, "y should be unchanged=1, got {y}");
+    }
+
+    #[test]
+    fn skew_y_shears_point_along_y_axis() {
+        use std::f32::consts::FRAC_PI_4;
+        // skew(ax=0, ay=π/4): x' = x, y' = tan(π/4)·x + y = x + y
+        let m = Affine2D::skew(0.0, FRAC_PI_4);
+        let (x, y) = m.transform_point(1.0, 1.0);
+        assert!((x - 1.0).abs() < 1e-5, "x should be unchanged=1, got {x}");
+        assert!((y - 2.0).abs() < 1e-5, "y should equal x+y=2, got {y}");
+    }
+
+    #[test]
+    fn skew_zero_angles_equals_identity() {
+        let m = Affine2D::skew(0.0, 0.0);
+        assert!(m.is_identity(), "skew(0,0) must equal identity");
+    }
 }
 
 #[cfg(test)]
@@ -4930,5 +5323,603 @@ mod multicol_rule_tests {
         assert!(first.is_empty());
         assert_eq!(second.len(), 1);
         assert!((second[0].y_offset - 0.0).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod forced_break_below_tests {
+    use super::*;
+
+    fn make_block_pc(height: f32, break_before: BreakBefore, y: f32) -> PositionedChild {
+        let block = BlockPageable::with_positioned_children(vec![]).with_pagination(Pagination {
+            break_before,
+            ..Pagination::default()
+        });
+        // We manually set cached_size via a mutable ref after creation
+        let mut block = block;
+        block.cached_size = Some(Size {
+            width: 100.0,
+            height,
+        });
+        PositionedChild {
+            child: Box::new(block),
+            x: 0.0,
+            y,
+        }
+    }
+
+    fn make_body(pcs: Vec<PositionedChild>, total_height: f32) -> BlockPageable {
+        let mut body = BlockPageable::with_positioned_children(pcs);
+        body.cached_size = Some(Size {
+            width: 100.0,
+            height: total_height,
+        });
+        body
+    }
+
+    /// Build a BlockPageable whose only child has `break-before: page`.
+    /// Used by wrapper propagation tests below.
+    fn make_inner_with_forced_break() -> Box<dyn Pageable> {
+        Box::new(make_body(
+            vec![make_block_pc(10.0, BreakBefore::Page, 0.0)],
+            10.0,
+        ))
+    }
+
+    /// Build a BlockPageable whose children have no forced break.
+    fn make_inner_without_forced_break() -> Box<dyn Pageable> {
+        Box::new(make_body(
+            vec![make_block_pc(10.0, BreakBefore::Auto, 0.0)],
+            10.0,
+        ))
+    }
+
+    #[test]
+    fn bookmark_marker_wrapper_propagates_forced_break() {
+        let marker = BookmarkMarkerPageable::new(1, "H1".into());
+        let wrapped =
+            BookmarkMarkerWrapperPageable::new(marker.clone(), make_inner_with_forced_break());
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = BookmarkMarkerWrapperPageable::new(marker, make_inner_without_forced_break());
+        assert!(!clean.has_forced_break_below());
+    }
+
+    #[test]
+    fn counter_op_wrapper_propagates_forced_break() {
+        let ops = vec![crate::gcpm::CounterOp::Increment {
+            name: "page".into(),
+            value: 1,
+        }];
+        let wrapped = CounterOpWrapperPageable::new(ops.clone(), make_inner_with_forced_break());
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = CounterOpWrapperPageable::new(ops, make_inner_without_forced_break());
+        assert!(!clean.has_forced_break_below());
+    }
+
+    #[test]
+    fn string_set_wrapper_propagates_forced_break() {
+        let markers = vec![StringSetPageable::new("title".into(), "X".into())];
+        let wrapped =
+            StringSetWrapperPageable::new(markers.clone(), make_inner_with_forced_break());
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = StringSetWrapperPageable::new(markers, make_inner_without_forced_break());
+        assert!(!clean.has_forced_break_below());
+    }
+
+    #[test]
+    fn running_element_wrapper_propagates_forced_break() {
+        let markers = vec![RunningElementMarkerPageable::new("hdr".into(), 0)];
+        let wrapped =
+            RunningElementWrapperPageable::new(markers.clone(), make_inner_with_forced_break());
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = RunningElementWrapperPageable::new(markers, make_inner_without_forced_break());
+        assert!(!clean.has_forced_break_below());
+    }
+
+    #[test]
+    fn list_item_propagates_forced_break_from_body() {
+        let wrapped = ListItemPageable {
+            marker: ListItemMarker::None,
+            marker_line_height: 0.0,
+            body: make_inner_with_forced_break(),
+            style: BlockStyle::default(),
+            width: 100.0,
+            height: 10.0,
+            opacity: 1.0,
+            visible: true,
+        };
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = ListItemPageable {
+            marker: ListItemMarker::None,
+            marker_line_height: 0.0,
+            body: make_inner_without_forced_break(),
+            style: BlockStyle::default(),
+            width: 100.0,
+            height: 10.0,
+            opacity: 1.0,
+            visible: true,
+        };
+        assert!(!clean.has_forced_break_below());
+    }
+
+    #[test]
+    fn table_propagates_forced_break_from_cells() {
+        let body_cells = vec![PositionedChild {
+            child: make_inner_with_forced_break(),
+            x: 0.0,
+            y: 0.0,
+        }];
+        let wrapped = TablePageable {
+            header_cells: vec![],
+            body_cells,
+            header_height: 0.0,
+            style: BlockStyle::default(),
+            layout_size: None,
+            width: 100.0,
+            cached_height: 10.0,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        };
+        assert!(wrapped.has_forced_break_below());
+
+        let clean = TablePageable {
+            header_cells: vec![],
+            body_cells: vec![PositionedChild {
+                child: make_inner_without_forced_break(),
+                x: 0.0,
+                y: 0.0,
+            }],
+            header_height: 0.0,
+            style: BlockStyle::default(),
+            layout_size: None,
+            width: 100.0,
+            cached_height: 10.0,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        };
+        assert!(!clean.has_forced_break_below());
+    }
+
+    // Mirrors content-004: body contains [text_anon(y=0,h=15), div1(y=15,break_before=Page), div2(y=25,break_before=Page)]
+    #[test]
+    fn has_forced_break_below_detects_nested_break() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+        assert!(
+            body.has_forced_break_below(),
+            "body should detect nested break"
+        );
+
+        let html = make_body(
+            vec![PositionedChild {
+                child: Box::new(body),
+                x: 0.0,
+                y: 0.0,
+            }],
+            35.0,
+        );
+        assert!(
+            html.has_forced_break_below(),
+            "html should detect break through body"
+        );
+    }
+
+    #[test]
+    fn find_split_point_splits_nested_break_before_page() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+
+        // Body itself fits in 700pt avail, but has forced breaks → should split at index 1.
+        let split = body.find_split_point(700.0);
+        assert!(
+            matches!(split, SplitDecision::AtIndex(1)),
+            "body should split at index 1, got {:?}",
+            split
+        );
+    }
+
+    /// `TablePageable::split()` must respect forced breaks inside cells even
+    /// when the table as a whole fits in `avail_height`. Previously it only
+    /// split on overflow, so a parent delegating via `WithinChild` would get
+    /// `None` and drop the nested break entirely.
+    #[test]
+    fn table_split_honours_forced_break_before_when_fits() {
+        // 3 body cells (one per row): cell 1 has break-before:page.
+        let cell_0 = make_block_pc(10.0, BreakBefore::Auto, 0.0);
+        let cell_1 = make_block_pc(10.0, BreakBefore::Page, 10.0);
+        let cell_2 = make_block_pc(10.0, BreakBefore::Auto, 20.0);
+
+        let table = TablePageable {
+            header_cells: vec![],
+            body_cells: vec![cell_0, cell_1, cell_2],
+            header_height: 0.0,
+            style: BlockStyle::default(),
+            layout_size: None,
+            width: 100.0,
+            cached_height: 30.0,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        };
+
+        // Table fits in 1000pt but has forced break → must still split.
+        let split = table.split(0.0, 1000.0);
+        assert!(
+            split.is_some(),
+            "table with nested break-before:page must split even when avail_height contains the whole table"
+        );
+        let (first, _) = split.unwrap();
+        let first_table = first
+            .as_any()
+            .downcast_ref::<TablePageable>()
+            .expect("first fragment should be a TablePageable");
+        // First fragment should contain only the first row.
+        assert_eq!(first_table.body_cells.len(), 1);
+    }
+
+    /// When a WithinChild split consumes part of a child (not the full
+    /// height), tail siblings on page 2 must be rebased by
+    /// `split_y + consumed_height`, not just `split_y`. Otherwise page 2
+    /// keeps an extra gap equal to the first fragment's height.
+    #[test]
+    fn within_child_split_propagates_consumed_height_to_tail() {
+        let inner = make_body(
+            vec![
+                make_block_pc(10.0, BreakBefore::Auto, 0.0),
+                make_block_pc(20.0, BreakBefore::Page, 10.0),
+            ],
+            30.0,
+        );
+
+        let outer = make_body(
+            vec![
+                make_block_pc(10.0, BreakBefore::Auto, 0.0),
+                PositionedChild {
+                    child: Box::new(inner),
+                    x: 0.0,
+                    y: 10.0,
+                },
+                make_block_pc(10.0, BreakBefore::Auto, 40.0),
+            ],
+            50.0,
+        );
+
+        // outer fits in 100pt avail, but nested forced break → WithinChild.
+        let (_, second) = outer.split(0.0, 100.0).expect("should split");
+        let second_block = second
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("second fragment should be BlockPageable");
+
+        // Page 2 layout:
+        // - children[0] = inner's second_part at y = 0 with height 20.
+        // - children[1] = outer's tail (originally at y=40 in outer).
+        //   Tail should be rebased to sit flush against second_part's bottom:
+        //     new_y = sph + (orig_tail_y - inner_y - inner_height)
+        //           = 20   + (40 - 10 - 30)
+        //           = 20
+        //   Without the fix it would be at y=30 (leaving a 10pt gap).
+        assert_eq!(second_block.children.len(), 2);
+        assert!(
+            (second_block.children[0].y - 0.0).abs() < 1e-3,
+            "second_part should be at y=0, got y={}",
+            second_block.children[0].y
+        );
+        assert!(
+            (second_block.children[1].y - 20.0).abs() < 1e-3,
+            "tail should be at y=20 (flush against second_part), got y={}",
+            second_block.children[1].y
+        );
+    }
+
+    #[test]
+    fn find_split_point_html_delegates_to_body_for_nested_break() {
+        let body = make_body(
+            vec![
+                make_block_pc(15.0, BreakBefore::Auto, 0.0),
+                make_block_pc(10.0, BreakBefore::Page, 15.0),
+                make_block_pc(10.0, BreakBefore::Page, 25.0),
+            ],
+            35.0,
+        );
+        let html = make_body(
+            vec![PositionedChild {
+                child: Box::new(body),
+                x: 0.0,
+                y: 0.0,
+            }],
+            35.0,
+        );
+
+        // html fits in 700pt but body contains forced breaks → WithinChild(0, ...).
+        let split = html.find_split_point(700.0);
+        assert!(
+            matches!(split, SplitDecision::WithinChild(0, _, _)),
+            "html should delegate to body via WithinChild(0,...), got {:?}",
+            split
+        );
+    }
+}
+
+#[cfg(test)]
+mod link_collector_tests {
+    use super::*;
+    use crate::paragraph::{LinkSpan, LinkTarget};
+    use std::sync::Arc;
+
+    fn make_link(url: &str) -> Arc<LinkSpan> {
+        Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new(url.to_string())),
+            alt_text: None,
+        })
+    }
+
+    fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn push_rect_zero_width_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 0.0, 10.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "zero-width rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn push_rect_zero_height_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 0.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "zero-height rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn push_rect_negative_dimension_is_discarded() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, -5.0, 10.0));
+        assert!(
+            lc.into_occurrences().is_empty(),
+            "negative-width rect must be ignored"
+        );
+    }
+
+    #[test]
+    fn same_link_same_page_merges_into_one_occurrence() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        // Simulates a multi-line anchor: two rects for the same Arc<LinkSpan>
+        lc.push_rect(&link, r(0.0, 0.0, 50.0, 12.0));
+        lc.push_rect(&link, r(0.0, 14.0, 30.0, 12.0));
+        let occs = lc.into_occurrences();
+        assert_eq!(
+            occs.len(),
+            1,
+            "same link same page must produce one occurrence"
+        );
+        assert_eq!(
+            occs[0].quads.len(),
+            2,
+            "both rects must be retained as separate quads"
+        );
+    }
+
+    #[test]
+    fn same_link_different_pages_produce_separate_occurrences() {
+        let mut lc = LinkCollector::new();
+        let link = make_link("https://example.com");
+        lc.set_current_page(0);
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+        lc.set_current_page(1);
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+        let occs = lc.into_occurrences();
+        assert_eq!(
+            occs.len(),
+            2,
+            "same link on different pages must produce two occurrences"
+        );
+        assert_eq!(occs[0].page_idx, 0);
+        assert_eq!(occs[1].page_idx, 1);
+    }
+
+    #[test]
+    fn take_page_returns_and_removes_its_page() {
+        let mut lc = LinkCollector::new();
+        let link_a = make_link("https://a.com");
+        let link_b = make_link("https://b.com");
+        lc.set_current_page(0);
+        lc.push_rect(&link_a, r(0.0, 0.0, 10.0, 10.0));
+        lc.set_current_page(1);
+        lc.push_rect(&link_b, r(0.0, 0.0, 10.0, 10.0));
+
+        let page0 = lc.take_page(0);
+        assert_eq!(page0.len(), 1);
+        assert_eq!(page0[0].page_idx, 0);
+
+        // Page 0 gone; only page 1 remains.
+        let remaining = lc.into_occurrences();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].page_idx, 1);
+    }
+
+    #[test]
+    fn take_page_on_missing_page_returns_empty() {
+        let mut lc = LinkCollector::new();
+        let result = lc.take_page(99);
+        assert!(
+            result.is_empty(),
+            "take_page on absent page must return empty vec"
+        );
+    }
+
+    #[test]
+    fn occurrences_is_non_consuming_snapshot() {
+        let mut lc = LinkCollector::new();
+        lc.set_current_page(0);
+        let link = make_link("https://example.com");
+        lc.push_rect(&link, r(0.0, 0.0, 10.0, 10.0));
+
+        let snap1 = lc.occurrences();
+        let snap2 = lc.occurrences();
+        assert_eq!(snap1.len(), 1);
+        assert_eq!(snap2.len(), 1, "second call must see the same data");
+
+        // Collector must still be usable after snapshots.
+        lc.set_current_page(1);
+        lc.push_rect(&link, r(0.0, 0.0, 5.0, 5.0));
+        assert_eq!(
+            lc.occurrences().len(),
+            2,
+            "new page occurrence visible after snapshots"
+        );
+    }
+}
+
+#[cfg(test)]
+mod break_after_tests {
+    use super::*;
+
+    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
+        let mut s = SpacerPageable::new(h);
+        s.wrap(100.0, 1000.0);
+        Box::new(s)
+    }
+
+    #[test]
+    fn break_after_page_forces_split_even_when_everything_fits() {
+        // The first child carries break_after: Page; even though both children
+        // fit in 1000pt, the forced break must produce a split.
+        let mut child_with_break =
+            BlockPageable::new(vec![make_spacer(50.0)]).with_pagination(Pagination {
+                break_after: BreakAfter::Page,
+                ..Pagination::default()
+            });
+        child_with_break.wrap(200.0, 1000.0);
+
+        let mut block = BlockPageable::new(vec![
+            Box::new(child_with_break) as Box<dyn Pageable>,
+            make_spacer(50.0),
+        ]);
+        block.wrap(200.0, 1000.0);
+
+        let result = block.split(200.0, 1000.0);
+        assert!(result.is_some(), "break-after:page must force a page split");
+
+        let (first, second) = result.unwrap();
+        let mut first = first;
+        let mut second = second;
+        // First fragment: just the child with break-after (50pt)
+        assert!((first.wrap(200.0, 1000.0).height - 50.0).abs() < 0.01);
+        // Second fragment: the remaining spacer (50pt)
+        assert!((second.wrap(200.0, 1000.0).height - 50.0).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod block_split_boxed_tests {
+    use super::*;
+
+    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
+        let mut s = SpacerPageable::new(h);
+        s.wrap(100.0, 1000.0);
+        Box::new(s)
+    }
+
+    #[test]
+    fn split_boxed_at_index_returns_ok_and_preserves_children() {
+        // Three 100pt spacers; available height 250pt.
+        // Children: y=0 (h=100), y=100 (h=100), y=200 (h=100).
+        // At avail=250: first two fit, third overflows → AtIndex(2).
+        let mut block = BlockPageable::new(vec![
+            make_spacer(100.0),
+            make_spacer(100.0),
+            make_spacer(100.0),
+        ]);
+        block.wrap(200.0, 1000.0);
+        let concrete: Box<BlockPageable> = Box::new(block);
+        let result = concrete.split_boxed(200.0, 250.0);
+        assert!(
+            result.is_ok(),
+            "split_boxed must succeed when a split is possible"
+        );
+        let (first, second) = match result {
+            Ok(pair) => pair,
+            Err(_) => panic!("split_boxed returned Err unexpectedly"),
+        };
+        let first_block = first.as_any().downcast_ref::<BlockPageable>().unwrap();
+        let second_block = second.as_any().downcast_ref::<BlockPageable>().unwrap();
+        assert_eq!(
+            first_block.children.len(),
+            2,
+            "first fragment keeps two children"
+        );
+        assert_eq!(
+            second_block.children.len(),
+            1,
+            "second fragment keeps one child"
+        );
+        // Second fragment's child must be rebased to y=0.
+        assert!(
+            (second_block.children[0].y - 0.0).abs() < 0.01,
+            "second fragment child must be rebased to y=0"
+        );
+    }
+
+    #[test]
+    fn split_boxed_no_split_returns_err_with_original_box() {
+        // Single 50pt spacer in 1000pt: no split needed.
+        // The BlockPageable override returns Err(self) without cloning.
+        let mut block = BlockPageable::new(vec![make_spacer(50.0)]);
+        block.wrap(200.0, 1000.0);
+        let concrete: Box<BlockPageable> = Box::new(block);
+        match concrete.split_boxed(200.0, 1000.0) {
+            Ok(_) => panic!("no split needed must return Err"),
+            Err(original) => {
+                let block = original
+                    .as_any()
+                    .downcast_ref::<BlockPageable>()
+                    .expect("Err must return the original BlockPageable");
+                assert_eq!(block.children.len(), 1, "child count must be preserved");
+                assert!(
+                    (block.children[0].child.height() - 50.0).abs() < 0.01,
+                    "child height must be preserved"
+                );
+            }
+        }
     }
 }

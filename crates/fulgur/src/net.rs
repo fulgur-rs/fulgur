@@ -47,6 +47,10 @@ use std::sync::{Arc, Mutex};
 /// (CLAUDE.md adapter-isolation rule). The `drain_*` methods below
 /// exist for that internal use only.
 pub struct FulgurNetProvider {
+    // `canonical_base` is consulted only by the native
+    // `resolve_local_path`; on `wasm32-unknown-unknown` the resolver is a
+    // stub that returns `None`, leaving this field intentionally unread.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     canonical_base: Option<PathBuf>,
     inner: Arc<Mutex<Inner>>,
 }
@@ -87,6 +91,7 @@ impl FulgurNetProvider {
     /// configured base directory. Returns `None` if the URL is not
     /// `file://`, the file does not exist, or the resolved path escapes
     /// the base directory.
+    #[cfg(not(target_arch = "wasm32"))]
     fn resolve_local_path(&self, request: &Request) -> Option<PathBuf> {
         if request.url.scheme() != "file" {
             return None;
@@ -98,6 +103,18 @@ impl FulgurNetProvider {
             return None;
         }
         Some(canonical)
+    }
+
+    /// WASM stub: `Url::to_file_path` and `Path::canonicalize` are gated
+    /// off on `wasm32-unknown-unknown`. Browsers also forbid JS access to
+    /// `file://`, so this resolver can never succeed there. Resources for
+    /// WASM must be delivered as bytes through `AssetBundle` (typically
+    /// fed from JS `fetch` / `FileReader` / OPFS via a wasm-bindgen
+    /// wrapper). A future async `NetProvider` could re-route `<link>` /
+    /// `@import` through a JS-side fetch callback.
+    #[cfg(target_arch = "wasm32")]
+    fn resolve_local_path(&self, _request: &Request) -> Option<PathBuf> {
+        None
     }
 
     fn looks_like_css(request: &Request, path: &Path) -> bool {

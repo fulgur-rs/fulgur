@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>fulgur WASM demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+    h1 { margin: 0 0 0.2em; }
+    p.note { color: #666; font-size: 0.9em; margin: 0 0 1.2em; }
+    textarea { width: 100%; min-height: 8em; font-family: ui-monospace, monospace; box-sizing: border-box; }
+    button { padding: 0.5em 1em; font-size: 1em; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    #status { margin-top: 1em; padding: 0.6em; background: #f4f4f4; white-space: pre-wrap; min-height: 1.2em; }
+    #status.error { background: #fde7e7; color: #a00; }
+    #status.ok { background: #e7f5e7; color: #060; }
+    fieldset.config { border: 1px solid #ddd; margin: 0 0 1em; padding: 0.6em 0.8em; }
+    fieldset.config legend { font-size: 0.85em; color: #666; padding: 0 0.3em; }
+    fieldset.config label { display: inline-block; margin-right: 1em; font-size: 0.9em; }
+    fieldset.config input[type="text"] { width: 14em; }
+    #preview { margin-top: 1em; display: flex; flex-direction: column; gap: 0.6em; }
+    #preview:empty { display: none; }
+    #preview canvas { width: 100%; height: auto; background: white; border: 1px solid #ddd; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
+  </style>
+</head>
+<body>
+  <h1>fulgur WASM demo</h1>
+  <p class="note">
+    Browser-side HTML &rarr; PDF rendering, no server required.
+    This is the B-3c step (config mirror) &mdash; page size, orientation,
+    and PDF metadata are configured from JS via <code>engine.configure({...})</code>.
+    Asset bridging (font / CSS / image) from B-2 / B-3a is unchanged.
+    The output is previewed in-place below using
+    <a href="https://mozilla.github.io/pdf.js/" rel="noreferrer">pdf.js</a>.
+  </p>
+
+  <label for="html">HTML input</label>
+  <textarea id="html"><h1>Hello World</h1>
+<p class="subtitle">Config mirror demo (B-3c)</p>
+<img class="icon" src="icon.png" alt="icon"></textarea>
+
+  <fieldset class="config">
+    <legend>Render config (forwarded to <code>engine.configure</code>)</legend>
+    <label>Page size:
+      <select id="page-size">
+        <option value="A4" selected>A4</option>
+        <option value="Letter">Letter</option>
+        <option value="A3">A3</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="landscape"> Landscape</label>
+    <label>Title: <input type="text" id="title" placeholder="(optional)"></label>
+  </fieldset>
+
+  <p>
+    <button id="render" disabled>Loading WASM&hellip;</button>
+  </p>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div id="preview" aria-label="Rendered PDF preview"></div>
+
+  <script type="module">
+    import init, { Engine } from "./pkg/fulgur_wasm.js";
+
+    const button = document.getElementById("render");
+    const statusEl = document.getElementById("status");
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text;
+      statusEl.className = kind ?? "";
+    }
+
+    async function fetchBytes(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`fetch ${url} failed: ${response.status}`);
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    }
+
+    async function fetchText(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`fetch ${url} failed: ${response.status}`);
+      }
+      return await response.text();
+    }
+
+    let engine;
+
+    try {
+      await init();
+      setStatus("Loading assets…", "");
+
+      const [fontBytes, cssText, iconBytes] = await Promise.all([
+        fetchBytes("../.fonts/NotoSans-Regular.ttf"),
+        fetchText("./style.css"),
+        fetchBytes("../image/icon.png"),
+      ]);
+
+      engine = new Engine();
+      engine.add_font(fontBytes);
+      engine.add_css(cssText);
+      engine.add_image("icon.png", iconBytes);
+
+      button.disabled = false;
+      button.textContent = "Render PDF";
+      setStatus(
+        "WASM ready (font + style.css + icon.png registered).",
+        "ok"
+      );
+    } catch (e) {
+      setStatus(`Failed to initialise: ${e}`, "error");
+      throw e;
+    }
+
+    const pageSizeEl = document.getElementById("page-size");
+    const landscapeEl = document.getElementById("landscape");
+    const titleEl = document.getElementById("title");
+    const previewEl = document.getElementById("preview");
+
+    const PDFJS_BASE = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4/build";
+    let pdfjsPromise = null;
+    function loadPdfjs() {
+      if (!pdfjsPromise) {
+        pdfjsPromise = import(`${PDFJS_BASE}/pdf.mjs`)
+          .then((mod) => {
+            mod.GlobalWorkerOptions.workerSrc = `${PDFJS_BASE}/pdf.worker.mjs`;
+            return mod;
+          })
+          .catch((err) => {
+            // Reset cache so a transient CDN failure can be retried.
+            pdfjsPromise = null;
+            throw err;
+          });
+      }
+      return pdfjsPromise;
+    }
+
+    async function renderPreview(bytes) {
+      const pdfjs = await loadPdfjs();
+      // Read width before clearing: `#preview:empty { display: none }` makes
+      // clientWidth go to 0 the moment we replaceChildren().
+      const containerWidth =
+        previewEl.clientWidth || previewEl.parentElement?.clientWidth || 720;
+      previewEl.replaceChildren();
+      const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+      const dpr = window.devicePixelRatio || 1;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const cssScale = containerWidth / baseViewport.width;
+        const viewport = page.getViewport({ scale: cssScale * dpr });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        previewEl.appendChild(canvas);
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      }
+    }
+
+    button.addEventListener("click", async () => {
+      const html = document.getElementById("html").value;
+      button.disabled = true;
+      try {
+        setStatus("Rendering…", "");
+        const t0 = performance.now();
+        // engine.configure は partial merge セマンティクス
+        // (key 省略 = 維持) なので、title は常に渡す。条件分岐で
+        // 省略すると、一度入力後に空に戻しても前回 title が残る。
+        engine.configure({
+          pageSize: pageSizeEl.value,
+          landscape: landscapeEl.checked,
+          title: titleEl.value.trim(),
+        });
+        const bytes = engine.render(html);
+        const renderMs = (performance.now() - t0).toFixed(1);
+        setStatus(
+          `Rendered ${bytes.length} bytes in ${renderMs} ms. Drawing preview…`,
+          "ok"
+        );
+        const t1 = performance.now();
+        await renderPreview(bytes);
+        const previewMs = (performance.now() - t1).toFixed(1);
+        setStatus(
+          `Rendered ${bytes.length} bytes in ${renderMs} ms (pdf.js preview ${previewMs} ms).`,
+          "ok"
+        );
+      } catch (e) {
+        setStatus(`Render failed: ${e}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

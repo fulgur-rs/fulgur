@@ -1,0 +1,33 @@
+[package]
+name = "fulgur-wasm"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly bindings for fulgur (HTML/CSS to PDF)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fulgur = { path = "../fulgur" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+# `configure(JsValue)` round-trips options through `JSON.stringify` +
+# `serde_json::from_str` rather than `serde-wasm-bindgen`, because
+# serde-wasm-bindgen silently ignores unknown fields (`deny_unknown_fields`
+# is not honoured by its `Reflect::get`-based deserializer). Going via
+# JSON gives us the same validation surface as the native test path.
+serde_json = "1"
+js-sys = "0.3"
+
+[dev-dependencies]
+lopdf = "0.40.0"
+
+# wasm-bindgen-test only compiles on wasm32 — gate it so native
+# `cargo test -p fulgur-wasm` doesn't try to pull it in.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

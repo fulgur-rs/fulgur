@@ -94,6 +94,7 @@ impl Pageable for SvgPageable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pageable::Canvas;
 
     // Minimal valid SVG: 100x50 red rectangle
     const MINIMAL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
@@ -102,6 +103,27 @@ mod tests {
         let opts = usvg::Options::default();
         let tree = Tree::from_str(MINIMAL_SVG, &opts).expect("parse minimal svg");
         Arc::new(tree)
+    }
+
+    /// Draw `svg` onto a freshly-created krilla Document and discard the output.
+    /// Used to exercise `draw()` without asserting on surface state.
+    fn draw_onto_surface(svg: &SvgPageable) {
+        let mut doc = krilla::Document::new();
+        {
+            let settings = krilla::page::PageSettings::from_wh(400.0, 400.0)
+                .expect("400×400 is a valid page size");
+            let mut page = doc.start_page_with(settings);
+            let mut surface = page.surface();
+            {
+                let mut canvas = Canvas {
+                    surface: &mut surface,
+                    bookmark_collector: None,
+                    link_collector: None,
+                };
+                svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
+            }
+        }
+        let _ = doc.finish();
     }
 
     #[test]
@@ -141,5 +163,53 @@ mod tests {
         let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.opacity, 1.0);
         assert!(svg.visible);
+    }
+
+    #[test]
+    fn test_pagination_returns_default() {
+        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        assert_eq!(svg.pagination(), Pagination::default());
+    }
+
+    #[test]
+    fn test_as_any_downcasts_to_svg_pageable() {
+        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        assert!(svg.as_any().downcast_ref::<SvgPageable>().is_some());
+    }
+
+    #[test]
+    fn test_draw_visible_does_not_panic() {
+        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_not_visible_returns_early() {
+        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        svg.visible = false;
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_zero_size_skips_draw() {
+        // Size::from_wh(0.0, …) returns None (NonZeroPositiveF32 rejects zero);
+        // this exercises the `let Some(size) = … else { return; }` branch.
+        let svg = SvgPageable::new(parse_tree(), 0.0, 50.0);
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_partial_opacity() {
+        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        svg.opacity = 0.5;
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_zero_opacity_returns_early() {
+        // draw_with_opacity short-circuits when opacity == 0.0.
+        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        svg.opacity = 0.0;
+        draw_onto_surface(&svg);
     }
 }

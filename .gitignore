@@ -6,3 +6,6 @@
 **/.env.*
 website/site
 website/.venv
+
+# wasm-pack build artifacts (regenerated locally; not checked in)
+examples/wasm-demo/pkg/

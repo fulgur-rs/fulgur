@@ -43,7 +43,7 @@ jobs:
             rustflags: "-C linker=lld-link"
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}-python-release
@@ -57,7 +57,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --strip --out dist -m crates/pyfulgur/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target }}
           path: dist/*.whl
@@ -67,12 +67,12 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
           args: --out dist -m crates/pyfulgur/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -89,11 +89,11 @@ jobs:
       matrix:
         python-version: ["3.9", "3.13"]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
@@ -135,11 +135,11 @@ jobs:
             artifact: wheels-x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: dist
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install wheel (unix)
@@ -167,19 +167,52 @@ jobs:
           print(f'OK: {len(pdf)} bytes')
           "
 
+  # release-prepare.yml が release PR に `release:skip-bindings` ラベルを付けて
+  # いれば bindings publish を丸ごと skip する。release event は PR コンテキストを
+  # 持たないため、tag → commit → associated PR の順に逆引きしてラベルを参照する。
+  check-skip-label:
+    name: Check skip-bindings label
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Check label
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "release" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" \
+            --jq '.[].labels[].name' 2>/dev/null || true)
+          if printf '%s\n' "$LABELS" | grep -qx 'release:skip-bindings'; then
+            echo "release:skip-bindings label set on associated PR; skipping PyPI publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist, smoke-test, smoke-test-sdist]
+    needs: [build-wheels, build-sdist, smoke-test, smoke-test-sdist, check-skip-label]
     # 本番 PyPI publish は release イベント (release.yml がタグから発火) のみ。
     # workflow_dispatch からは任意の ref を publish できないようにする (security)。
     # 手動検証は publish-testpypi (dry_run=true) を使う。
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && needs.check-skip-label.outputs.skip != 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -194,7 +227,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

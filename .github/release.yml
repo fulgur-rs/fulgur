@@ -1,0 +1,18 @@
+changelog:
+  exclude:
+    labels:
+      - release-notes:internal
+      - dependencies
+  categories:
+    - title: Features
+      labels:
+        - release-notes:feature
+    - title: Bug Fixes
+      labels:
+        - release-notes:fix
+    - title: Documentation
+      labels:
+        - release-notes:docs
+    - title: Other Changes
+      labels:
+        - "*"

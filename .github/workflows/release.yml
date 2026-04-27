@@ -28,7 +28,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -36,7 +36,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-publish-fulgur
+          shared-key: ubuntu-latest-fulgur
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Configure fast build
         run: |
@@ -63,7 +64,7 @@ jobs:
       # 前提で発行されるので、そちらを使う (docs/RELEASE_SETUP.md 参照)。
       - name: Generate App token for tag push
         id: app-token-tag
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -146,7 +147,7 @@ jobs:
             rustflags: "-C linker=lld-link"
             install-mold: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: "v${{ needs.publish.outputs.version }}"
 
@@ -200,12 +201,12 @@ jobs:
           New-Item -ItemType Directory -Force npm-bin
           Copy-Item "target/${{ matrix.target }}/release/fulgur.exe" "npm-bin/fulgur.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-${{ matrix.target }}
           path: npm-bin/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fulgur-${{ matrix.target }}
           path: fulgur-v${{ needs.publish.outputs.version }}-${{ matrix.target }}.*
@@ -215,7 +216,7 @@ jobs:
     needs: [publish, build-binaries]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: 'fulgur-*'
@@ -227,7 +228,7 @@ jobs:
       # 手順は docs/RELEASE_SETUP.md を参照。
       - name: Generate App token for release publish
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -254,23 +255,26 @@ jobs:
   publish-npm:
     name: Publish npm packages
     needs: [publish, build-binaries]
+    # GH Release (and CLI binary distribution) is unconditional, but the npm
+    # publish is gated by `release:skip-bindings` to allow core-only releases.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'release:skip-bindings') }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: "v${{ needs.publish.outputs.version }}"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all npm artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: npm-*
           path: npm-artifacts

@@ -2,6 +2,138 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-04-26
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(gradient): CSS linear-gradient Phase 1 by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/235
+### Bug Fixes
+* fix(vrt): respect CSS @page margin in runner by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/219
+* fix(fulgur-zsn8): force-enable image png feature for build determinism by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/236
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.8.0...v0.9.0
+
+## [0.8.0] - 2026-04-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(release-ruby): bump rb-sys-dock tag to 0.9.127 (host version drift) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/220
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.7.0...v0.8.0
+
+## [0.7.0] - 2026-04-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(bindings): handle fulgur::Error::Other in pyfulgur and fulgur-ruby by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/217
+### Other Changes
+* ci(cache): consolidate dev shared-keys + scope save-if to main by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/216
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.6.0...v0.7.0
+
+## [0.6.0] - 2026-04-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(fulgur-wasm): wasm-bindgen wrapper crate + browser demo (scope 3 B-1) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/208
+* feat(fulgur-wasm): add Engine builder mirror with add_font (B-2) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/209
+* feat(fulgur-wasm): CSS / image bridge (B-3a) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/210
+* feat(fulgur-wasm): pass page size / metadata from JS via Engine.configure (B-3c) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/211
+* feat(wasm-demo): preview rendered PDF in-page via pdf.js by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/212
+### Bug Fixes
+* fix(convert): correct y-coordinate for display:inline-block (fulgur-z2ho) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/190
+* fix(pageable): honour break-before:page in inline-root blocks (WPT content-004/005/006) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/194
+* fix(fulgur): paint position:absolute pseudo-elements at their CSS-resolved position by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/192
+* fix(fulgur-lje5): wire CSS page-break-after/before to BreakAfter/BreakBefore by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/188
+* fix(pageable): keep grid cell backgrounds/borders across page breaks (fulgur-86fo) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/205
+### Documentation
+* docs: coordinate system and unit conversion rules by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/191
+* docs: record tagged PDF Krilla API design by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/143
+* docs(release): document ZeroVer policy + skip_bindings + release-notes labels by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/214
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.5.14...v0.6.0
+
+## [0.5.14] - 2026-04-23
+
+### Bug Fixes
+
+- replace postinstall with checked-in bin shim
+
+## [0.5.13] - 2026-04-23
+
+### Bug Fixes
+
+- apply CTM stack to image/text positions in inspect
+- collapse nested if-let to fix clippy::collapsible_match
+- use match guards to fix clippy::collapsible_match on Rust 1.95
+- correct Td/TD text-space transform and add BT reset
+- address AI review feedback (10 items)
+
+### CI
+
+- add Dependabot config for cargo, actions, npm, pip, bundler
+- use uv ecosystem for website
+- drop semver-*-days for github-actions ecosystem
+- set default contents:read permissions on workflows
+
+### Documentation
+
+- add npx installation as primary option for CLI
+- fix Japanese 'local install' wording to 'global install'
+- add README for @fulgur-rs/cli meta and platform packages
+- add inspect implementation plan
+
+### Features
+
+- add inspect module — extract text, images, metadata from PDF
+- add inspect subcommand
+
+### Miscellaneous
+
+- bump rand in the cargo group across 1 directory
+- bump the cargo-minor-patch group with 3 updates
+- bump cssparser from 0.35.0 to 0.36.0
+- bump actions/setup-node in the actions-minor-patch group
+- bump actions/cache from 4 to 5
+- bump chromiumoxide from 0.7.0 to 0.8.0
+- bump dirs from 5.0.1 to 6.0.0
+- bump skrifa from 0.37.0 to 0.40.0
+- bump DavidAnson/markdownlint-cli2-action
+- bump magnus from 0.7.1 to 0.8.2
+- bump actions/create-github-app-token from 2 to 3
+- bump actions/setup-python from 5 to 6
+- bump actions/checkout from 4 to 6
+- bump toml from 0.8.23 to 1.1.2+spec-1.1.0
+- add lopdf and serde dependencies for inspect
+
+### Refactor
+
+- fix code quality issues in inspect module
+- simplify and fix graphics state restore
+
+### Styling
+
+- cargo fmt for inspect module
+- cargo fmt
+
+### Testing
+
+- add coverage for pure logic functions
+- add inspect subcommand integration tests
+- improve inspect coverage — helpers, images, error paths
+
+### Release
+
+- v0.5.13
+
 ## [0.5.12] - 2026-04-22
 
 ### Bug Fixes
@@ -14,6 +146,10 @@ All notable changes to this project will be documented in this file.
 
 - remove redundant PDF regeneration from release-prepare
 - regenerate example PDFs
+
+### Release
+
+- v0.5.12
 
 ## [0.5.11] - 2026-04-22
 

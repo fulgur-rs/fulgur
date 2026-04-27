@@ -177,10 +177,11 @@ of the `@fulgur-rs/cli-<platform>` packages above, all declared as
 npm only installs the one that matches the current `os` / `cpu` / libc, so
 there is no per-platform bloat and no cross-compilation at install time.
 
-A small `postinstall` script copies the platform binary into the meta
-package's `bin/` directory so `fulgur` becomes available on the `PATH`. If you
-install with `--ignore-optional` or on an unsupported platform, the script
-exits with a clear error message.
+The `bin/fulgur` entry is a small JavaScript shim that, at run time, resolves
+the platform package via `require.resolve` and execs its native binary. There
+is no `postinstall` step, so `npx @fulgur-rs/cli` works on the very first run.
+If you install with `--ignore-optional` or on an unsupported platform, the
+shim exits with a clear error message.
 
 ## Links
 

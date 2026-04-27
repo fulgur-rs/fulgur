@@ -10,17 +10,17 @@ description = "Visual regression testing harness for fulgur (dev-only, not publi
 [dependencies]
 fulgur = { path = "../fulgur" }
 image = { version = "0.25", default-features = false, features = ["png"] }
-toml = "0.8"
+toml = "1.1"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tempfile = "3"
 
 # chrome-golden feature is optional: only pulled in when generating or comparing
 # against Chromium screenshots. The default PR flow uses fulgur goldens only.
-chromiumoxide = { version = "0.7", optional = true, features = ["tokio-runtime"] }
+chromiumoxide = { version = "0.8", optional = true, features = ["tokio-runtime"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
 futures = { version = "0.3", optional = true }
-dirs = { version = "5", optional = true }
+dirs = { version = "6", optional = true }
 
 [features]
 default = []

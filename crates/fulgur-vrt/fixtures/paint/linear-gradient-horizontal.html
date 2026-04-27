@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRT: linear-gradient horizontal red→blue</title>
+<style>
+  html, body { margin: 0; padding: 0; background: white; }
+  /* Margin and dimensions chosen so the box spans an integer number of raster
+     pixels at 150dpi (1 CSS px = 25/16 raster px). Width 400, margin 32 →
+     box at raster x=[50, 675] exactly. Strip boundaries at 16-CSS-px stride
+     map to integer raster columns, eliminating sub-pixel seams in the ref. */
+  .g {
+    width: 400px;
+    height: 192px;
+    margin: 32px;
+    background: linear-gradient(90deg, #e53935 0%, #1e88e5 100%);
+  }
+</style>
+</head>
+<body>
+  <div class="g"></div>
+</body>
+</html>

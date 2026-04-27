@@ -12,6 +12,7 @@ pub mod engine;
 pub mod error;
 pub mod gcpm;
 pub mod image;
+pub mod inspect;
 pub(crate) mod link;
 pub(crate) mod multicol_layout;
 pub(crate) mod net;

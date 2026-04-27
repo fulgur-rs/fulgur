@@ -6,7 +6,7 @@
 
 #![cfg(feature = "ruby-api")]
 
-use magnus::{Error, define_module};
+use magnus::Error;
 
 mod asset_bundle;
 mod engine;
@@ -30,7 +30,7 @@ mod assertions {
 
 #[magnus::init]
 fn init(ruby: &magnus::Ruby) -> Result<(), Error> {
-    let fulgur = define_module("Fulgur")?;
+    let fulgur = ruby.define_module("Fulgur")?;
     page_size::define(ruby, &fulgur)?;
     margin::define(ruby, &fulgur)?;
     asset_bundle::define(ruby, &fulgur)?;

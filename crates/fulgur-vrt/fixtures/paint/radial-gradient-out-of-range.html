@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRT test: radial-gradient out-of-range stop (-50%, 100%)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: white; }
+  /* radial-gradient-circular.html と同じ box geometry / shape を踏襲。
+     範囲外 stop -50% は CSS Images 3 §3.5.1 に従い drop され、中心 (r=0)
+     の色は `red + (1/3) * (blue - red)` で合成される。 */
+  .g {
+    width: 192px;
+    height: 192px;
+    margin: 32px;
+    background: radial-gradient(circle closest-side, #e53935 -50%, #1e88e5 100%);
+  }
+</style>
+</head>
+<body>
+  <div class="g"></div>
+</body>
+</html>

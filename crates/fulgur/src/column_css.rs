@@ -45,7 +45,7 @@ use cssparser::{
     color::{parse_hash_color, parse_named_color},
 };
 
-use crate::pageable::BreakInside;
+use crate::pageable::{BreakAfter, BreakBefore, BreakInside};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -108,6 +108,10 @@ pub struct ColumnStyleProps {
     /// reason as the other fields: a later rule overwrites only the
     /// properties it declares (see [`merge`](Self::merge)).
     pub break_inside: Option<BreakInside>,
+    /// `break-after` / `page-break-after` resolved by the sniffer.
+    pub break_after: Option<BreakAfter>,
+    /// `break-before` / `page-break-before` resolved by the sniffer.
+    pub break_before: Option<BreakBefore>,
 }
 
 impl ColumnStyleProps {
@@ -123,10 +127,20 @@ impl ColumnStyleProps {
         if other.break_inside.is_some() {
             self.break_inside = other.break_inside;
         }
+        if other.break_after.is_some() {
+            self.break_after = other.break_after;
+        }
+        if other.break_before.is_some() {
+            self.break_before = other.break_before;
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.rule.is_none() && self.fill.is_none() && self.break_inside.is_none()
+        self.rule.is_none()
+            && self.fill.is_none()
+            && self.break_inside.is_none()
+            && self.break_after.is_none()
+            && self.break_before.is_none()
     }
 }
 
@@ -140,7 +154,7 @@ pub type ColumnStyleTable = BTreeMap<usize, ColumnStyleProps>;
 /// that apply when any of them matches.
 #[derive(Clone, Debug)]
 pub struct StyleRule {
-    pub selectors: Vec<CompoundSelector>,
+    pub selectors: Vec<ComplexSelector>,
     pub props: ColumnStyleProps,
 }
 
@@ -165,6 +179,16 @@ pub enum SimpleSelector {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompoundSelector {
     pub parts: Vec<SimpleSelector>,
+}
+
+/// One leg of a complex selector. `subject` is the element that must match
+/// the rule target. `prev_sibling` (if `Some`) is a compound selector that
+/// must match the element immediately preceding `subject` in the DOM.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComplexSelector {
+    pub subject: CompoundSelector,
+    /// Adjacent-sibling context (`E + F` → F is subject, E is prev_sibling).
+    pub prev_sibling: Option<CompoundSelector>,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +449,28 @@ fn parse_break_inside_value<'i>(
     }
 }
 
+fn parse_break_after_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BreakAfter, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    match ident.as_ref().to_ascii_lowercase().as_str() {
+        "always" | "page" | "left" | "right" | "recto" | "verso" => Ok(BreakAfter::Page),
+        "auto" => Ok(BreakAfter::Auto),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
+fn parse_break_before_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BreakBefore, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    match ident.as_ref().to_ascii_lowercase().as_str() {
+        "always" | "page" | "left" | "right" | "recto" | "verso" => Ok(BreakBefore::Page),
+        "auto" => Ok(BreakBefore::Auto),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Declaration block parser
 // ---------------------------------------------------------------------------
@@ -507,6 +553,18 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
             // so siblings keep applying.
             if let Ok(bi) = input.parse_entirely(parse_break_inside_value) {
                 self.props.break_inside = Some(bi);
+            }
+        } else if name.eq_ignore_ascii_case("break-after")
+            || name.eq_ignore_ascii_case("page-break-after")
+        {
+            if let Ok(v) = input.parse_entirely(parse_break_after_value) {
+                self.props.break_after = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("break-before")
+            || name.eq_ignore_ascii_case("page-break-before")
+        {
+            if let Ok(v) = input.parse_entirely(parse_break_before_value) {
+                self.props.break_before = Some(v);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -612,32 +670,29 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
 // ---------------------------------------------------------------------------
 
 /// Parse a comma-separated selector list. Returns an empty `Vec` when any
-/// selector uses unsupported syntax (combinators, pseudo-classes, attribute
-/// selectors, or whitespace descendant) — per Phase A scope discipline the
-/// whole rule is dropped silently so authors do not get a half-applied
-/// result.
-pub fn parse_selector_list(input: &str) -> Vec<CompoundSelector> {
+/// selector uses unsupported syntax (pseudo-classes, attribute selectors,
+/// descendant/child/general-sibling combinators) — per Phase A scope
+/// discipline the whole rule is dropped silently so authors do not get a
+/// half-applied result. The adjacent-sibling combinator (`+`) is supported.
+pub fn parse_selector_list(input: &str) -> Vec<ComplexSelector> {
     let mut parser_input = ParserInput::new(input);
     let mut parser = Parser::new(&mut parser_input);
 
-    let mut compounds = Vec::new();
-    // `just_completed` signals the tokenizer yielded a compound-terminating
-    // whitespace sequence: the next real token must be a `,` or EOF, else
-    // we have a descendant combinator which Phase A does not model.
-    let mut just_saw_whitespace = false;
+    let mut selectors: Vec<ComplexSelector> = Vec::new();
     let mut current = CompoundSelector::default();
+    let mut prev_sibling: Option<CompoundSelector> = None;
+    // `just_saw_whitespace` is true when the previous real token completed a
+    // compound and whitespace followed: the next real token must be `,`, `+`,
+    // or EOF, otherwise we have a descendant combinator which is not supported.
+    let mut just_saw_whitespace = false;
 
     loop {
-        let tok_result = parser.next_including_whitespace();
-        let tok = match tok_result {
+        let tok = match parser.next_including_whitespace() {
             Ok(t) => t.clone(),
             Err(_) => break,
         };
 
         if matches!(tok, Token::WhiteSpace(_)) {
-            // Record but don't act — the follow-up token decides whether
-            // this whitespace was valid (around `,` / at end) or a
-            // descendant combinator (before another selector part).
             just_saw_whitespace = !current.parts.is_empty();
             continue;
         }
@@ -647,7 +702,17 @@ pub fn parse_selector_list(input: &str) -> Vec<CompoundSelector> {
                 if current.parts.is_empty() {
                     return Vec::new();
                 }
-                compounds.push(std::mem::take(&mut current));
+                selectors.push(ComplexSelector {
+                    subject: std::mem::take(&mut current),
+                    prev_sibling: prev_sibling.take(),
+                });
+                just_saw_whitespace = false;
+            }
+            Token::Delim('+') => {
+                if current.parts.is_empty() || prev_sibling.is_some() {
+                    return Vec::new();
+                }
+                prev_sibling = Some(std::mem::take(&mut current));
                 just_saw_whitespace = false;
             }
             Token::Delim('.') => {
@@ -689,25 +754,29 @@ pub fn parse_selector_list(input: &str) -> Vec<CompoundSelector> {
                     .push(SimpleSelector::Type(name.as_ref().to_ascii_lowercase()));
                 just_saw_whitespace = false;
             }
-            // Unsupported tokens: pseudo-classes (`:`), attribute
-            // selectors (`[`), combinators (`>`, `+`, `~`), numbers, and
-            // anything else the Phase A grammar does not model. Drop the
+            // Unsupported tokens: pseudo-classes (`:`), attribute selectors
+            // (`[`), child/general-sibling combinators (`>`, `~`), numbers,
+            // and anything else the Phase A grammar does not model. Drop the
             // whole list.
             _ => return Vec::new(),
         }
     }
 
     if !current.parts.is_empty() {
-        compounds.push(current);
-    } else if compounds.is_empty() {
+        selectors.push(ComplexSelector {
+            subject: std::mem::take(&mut current),
+            prev_sibling: prev_sibling.take(),
+        });
+    } else if selectors.is_empty() || prev_sibling.is_some() {
+        // Either the input was empty (no selectors accepted) or a trailing
+        // combinator like `.a, .b +` left `prev_sibling` without a subject.
+        // Either way, the whole list is invalid — drop it.
         return Vec::new();
     }
-    compounds
+    selectors
 }
 
-/// Match a [`CompoundSelector`] against a blitz DOM node. Every
-/// [`SimpleSelector`] in the compound must hold (logical AND).
-pub fn matches_node(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
+fn matches_compound(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
     let Some(elem) = node.element_data() else {
         return false;
     };
@@ -723,6 +792,40 @@ pub fn matches_node(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
             crate::blitz_adapter::get_attr(elem, "id").is_some_and(|id| id == want)
         }
     })
+}
+
+pub fn matches_complex(
+    sel: &ComplexSelector,
+    node: &blitz_dom::Node,
+    doc: &blitz_html::HtmlDocument,
+) -> bool {
+    if !matches_compound(&sel.subject, node) {
+        return false;
+    }
+    match &sel.prev_sibling {
+        None => true,
+        Some(sibling_sel) => {
+            let Some(parent_id) = node.parent else {
+                return false;
+            };
+            let Some(parent) = doc.get_node(parent_id) else {
+                return false;
+            };
+            let siblings = &parent.children;
+            let Some(pos) = siblings.iter().position(|&id| id == node.id) else {
+                return false;
+            };
+            for &prev_id in siblings[..pos].iter().rev() {
+                let Some(prev_node) = doc.get_node(prev_id) else {
+                    continue;
+                };
+                if prev_node.element_data().is_some() {
+                    return matches_compound(sibling_sel, prev_node);
+                }
+            }
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -770,7 +873,7 @@ impl<'i, 'a> AtRuleParser<'i> for SheetParser<'a> {
 }
 
 impl<'i, 'a> QualifiedRuleParser<'i> for SheetParser<'a> {
-    type Prelude = Vec<CompoundSelector>;
+    type Prelude = Vec<ComplexSelector>;
     type QualifiedRule = ();
     type Error = ();
 
@@ -846,7 +949,11 @@ fn walk(
     if node.element_data().is_some() {
         let mut props = ColumnStyleProps::default();
         for rule in rules {
-            if rule.selectors.iter().any(|sel| matches_node(sel, node)) {
+            if rule
+                .selectors
+                .iter()
+                .any(|sel| matches_complex(sel, node, doc))
+            {
                 props.merge(rule.props);
             }
         }
@@ -1085,7 +1192,7 @@ mod tests {
         let list = parse_selector_list("div.foo#bar");
         assert_eq!(list.len(), 1);
         assert_eq!(
-            list[0].parts,
+            list[0].subject.parts,
             vec![
                 SimpleSelector::Type("div".into()),
                 SimpleSelector::Class("foo".into()),
@@ -1098,16 +1205,22 @@ mod tests {
     fn selector_universal() {
         let list = parse_selector_list("*");
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].parts, vec![SimpleSelector::Universal]);
+        assert_eq!(list[0].subject.parts, vec![SimpleSelector::Universal]);
     }
 
     #[test]
     fn selector_comma_list_parsed_as_multiple_compounds() {
         let list = parse_selector_list(".a, div, #x");
         assert_eq!(list.len(), 3);
-        assert_eq!(list[0].parts, vec![SimpleSelector::Class("a".into())]);
-        assert_eq!(list[1].parts, vec![SimpleSelector::Type("div".into())]);
-        assert_eq!(list[2].parts, vec![SimpleSelector::Id("x".into())]);
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Class("a".into())]
+        );
+        assert_eq!(
+            list[1].subject.parts,
+            vec![SimpleSelector::Type("div".into())]
+        );
+        assert_eq!(list[2].subject.parts, vec![SimpleSelector::Id("x".into())]);
     }
 
     #[test]
@@ -1133,7 +1246,10 @@ mod tests {
     #[test]
     fn selector_tag_lowercased() {
         let list = parse_selector_list("DIV");
-        assert_eq!(list[0].parts, vec![SimpleSelector::Type("div".into())]);
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Type("div".into())]
+        );
     }
 
     // -------- end-to-end matcher (via blitz_adapter::parse) --------
@@ -1205,11 +1321,11 @@ mod tests {
             parts: vec![SimpleSelector::Class("other".into())],
         };
 
-        assert!(matches_node(&t, div));
-        assert!(matches_node(&c, div));
-        assert!(matches_node(&i, div));
-        assert!(matches_node(&compound, div));
-        assert!(!matches_node(&not_match, div));
+        assert!(matches_compound(&t, div));
+        assert!(matches_compound(&c, div));
+        assert!(matches_compound(&i, div));
+        assert!(matches_compound(&compound, div));
+        assert!(!matches_compound(&not_match, div));
     }
 
     #[test]
@@ -1224,7 +1340,7 @@ mod tests {
         let u = CompoundSelector {
             parts: vec![SimpleSelector::Universal],
         };
-        assert!(matches_node(&u, span));
+        assert!(matches_compound(&u, span));
     }
 
     // -------- stylesheet parsing --------
@@ -1237,7 +1353,7 @@ mod tests {
         "#;
         let rules = parse_stylesheet(css);
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].selectors[0].parts.len(), 1);
+        assert_eq!(rules[0].selectors[0].subject.parts.len(), 1);
         assert!(rules[0].props.rule.is_some());
         assert_eq!(rules[1].props.fill, Some(ColumnFill::Auto));
     }
@@ -1264,7 +1380,7 @@ mod tests {
         let rules = parse_stylesheet(css);
         assert_eq!(rules.len(), 1);
         assert_eq!(
-            rules[0].selectors[0].parts[0],
+            rules[0].selectors[0].subject.parts[0],
             SimpleSelector::Class("mc".into())
         );
     }
@@ -1349,6 +1465,72 @@ mod tests {
         assert!(table.is_empty());
     }
 
+    // -------- inline-style helpers used by break-after / break-before tests ----
+
+    fn parse_inline_style(css: &str) -> ColumnStyleProps {
+        parse_declaration_block(css)
+    }
+
+    // -------- break-after / page-break-after --------
+
+    #[test]
+    fn parse_break_after_always_inline() {
+        let props = parse_inline_style("break-after: always");
+        assert_eq!(props.break_after, Some(BreakAfter::Page));
+    }
+
+    #[test]
+    fn parse_page_break_after_always_inline() {
+        let props = parse_inline_style("page-break-after: always");
+        assert_eq!(props.break_after, Some(BreakAfter::Page));
+    }
+
+    #[test]
+    fn parse_break_before_always_inline() {
+        let props = parse_inline_style("break-before: always");
+        assert_eq!(props.break_before, Some(BreakBefore::Page));
+    }
+
+    #[test]
+    fn parse_page_break_before_always_inline() {
+        let props = parse_inline_style("page-break-before: always");
+        assert_eq!(props.break_before, Some(BreakBefore::Page));
+    }
+
+    #[test]
+    fn parse_break_after_auto_is_auto() {
+        let props = parse_inline_style("break-after: auto");
+        assert_eq!(props.break_after, Some(BreakAfter::Auto));
+    }
+
+    #[test]
+    fn parse_break_after_invalid_is_silently_dropped() {
+        let props = parse_inline_style("break-after: banana");
+        assert_eq!(props.break_after, None);
+    }
+
+    #[test]
+    fn parse_break_after_via_selector() {
+        let rules = parse_stylesheet(".forced { break-after: page; }");
+        assert_eq!(rules[0].props.break_after, Some(BreakAfter::Page));
+    }
+
+    // -------- break-before / page-break-before --------
+
+    #[test]
+    fn parse_break_before_via_selector() {
+        let rules = parse_stylesheet(".forced { break-before: page; }");
+        assert_eq!(rules[0].props.break_before, Some(BreakBefore::Page));
+    }
+
+    #[test]
+    fn parse_break_after_left_and_right_collapse_to_page() {
+        let p1 = parse_inline_style("break-after: left");
+        let p2 = parse_inline_style("break-after: right");
+        assert_eq!(p1.break_after, Some(BreakAfter::Page));
+        assert_eq!(p2.break_after, Some(BreakAfter::Page));
+    }
+
     #[test]
     fn comma_selector_list_matches_any_compound() {
         let css = "div, #a { column-fill: auto; }";
@@ -1385,5 +1567,183 @@ mod tests {
         assert_eq!(table.get(&div_id).unwrap().fill, Some(ColumnFill::Auto));
         assert_eq!(table.get(&a_id).unwrap().fill, Some(ColumnFill::Auto));
         assert!(!table.contains_key(&b_id));
+    }
+
+    #[test]
+    fn adjacent_sibling_selector_parsed() {
+        let selectors = parse_selector_list("div + div");
+        assert_eq!(selectors.len(), 1);
+        let sel = &selectors[0];
+        assert_eq!(sel.subject.parts, vec![SimpleSelector::Type("div".into())]);
+        let prev = sel
+            .prev_sibling
+            .as_ref()
+            .expect("prev_sibling should be Some");
+        assert_eq!(prev.parts, vec![SimpleSelector::Type("div".into())]);
+    }
+
+    #[test]
+    fn combinator_gt_drops_rule() {
+        assert!(parse_selector_list("div > p").is_empty());
+    }
+
+    #[test]
+    fn combinator_tilde_drops_rule() {
+        assert!(parse_selector_list("div ~ p").is_empty());
+    }
+
+    #[test]
+    fn simple_selector_no_sibling() {
+        let selectors = parse_selector_list("div");
+        assert_eq!(selectors.len(), 1);
+        assert!(selectors[0].prev_sibling.is_none());
+    }
+
+    #[test]
+    fn descendant_after_plus_drops_rule() {
+        assert!(parse_selector_list("div + div .foo").is_empty());
+    }
+
+    /// `a + b + c` can't be represented by the one-leg ComplexSelector model,
+    /// so it must be dropped rather than silently degrading to `b + c`.
+    #[test]
+    fn chained_adjacent_sibling_drops_rule() {
+        assert!(parse_selector_list("div + p + span").is_empty());
+    }
+
+    /// Trailing `+` in a comma-separated list (`.a, .b +`) must invalidate
+    /// the whole list rather than silently returning only `.a`.
+    #[test]
+    fn trailing_plus_in_comma_list_drops_rule() {
+        assert!(parse_selector_list(".a, .b +").is_empty());
+    }
+
+    // -------- matches_complex DOM behaviour --------
+
+    /// `div + div` matches the second div but not the first.
+    #[test]
+    fn matches_complex_adjacent_sibling_matches_second_not_first() {
+        let doc = build_doc(
+            r#"<html><body>
+                <div id="first"></div>
+                <div id="second"></div>
+            </body></html>"#,
+        );
+
+        let first_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("first")
+        })
+        .expect("first");
+        let second_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("second")
+        })
+        .expect("second");
+
+        // `div + div`: prev_sibling = div, subject = div
+        let div_compound = CompoundSelector {
+            parts: vec![SimpleSelector::Type("div".into())],
+        };
+        let sel = ComplexSelector {
+            subject: div_compound.clone(),
+            prev_sibling: Some(div_compound),
+        };
+
+        let first = doc.get_node(first_id).unwrap();
+        let second = doc.get_node(second_id).unwrap();
+
+        // The second div has a div immediately before it → should match.
+        assert!(matches_complex(&sel, second, &doc));
+        // The first div has no element before it → should not match.
+        assert!(!matches_complex(&sel, first, &doc));
+    }
+
+    /// A `ComplexSelector` with `prev_sibling: None` matches the first element.
+    #[test]
+    fn matches_complex_no_sibling_context_matches_first_element() {
+        let doc = build_doc(
+            r#"<html><body>
+                <div id="only"></div>
+            </body></html>"#,
+        );
+
+        let only_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("only")
+        })
+        .expect("only");
+
+        let sel = ComplexSelector {
+            subject: CompoundSelector {
+                parts: vec![SimpleSelector::Type("div".into())],
+            },
+            prev_sibling: None,
+        };
+
+        let only = doc.get_node(only_id).unwrap();
+        assert!(matches_complex(&sel, only, &doc));
+    }
+
+    /// Text nodes between siblings must not prevent the adjacent-sibling match.
+    #[test]
+    fn matches_complex_adjacent_sibling_skips_text_nodes() {
+        // Explicit text between the two divs guarantees a text node in the DOM.
+        let doc =
+            build_doc(r#"<html><body><div id="a"></div>some text<div id="b"></div></body></html>"#);
+
+        let b_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                == Some("b")
+        })
+        .expect("b");
+
+        let div_compound = CompoundSelector {
+            parts: vec![SimpleSelector::Type("div".into())],
+        };
+        let sel = ComplexSelector {
+            subject: div_compound.clone(),
+            prev_sibling: Some(div_compound),
+        };
+
+        let b = doc.get_node(b_id).unwrap();
+        // Text node between #a and #b must be skipped; #a is still the
+        // adjacent element sibling of #b.
+        assert!(matches_complex(&sel, b, &doc));
+    }
+
+    // -------- break-before --------
+
+    #[test]
+    fn parses_break_before_page() {
+        let props = parse_declaration_block("break-before: page;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+    }
+
+    #[test]
+    fn parses_break_before_always() {
+        let props = parse_declaration_block("break-before: always;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+    }
+
+    #[test]
+    fn parses_break_before_auto() {
+        let props = parse_declaration_block("break-before: auto;");
+        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Auto));
+    }
+
+    #[test]
+    fn break_before_propagates_to_pagination() {
+        // Test that the stylesheet parser correctly captures break_before.
+        let rules = parse_stylesheet("div { break-before: page; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].props.break_before,
+            Some(crate::pageable::BreakBefore::Page)
+        );
     }
 }

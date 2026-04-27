@@ -59,8 +59,9 @@ pub fn extract(value: Value) -> Result<PageSize, Error> {
     if let Ok(s) = <String>::try_convert(value) {
         return parse_name(&s);
     }
+    let ruby = Ruby::get().expect("ruby vm");
     Err(Error::new(
-        magnus::exception::arg_error(),
+        ruby.exception_arg_error(),
         "page_size must be Symbol, String, or Fulgur::PageSize",
     ))
 }
@@ -70,15 +71,18 @@ fn parse_name(name: &str) -> Result<PageSize, Error> {
         "A4" => Ok(PageSize::A4),
         "LETTER" => Ok(PageSize::LETTER),
         "A3" => Ok(PageSize::A3),
-        other => Err(Error::new(
-            magnus::exception::arg_error(),
-            format!("unknown page size: {other}"),
-        )),
+        other => {
+            let ruby = Ruby::get().expect("ruby vm");
+            Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("unknown page size: {other}"),
+            ))
+        }
     }
 }
 
-pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
-    let class = fulgur.define_class("PageSize", magnus::class::object())?;
+pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
+    let class = fulgur.define_class("PageSize", ruby.class_object())?;
     class.define_singleton_method("custom", function!(RbPageSize::custom, 2))?;
     class.define_method("width", method!(RbPageSize::width, 0))?;
     class.define_method("height", method!(RbPageSize::height, 0))?;

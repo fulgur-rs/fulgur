@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>VRT fixture: bugs/grid-row-promote-background</title>
+<style>
+  @page { size: A4; margin: 20mm 18mm; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #fff; }
+  /* Spacer pushes the grid to overflow the first page so card 1 must split
+     internally. Without the fulgur-86fo fix card 2 (the parallel sibling
+     promoted to page 2) loses its background and border. */
+  .spacer { height: 800pt; background: #eef; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10pt;
+    margin: 12pt 0;
+  }
+  .card {
+    background: #fafafa;
+    border: 1pt solid #888;
+    border-radius: 8pt;
+    padding: 12pt;
+  }
+  .icon { width: 18pt; height: 18pt; background: #c33; margin-bottom: 6pt; }
+  .body { width: 80%; height: 30pt; background: #999; }
+</style>
+</head><body>
+<div class="spacer"></div>
+<div class="grid">
+  <div class="card"><div class="icon"></div><div class="body"></div></div>
+  <div class="card"><div class="icon"></div><div class="body"></div></div>
+</div>
+</body></html>

@@ -1,0 +1,30 @@
+/* Sample stylesheet for the fulgur WASM demo (B-3a).
+ * Loaded by the demo at startup via fetch() and registered with
+ * Engine.add_css(). Demonstrates that an external CSS resource
+ * applies to the rendered HTML even though no <link> tag is
+ * resolved in the WASM target. */
+body {
+  font-family: 'Noto Sans', system-ui, sans-serif;
+  margin: 0;
+  padding: 36pt 48pt;
+}
+
+h1 {
+  color: #2244aa;
+  margin: 0 0 8pt;
+  border-bottom: 2pt solid #2244aa;
+  padding-bottom: 6pt;
+}
+
+p.subtitle {
+  color: #888;
+  font-style: italic;
+  margin: 0 0 16pt;
+}
+
+img.icon {
+  display: block;
+  width: 64px;
+  height: 64px;
+  margin-top: 12pt;
+}

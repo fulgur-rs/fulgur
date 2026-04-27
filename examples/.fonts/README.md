@@ -19,6 +19,8 @@ sidesteps the issue for examples without patching upstream Blitz.
 |---|---|---|---|
 | `NotoSans-Regular.ttf` | SIL OFL 1.1 | © 2022 The Noto Project Authors | [notofonts/latin-greek-cyrillic NotoSans-v2.015](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015) — `unhinted/ttf/NotoSans-Regular.ttf` |
 | `NotoSans-Bold.ttf` | SIL OFL 1.1 | © 2022 The Noto Project Authors | same release — `unhinted/ttf/NotoSans-Bold.ttf` |
+| `NotoSans-Italic.ttf` | SIL OFL 1.1 | © 2022 The Noto Project Authors | same release — `unhinted/ttf/NotoSans-Italic.ttf` |
+| `NotoSans-BoldItalic.ttf` | SIL OFL 1.1 | © 2022 The Noto Project Authors | same release — `unhinted/ttf/NotoSans-BoldItalic.ttf` |
 | `NotoSansMono-Regular.ttf` | SIL OFL 1.1 | © 2022 The Noto Project Authors | [notofonts/latin-greek-cyrillic NotoSansMono-v2.014](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSansMono-v2.014) — `unhinted/ttf/NotoSansMono-Regular.ttf` |
 | `NotoSansJP-Regular.otf` | SIL OFL 1.1 | © 2014–2021 Adobe (Noto is a trademark of Google Inc.) | [notofonts/noto-cjk Sans2.004](https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004) — `16_NotoSansJP.zip` |
 | `NotoSansJP-Bold.otf` | SIL OFL 1.1 | © 2014–2021 Adobe (Noto is a trademark of Google Inc.) | same release |
@@ -51,6 +53,8 @@ unzip -o /tmp/noto-mono.zip -d /tmp/
 
 cp /tmp/NotoSans/unhinted/ttf/NotoSans-Regular.ttf     examples/.fonts/
 cp /tmp/NotoSans/unhinted/ttf/NotoSans-Bold.ttf        examples/.fonts/
+cp /tmp/NotoSans/unhinted/ttf/NotoSans-Italic.ttf      examples/.fonts/
+cp /tmp/NotoSans/unhinted/ttf/NotoSans-BoldItalic.ttf  examples/.fonts/
 cp /tmp/NotoSansMono/unhinted/ttf/NotoSansMono-Regular.ttf examples/.fonts/
 
 # Japanese (OTF static, region-specific subset)

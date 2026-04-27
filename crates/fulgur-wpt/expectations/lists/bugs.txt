@@ -1,0 +1,77 @@
+# fulgur-review.html ベンチ（epic fulgur-rs7b）で発見された bug に対応する
+# cross-subdir cherry-pick。
+#
+# 2 種類のエントリが混在:
+#   - FAIL: bug を WPT で直接再現できるもの。fulgur 修正で PASS に昇格し、
+#           該当 bead issue をクローズする primary 検証。
+#   - PASS: 基本ケースは fulgur が通るもの。bug の再現は WPT 外（custom
+#           fixture / fulgur-review.html などの interaction 条件）だが、
+#           近接メカニズムの regression net として保持しておく。
+#
+# 各ブロック冒頭のコメントで bead-id と役割 (primary / regression net) を明記。
+
+# fulgur-vlr3: ::before / ::after に position:absolute + content:"" + background
+# を指定した際に擬似要素が描画されないバグ。WPT で直接再現 (primary)。
+FAIL  css/CSS2/generated-content/before-after-positioned-003.html  # fulgur-vlr3: primary repro (::before/::after + position:absolute + empty content + bg)
+FAIL  css/CSS2/generated-content/before-after-positioned-002.html  # fulgur-vlr3: primary repro (同 mechanism、position:fixed)
+
+# fulgur-86fo: 複数 grid item の background-color が描画されないバグ。
+# WPT の basic な grid-items は fulgur で通っているため、実際のバグは
+# ページ境界・nested flex 等の interaction に限定されそう。custom fixture で要追補。
+PASS  css/css-grid/grid-definition/grid-layout-repeat-notation.html  # fulgur-86fo: regression net (basic repeat() + bg 多 cell)
+PASS  css/css-grid/grid-definition/grid-layout-basic.html             # fulgur-86fo: regression net (basic explicit columns + bg)
+
+# fulgur-yax4: linear-gradient Phase 1 実装 (axis directions + cardinal
+# keywords + %-positioned stops + auto stop spacing) で実描画として PASS。
+# 独立検証用の test↔ref harness は
+# `crates/fulgur-vrt/tests/gradient_harness.rs` に。
+PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: linear-gradient (3-stop axis direction)
+FAIL  css/css-images/linear-gradient-non-square.html    # Tracking: beads fulgur-woge — latent regression, bisect details in issue body
+
+# fulgur-gm56: radial-gradient Phase 2 実装 (shape/size/position + %-positioned
+# stops + auto stop spacing) は実装済み。視覚比較は VRT
+# (`crates/fulgur-vrt/tests/radial_gradient_harness.rs`) で circle + closest-side を
+# 独立検証済み。upstream WPT 側の reftest を seed する際の制約:
+#
+# - upstream の純粋な radial-gradient reftest は test/ref を 100x100 で描く構成が多く、
+#   harness が A4 raster (~890k px) に rasterize する都合で、test の `<meta name=fuzzy>`
+#   上限 (例 maxDifference=0-1; totalPixels=0-40000) を page area に対する ratio に
+#   換算すると ~4.5% になり、100x100 box が完全に違っていても PASS と判定されてしまう
+#   (harness 側の既知のスケール問題。`crates/fulgur-wpt/src/harness.rs:91-108` 参照)。
+#   このため Phase 2 で実装している機能だけを使う「視覚的に正しい一致」reftest が
+#   subset 内で見つからず、PASS 列挙は false positive を避けるため見送り。
+# - tiled-radial-gradients.html は fulgur-4ono で bg-size/position/repeat の
+#   gradient layer 伝播が有効化されたため PASS に昇格 (radial-gradient 自体は
+#   ellipse + closest-side + transparent stop で Phase 1 / Phase 2 通じて正常)。
+# - multiple-position-color-stop-radial-2.html は test/ref 双方が radial-gradient のみで
+#   Stylo の 2-position color stop (`red 0% 25%`) parse 展開を検証する優良候補だが、
+#   `<link rel="match" href="/css/css-images/...">` が root-relative href で、現在の
+#   harness (`crates/fulgur-wpt/src/reftest.rs:191`) は wpt_root context を持たず NoMatch
+#   SKIP に倒れる。harness 側修正が入った段階で PASS に昇格できる見込みのため SKIP で
+#   保留する。
+PASS  css/css-images/tiled-radial-gradients.html                  # fulgur-4ono: bg-size/position が gradient layer に正しく伝播するようになった (Phase 2)
+SKIP  css/css-images/multiple-position-color-stop-radial-2.html   # fulgur-gm56: harness が root-relative rel=match href 未対応 (NoMatch)
+
+# fulgur-4ono: bg-size/position/repeat × gradient integration が enabled
+# になったことで通るようになった radial-gradient 系 reftest 群。
+PASS  css/css-images/multiple-position-color-stop-radial.html     # fulgur-4ono: radial gradient with multi-position color stops
+PASS  css/css-images/normalization-radial.html                    # fulgur-4ono: radial gradient normalization
+PASS  css/css-images/normalization-radial-2.html                  # fulgur-4ono: radial gradient normalization (variant 2)
+PASS  css/css-images/normalization-radial-3.html                  # fulgur-4ono: radial gradient normalization (variant 3)
+PASS  css/css-images/normalization-radial-4.html                  # fulgur-4ono: radial gradient normalization (variant 4)
+PASS  css/css-images/normalization-radial-degenerate.html         # fulgur-4ono: radial gradient degenerate cases
+
+# fulgur-z2ho: inline-block 末尾要素がブロック兄弟の後に来た時の配置バグ。
+# 本件は fulgur 内部の Pageable handoff バグで厳密一致 reftest は不在。
+# §9.2.1.1 (anonymous block-level handling) を検証する近接機構として登録。
+PASS  css/CSS2/visuren/float-inside-inline-between-blocks-1.html  # fulgur-z2ho: regression net (anonymous block-level handling)
+
+# fulgur-y9pu: height:100vh + page-break-after:always で先頭に空白ページが挿入。
+# 厳密一致 reftest は無く、zero-height-page-break-001 が「break-after:page 直後に
+# 余計な空ページを作らない」点で機構が近い (方向は逆)。
+PASS  css/css-break/zero-height-page-break-001-print.html  # fulgur-y9pu: regression net (pagination correctness primitive)
+
+# fulgur-fy42: ページ境界で次ページ先頭要素が前ページ末尾に bleed。
+# 厳密一致 reftest は無く、monolithic-overflow-001 が page-edge clip primitive を
+# 検証する点で機構が近い。
+PASS  css/css-page/monolithic-overflow-001-print.html  # fulgur-fy42: regression net (page-edge clip primitive)

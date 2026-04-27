@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     println!("work:    {}", work_dir.display());
     println!("diff:    {}", diff_dir.display());
 
-    let outcome = run_one(&test_path, &work_dir, &diff_dir, dpi)?;
+    let outcome = run_one(&test_path, &work_dir, &diff_dir, dpi, None)?;
     let verdict = match outcome.observed {
         Expectation::Pass => "PASS",
         Expectation::Fail => "FAIL",

@@ -61,8 +61,8 @@ impl RbMargin {
     }
 }
 
-pub fn define(_ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
-    let class = fulgur.define_class("Margin", magnus::class::object())?;
+pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
+    let class = fulgur.define_class("Margin", ruby.class_object())?;
     class.define_singleton_method("__build__", function!(RbMargin::from_trbl, 4))?;
     class.define_singleton_method("uniform", function!(RbMargin::uniform, 1))?;
     class.define_singleton_method("symmetric", function!(RbMargin::symmetric, 2))?;

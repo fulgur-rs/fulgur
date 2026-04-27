@@ -9,84 +9,102 @@ rendering output via `cargo test`. It is never released to crates.io.
 
 1. Each fixture in `fixtures/` is a self-contained, font-free HTML snippet
    (rectangles, gradients, SVG shapes).
-2. `cargo test -p fulgur-vrt` renders each fixture through fulgur, converts
-   the resulting PDF to PNG via `pdftocairo` at 150 DPI, and compares the
-   output to a committed `goldens/fulgur/<path>.png` using a maximum
-   channel diff plus diff-ratio tolerance (see `manifest.toml`).
-3. On failure, a diff image is written to
-   `target/vrt-diff/<path>.diff.png` — differing pixels are highlighted in
-   red against a brightened grayscale copy of the reference image. Out of
-   range areas (when image sizes disagree) are painted yellow.
+2. `cargo test -p fulgur-vrt` renders each fixture through fulgur and
+   compares the resulting PDF byte-wise against a committed
+   `goldens/fulgur/<path>.pdf`. fulgur's PDF output is deterministic
+   (verified by `crates/fulgur-cli/tests/examples_determinism.rs`), so the
+   comparison is exact — no tolerance, no normalization.
+3. On failure, both PDFs are rasterized via `pdftocairo` at the fixture's
+   DPI and a diff image is written to `target/vrt-diff/<path>.diff.png`
+   (differing pixels in red, reference dimmed in grayscale, size-mismatch
+   regions yellow). The actual PDF is also saved to
+   `target/vrt-diff/<path>.actual.pdf` so a CI-rendered output can be
+   copied verbatim into `goldens/` if local and CI rendering ever diverge.
+
+The pass path does not invoke `pdftocairo`, so poppler-utils is only
+needed when a fixture fails and you want to inspect the diff image.
 
 ## Running
 
 ```bash
-# Install once
+# poppler-utils is only required when a fixture fails (for diff PNG generation)
 sudo apt-get install -y poppler-utils
 
 # Normal run: compare against committed fulgur goldens
-cargo test -p fulgur-vrt
+FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
+    cargo test -p fulgur-vrt
 
 # Update every fulgur golden (after an intentional rendering change)
-FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt
+FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
+    FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt
 
 # Update only the fulgur goldens that currently differ
-FULGUR_VRT_UPDATE=failing cargo test -p fulgur-vrt
+FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
+    FULGUR_VRT_UPDATE=failing cargo test -p fulgur-vrt
 
 # Regenerate Chromium goldens (heavy, manual)
 cargo test -p fulgur-vrt --features chrome-golden -- --ignored
 ```
 
-The Chromium step is not wired up end-to-end yet — the
-`chrome-golden` feature currently provides a stub (`todo!()`) so the
-workflow and `goldens/chrome/` directory have a fixed home before the
-real chromiumoxide integration lands.
+`FONTCONFIG_FILE` pins the bundled Noto Sans set so font selection is
+stable across hosts — required for byte-identical PDF output between
+local dev and CI.
 
 ## Adding a fixture
 
-1. Create `fixtures/<category>/<name>.html`. Keep it font-free (no text),
-   use inline styles, and prefer shapes and solid colors that diff
-   cleanly.
+1. Create `fixtures/<category>/<name>.html`. Keep it self-contained
+   (inline styles, no external assets) and avoid host-dependent text
+   styling — see the *Cross-environment determinism* section below.
 2. Add a `[[fixture]]` entry to `manifest.toml`.
-3. Run `FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt` to seed the golden.
-4. Inspect `goldens/fulgur/<category>/<name>.png` and commit both the
+3. Run `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" FULGUR_VRT_UPDATE=1 cargo test -p fulgur-vrt`
+   to seed the golden.
+4. Inspect `goldens/fulgur/<category>/<name>.pdf` and commit both the
    fixture and the golden in the same change.
 
 ## Directory layout
 
 ```text
 fixtures/          HTML inputs grouped by category
-goldens/fulgur/    fulgur PDF → PNG references (committed)
+goldens/fulgur/    fulgur PDF references (committed, byte-wise compared)
 goldens/chrome/    Chromium screenshot references (manual, follow-up work)
-manifest.toml      fixture list plus tolerance defaults
+manifest.toml      fixture list plus chrome tolerance defaults
 src/
   manifest.rs      TOML parser
-  diff.rs          pixel diff plus diff image writer
-  pdf_render.rs    fulgur → pdftocairo bridge
+  diff.rs          PDF byte equality plus failure-path PNG diff writer
+  pdf_render.rs    fulgur PDF generation plus pdftocairo rasterizer (failure-only)
   chrome.rs        chromiumoxide adapter (feature "chrome-golden")
-  runner.rs        manifest → diff → update orchestration
+  runner.rs        manifest → byte compare → update orchestration
 tests/vrt_test.rs  single entrypoint run by `cargo test`
 ```
 
-## Tolerance model
+## Cross-environment determinism
 
-The comparator in `src/diff.rs` uses two knobs per fixture:
+fulgur produces byte-identical PDFs for the same input (the regression
+harness lives at `crates/fulgur-cli/tests/examples_determinism.rs`).
+Two caveats apply when authoring fixtures:
 
-- `max_channel_diff` — maximum allowed absolute difference on any of R,
-  G, or B for a pixel to be considered "unchanged" (alpha is ignored).
-- `max_diff_pixels_ratio` — fraction of pixels allowed to exceed
-  `max_channel_diff` and still count as a pass.
+- **`FONTCONFIG_FILE` is required.** Without the pinned config the host
+  fontconfig may resolve generic families (`sans-serif`, `serif`) to
+  different concrete files, changing the embedded font subset.
+- **Avoid italic / bold-italic spans for now.** fulgur library callers
+  go through Parley's system font database in addition to fontconfig,
+  so italic variants can resolve to host-dependent fonts (e.g.
+  `DejaVuSans-Oblique` on some Ubuntu images, synthesized italic on
+  others) even when a bundled italic exists. Tracked separately as
+  follow-up work; until that is resolved, italic in fixtures will
+  break cross-environment determinism.
 
-Defaults (from `manifest.toml`):
+## Chrome tolerance (optional, future work)
+
+The Chromium-comparison path under the `chrome-golden` feature still
+uses pixel tolerance because Chromium and fulgur are different
+renderers. The defaults live in `manifest.toml`:
 
 ```toml
 [defaults]
-tolerance_fulgur = { max_channel_diff = 2, max_diff_pixels_ratio = 0.001 }
 tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
 ```
 
-The fulgur tolerance is tight because fulgur-vs-fulgur comparisons run
-the same renderer twice and should be pixel-identical barring a genuine
-regression. The chrome tolerance is loose because Chromium and fulgur
-are different renderers — the chrome golden exists as an external
-sanity reference, not as a strict assertion.
+The chromiumoxide integration itself is not wired up end-to-end yet —
+the feature exists so the workflow and `goldens/chrome/` directory have
+a fixed home before the real implementation lands.

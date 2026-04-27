@@ -10,3 +10,109 @@ css/fonts
 css/CSS2/support
 fonts
 resources
+
+# Cross-subdir cherry-pick (expectations/lists/bugs.txt).
+# Each bug references 1-2 WPT reftests; fetch both test and -ref.
+# fulgur-z2ho (inline-block after block siblings, regression net)
+css/CSS2/visuren/float-inside-inline-between-blocks-1.html
+css/CSS2/visuren/float-inside-inline-between-blocks-1-ref.html
+# fulgur-vlr3 (::before / ::after with position:absolute + content:"")
+# Note: -003.html shares -002-ref.html via its <link rel="match"> — the ref
+# file only needs listing once.
+css/CSS2/generated-content/before-after-positioned-003.html
+css/CSS2/generated-content/before-after-positioned-002.html
+css/CSS2/generated-content/before-after-positioned-002-ref.html
+# fulgur-86fo (multiple grid items with background-color)
+css/css-grid/grid-definition/grid-layout-repeat-notation.html
+css/css-grid/grid-definition/grid-layout-basic.html
+css/css-grid/reference/grid-layout-repeat-notation-ref.html
+css/css-grid/reference/grid-layout-basic-ref.html
+# fulgur-yax4 (linear-gradient multi-stop + diagonal)
+css/css-images/linear-gradient-1.html
+css/css-images/linear-gradient-non-square.html
+css/css-images/linear-gradient-ref.html
+css/css-images/reference/linear-gradient-non-square-ref.html
+# fulgur-gm56 (radial-gradient Phase 2: shape/size/position + % stops)
+# Wide net of candidates — annotated outcomes (PASS / FAIL / SKIP) live in
+# expectations/lists/bugs.txt. 候補がここに list 化されていても bugs.txt に
+# 載っていないものは未トラッキングではなく「sparse-checkout はしているが
+# まだ outcome を annotate していない」状態 (Phase 3+ で順次拾う見込み)。
+css/css-images/multiple-position-color-stop-radial.html
+css/css-images/multiple-position-color-stop-radial-2.html
+css/css-images/multiple-position-color-stop-radial-2-ref.html
+css/css-images/normalization-radial.html
+css/css-images/normalization-radial-2.html
+css/css-images/normalization-radial-3.html
+css/css-images/normalization-radial-4.html
+css/css-images/normalization-radial-degenerate.html
+css/css-images/tiled-radial-gradients.html
+css/css-images/tiled-radial-gradients-ref.html
+css/css-images/reference/100x100-blue.html
+css/css-images/reference/100x100-blue-green.html
+
+# fulgur-i3u9: opacity / visibility WPT coverage (expectations/lists/opacity-visibility.txt).
+# Existing `css/reference` (line 8) already covers shared refs under that path.
+# CSS 2.1 visibility — visufx (only the 2 reftests with rel=match; the rest are manual)
+css/CSS2/visufx/visibility-005.xht
+css/CSS2/visufx/visibility-block-001.xht
+css/CSS2/reference/ref-filled-green-100px-square.xht
+css/CSS2/reference/no-red-on-blank-page-ref.xht
+# css-tables visibility (reftests only; testharness/crash variants excluded)
+css/css-tables/visibility-collapse-border-spacing-001.html
+css/css-tables/visibility-collapse-border-spacing-002.html
+css/css-tables/visibility-collapse-colspan-003.html
+css/css-tables/visibility-collapse-colspan-003-ref.html
+css/css-tables/visibility-collapse-rowspan-005.html
+css/css-tables/visibility-collapse-rowspan-005-ref.html
+css/css-tables/visibility-hidden-collapsed-borders.html
+# css-color opacity — t32 series + neighbours
+css/css-color/t32-opacity-basic-0.0-a.xht
+css/css-color/t32-opacity-basic-0.0-a-ref.html
+css/css-color/t32-opacity-basic-0.6-a.xht
+css/css-color/t32-opacity-basic-0.6-a-ref.xht
+css/css-color/t32-opacity-basic-1.0-a.xht
+css/css-color/t32-opacity-basic-1.0-a-ref.html
+css/css-color/t32-opacity-clamping-0.0-b.xht
+css/css-color/t32-opacity-clamping-1.0-b.xht
+css/css-color/t32-opacity-clamping-1.0-b-ref.html
+css/css-color/t32-opacity-offscreen-b.xht
+css/css-color/t32-opacity-offscreen-b-ref.html
+css/css-color/t32-opacity-offscreen-multiple-boxes-1-c.xht
+css/css-color/t32-opacity-offscreen-multiple-boxes-1-c-ref.html
+css/css-color/t32-opacity-offscreen-multiple-boxes-2-c.xht
+css/css-color/t32-opacity-offscreen-multiple-boxes-2-c-ref.html
+css/css-color/t32-opacity-offscreen-with-alpha-c.xht
+css/css-color/t32-opacity-offscreen-with-alpha-c-ref.html
+css/css-color/t32-opacity-zorder-c.xht
+css/css-color/t32-opacity-zorder-c-ref.html
+css/css-color/body-opacity-0-to-1-stacking-context.html
+css/css-color/canvas-change-opacity.html
+css/css-color/greensquare-ref.html
+css/css-color/clip-opacity-out-of-flow.html
+css/css-color/clip-opacity-out-of-flow-ref.html
+css/css-color/composited-filters-under-opacity.html
+css/css-color/composited-filters-under-opacity-ref.html
+css/css-color/filters-under-will-change-opacity.html
+css/css-color/inline-opacity-float-child.html
+css/css-color/opacity-overlapping-letters.html
+css/css-color/opacity-overlapping-letters-ref.html
+# css-pseudo first-letter / first-line opacity (notref needed for mismatch reftest)
+css/css-pseudo/first-letter-opacity-001.html
+css/css-pseudo/first-letter-opacity-001-ref.html
+css/css-pseudo/first-letter-opacity-001-not-ref.html
+css/css-pseudo/first-letter-opacity-float-001.html
+css/css-pseudo/first-letter-opacity-float-001-ref.html
+css/css-pseudo/first-line-opacity-001.html
+css/css-pseudo/first-line-opacity-001-ref.html
+css/css-pseudo/first-line-opacity-001-not-ref.html
+# css-position invalidate-opacity
+css/css-position/invalidate-opacity-negative-z-index.html
+css/css-position/invalidate-opacity-negative-z-index-ref.html
+# css-overflow opacity / visibility (crash test excluded)
+css/css-overflow/overflow-inline-block-with-opacity.html
+css/css-overflow/reference/overflow-inline-block-with-opacity-ref.html
+css/css-overflow/overflow-scroll-resize-visibility-hidden.html
+css/css-overflow/overflow-scroll-resize-visibility-hidden-ref.html
+# compositing opacity (rel=match explicit only)
+css/compositing/root-element-background-margin-opacity.html
+css/compositing/root-element-background-margin-opacity-ref.html

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Collection of external assets (CSS, fonts, images) for PDF generation.
+#[derive(Clone)]
 pub struct AssetBundle {
     pub css: Vec<String>,
     pub fonts: Vec<Arc<Vec<u8>>>,
@@ -417,5 +418,19 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
         assert_eq!(bundle.fonts.len(), 0);
+    }
+
+    #[test]
+    fn clone_shares_font_arc() {
+        use std::sync::Arc;
+        let mut bundle = AssetBundle::new();
+        let data = vec![0u8; 64];
+        bundle.fonts.push(Arc::new(data));
+
+        let cloned = bundle.clone();
+        assert_eq!(bundle.fonts.len(), 1);
+        assert_eq!(cloned.fonts.len(), 1);
+        // Arc の共有を確認（同じヒープ上の Vec を指している）
+        assert!(Arc::ptr_eq(&bundle.fonts[0], &cloned.fonts[0]));
     }
 }
