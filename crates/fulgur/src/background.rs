@@ -527,10 +527,6 @@ fn lerp_u8(a: u8, b: u8, alpha: f32) -> u8 {
 
 /// `resolve_gradient_stops` 内の中間表現。position / Auto fixup 完了後に
 /// `is_hint` を保持して `expand_interpolation_hints` に渡される。
-//
-// NOTE: Task 2 で導入。Task 3 で `resolve_gradient_stops` から呼ばれるまでは
-// 未使用なので `dead_code` を抑制する。
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ResolvedStop {
     pos: f32,
@@ -548,9 +544,6 @@ struct ResolvedStop {
 /// アルゴリズム: hint 位置 H_norm に対し exponent = log(0.5) / log(H_norm)、
 /// 隣接 stop 間で t 等間隔の N=8 サンプル位置 / t.powf(exponent) で色補間。
 /// `H_norm == 0.5` のとき exponent=1.0 で線形 (no-op、8 stop は冗長だが正しい)。
-//
-// NOTE: Task 2 で導入。Task 3 で wire up されるまで非テスト経路では未使用。
-#[allow(dead_code)]
 fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
     const N_SAMPLES: usize = 8;
     const EPS: f32 = 1e-4;
@@ -688,20 +681,30 @@ fn resolve_gradient_stops(
         i = end;
     }
 
-    let resolved: Vec<(f32, [u8; 4])> = stops
+    let resolved: Vec<ResolvedStop> = stops
         .iter()
         .zip(positions)
-        .map(|(s, p)| (p.expect("all slots resolved"), s.rgba))
+        .map(|(s, p)| ResolvedStop {
+            pos: p.expect("all slots resolved"),
+            rgba: s.rgba,
+            is_hint: s.is_hint,
+        })
         .collect();
+
+    // CSS Images 3 §3.5.3 interpolation hint expansion.
+    // 現状 convert 側は hint を含む layer を drop するため、ここに到達する
+    // stop 列に `is_hint=true` は含まれず実質 passthrough。Task 4 で convert を
+    // 切り替えると end-to-end で動く。
+    let after_hints: Vec<(f32, [u8; 4])> = expand_interpolation_hints(resolved);
 
     // 周期展開: repeating-* gradient は first/last stop 間の差を周期に取り、
     // `[0, 1]` を覆うように copy を平行移動して並べる。renormalize 段で
     // 範囲外 stop は端点補間にクリップされるので、ここでは [0, 1] を
     // 充分カバーするだけ生成すればよい。
     let expanded = if repeating {
-        expand_repeating_stops(resolved)?
+        expand_repeating_stops(after_hints)?
     } else {
-        resolved
+        after_hints
     };
 
     // renormalize: 範囲外 fraction は端点合成で [0, 1] 内表現に変換 (fulgur-n3zk)
