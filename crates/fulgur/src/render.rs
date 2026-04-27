@@ -895,6 +895,10 @@ mod tests {
         assert_eq!(pdf_info_field(&pdf, b"Title").as_deref(), Some("My Title"));
         assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Alice"));
         assert_eq!(
+            pdf_info_field(&pdf, b"Producer").as_deref(),
+            Some("my-producer")
+        );
+        assert_eq!(
             pdf_info_field(&pdf, b"Creator").as_deref(),
             Some("my-creator")
         );
@@ -1017,6 +1021,10 @@ mod tests {
             Some("GCPM Title")
         );
         assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Author"));
+        assert_eq!(
+            pdf_info_field(&pdf, b"Producer").as_deref(),
+            Some("producer")
+        );
         assert_eq!(pdf_info_field(&pdf, b"Creator").as_deref(), Some("creator"));
         assert!(pdf_info_field(&pdf, b"CreationDate").is_some());
     }
