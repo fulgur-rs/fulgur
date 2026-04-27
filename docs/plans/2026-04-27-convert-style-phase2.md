@@ -66,12 +66,10 @@ pub(super) fn extract_block_style(
     if let Some(styles) = node.primary_styles() {
         let current_color = styles.clone_color();
         let ctx = StyleContext { styles: &styles, current_color: &current_color, layout: &layout, assets };
-        background_color::apply_to(&mut style, &ctx); // bg color
-        border::apply_to(&mut style, &ctx);
+        border::apply_to(&mut style, &ctx);           // border_color + border_radii + border_styles
         shadow::apply_to(&mut style, &ctx);
-        // border_styles is folded into border::apply_to in the same step
         overflow::apply_to(&mut style, &ctx);
-        background::apply_to(&mut style, &ctx);       // bg layers (image / gradient) — last, matches original
+        background::apply_to(&mut style, &ctx);       // bg color + bg layers (image / gradient) — last, matches original
     }
     style
 }
@@ -502,7 +500,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
 }
 
 // 11 private helpers below — moved verbatim from style/mod.rs
-fn absolute_to_rgba_unused() {} // (placeholder so editor finds; remove)
+// (intentionally omitted here; copy/move them without structural changes):
 // resolve_linear_gradient, resolve_color_stops, resolve_radial_gradient,
 // resolve_conic_gradient, map_extent, convert_bg_size, convert_lp_to_bg,
 // convert_bg_position, convert_bg_repeat, convert_bg_origin, convert_bg_clip
@@ -558,7 +556,7 @@ git commit -m "refactor(convert): extract background from extract_block_style"
 
 use blitz_dom::Node;
 
-pub(crate) fn extract_opacity_visible(node: &Node) -> (f32, bool) {
+pub(in crate::convert) fn extract_opacity_visible(node: &Node) -> (f32, bool) {
     use ::style::properties::longhands::visibility::computed_value::T as Visibility;
     node.primary_styles()
         .map(|s| {
@@ -571,7 +569,7 @@ pub(crate) fn extract_opacity_visible(node: &Node) -> (f32, bool) {
 }
 ```
 
-Visibility is `pub(crate)` (not `pub(super)`) because it crosses module boundaries — `convert/block.rs` is a sibling of `convert/style/`, not a child.
+Visibility is `pub(in crate::convert)` (not `pub(super)`) because it crosses module boundaries — `convert/block.rs` is a sibling of `convert/style/`, not a child. `pub(in crate::convert)` keeps the helper reachable from sibling modules under `convert/` while preventing unrelated crate-level callers (`paragraph`, `render`, …) from binding to it directly.
 
 **Step 7.2 — Re-export from `convert/mod.rs`**
 

@@ -302,3 +302,169 @@ fn test_render_html_conic_gradient_at_position() {
         .expect("render conic with offset center");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn test_render_html_shadow_inset_logged_and_skipped() {
+    // box-shadow: inset paths the inset-warn skip arm in convert/style/shadow.rs.
+    // The shadow must not be drawn (inset is unsupported), but the render must
+    // still succeed.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;background:#fff;
+                    box-shadow:inset 0 0 0 5px red;"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render inset shadow");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_shadow_blur_warning_path() {
+    // Non-zero blur radius hits the blur-warn arm in shadow::apply_to.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;background:#fff;
+                    box-shadow:0 0 8px red;"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render blurred shadow");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_shadow_fully_transparent_skipped() {
+    // rgba(0,0,0,0) shadows hit the transparent-skip arm in shadow::apply_to.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;background:#fff;
+                    box-shadow:5px 5px 0 rgba(0,0,0,0);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render transparent shadow");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_bg_image_unknown_asset() {
+    // background-image: url(...) with a non-image asset (or one that
+    // AssetKind::detect cannot classify) traverses the AssetKind::Unknown
+    // arm in background::apply_to.
+    let dir = tempdir().unwrap();
+    let bogus = dir.path().join("bogus.dat");
+    std::fs::write(&bogus, b"NOT_AN_IMAGE_OR_SVG").unwrap();
+
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("bogus.dat", std::fs::read(&bogus).unwrap());
+
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;
+                    background-image:url(bogus.dat);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("render unknown-asset bg");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_bg_image_invalid_svg_logs_and_falls_back() {
+    // background-image: url(broken.svg) where the bytes look like SVG (XML)
+    // but fail to parse triggers the SVG parse-error arm in
+    // background::apply_to (logs warn, returns None).
+    let dir = tempdir().unwrap();
+    let broken = dir.path().join("broken.svg");
+    std::fs::write(&broken, b"<svg<<<not valid xml>>>").unwrap();
+
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("broken.svg", std::fs::read(&broken).unwrap());
+
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;
+                    background-image:url(broken.svg);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("render broken-svg bg");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_linear_gradient_keyword_directions() {
+    // linear-gradient(to top/bottom/left/right) — Vertical / Horizontal arms in
+    // background::resolve_linear_gradient. Default (red, blue) = Angle(180deg)
+    // does NOT hit these.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:80px;height:80px;background:linear-gradient(to top, red, blue);"></div>
+        <div style="width:80px;height:80px;background:linear-gradient(to bottom, red, blue);"></div>
+        <div style="width:80px;height:80px;background:linear-gradient(to left, red, blue);"></div>
+        <div style="width:80px;height:80px;background:linear-gradient(to right, red, blue);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_linear_gradient_corner_directions() {
+    // to top-left / bottom-left / bottom-right Corner arms (top-right is
+    // already covered by the existing corner-direction smoke test).
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:80px;height:80px;background:linear-gradient(to top left, red, blue);"></div>
+        <div style="width:80px;height:80px;background:linear-gradient(to bottom left, red, blue);"></div>
+        <div style="width:80px;height:80px;background:linear-gradient(to bottom right, red, blue);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_radial_gradient_shape_variants() {
+    // Cover Circle::Radius (single radius), Circle::Extent (closest-side etc.),
+    // Ellipse::Radii arms in resolve_radial_gradient.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:120px;height:80px;background:radial-gradient(closest-side, red, blue);"></div>
+        <div style="width:120px;height:80px;background:radial-gradient(farthest-side, red, blue);"></div>
+        <div style="width:120px;height:80px;background:radial-gradient(closest-corner, red, blue);"></div>
+        <div style="width:120px;height:80px;background:radial-gradient(farthest-corner, red, blue);"></div>
+        <div style="width:120px;height:80px;background:radial-gradient(circle 30px, red, blue);"></div>
+        <div style="width:120px;height:80px;background:radial-gradient(ellipse 40px 30px, red, blue);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_bg_repeat_origin_clip_variants() {
+    // Cover non-default convert_bg_repeat / convert_bg_origin / convert_bg_clip
+    // arms (NoRepeat, Space, Round, PaddingBox, ContentBox).
+    // 1x1 red PNG (valid CRCs — same fixture as marker-image test above).
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", png_data);
+
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:80px;height:80px;background:url(dot.png) no-repeat;"></div>
+        <div style="width:80px;height:80px;background:url(dot.png) space;"></div>
+        <div style="width:80px;height:80px;background:url(dot.png) round;"></div>
+        <div style="width:80px;height:80px;padding:10px;background:url(dot.png);background-origin:padding-box;background-clip:padding-box;"></div>
+        <div style="width:80px;height:80px;padding:10px;background:url(dot.png);background-origin:content-box;background-clip:content-box;"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("render bg repeat/origin/clip variants");
+    assert!(!pdf.is_empty());
+}

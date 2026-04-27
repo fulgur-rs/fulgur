@@ -52,25 +52,58 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
         ],
     ];
 
-    // Border styles
-    let convert_border_style = |bs: style::values::specified::BorderStyle| -> BorderStyleValue {
-        use style::values::specified::BorderStyle as BS;
-        match bs {
-            BS::None | BS::Hidden => BorderStyleValue::None,
-            BS::Dashed => BorderStyleValue::Dashed,
-            BS::Dotted => BorderStyleValue::Dotted,
-            BS::Double => BorderStyleValue::Double,
-            BS::Groove => BorderStyleValue::Groove,
-            BS::Ridge => BorderStyleValue::Ridge,
-            BS::Inset => BorderStyleValue::Inset,
-            BS::Outset => BorderStyleValue::Outset,
-            BS::Solid => BorderStyleValue::Solid,
-        }
-    };
     style.border_styles = [
-        convert_border_style(ctx.styles.clone_border_top_style()),
-        convert_border_style(ctx.styles.clone_border_right_style()),
-        convert_border_style(ctx.styles.clone_border_bottom_style()),
-        convert_border_style(ctx.styles.clone_border_left_style()),
+        map_border_style(ctx.styles.clone_border_top_style()),
+        map_border_style(ctx.styles.clone_border_right_style()),
+        map_border_style(ctx.styles.clone_border_bottom_style()),
+        map_border_style(ctx.styles.clone_border_left_style()),
     ];
+}
+
+fn map_border_style(bs: style::values::specified::BorderStyle) -> BorderStyleValue {
+    use style::values::specified::BorderStyle as BS;
+    match bs {
+        BS::None | BS::Hidden => BorderStyleValue::None,
+        BS::Dashed => BorderStyleValue::Dashed,
+        BS::Dotted => BorderStyleValue::Dotted,
+        BS::Double => BorderStyleValue::Double,
+        BS::Groove => BorderStyleValue::Groove,
+        BS::Ridge => BorderStyleValue::Ridge,
+        BS::Inset => BorderStyleValue::Inset,
+        BS::Outset => BorderStyleValue::Outset,
+        BS::Solid => BorderStyleValue::Solid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_border_style;
+    use crate::pageable::BorderStyleValue;
+    use style::values::specified::BorderStyle as BS;
+
+    #[test]
+    fn none_and_hidden_collapse_to_none() {
+        assert_eq!(map_border_style(BS::None), BorderStyleValue::None);
+        assert_eq!(map_border_style(BS::Hidden), BorderStyleValue::None);
+    }
+
+    #[test]
+    fn dashed_dotted_double() {
+        assert_eq!(map_border_style(BS::Dashed), BorderStyleValue::Dashed);
+        assert_eq!(map_border_style(BS::Dotted), BorderStyleValue::Dotted);
+        assert_eq!(map_border_style(BS::Double), BorderStyleValue::Double);
+    }
+
+    #[test]
+    fn groove_ridge_inset_outset() {
+        assert_eq!(map_border_style(BS::Groove), BorderStyleValue::Groove);
+        assert_eq!(map_border_style(BS::Ridge), BorderStyleValue::Ridge);
+        assert_eq!(map_border_style(BS::Inset), BorderStyleValue::Inset);
+        assert_eq!(map_border_style(BS::Outset), BorderStyleValue::Outset);
+    }
+
+    #[test]
+    fn solid() {
+        assert_eq!(map_border_style(BS::Solid), BorderStyleValue::Solid);
+    }
 }
