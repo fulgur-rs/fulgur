@@ -3358,12 +3358,12 @@ fn resolve_radial_gradient(
     ))
 }
 
-/// SPIKE: Convert Stylo `Gradient::Conic` into `BgImageContent::ConicGradient`.
+/// Convert Stylo `Gradient::Conic` into `BgImageContent::ConicGradient`.
 ///
-/// Phase 1 で sky-bail せず素直に conic を実体化する。stop position は
-/// `<angle>` を `angle / 2π` で fraction 化、`<percentage>` はそのまま fraction
-/// として扱い、共通 `GradientStop` (Auto / Fraction / LengthPx) に正規化する。
-/// 描画は `background.rs::draw_conic_gradient` の path wedge 分解に委ねる。
+/// stop position は `<angle>` を `angle / 2π` で fraction 化、`<percentage>` は
+/// そのまま fraction として扱い、共通 `GradientStop` (Auto / Fraction / LengthPx)
+/// に正規化する。描画は `background.rs::draw_conic_gradient` の path wedge 分解
+/// に委ねる。
 fn resolve_conic_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,
@@ -3386,7 +3386,7 @@ fn resolve_conic_gradient(
     if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
         log::warn!(
             "conic-gradient: non-default color-interpolation-method is not yet \
-             supported (Phase 2). Layer dropped."
+             supported. Layer dropped."
         );
         return None;
     }
@@ -3411,7 +3411,7 @@ fn resolve_conic_gradient(
                 let abs = color.resolve_to_absolute(current_color);
                 let frac = match position {
                     AngleOrPercentage::Percentage(p) => p.0,
-                    AngleOrPercentage::Angle(a) => a.radians() / (2.0 * std::f32::consts::PI),
+                    AngleOrPercentage::Angle(a) => a.radians() / std::f32::consts::TAU,
                 };
                 stops.push(GradientStop {
                     position: GradientStopPosition::Fraction(frac),
@@ -3420,8 +3420,8 @@ fn resolve_conic_gradient(
             }
             GradientItem::InterpolationHint(_) => {
                 log::warn!(
-                    "conic-gradient: interpolation hints are not yet supported \
-                     (Phase 2). Layer dropped."
+                    "conic-gradient: interpolation hints are not yet supported. \
+                     Layer dropped."
                 );
                 return None;
             }

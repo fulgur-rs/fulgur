@@ -844,10 +844,10 @@ pub enum BgImageContent {
     },
     /// CSS `conic-gradient(...)` / `repeating-conic-gradient(...)`.
     ///
-    /// SPIKE 実装: 360 個の固定角三角ウェッジを path で描画する (krilla の
-    /// PostScript shading を使わず、PDF/A 適合)。stops の position は convert 時に
-    /// fraction (0..1) に正規化済み (`<percentage>` はそのまま、`<angle>` は
-    /// `angle / 2π`)。
+    /// stops の position は convert 時に fraction (0..1) に正規化済み
+    /// (`<percentage>` はそのまま、`<angle>` は `angle / 2π`)。draw 経路は
+    /// PostScript shading を使わず path wedge 分解で発行するため PDF/A-1, A-2
+    /// 適合 (`background.rs::draw_conic_gradient`)。
     ConicGradient {
         /// CSS `from <angle>` を radians で保持 (規約: 0=top, CW)。
         from_angle: f32,

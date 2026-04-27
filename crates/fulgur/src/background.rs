@@ -349,19 +349,39 @@ fn draw_background_layer(
             stops,
             repeating,
         } => {
-            for (tx, ty, tw, th) in &tiles {
-                draw_conic_gradient(
-                    canvas.surface,
-                    *from_angle,
-                    position_x,
-                    position_y,
-                    stops,
-                    *repeating,
-                    *tx,
-                    *ty,
-                    *tw,
-                    *th,
-                );
+            // Linear/Radial と同じく uniform-tile grid なら 1 個の Tiling Pattern
+            // resource に集約する。Conic は wedge path 群 (~数百 byte/conic) が
+            // 各 tile で完全同一になるため、特に N×M タイルで効果が大きい。
+            if let Some(grid) = try_uniform_grid(&tiles) {
+                draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
+                    draw_conic_gradient(
+                        surface,
+                        *from_angle,
+                        position_x,
+                        position_y,
+                        stops,
+                        *repeating,
+                        0.0,
+                        0.0,
+                        tw,
+                        th,
+                    );
+                });
+            } else {
+                for (tx, ty, tw, th) in &tiles {
+                    draw_conic_gradient(
+                        canvas.surface,
+                        *from_angle,
+                        position_x,
+                        position_y,
+                        stops,
+                        *repeating,
+                        *tx,
+                        *ty,
+                        *tw,
+                        *th,
+                    );
+                }
             }
         }
         BgImageContent::Raster { data, format } => {
@@ -917,17 +937,13 @@ fn draw_radial_gradient(
     surface.set_fill(None);
 }
 
-/// SPIKE: Draw a CSS conic-gradient as N triangular path wedges, sampling
-/// color at each wedge's mid-angle.
+/// Draw a CSS conic-gradient as N=360 triangular path wedges, sampling color
+/// at each wedge's mid-angle and merging adjacent same-color wedges into
+/// single polygons. PostScript shading を使わないため PDF/A-1, A-2 適合。
 ///
-/// PostScript shading を使わず PDF/A 適合。N=360 で 1° per wedge。三角形の
-/// outer edge は box 境界との ray intersection で求める (中心から放射した
-/// ray が box 辺と交わる点)。
-///
-/// 制約 (spike):
-/// - GradientStop の Auto 補間は線形 (`fixup_conic_stops` 簡易版)
-/// - 重複 stop の特殊処理なし
-/// - repeating は period = (last - first) で fraction を周期化
+/// 三角形の外周頂点は中心から放射した ray と box 辺の交点で計算する
+/// (`box_edge_at_angle`)。merge により hard step (pie chart) は色変化点数まで
+/// path が減り、見た目の境界 AA も同色 wedge 間で消失する。
 #[allow(clippy::too_many_arguments)]
 fn draw_conic_gradient(
     surface: &mut krilla::surface::Surface<'_>,
@@ -957,20 +973,26 @@ fn draw_conic_gradient(
     let period = (last - first).max(1e-6);
 
     const N: usize = 360;
-    let two_pi = 2.0 * std::f32::consts::PI;
 
-    // 各 wedge の代表色を先に計算し、隣接同色を 1 個の多角形にマージする。
-    // (pie chart のように step transition が連続する場合、N=360 個の path が
-    // 数個に減って PDF サイズも大幅減・モアレ境界線も消える)
+    // 各 wedge の中点角度 (CSS fraction) で色をサンプル。repeating 時は
+    // CSS Images 4 §3.x の周期展開で fraction を [first, last] にラップする。
     let colors: Vec<[u8; 4]> = (0..N)
         .map(|i| {
             let mid_f = (i as f32 + 0.5) / N as f32;
             let mid_t = if repeating {
-                first + ((mid_f - first).rem_euclid(period))
+                first + (mid_f - first).rem_euclid(period)
             } else {
                 mid_f
             };
             sample_conic_color(&normalized, mid_t.clamp(0.0, 1.0))
+        })
+        .collect();
+
+    // box 辺との交点を 0..=N でキャッシュ (隣接 wedge で同じ点を 2 回計算するのを避ける)。
+    let edge_points: Vec<(f32, f32)> = (0..=N)
+        .map(|k| {
+            let theta = from_angle_rad + (k as f32 / N as f32) * std::f32::consts::TAU;
+            box_edge_at_angle(theta, cx, cy, ox, oy, ow, oh)
         })
         .collect();
 
@@ -983,24 +1005,13 @@ fn draw_conic_gradient(
         while j < N && colors[j] == color {
             j += 1;
         }
-        // [i, j) は同色 wedge 群。中心 + theta_i から theta_j までの外周点列で多角形化。
-        let theta_start = from_angle_rad + (i as f32 / N as f32) * two_pi;
-        let theta_end = from_angle_rad + (j as f32 / N as f32) * two_pi;
-
+        // [i, j) の同色 wedge 群を 1 個の多角形にまとめる:
+        //   center → edge_points[i] → edge_points[i+1] → ... → edge_points[j]
         let mut pb = krilla::geom::PathBuilder::new();
         pb.move_to(cx, cy);
-        // 開始端点
-        let (sx, sy) = box_edge_at_angle(theta_start, cx, cy, ox, oy, ow, oh);
-        pb.line_to(sx, sy);
-        // 中間 wedge 境界の外周点を順に追加
-        for k in (i + 1)..j {
-            let theta_k = from_angle_rad + (k as f32 / N as f32) * two_pi;
-            let (px, py) = box_edge_at_angle(theta_k, cx, cy, ox, oy, ow, oh);
+        for &(px, py) in &edge_points[i..=j] {
             pb.line_to(px, py);
         }
-        // 終了端点
-        let (ex, ey) = box_edge_at_angle(theta_end, cx, cy, ox, oy, ow, oh);
-        pb.line_to(ex, ey);
         pb.close();
 
         let Some(path) = pb.finish() else {
@@ -1010,8 +1021,7 @@ fn draw_conic_gradient(
         surface.set_fill(Some(krilla::paint::Fill {
             paint: krilla::color::rgb::Color::new(color[0], color[1], color[2]).into(),
             rule: Default::default(),
-            opacity: krilla::num::NormalizedF32::new(color[3] as f32 / 255.0)
-                .unwrap_or(krilla::num::NormalizedF32::ONE),
+            opacity: crate::pageable::alpha_to_opacity(color[3]),
         }));
         surface.draw_path(&path);
 
@@ -1053,9 +1063,10 @@ fn box_edge_at_angle(
     (cx + t * dx, cy + t * dy)
 }
 
-/// SPIKE: stop position fixup. GradientStop の Auto を線形補間で埋める。
-/// LengthPx は conic ではほぼ来ない (CSS では `<angle>|<percentage>`) ので
-/// 0..1 範囲外として扱い無視する (Phase 1 簡易策)。
+/// stop position fixup. GradientStop の Auto を線形補間で埋める。
+///
+/// CSS では conic の position は `<angle>|<percentage>` のみで `LengthPx` は
+/// 出ないが、共通 `GradientStop` 経由のため変種が来た場合は無視する。
 fn normalize_conic_stops(stops: &[crate::pageable::GradientStop]) -> Vec<(f32, [u8; 4])> {
     use crate::pageable::GradientStopPosition;
     if stops.is_empty() {
@@ -1068,7 +1079,7 @@ fn normalize_conic_stops(stops: &[crate::pageable::GradientStop]) -> Vec<(f32, [
             let p = match s.position {
                 GradientStopPosition::Auto => None,
                 GradientStopPosition::Fraction(f) => Some(f),
-                GradientStopPosition::LengthPx(_) => None, // spike: 無視
+                GradientStopPosition::LengthPx(_) => None,
             };
             (p, s.rgba)
         })
