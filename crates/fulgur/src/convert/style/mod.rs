@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod box_metrics;
 mod overflow;
+mod shadow;
 
 /// Bundle of references threaded through the per-property style extractors.
 ///
@@ -92,33 +93,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
         ];
 
         // Box shadows
-        let shadow_list = ctx.styles.clone_box_shadow();
-        for shadow in shadow_list.0.iter() {
-            if shadow.inset {
-                log::warn!("box-shadow: inset is not yet supported; skipping");
-                continue;
-            }
-            let blur_px = shadow.base.blur.px();
-            if blur_px > 0.0 {
-                log::warn!(
-                    "box-shadow: blur-radius > 0 is not yet supported; \
-                     drawing as blur=0 (blur={}px)",
-                    blur_px
-                );
-            }
-            let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(ctx.current_color));
-            if rgba[3] == 0 {
-                continue; // fully transparent — skip
-            }
-            style.box_shadows.push(crate::pageable::BoxShadow {
-                offset_x: px_to_pt(shadow.base.horizontal.px()),
-                offset_y: px_to_pt(shadow.base.vertical.px()),
-                blur: px_to_pt(blur_px),
-                spread: px_to_pt(shadow.spread.px()),
-                color: rgba,
-                inset: false,
-            });
-        }
+        shadow::apply_to(&mut style, &ctx);
 
         // Border styles
         let convert_border_style = |bs: style::values::specified::BorderStyle| -> BorderStyleValue {
