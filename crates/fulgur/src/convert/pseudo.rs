@@ -1,3 +1,4 @@
+use super::inline_root;
 use super::positioned::{
     AbsCb, build_absolute_pseudo_children, is_absolutely_positioned,
     try_build_absolute_pseudo_image,
@@ -322,7 +323,7 @@ pub(super) fn attach_link_to_inline_image(
     doc: &blitz_dom::BaseDocument,
     origin_node_id: usize,
 ) {
-    if let Some((_, span)) = resolve_enclosing_anchor(doc, origin_node_id) {
+    if let Some((_, span)) = inline_root::resolve_enclosing_anchor(doc, origin_node_id) {
         img.link = Some(Arc::new(span));
     }
 }

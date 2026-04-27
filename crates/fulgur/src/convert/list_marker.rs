@@ -1,3 +1,4 @@
+use super::inline_root;
 use super::*;
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
@@ -420,7 +421,7 @@ pub(super) fn inject_inside_marker_item_into_children(
                 }
             }
             para_clone.lines[0].items.insert(0, marker_item);
-            recalculate_paragraph_line_boxes(&mut para_clone.lines);
+            inline_root::recalculate_paragraph_line_boxes(&mut para_clone.lines);
         }
         para_clone.cached_height = para_clone.lines.iter().map(|l| l.height).sum();
         pc.child = Box::new(para_clone);

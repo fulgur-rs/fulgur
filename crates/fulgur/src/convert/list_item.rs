@@ -1,5 +1,5 @@
 use super::*;
-use super::{list_marker, positioned, pseudo};
+use super::{inline_root, list_marker, positioned, pseudo};
 
 /// Dispatcher entry for list-item nodes. Tries three branches in this order:
 ///
@@ -328,7 +328,7 @@ fn build_list_item_body(
     depth: usize,
 ) -> Box<dyn Pageable> {
     if node.flags.is_inline_root() {
-        let paragraph_opt = extract_paragraph(doc, node, ctx, depth);
+        let paragraph_opt = inline_root::extract_paragraph(doc, node, ctx, depth);
 
         // Inline pseudo images for list item body
         let before_inline = node
@@ -371,7 +371,7 @@ fn build_list_item_body(
                     before_inline,
                     after_inline,
                 );
-                recalculate_paragraph_line_boxes(&mut paragraph.lines);
+                inline_root::recalculate_paragraph_line_boxes(&mut paragraph.lines);
                 paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
             }
 
@@ -425,7 +425,7 @@ fn build_list_item_body(
                 before_inline,
                 after_inline,
             );
-            let font_metrics = metrics_from_line(&line);
+            let font_metrics = inline_root::metrics_from_line(&line);
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             let mut paragraph = ParagraphPageable::new(vec![line]);
             paragraph.visible = visible;
