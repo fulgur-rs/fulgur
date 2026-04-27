@@ -75,10 +75,28 @@ fn linear_gradient_mixed_auto_length_render() {
 }
 
 #[test]
-fn linear_gradient_interpolation_hint_drops_layer() {
-    // InterpolationHint arm → log::warn + None. Layer is dropped, but
-    // overall render still succeeds (background just becomes solid white).
+fn linear_gradient_with_interpolation_hint_renders() {
+    // CSS Images 3 §3.5.3: 30% hint で red→blue を累乗カーブ補間。
+    // Layer drop ではなく実際に gradient が描画される (fulgur-2zam)。
     assert_pdf(&render("linear-gradient(red, 30%, blue)"));
+}
+
+#[test]
+fn linear_gradient_leading_hint_drops_layer() {
+    // 先頭 hint は CSS syntax 上不正、Layer drop.
+    assert_pdf(&render("linear-gradient(30%, red, blue)"));
+}
+
+#[test]
+fn linear_gradient_trailing_hint_drops_layer() {
+    // 末尾 hint は不正、Layer drop.
+    assert_pdf(&render("linear-gradient(red, blue, 70%)"));
+}
+
+#[test]
+fn linear_gradient_consecutive_hints_drop_layer() {
+    // 連続 hint は不正、Layer drop.
+    assert_pdf(&render("linear-gradient(red, 30%, 60%, blue)"));
 }
 
 #[test]
@@ -126,6 +144,15 @@ fn radial_gradient_ellipse_with_length_stops_render() {
 }
 
 #[test]
-fn radial_gradient_interpolation_hint_drops_layer() {
+fn radial_gradient_with_interpolation_hint_renders() {
+    // 共有 resolve_color_stops 経由で radial も hint 対応 (fulgur-2zam スコープ).
     assert_pdf(&render("radial-gradient(red, 30%, blue)"));
+}
+
+#[test]
+fn repeating_linear_gradient_with_interpolation_hint_renders() {
+    // 周期内 hint: 各周期に hint 展開済み stop 列が平行コピーされる.
+    assert_pdf(&render(
+        "repeating-linear-gradient(red, 30%, blue 50%, red 100%)",
+    ));
 }

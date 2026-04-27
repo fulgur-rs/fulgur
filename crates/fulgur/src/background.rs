@@ -525,6 +525,78 @@ fn lerp_u8(a: u8, b: u8, alpha: f32) -> u8 {
     (av + (bv - av) * alpha).round().clamp(0.0, 255.0) as u8
 }
 
+/// `resolve_gradient_stops` 内の中間表現。position / Auto fixup 完了後に
+/// `is_hint` を保持して `expand_interpolation_hints` に渡される。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedStop {
+    pos: f32,
+    rgba: [u8; 4],
+    is_hint: bool,
+}
+
+/// CSS Images 3 §3.5.3 の interpolation hint を 8 個の中間 stop に展開する。
+///
+/// 入力契約:
+/// - 先頭末尾は必ず `is_hint=false` (convert 時に validate 済み)
+/// - 各 hint は前後を `is_hint=false` stop に挟まれる (連続 hint は convert で drop)
+/// - position は monotonic (resolve_gradient_stops の clamp 通過後)
+///
+/// アルゴリズム: hint 位置 H_norm に対し exponent = log(0.5) / log(H_norm)、
+/// 隣接 stop 間で t 等間隔の N=8 サンプル位置 / t.powf(exponent) で色補間。
+/// `H_norm == 0.5` のとき exponent=1.0 で線形 (no-op、8 stop は冗長だが正しい)。
+fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
+    const N_SAMPLES: usize = 8;
+    const EPS: f32 = 1e-4;
+
+    let mut out: Vec<(f32, [u8; 4])> = Vec::with_capacity(stops.len() + N_SAMPLES);
+
+    let mut i = 0;
+    while i < stops.len() {
+        let s = stops[i];
+        if !s.is_hint {
+            out.push((s.pos, s.rgba));
+            i += 1;
+            continue;
+        }
+        // hint: 前後の color stop を取得。convert 段の validation で
+        // leading/trailing hint は drop されるため通常到達不能だが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で不正な
+        // 入力が来た場合に release build で usize underflow / OOB panic
+        // しないよう defensively skip する。
+        if i == 0 || i + 1 >= stops.len() {
+            i += 1;
+            continue;
+        }
+        let a = stops[i - 1];
+        let b = stops[i + 1];
+        let span = b.pos - a.pos;
+
+        if span <= EPS {
+            // 縮退: a と b が同位置 → hint を drop して continue
+            i += 1;
+            continue;
+        }
+
+        let h_norm = ((s.pos - a.pos) / span).clamp(EPS, 1.0 - EPS);
+        let exponent = 0.5_f32.ln() / h_norm.ln();
+
+        for k in 1..=N_SAMPLES {
+            let t = (k as f32) / (N_SAMPLES as f32 + 1.0);
+            let p = t.powf(exponent);
+            let pos = a.pos + span * t;
+            let rgba = [
+                lerp_u8(a.rgba[0], b.rgba[0], p),
+                lerp_u8(a.rgba[1], b.rgba[1], p),
+                lerp_u8(a.rgba[2], b.rgba[2], p),
+                lerp_u8(a.rgba[3], b.rgba[3], p),
+            ];
+            out.push((pos, rgba));
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
 /// `Stop` 列に変換する。
 ///
@@ -613,20 +685,29 @@ fn resolve_gradient_stops(
         i = end;
     }
 
-    let resolved: Vec<(f32, [u8; 4])> = stops
+    let resolved: Vec<ResolvedStop> = stops
         .iter()
         .zip(positions)
-        .map(|(s, p)| (p.expect("all slots resolved"), s.rgba))
+        .map(|(s, p)| ResolvedStop {
+            pos: p.expect("all slots resolved"),
+            rgba: s.rgba,
+            is_hint: s.is_hint,
+        })
         .collect();
+
+    // CSS Images 3 §3.5.3 interpolation hint expansion. `is_hint=true` の
+    // marker stop を 8 個の中間 stop (累乗カーブ) に展開する。hint を含まない
+    // 入力は素通り。
+    let after_hints: Vec<(f32, [u8; 4])> = expand_interpolation_hints(resolved);
 
     // 周期展開: repeating-* gradient は first/last stop 間の差を周期に取り、
     // `[0, 1]` を覆うように copy を平行移動して並べる。renormalize 段で
     // 範囲外 stop は端点補間にクリップされるので、ここでは [0, 1] を
     // 充分カバーするだけ生成すればよい。
     let expanded = if repeating {
-        expand_repeating_stops(resolved)?
+        expand_repeating_stops(after_hints)?
     } else {
-        resolved
+        after_hints
     };
 
     // renormalize: 範囲外 fraction は端点合成で [0, 1] 内表現に変換 (fulgur-n3zk)
@@ -3010,7 +3091,11 @@ mod resolve_gradient_stops_tests {
         LengthPx(f)
     }
     fn stop(p: GradientStopPosition, rgba: [u8; 4]) -> GradientStop {
-        GradientStop { position: p, rgba }
+        GradientStop {
+            position: p,
+            rgba,
+            is_hint: false,
+        }
     }
 
     #[test]
@@ -3254,6 +3339,165 @@ mod resolve_gradient_stops_tests {
 }
 
 #[cfg(test)]
+mod expand_interpolation_hints_tests {
+    use super::*;
+
+    /// 内部表現: position 解決済みの stop 列。`is_hint=true` は CSS hint marker。
+    fn s(pos: f32, r: u8, g: u8, b: u8) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba: [r, g, b, 255],
+            is_hint: false,
+        }
+    }
+    fn h(pos: f32) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba: [0, 0, 0, 0],
+            is_hint: true,
+        }
+    }
+
+    #[test]
+    fn no_hints_passthrough() {
+        let input = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (0.0, [255, 0, 0, 255]));
+        assert_eq!(out[1], (1.0, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn midpoint_hint_yields_linear_interpolation() {
+        // H=0.5 → exponent=1.0 → 8 個の中間 stop は線形補間と一致 (許容誤差 1)
+        let input = vec![s(0.0, 255, 0, 0), h(0.5), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8, "2 endpoints + 8 samples");
+        // 中央サンプル (i=4, t=4/9) の R は線形補間で 255 * (1 - 4/9) = 141.67 → 142
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            (mid.1[0] as i16 - 142).abs() <= 1,
+            "R channel near 142, got {}",
+            mid.1[0]
+        );
+        assert!(
+            (mid.1[2] as i16 - 113).abs() <= 1,
+            "B channel near 113, got {}",
+            mid.1[2]
+        );
+    }
+
+    #[test]
+    fn early_hint_biases_toward_end_color() {
+        // H=0.2 → exponent = log(0.5)/log(0.2) ≈ 0.43 → 早期に end 色に寄る
+        let input = vec![s(0.0, 255, 0, 0), h(0.2), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        // 中央サンプル (t=0.5 相当 = i=4 / 9) の B は H=0.5 (線形 113) より高い
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            mid.1[2] > 113,
+            "B should be biased above 113, got {}",
+            mid.1[2]
+        );
+    }
+
+    #[test]
+    fn late_hint_biases_toward_start_color() {
+        // H=0.8 → exponent ≈ 3.1 → 後期まで start 色に近い
+        let input = vec![s(0.0, 255, 0, 0), h(0.8), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            mid.1[0] > 142,
+            "R should remain above 142, got {}",
+            mid.1[0]
+        );
+    }
+
+    #[test]
+    fn degenerate_zero_span_drops_hint() {
+        // p_a == p_b → hint は無意味、output から hint を drop
+        let input = vec![s(0.5, 255, 0, 0), h(0.5), s(0.5, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        // hint が drop され、両端 color stop だけが残る
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter().all(|(_, c)| c[3] == 255),
+            "no transparent hint leak"
+        );
+    }
+
+    #[test]
+    fn hint_at_extreme_position_clamps() {
+        // H=0 (start に張り付き) は EPS で吸収、panic しない
+        let input = vec![s(0.0, 255, 0, 0), h(0.0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8);
+        // すべて step 関数化、ほぼ end 色 (B≈255)
+        let last_sample = out.iter().rfind(|(p, _)| *p > 0.0 && *p < 1.0).unwrap();
+        assert!(
+            last_sample.1[2] > 200,
+            "B should be near 255 (step), got {}",
+            last_sample.1[2]
+        );
+    }
+
+    #[test]
+    fn hint_within_segment_geometry() {
+        // span 0.4..0.8 内の hint。位置は span 等間隔で 8 サンプル。
+        let input = vec![s(0.4, 255, 0, 0), h(0.6), s(0.8, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8);
+        // 中間 sample 位置は p_a + (p_b - p_a) * i/9 で 0.4..0.8 内
+        for (p, _) in out.iter().filter(|(p, _)| *p > 0.4 && *p < 0.8) {
+            assert!((0.4..=0.8).contains(p));
+        }
+    }
+
+    #[test]
+    fn multiple_hints_in_separate_segments() {
+        // [red, h, blue, h, green]: 各 segment 独立に展開
+        let input = vec![
+            s(0.0, 255, 0, 0),
+            h(0.25),
+            s(0.5, 0, 0, 255),
+            h(0.75),
+            s(1.0, 0, 255, 0),
+        ];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 3 + 8 + 8, "3 endpoints + 8 + 8 samples");
+    }
+
+    #[test]
+    fn ill_formed_leading_or_trailing_hint_is_dropped_safely() {
+        // convert 段が validation を通常通り行えば到達しないが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で
+        // leading / trailing hint を持つ入力が来た場合に panic せず
+        // hint を silently drop して残りの color stop だけ返す。
+        let leading = vec![h(0.5), s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(leading);
+        assert_eq!(out.len(), 2, "leading hint dropped, two color stops remain");
+
+        let trailing = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255), h(0.5)];
+        let out = expand_interpolation_hints(trailing);
+        assert_eq!(
+            out.len(),
+            2,
+            "trailing hint dropped, two color stops remain"
+        );
+    }
+}
+
+#[cfg(test)]
 mod renormalize_stops_to_unit_range_tests {
     use super::renormalize_stops_to_unit_range;
 
@@ -3457,14 +3701,17 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Fraction(0.0),
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(0.5),
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(1.0),
                 rgba: [0, 0, 255, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);
@@ -3481,14 +3728,17 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [0, 0, 255, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);
@@ -3505,10 +3755,12 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Fraction(0.5),
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(0.3),
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);

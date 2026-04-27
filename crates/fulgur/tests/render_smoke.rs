@@ -468,3 +468,29 @@ fn test_render_html_bg_repeat_origin_clip_variants() {
         .expect("render bg repeat/origin/clip variants");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn linear_gradient_with_interpolation_hint_renders_via_engine() {
+    // CSS Images 3 §3.5.3 hint expansion を `Engine::render_html` 経由で叩く
+    // (fulgur-2zam). VRT は codecov 対象外なので draw branch 起動の証拠を
+    // ここに残す (CLAUDE.md "Coverage scope" Gotcha).
+    let html = r#"<html><body><div style="width:200px;height:100px;background:linear-gradient(red, 30%, blue)">x</div></body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn radial_gradient_with_interpolation_hint_renders_via_engine() {
+    let html = r#"<html><body><div style="width:200px;height:100px;background:radial-gradient(red, 30%, blue)">x</div></body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn repeating_linear_gradient_with_hint_renders_via_engine() {
+    // hint expansion + repeating 周期展開の組み合わせ経路.
+    let html = r#"<html><body><div style="width:200px;height:100px;background:repeating-linear-gradient(red, 30%, blue 50%, red 100%)">x</div></body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
