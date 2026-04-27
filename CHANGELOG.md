@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-04-27
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(gradient): radial-gradient() support (Phase 2 child of fulgur-yax4) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/238
+* feat(gradient): integrate background-size/position/repeat with gradient rendering by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/239
+* feat(gradient): support length-typed stop position in linear/radial gradients by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/241
+* feat(gradient): allow CSS out-of-range stop positions (fulgur-n3zk) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/243
+* feat(gradient): support repeating-linear-gradient and repeating-radial-gradient by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/244
+* feat(gradient): conic-gradient via path wedge decomposition by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/249
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.9.0...v0.10.0
+
 ## [0.9.0] - 2026-04-26
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
