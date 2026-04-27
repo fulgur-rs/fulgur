@@ -5,8 +5,11 @@ use blitz_dom::Node;
 mod background;
 mod border;
 mod box_metrics;
+mod opacity;
 mod overflow;
 mod shadow;
+
+pub(super) use opacity::extract_opacity_visible;
 
 /// Bundle of references threaded through the per-property style extractors.
 ///
@@ -53,20 +56,6 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
     }
 
     style
-}
-
-/// Extract CSS opacity and visibility from computed styles.
-/// Returns `(opacity, visible)` with defaults `(1.0, true)`.
-pub(super) fn extract_opacity_visible(node: &Node) -> (f32, bool) {
-    use style::properties::longhands::visibility::computed_value::T as Visibility;
-    node.primary_styles()
-        .map(|s| {
-            let opacity = s.clone_opacity();
-            let v = s.clone_visibility();
-            let visible = v != Visibility::Hidden && v != Visibility::Collapse;
-            (opacity, visible)
-        })
-        .unwrap_or((1.0, true))
 }
 
 pub(super) fn absolute_to_rgba(c: style::color::AbsoluteColor) -> [u8; 4] {
