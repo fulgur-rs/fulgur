@@ -9,7 +9,7 @@ fn resolve_list_style_image_asset<'a>(
     node: &Node,
     assets: Option<&'a AssetBundle>,
 ) -> Option<(&'a Arc<Vec<u8>>, crate::image::AssetKind)> {
-    use style::values::computed::image::Image;
+    use ::style::values::computed::image::Image;
     let assets = assets?;
     let styles = node.primary_styles()?;
     let image = styles.clone_list_style_image();
@@ -18,8 +18,8 @@ fn resolve_list_style_image_asset<'a>(
         _ => return None,
     };
     let raw_src = match &url {
-        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+        ::style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+        ::style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
     };
     let src = extract_asset_name(raw_src);
     let data = assets.get_image(src)?;

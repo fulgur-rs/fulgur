@@ -107,7 +107,7 @@ pub(super) fn try_convert(
         // Honour explicit line-height first; fall back to font-size * 1.2 for
         // `normal`, matching the same heuristic Blitz uses internally.
         let line_height = {
-            use style::values::computed::font::LineHeight;
+            use ::style::values::computed::font::LineHeight;
             let font_size_pt = px_to_pt(styles.clone_font_size().used_size().px());
             match styles.clone_line_height() {
                 LineHeight::Normal => font_size_pt * DEFAULT_LINE_HEIGHT_RATIO,
@@ -165,7 +165,7 @@ pub(super) fn try_convert(
         let (font_size_pt, line_height) = if let Some(styles) = node.primary_styles() {
             let fs = px_to_pt(styles.clone_font_size().used_size().px());
             let lh = {
-                use style::values::computed::font::LineHeight;
+                use ::style::values::computed::font::LineHeight;
                 match styles.clone_line_height() {
                     LineHeight::Normal => fs * DEFAULT_LINE_HEIGHT_RATIO,
                     LineHeight::Number(num) => fs * num.0,

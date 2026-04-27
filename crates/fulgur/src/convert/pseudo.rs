@@ -55,7 +55,7 @@ pub(super) fn build_pseudo_image(
 /// fall through to Phase 2 work (tracked separately) where the image has to
 /// be injected into `ParagraphPageable`'s line layout.
 pub(super) fn is_block_pseudo(pseudo: &Node) -> bool {
-    use style::values::specified::box_::DisplayOutside;
+    use ::style::values::specified::box_::DisplayOutside;
     pseudo
         .primary_styles()
         .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Block)
@@ -383,9 +383,9 @@ pub(super) fn inject_inline_pseudo_images(
 /// height, but Phase 1 only cares about block-display pseudo icons whose
 /// height is typically an explicit px value; using parent_width as the basis
 /// for both dimensions is a conscious simplification.)
-fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) -> Option<f32> {
-    use style::values::computed::Length;
-    use style::values::generics::length::GenericSize;
+fn resolve_pseudo_size(size: &::style::values::computed::Size, parent_width: f32) -> Option<f32> {
+    use ::style::values::computed::Length;
+    use ::style::values::generics::length::GenericSize;
     match size {
         GenericSize::LengthPercentage(lp) => {
             // Stylo resolves length-percentages in CSS px space: absolute

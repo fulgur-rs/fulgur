@@ -155,7 +155,7 @@ pub(super) fn is_absolutely_positioned(node: &Node) -> bool {
 /// CSS 2.1 §10.1.5: `position: fixed` establishes the *initial* containing
 /// block (page / viewport) as the CB, not the nearest positioned ancestor.
 fn is_position_fixed(node: &Node) -> bool {
-    use style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles()
         .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed))
 }
@@ -163,7 +163,7 @@ fn is_position_fixed(node: &Node) -> bool {
 /// Whether `node`'s computed `position` is `static` (the default — does not
 /// establish a containing block for absolute descendants).
 fn is_position_static(node: &Node) -> bool {
-    use style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles()
         .is_none_or(|s| matches!(s.get_box().clone_position(), Pos::Static))
 }
@@ -277,11 +277,11 @@ fn resolve_cb_for_absolute(
 /// Resolve a stylo `Inset` value against a CSS-px basis. Returns `None` for
 /// `auto` and other non-length variants.
 fn resolve_inset_px(
-    inset: &style::values::computed::position::Inset,
+    inset: &::style::values::computed::position::Inset,
     basis_px: f32,
 ) -> Option<f32> {
-    use style::values::computed::Length;
-    use style::values::generics::position::GenericInset;
+    use ::style::values::computed::Length;
+    use ::style::values::generics::position::GenericInset;
     match inset {
         GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
         _ => None,
