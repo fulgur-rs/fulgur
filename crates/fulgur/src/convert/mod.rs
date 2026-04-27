@@ -1,6 +1,7 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a Pageable tree.
 
 use crate::asset::AssetBundle;
+use crate::blitz_adapter::{BaseDocument, Node, NodeData};
 use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
@@ -16,7 +17,6 @@ use crate::paragraph::{
     VerticalAlign,
 };
 use crate::svg::SvgPageable;
-use blitz_dom::{Node, NodeData};
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -152,7 +152,7 @@ pub fn dom_to_pageable(doc: &HtmlDocument, ctx: &mut ConvertContext<'_>) -> Box<
     convert_node(doc.deref(), root.id, ctx, 0)
 }
 
-fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) {
+fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
     if depth >= MAX_DOM_DEPTH {
         eprintln!("{}... (max depth reached)", "  ".repeat(depth));
         return;
@@ -183,7 +183,7 @@ fn debug_print_tree(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize)
 }
 
 fn convert_node(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -270,7 +270,7 @@ fn maybe_prepend_counter_ops(
 /// it there covers every `BlockPageable::with_positioned_children`
 /// construction path without requiring per-site adjustments.
 fn maybe_wrap_multicol_rule(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &ConvertContext<'_>,
     child: Box<dyn Pageable>,
@@ -319,7 +319,7 @@ fn maybe_wrap_multicol_rule(
 /// and enforces atomic pagination (a transformed element never splits across
 /// a page boundary).
 fn maybe_wrap_transform(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     child: Box<dyn Pageable>,
 ) -> Box<dyn Pageable> {
@@ -449,7 +449,7 @@ fn take_running_marker(
 }
 
 fn convert_node_inner(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -527,7 +527,7 @@ fn extract_pagination_from_column_css(
 /// right place. Regular absolutely-positioned elements do not have a
 /// corresponding re-emit path yet and must fall through to
 /// `convert_node` instead of being silently dropped.
-fn is_pseudo_node(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+fn is_pseudo_node(doc: &BaseDocument, node: &Node) -> bool {
     node.parent
         .and_then(|pid| doc.get_node(pid))
         .is_some_and(|p| p.before == Some(node.id) || p.after == Some(node.id))
@@ -585,11 +585,7 @@ pub(crate) struct LinkCache {
 }
 
 impl LinkCache {
-    pub(crate) fn lookup(
-        &mut self,
-        doc: &blitz_dom::BaseDocument,
-        start_id: usize,
-    ) -> Option<Arc<LinkSpan>> {
+    pub(crate) fn lookup(&mut self, doc: &BaseDocument, start_id: usize) -> Option<Arc<LinkSpan>> {
         if let Some(cached) = self.by_start.get(&start_id) {
             let anchor_id = (*cached)?;
             return self.by_anchor.get(&anchor_id).cloned();
@@ -647,7 +643,7 @@ pub(super) fn has_paragraph_descendant(p: &dyn Pageable) -> bool {
 }
 
 /// Get text color from a DOM node's computed styles.
-fn get_text_color(doc: &blitz_dom::BaseDocument, node_id: usize) -> [u8; 4] {
+fn get_text_color(doc: &BaseDocument, node_id: usize) -> [u8; 4] {
     if let Some(node) = doc.get_node(node_id)
         && let Some(styles) = node.primary_styles()
     {
@@ -657,7 +653,7 @@ fn get_text_color(doc: &blitz_dom::BaseDocument, node_id: usize) -> [u8; 4] {
 }
 
 /// Get text-decoration properties from a DOM node's computed styles.
-fn get_text_decoration(doc: &blitz_dom::BaseDocument, node_id: usize) -> TextDecoration {
+fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
     if let Some(node) = doc.get_node(node_id)
         && let Some(styles) = node.primary_styles()
     {
@@ -715,7 +711,7 @@ mod tests {
     }
 
     pub(super) fn find_h1(doc: &blitz_html::HtmlDocument) -> usize {
-        fn walk(doc: &blitz_dom::BaseDocument, id: usize) -> Option<usize> {
+        fn walk(doc: &BaseDocument, id: usize) -> Option<usize> {
             let node = doc.get_node(id)?;
             if let Some(ed) = node.element_data() {
                 if ed.name.local.as_ref() == "h1" {
@@ -766,7 +762,7 @@ mod tests {
     /// without running the full `BookmarkPass` pipeline — these tests exercise
     /// the `convert_node` wrapping path in isolation.
     fn find_node_by_tag(doc: &blitz_html::HtmlDocument, tag: &str) -> Option<usize> {
-        fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
+        fn walk(doc: &BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
             let node = doc.get_node(node_id)?;
             if let Some(el) = node.element_data() {
                 if el.name.local.as_ref() == tag {
@@ -961,7 +957,7 @@ mod tests {
 
     /// Locate the first element with the given tag by DFS from the document root.
     pub(super) fn find_tag(doc: &blitz_html::HtmlDocument, tag: &str) -> Option<usize> {
-        fn walk(doc: &blitz_dom::BaseDocument, id: usize, tag: &str) -> Option<usize> {
+        fn walk(doc: &BaseDocument, id: usize, tag: &str) -> Option<usize> {
             let node = doc.get_node(id)?;
             if let Some(ed) = node.element_data() {
                 if ed.name.local.as_ref() == tag {
