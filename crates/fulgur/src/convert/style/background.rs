@@ -259,12 +259,14 @@ fn resolve_color_stops(
                 });
             }
             GradientItem::InterpolationHint(lp) => {
-                // 先頭/連続 hint は CSS Images 3 syntax 上不正、Layer drop.
-                if out.is_empty() || out.last().is_some_and(|s| s.is_hint) {
-                    log::warn!(
-                        "{gradient_kind}: leading or consecutive interpolation hint. \
-                         Layer dropped."
-                    );
+                // CSS Images 3 §3.5.3: hint は 2 つの color stop の間にしか
+                // 置けない (先頭/連続/末尾は syntactically invalid)。
+                if out.is_empty() {
+                    log::warn!("{gradient_kind}: leading interpolation hint. Layer dropped.");
+                    return None;
+                }
+                if out.last().is_some_and(|s| s.is_hint) {
+                    log::warn!("{gradient_kind}: consecutive interpolation hints. Layer dropped.");
                     return None;
                 }
                 let pos = if let Some(pct) = lp.to_percentage() {
