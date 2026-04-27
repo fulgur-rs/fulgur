@@ -100,6 +100,17 @@ jobs:
 
           cargo check --workspace
 
+      # Gemfile.lock は fulgur-jdt3 で commit 方針 (rb_sys host/container drift 防止)。
+      # gemspec 側 version が変わると frozen-mode bundler が exit 16 で失敗するため、
+      # version bump に合わせて lockfile も更新する。
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+      - name: Refresh fulgur-ruby Gemfile.lock
+        working-directory: crates/fulgur-ruby
+        run: bundle install
+
       # PR-based changelog: ask GitHub to render notes from merged PRs since the
       # last release, classified by `release-notes:*` labels per .github/release.yml.
       # `previous_tag_name` is auto-detected when omitted.
