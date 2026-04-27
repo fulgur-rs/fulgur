@@ -1,6 +1,6 @@
 use crate::asset::AssetBundle;
+use crate::blitz_adapter::Node;
 use crate::pageable::BlockStyle;
-use blitz_dom::Node;
 
 mod background;
 mod border;
