@@ -20,7 +20,7 @@ The issue (`bd show fulgur-zcmt`) was a sketch authored before auditing the curr
 
 | Issue text | Reality | Plan |
 |---|---|---|
-| Move all 11 bg helpers (incl. `absolute_to_rgba`) to `background.rs` | `absolute_to_rgba` is also used by `shadow` + `border` | Keep `absolute_to_rgba` in `style/mod.rs` as `pub(super) fn`, move only the 10 bg-specific helpers to `background.rs` (also `resolve_conic_gradient` which the issue text missed) |
+| Move all 11 bg helpers (incl. `absolute_to_rgba`) to `background.rs` | `absolute_to_rgba` is also used by `shadow` + `border` | Keep `absolute_to_rgba` in `style/mod.rs` as `pub(super) fn` (1 helper stays). Move 12 helpers to `background.rs` as private `fn`: `resolve_linear_gradient`, `resolve_color_stops`, `resolve_radial_gradient`, `resolve_conic_gradient` (the issue text missed conic), `map_extent`, `convert_bg_size`, `convert_lp_to_bg`, `try_convert_lp_to_bg` (sole callers `resolve_radial_gradient` / `resolve_conic_gradient` move with it), `convert_bg_position`, `convert_bg_repeat`, `convert_bg_origin`, `convert_bg_clip`. Net: 1 helper stays, 12 helpers move — total bg-related symbols outside `extract_block_style` = 13 |
 | Add `transform.rs` | `BlockStyle` has no transform field. Transform is handled by `maybe_wrap_transform` (`convert/mod.rs:315`) which wraps a `Pageable`, not a `BlockStyle` field | **Drop `transform.rs` from this phase.** `maybe_wrap_transform` stays where it is |
 | Modules: `box_metrics / border / background / shadow / transform / opacity` | `extract_block_style` also fills `overflow_x` / `overflow_y`, which is missing from the issue list | **Add `overflow.rs`.** Same shape as the others |
 | Uniform 5-param `apply_to` signature on every module | `box_metrics` does not need `styles` / `current_color` / `assets`; `overflow` does not need `current_color` / `layout` / `assets` | **Use a small `StyleContext` bundle for the inner-styles modules; `box_metrics` keeps a thin `&Layout`-only signature.** Better than passing unused params |
@@ -571,19 +571,17 @@ pub(in crate::convert) fn extract_opacity_visible(node: &Node) -> (f32, bool) {
 
 Visibility is `pub(in crate::convert)` (not `pub(super)`) because it crosses module boundaries — `convert/block.rs` is a sibling of `convert/style/`, not a child. `pub(in crate::convert)` keeps the helper reachable from sibling modules under `convert/` while preventing unrelated crate-level callers (`paragraph`, `render`, …) from binding to it directly.
 
-**Step 7.2 — Re-export from `convert/mod.rs`**
+**Step 7.2 — Add the re-export in `style/mod.rs`** (single source of truth)
 
-In `convert/mod.rs`, replace the existing `use style::extract_opacity_visible;` (added in Task 1) with `pub(super) use style::opacity::extract_opacity_visible;` so siblings see the same name they always did.
-
-Actually — since callers already use `extract_opacity_visible` unqualified, and they live in sibling modules of `style`, the cleanest route is a re-export at `convert/mod.rs`:
+In `crates/fulgur/src/convert/style/mod.rs`, add a re-export so that the existing `convert/mod.rs` line `use self::style::{absolute_to_rgba, extract_block_style, extract_opacity_visible};` keeps resolving:
 
 ```rust
-pub(super) use self::style::opacity::extract_opacity_visible;
+pub(super) use opacity::extract_opacity_visible;
 ```
 
-That way no caller changes its import.
+**Do NOT add a separate re-export in `convert/mod.rs`.** The `use self::style::{...}` already in `convert/mod.rs:38` propagates via the `style/mod.rs` re-export. Adding a second re-export would shadow the first and is unnecessary.
 
-Verify no caller said `crate::convert::extract_opacity_visible` (which would still resolve via the re-export). `grep -rn "extract_opacity_visible" crates/fulgur/src/`.
+Verify no caller said `crate::convert::extract_opacity_visible` (which would still resolve via the re-export chain). `grep -rn "extract_opacity_visible" crates/fulgur/src/`.
 
 **Step 7.3 — Remove from `style/mod.rs`**
 
