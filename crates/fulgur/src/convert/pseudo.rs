@@ -404,3 +404,643 @@ fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) 
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{collect_images, find_h1, walk_all_children};
+    use super::super::{ConvertContext, dom_to_pageable, size_in_pt};
+    use crate::asset::AssetBundle;
+    use crate::paragraph::ParagraphPageable;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_build_pseudo_image_reads_content_url() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("read examples/image/icon.png");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before {
+                content: url("icon.png");
+                display: block;
+                width: 48px;
+                height: 48px;
+            }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let h1_id = find_h1(&doc);
+        let before_id = doc
+            .get_node(h1_id)
+            .unwrap()
+            .before
+            .expect("::before pseudo");
+        let pseudo = doc.get_node(before_id).unwrap();
+        let (parent_w, parent_h) = size_in_pt(doc.get_node(h1_id).unwrap().final_layout.size);
+
+        let img = super::build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle))
+            .expect("build_pseudo_image should return Some for content: url()");
+        // 48 CSS px × 0.75 = 36 pt
+        assert_eq!(img.width, 36.0);
+        assert_eq!(img.height, 36.0);
+    }
+
+    #[test]
+    fn test_build_pseudo_image_width_only_uses_intrinsic_aspect() {
+        // icon.png is 32x32 so aspect = 1.0. width:20px → 15 pt, height
+        // back-propagates via intrinsic aspect → 15 pt.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); display: block; width: 20px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        let (parent_w, parent_h) = size_in_pt(doc.get_node(h1_id).unwrap().final_layout.size);
+
+        let img = super::build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle)).unwrap();
+        assert_eq!(img.width, 15.0);
+        assert_eq!(img.height, 15.0);
+    }
+
+    #[test]
+    fn test_build_pseudo_image_missing_asset_returns_none() {
+        let bundle = AssetBundle::new();
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("missing.png"); display: block; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        assert!(
+            super::build_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle)).is_none(),
+            "missing asset should silently return None"
+        );
+    }
+
+    #[test]
+    fn test_build_pseudo_image_no_assets_returns_none() {
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+        assert!(super::build_pseudo_image(pseudo, 800.0, 600.0, None).is_none());
+    }
+
+    #[test]
+    fn test_build_pseudo_image_height_percent_resolves_against_parent_height() {
+        // Verifies the coderabbit fix: height: 50% on the pseudo should
+        // resolve against parent_content_height, not parent_content_width.
+        // icon.png is 32x32 intrinsic, so with height=50% of 200 = 100 and
+        // no explicit width, the aspect ratio gives width = 100.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); display: block; height: 50%; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
+        let pseudo = doc.get_node(before_id).unwrap();
+
+        // Explicitly call with distinguishable width (400) and height (200)
+        // so we can verify which basis is used for `height: 50%`.
+        let img = super::build_pseudo_image(pseudo, 400.0, 200.0, Some(&bundle)).unwrap();
+        assert_eq!(
+            img.height, 100.0,
+            "height: 50% should resolve against parent_content_height (200.0)"
+        );
+        assert_eq!(
+            img.width, 100.0,
+            "intrinsic aspect (1:1) should give width = height"
+        );
+    }
+
+    #[test]
+    fn test_build_inline_pseudo_image_returns_some_for_inline_pseudo() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("icon.png fixture must exist");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); width: 24px; height: 24px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.expect("::before");
+        let pseudo = doc.get_node(before_id).unwrap();
+
+        // Inline pseudos have display: inline by default (not block)
+        assert!(
+            !super::is_block_pseudo(pseudo),
+            "pseudo should be inline by default"
+        );
+
+        let img = super::build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        assert!(img.is_some(), "should return Some for inline pseudo");
+        let img = img.unwrap();
+        // 24 CSS px × 0.75 = 18 pt
+        assert_eq!(img.width, 18.0);
+        assert_eq!(img.height, 18.0);
+    }
+
+    #[test]
+    fn test_build_inline_pseudo_image_does_not_filter_display() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .expect("icon.png fixture must exist");
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            h1::before { content: url("icon.png"); display: block; width: 24px; height: 24px; }
+        </style></head><body><h1>T</h1></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let h1_id = find_h1(&doc);
+        let before_id = doc.get_node(h1_id).unwrap().before.expect("::before");
+        let pseudo = doc.get_node(before_id).unwrap();
+
+        assert!(
+            super::is_block_pseudo(pseudo),
+            "pseudo with display:block should be block"
+        );
+
+        // The inline builder should NOT produce an image for block pseudos
+        // (the caller filters with !is_block_pseudo, but we verify the function
+        // itself still returns Some — the filtering is done at the call site)
+        // Here we verify the function works, the call-site filter is tested
+        // by the integration test above.
+        let img = super::build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        // build_inline_pseudo_image doesn't check display, so this will be Some.
+        // The call site filters with !is_block_pseudo.
+        assert!(
+            img.is_some(),
+            "build_inline_pseudo_image itself doesn't filter display"
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_block_pseudo_image() {
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .wrap::before {
+                content: url("icon.png");
+                display: block;
+                width: 24px;
+                height: 24px;
+            }
+        </style></head><body><div class="wrap">hello</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.iter().any(|(w, h)| *w == 18.0 && *h == 18.0),
+            "expected an 18x18 pt ImagePageable (24 CSS px × 0.75) from ::before pseudo, got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_inline_pseudo_image_as_line_item() {
+        // An inline `::before` with `content: url()` should be injected into
+        // the host paragraph's first line as a `LineItem::Image` (not as a
+        // standalone `ImagePageable`). This intentionally inspects line items
+        // directly: `collect_images` only finds `ImagePageable` and would pass
+        // vacuously here, hiding regressions where the inline image is dropped.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            p::before { content: url("icon.png"); width: 10px; height: 10px; }
+        </style></head><body><p>hello</p></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+
+        // Sanity: no standalone ImagePageable was emitted (block-pseudo path
+        // didn't fire because `display` defaults to inline for pseudos).
+        let mut block_images = Vec::new();
+        collect_images(&*tree, &mut block_images);
+        assert!(
+            block_images.is_empty(),
+            "inline pseudo must not surface as standalone ImagePageable; got {:?}",
+            block_images
+        );
+
+        // Walk every paragraph in the tree and collect inline image dimensions.
+        let mut line_images: Vec<(f32, f32)> = Vec::new();
+        walk_all_children(&*tree, &mut |p| {
+            if let Some(para) = p.as_any().downcast_ref::<ParagraphPageable>() {
+                for line in &para.lines {
+                    for item in &line.items {
+                        if let LineItem::Image(img) = item {
+                            line_images.push((img.width, img.height));
+                        }
+                    }
+                }
+            }
+        });
+        // 10 CSS px × 0.75 = 7.5 pt for both dimensions.
+        assert!(
+            line_images
+                .iter()
+                .any(|(w, h)| (*w - 7.5).abs() < 1e-3 && (*h - 7.5).abs() < 1e-3),
+            "expected a 7.5×7.5 pt LineItem::Image from p::before; got {:?}",
+            line_images
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_pseudo_on_childless_element() {
+        // Regression for Devin Review comment on PR #70: the children.is_empty()
+        // branch used to skip pseudo injection. `<div class="icon"></div>` with
+        // a block pseudo should still render the image.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .icon::before {
+                content: url("icon.png");
+                display: block;
+                width: 16px;
+                height: 16px;
+            }
+        </style></head><body><div class="icon"></div></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.iter().any(|(w, h)| *w == 12.0 && *h == 12.0),
+            "childless element ::before pseudo should emit a 12x12 pt image (16 CSS px × 0.75); got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_pseudo_on_zero_size_block_leaf() {
+        // Regression for coderabbit follow-up on PR #70: a 0x0 block leaf
+        // was being skipped by the collect_positioned_children zero-size
+        // leaf filter BEFORE reaching the convert_node `children.is_empty()`
+        // branch. The pseudo probe (`node_has_block_pseudo_image`) now lets
+        // such leaves fall through.
+        //
+        // Scope note: this test specifically targets a BLOCK element with
+        // explicit width:0;height:0 that still has a ::before image — e.g.
+        // a decorative sentinel div a template sets to 0x0 with a pseudo
+        // icon. Inline `<span>` with a block ::before is a different
+        // edge case that requires Phase 2 inline-flow handling.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .zero { display: block; width: 0; height: 0; }
+            .zero::before {
+                content: url("icon.png");
+                display: block;
+                width: 18px;
+                height: 18px;
+            }
+        </style></head><body><section><div class="zero"></div></section></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        let mut images = Vec::new();
+        walk_all_children(&*tree, &mut |p| collect_images(p, &mut images));
+        assert!(
+            images.iter().any(|(w, h)| *w == 13.5 && *h == 13.5),
+            "zero-size block leaf with block pseudo should emit a 13.5x13.5 pt image (18 CSS px × 0.75); got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_dom_to_pageable_emits_pseudo_on_list_item_with_text() {
+        // Regression for Devin Review comment on PR #70: the list item
+        // inline-root body path used to skip pseudo injection. A <li> with
+        // inline text content and a block ::before should still render.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            li::before {
+                content: url("icon.png");
+                display: block;
+                width: 12px;
+                height: 12px;
+            }
+        </style></head><body><ul><li>item text</li></ul></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        let mut images = Vec::new();
+        walk_all_children(&*tree, &mut |p| collect_images(p, &mut images));
+        assert!(
+            images.iter().any(|(w, h)| *w == 9.0 && *h == 9.0),
+            "list item with text + block pseudo should emit a 9x9 pt image (12 CSS px × 0.75); got {:?}",
+            images
+        );
+    }
+
+    // ---- inline pseudo image inject tests ----
+
+    use super::super::tests::sample_png_arc;
+    use crate::image::ImageFormat;
+    use crate::paragraph::{
+        InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration,
+        VerticalAlign,
+    };
+
+    fn make_test_inline_image(w: f32, h: f32) -> InlineImage {
+        InlineImage {
+            data: sample_png_arc(),
+            format: ImageFormat::Png,
+            width: w,
+            height: h,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        }
+    }
+
+    fn make_test_text_run(x_offset: f32, advance: f32) -> ShapedGlyphRun {
+        ShapedGlyphRun {
+            font_data: sample_png_arc(), // dummy — not rendered in unit tests
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: advance / 12.0, // normalized by font_size
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".to_string(),
+            x_offset,
+            link: None,
+        }
+    }
+
+    #[test]
+    fn test_inject_before_shifts_existing_items() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(20.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, Some(img), None);
+
+        assert_eq!(lines[0].items.len(), 2);
+        // First item should be the image at x_offset 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01, "img x_offset={}", i.x_offset);
+            assert!((i.width - 20.0).abs() < 0.01);
+        } else {
+            panic!("expected Image at index 0");
+        }
+        // Second item (text) should be shifted by 20.0
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!(
+                (r.x_offset - 20.0).abs() < 0.01,
+                "text x_offset={}",
+                r.x_offset,
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_after_appends_at_end() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(15.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, None, Some(img));
+
+        assert_eq!(lines[0].items.len(), 2);
+        // Last item should be the image
+        if let LineItem::Image(ref i) = lines[0].items[1] {
+            // Text run width = advance (normalized x_advance * font_size) = (60/12) * 12 = 60
+            assert!(
+                (i.x_offset - 60.0).abs() < 0.01,
+                "after img x_offset={}",
+                i.x_offset,
+            );
+        } else {
+            panic!("expected Image at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_both_before_and_after() {
+        let run = make_test_text_run(0.0, 36.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let before = make_test_inline_image(10.0, 16.0);
+        let after = make_test_inline_image(10.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, Some(before), Some(after));
+
+        assert_eq!(lines[0].items.len(), 3);
+        // Before image at 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01);
+        }
+        // Text shifted by 10
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!((r.x_offset - 10.0).abs() < 0.01);
+        }
+        // After image at 10 (before width) + 36 (text width) = 46
+        if let LineItem::Image(ref i) = lines[0].items[2] {
+            assert!(
+                (i.x_offset - 46.0).abs() < 0.01,
+                "after x_offset={}",
+                i.x_offset,
+            );
+        }
+    }
+}

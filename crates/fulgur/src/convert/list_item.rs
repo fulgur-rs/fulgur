@@ -509,3 +509,84 @@ fn build_list_item_body(
         Box::new(block)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::find_marker_text_in_tree;
+    use super::super::{ConvertContext, dom_to_pageable};
+    use std::collections::HashMap;
+
+    #[test]
+    fn inside_marker_on_block_child_li() {
+        let html = r#"<html><body><ul style="list-style-position:inside"><li><p>hello</p></li></ul></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        assert!(
+            find_marker_text_in_tree(&*tree, "\u{2022}"),
+            "inside marker bullet should be injected into <li><p>hello</p></li>"
+        );
+    }
+
+    #[test]
+    fn inside_marker_on_empty_li() {
+        let html =
+            r#"<html><body><ul style="list-style-position:inside"><li></li></ul></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        // Empty <li> with no AssetBundle fonts: marker may not render if no
+        // system font covers the bullet. We still verify no panic occurs.
+        // When a system font IS available, the marker should be present.
+        let _found = find_marker_text_in_tree(&*tree, "\u{2022}");
+        // Not asserting found==true because system font availability varies.
+    }
+
+    #[test]
+    fn inside_marker_on_block_child_ol() {
+        let html = r#"<html><body><ol style="list-style-position:inside"><li><p>hello</p></li></ol></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+        assert!(
+            find_marker_text_in_tree(&*tree, "1."),
+            "inside marker '1.' should be injected into <li><p>hello</p></li> in <ol>"
+        );
+    }
+}
