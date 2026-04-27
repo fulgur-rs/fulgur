@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-04-27
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(release-prepare): refresh fulgur-ruby Gemfile.lock on version bump by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/254
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.10.0...v0.11.0
+
 ## [0.10.0] - 2026-04-27
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
