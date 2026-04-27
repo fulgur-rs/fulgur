@@ -410,6 +410,7 @@ mod tests {
     use super::super::tests::{collect_images, find_h1, walk_all_children};
     use super::super::{ConvertContext, dom_to_pageable, size_in_pt};
     use crate::asset::AssetBundle;
+    use crate::paragraph::ParagraphPageable;
     use std::collections::HashMap;
 
     #[test]
@@ -684,9 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dom_to_pageable_inline_pseudo_ignored_phase1() {
-        // Phase 1 only handles display:block pseudos. An inline pseudo with
-        // content: url() should be silently ignored (Phase 2 will handle it).
+    fn test_dom_to_pageable_emits_inline_pseudo_image_as_line_item() {
+        // An inline `::before` with `content: url()` should be injected into
+        // the host paragraph's first line as a `LineItem::Image` (not as a
+        // standalone `ImagePageable`). This intentionally inspects line items
+        // directly: `collect_images` only finds `ImagePageable` and would pass
+        // vacuously here, hiding regressions where the inline image is dropped.
         let icon_bytes = std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
@@ -720,12 +724,36 @@ mod tests {
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
 
-        let mut images = Vec::new();
-        collect_images(&*tree, &mut images);
+        // Sanity: no standalone ImagePageable was emitted (block-pseudo path
+        // didn't fire because `display` defaults to inline for pseudos).
+        let mut block_images = Vec::new();
+        collect_images(&*tree, &mut block_images);
         assert!(
-            images.is_empty(),
-            "Phase 1 must not emit inline pseudo images; got {:?}",
-            images
+            block_images.is_empty(),
+            "inline pseudo must not surface as standalone ImagePageable; got {:?}",
+            block_images
+        );
+
+        // Walk every paragraph in the tree and collect inline image dimensions.
+        let mut line_images: Vec<(f32, f32)> = Vec::new();
+        walk_all_children(&*tree, &mut |p| {
+            if let Some(para) = p.as_any().downcast_ref::<ParagraphPageable>() {
+                for line in &para.lines {
+                    for item in &line.items {
+                        if let LineItem::Image(img) = item {
+                            line_images.push((img.width, img.height));
+                        }
+                    }
+                }
+            }
+        });
+        // 10 CSS px × 0.75 = 7.5 pt for both dimensions.
+        assert!(
+            line_images
+                .iter()
+                .any(|(w, h)| (*w - 7.5).abs() < 1e-3 && (*h - 7.5).abs() < 1e-3),
+            "expected a 7.5×7.5 pt LineItem::Image from p::before; got {:?}",
+            line_images
         );
     }
 
