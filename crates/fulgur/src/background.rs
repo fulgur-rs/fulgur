@@ -3010,7 +3010,11 @@ mod resolve_gradient_stops_tests {
         LengthPx(f)
     }
     fn stop(p: GradientStopPosition, rgba: [u8; 4]) -> GradientStop {
-        GradientStop { position: p, rgba }
+        GradientStop {
+            position: p,
+            rgba,
+            is_hint: false,
+        }
     }
 
     #[test]
@@ -3457,14 +3461,17 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Fraction(0.0),
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(0.5),
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(1.0),
                 rgba: [0, 0, 255, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);
@@ -3481,14 +3488,17 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Auto,
                 rgba: [0, 0, 255, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);
@@ -3505,10 +3515,12 @@ mod conic_helpers_tests {
             GradientStop {
                 position: GradientStopPosition::Fraction(0.5),
                 rgba: [255, 0, 0, 255],
+                is_hint: false,
             },
             GradientStop {
                 position: GradientStopPosition::Fraction(0.3),
                 rgba: [0, 255, 0, 255],
+                is_hint: false,
             },
         ];
         let n = normalize_conic_stops(&stops);

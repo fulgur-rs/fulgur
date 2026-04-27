@@ -754,10 +754,15 @@ pub enum GradientStopPosition {
 
 /// A single color stop in a CSS gradient. Position は `GradientStopPosition`
 /// で保持され、draw 時に gradient line 長さで fraction に解決される。
+///
+/// `is_hint=true` のときは CSS interpolation hint marker。`rgba` は無効値で
+/// あり読まない契約。draw 段の `resolve_gradient_stops` が `expand_interpolation_hints`
+/// を介して隣接 stop の色から N 個の中間 stop に展開する (CSS Images 3 §3.5.3)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GradientStop {
     pub position: GradientStopPosition,
     pub rgba: [u8; 4],
+    pub is_hint: bool,
 }
 
 /// CSS `to <h> <v>` corner direction. The four enumerated variants exhaust

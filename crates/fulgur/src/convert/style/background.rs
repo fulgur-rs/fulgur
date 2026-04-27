@@ -236,6 +236,7 @@ fn resolve_color_stops(
                 out.push(GradientStop {
                     position: GradientStopPosition::Auto,
                     rgba: absolute_to_rgba(abs),
+                    is_hint: false,
                 });
             }
             GradientItem::ComplexColorStop { color, position } => {
@@ -254,6 +255,7 @@ fn resolve_color_stops(
                 out.push(GradientStop {
                     position: pos,
                     rgba: absolute_to_rgba(abs),
+                    is_hint: false,
                 });
             }
             GradientItem::InterpolationHint(_) => {
@@ -410,6 +412,7 @@ fn resolve_conic_gradient(
                 stops.push(GradientStop {
                     position: GradientStopPosition::Auto,
                     rgba: absolute_to_rgba(abs),
+                    is_hint: false,
                 });
             }
             GradientItem::ComplexColorStop { color, position } => {
@@ -421,6 +424,7 @@ fn resolve_conic_gradient(
                 stops.push(GradientStop {
                     position: GradientStopPosition::Fraction(frac),
                     rgba: absolute_to_rgba(abs),
+                    is_hint: false,
                 });
             }
             GradientItem::InterpolationHint(_) => {
