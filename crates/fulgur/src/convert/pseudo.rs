@@ -1,3 +1,7 @@
+use super::positioned::{
+    AbsCb, build_absolute_pseudo_children, is_absolutely_positioned,
+    try_build_absolute_pseudo_image,
+};
 use super::*;
 
 /// Build an `ImagePageable` for a `::before`/`::after` pseudo-element node
