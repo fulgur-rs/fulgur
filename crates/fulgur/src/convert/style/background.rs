@@ -258,16 +258,41 @@ fn resolve_color_stops(
                     is_hint: false,
                 });
             }
-            GradientItem::InterpolationHint(_) => {
-                log::warn!(
-                    "{gradient_kind}: interpolation hints are not yet supported \
-                     (Phase 2). Layer dropped."
-                );
-                return None;
+            GradientItem::InterpolationHint(lp) => {
+                // 先頭/連続 hint は CSS Images 3 syntax 上不正、Layer drop.
+                if out.is_empty() || out.last().is_some_and(|s| s.is_hint) {
+                    log::warn!(
+                        "{gradient_kind}: leading or consecutive interpolation hint. \
+                         Layer dropped."
+                    );
+                    return None;
+                }
+                let pos = if let Some(pct) = lp.to_percentage() {
+                    GradientStopPosition::Fraction(pct.0)
+                } else if let Some(len) = lp.to_length() {
+                    GradientStopPosition::LengthPx(len.px())
+                } else {
+                    // calc() etc. unsupported (Phase 2 別 issue) — Layer drop.
+                    log::warn!(
+                        "{gradient_kind}: hint position is neither percentage \
+                         nor length (calc() etc.). Layer dropped."
+                    );
+                    return None;
+                };
+                out.push(GradientStop {
+                    position: pos,
+                    rgba: [0; 4], // is_hint=true のとき意味なし
+                    is_hint: true,
+                });
             }
         }
     }
 
+    // 末尾 hint は不正
+    if out.last().is_some_and(|s| s.is_hint) {
+        log::warn!("{gradient_kind}: trailing interpolation hint. Layer dropped.");
+        return None;
+    }
     if out.len() < 2 {
         return None;
     }
