@@ -1,6 +1,6 @@
 use super::inline_root;
 use super::*;
-use crate::blitz_adapter::{ListItemLayoutPosition, Marker, marker_skrifa_text, marker_to_string};
+use crate::blitz_adapter::{Marker, marker_skrifa_text, marker_to_string};
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
@@ -110,7 +110,7 @@ pub(super) fn resolve_inside_image_marker(
 
     let elem_data = node.element_data()?;
     let list_data = elem_data.list_item_data.as_ref()?;
-    if !matches!(list_data.position, ListItemLayoutPosition::Inside) {
+    if !crate::blitz_adapter::is_list_position_inside(&list_data.position) {
         return None;
     }
     if first_line_height <= 0.0 {
@@ -153,9 +153,10 @@ pub(super) fn extract_marker_lines(
         Some(d) => d,
         None => return (Vec::new(), 0.0, 0.0),
     };
-    let parley_layout = match &list_item_data.position {
-        ListItemLayoutPosition::Outside(layout) => layout,
-        ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
+    let Some(parley_layout) =
+        crate::blitz_adapter::list_position_outside_layout(&list_item_data.position)
+    else {
+        return (Vec::new(), 0.0, 0.0);
     };
 
     let marker_text = marker_to_string(&list_item_data.marker);

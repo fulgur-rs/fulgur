@@ -1,6 +1,5 @@
 use super::*;
 use super::{inline_root, list_marker, positioned, pseudo};
-use crate::blitz_adapter::ListItemLayoutPosition;
 
 /// Dispatcher entry for list-item nodes. Tries three branches in this order:
 ///
@@ -38,10 +37,9 @@ pub(super) fn try_convert(
     // upstream Blitz behavior — Blitz's inline-layout injection only fires for
     // inline-root elements.
     if let Some(elem_data) = node.element_data()
-        && elem_data
-            .list_item_data
-            .as_ref()
-            .is_some_and(|d| matches!(d.position, ListItemLayoutPosition::Outside(_)))
+        && elem_data.list_item_data.as_ref().is_some_and(|d| {
+            crate::blitz_adapter::list_position_outside_layout(&d.position).is_some()
+        })
     {
         let (marker_lines, marker_width, marker_line_height) =
             list_marker::extract_marker_lines(doc, node, ctx);
@@ -149,7 +147,7 @@ pub(super) fn try_convert(
     // skrifa and inject it into the first child ParagraphPageable.
     if let Some(elem_data) = node.element_data()
         && let Some(list_data) = &elem_data.list_item_data
-        && matches!(list_data.position, ListItemLayoutPosition::Inside)
+        && crate::blitz_adapter::is_list_position_inside(&list_data.position)
         && !node.flags.is_inline_root()
     {
         let marker = &list_data.marker;
