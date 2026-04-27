@@ -211,6 +211,7 @@ pub(super) fn try_convert(
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    out_of_flow: false,
                 }];
                 let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
                     doc,
@@ -277,6 +278,7 @@ pub(super) fn try_convert(
                             child: Box::new(paragraph),
                             x: 0.0,
                             y: 0.0,
+                            out_of_flow: false,
                         },
                     );
                 }
@@ -377,7 +379,7 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let abs_pseudos = positioned::build_absolute_pseudo_children(doc, node, ctx, depth);
+            let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
@@ -392,6 +394,7 @@ fn build_list_item_body(
                     child: Box::new(p),
                     x: child_x,
                     y: child_y,
+                    out_of_flow: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
@@ -432,7 +435,7 @@ fn build_list_item_body(
 
             let (before_pseudo, after_pseudo) =
                 pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
-            let abs_pseudos = positioned::build_absolute_pseudo_children(doc, node, ctx, depth);
+            let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             let pagination = extract_pagination_from_column_css(ctx, node);
@@ -445,6 +448,7 @@ fn build_list_item_body(
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    out_of_flow: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,

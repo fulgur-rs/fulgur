@@ -923,11 +923,45 @@ impl BlockStyle {
 // ─── PositionedChild ─────────────────────────────────────
 
 /// A child element with its Taffy-computed position.
+///
+/// `out_of_flow` (CSS 2.1 §10.6.4) marks `position: absolute|fixed`
+/// children. They are excluded from `BlockPageable::wrap`'s height fold and
+/// `find_split_point`'s overflow scan (their height does not contribute to
+/// the parent's flow height and must not trigger page splits), and are
+/// replicated to BOTH halves of `BlockPageable::split` with their CB-relative
+/// `y` preserved (negative values allowed) so a tall abs element naturally
+/// slices across the pages where its CB overlaps.
 #[derive(Clone)]
 pub struct PositionedChild {
     pub child: Box<dyn Pageable>,
     pub x: Pt,
     pub y: Pt,
+    pub out_of_flow: bool,
+}
+
+impl PositionedChild {
+    /// Construct an in-flow child (default for normal block layout).
+    pub fn in_flow(child: Box<dyn Pageable>, x: Pt, y: Pt) -> Self {
+        Self {
+            child,
+            x,
+            y,
+            out_of_flow: false,
+        }
+    }
+
+    /// Construct an out-of-flow child (`position: absolute|fixed`). The
+    /// caller must have already resolved `(x, y)` against the appropriate
+    /// containing block (CSS 2.1 §10.3.7 / §10.6.4) and expressed it
+    /// relative to the parent's border-box.
+    pub fn out_of_flow(child: Box<dyn Pageable>, x: Pt, y: Pt) -> Self {
+        Self {
+            child,
+            x,
+            y,
+            out_of_flow: true,
+        }
+    }
 }
 
 pub type SplitPair = (Box<dyn Pageable>, Box<dyn Pageable>);
@@ -995,6 +1029,7 @@ impl BlockPageable {
                     child,
                     x: 0.0,
                     y: child_y,
+                    out_of_flow: false,
                 }
             })
             .collect();
@@ -1068,7 +1103,12 @@ impl BlockPageable {
             if self.page_height <= 0.0 || total_height <= self.page_height {
                 // CSS Fragmentation Level 3 §5.4: forced breaks override break-inside: avoid.
                 // Check direct children and recurse into descendants before returning NoSplit.
+                // Out-of-flow children are skipped per CSS 2.1 §10.6.4 — their
+                // pagination is independent of the parent's flow.
                 let has_forced_break = self.children.iter().enumerate().any(|(i, pc)| {
+                    if pc.out_of_flow {
+                        return false;
+                    }
                     (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
                         || (pc.child.pagination().break_after == BreakAfter::Page
                             && i < self.children.len() - 1)
@@ -1085,7 +1125,15 @@ impl BlockPageable {
             // Fall through to normal splitting logic.
         }
 
+        // Out-of-flow children (CSS 2.1 §10.6.4) are excluded from every
+        // pagination check below: they don't trigger break-before/-after
+        // splits, don't drive overflow detection, and aren't probed for
+        // descendant breaks. They're replicated to both halves of the
+        // split in `clone_children` instead.
         let has_forced_break = self.children.iter().enumerate().any(|(i, pc)| {
+            if pc.out_of_flow {
+                return false;
+            }
             (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
                 || (pc.child.pagination().break_after == BreakAfter::Page
                     && i < self.children.len() - 1)
@@ -1104,6 +1152,9 @@ impl BlockPageable {
             // No overflow and no direct-child forced breaks — check descendants.
             let mut has_descendant_forced_break = false;
             for pc in &self.children {
+                if pc.out_of_flow {
+                    continue;
+                }
                 let child_avail = avail_height - pc.y;
                 if child_avail > 0.0 && pc.child.split(0.0, child_avail).is_some() {
                     has_descendant_forced_break = true;
@@ -1116,6 +1167,9 @@ impl BlockPageable {
         }
 
         for (i, pc) in self.children.iter().enumerate() {
+            if pc.out_of_flow {
+                continue;
+            }
             if pc.child.pagination().break_before == BreakBefore::Page && i > 0 && pc.y > 0.0 {
                 return SplitDecision::AtIndex(i);
             }
@@ -1366,20 +1420,106 @@ fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) ->
     ]
 }
 
+/// Clone a single `PositionedChild`, shifting its y by `y_offset`. In-flow
+/// children clamp at 0.0 to keep grid/flex parallel siblings on-page;
+/// out-of-flow children preserve negative y so their CB-anchored position
+/// extends naturally across pages (Krilla clips outside the page area).
+fn clone_pc_with_offset(pc: &PositionedChild, y_offset: f32) -> PositionedChild {
+    let shifted = pc.y - y_offset;
+    let y = if pc.out_of_flow {
+        shifted
+    } else {
+        shifted.max(0.0)
+    };
+    PositionedChild {
+        child: pc.child.clone_box(),
+        x: pc.x,
+        y,
+        out_of_flow: pc.out_of_flow,
+    }
+}
+
+/// Split `children` at `split_index` for `SplitDecision::AtIndex`.
+///
+/// In-flow children are partitioned by index. Out-of-flow children
+/// (CSS 2.1 §10.6.4) are replicated to BOTH halves — they're anchored to
+/// their containing block and apply to every page the CB overlaps. The
+/// second half's y values are shifted by `split_y` (out-of-flow keeps
+/// negative y; in-flow clamps at 0).
+fn split_children_at_index(
+    children: &[PositionedChild],
+    split_index: usize,
+    split_y: f32,
+) -> (Vec<PositionedChild>, Vec<PositionedChild>) {
+    let mut first = Vec::with_capacity(children.len());
+    let mut second = Vec::with_capacity(children.len());
+    for (i, pc) in children.iter().enumerate() {
+        if pc.out_of_flow {
+            first.push(clone_pc_with_offset(pc, 0.0));
+            second.push(clone_pc_with_offset(pc, split_y));
+        } else if i < split_index {
+            first.push(clone_pc_with_offset(pc, 0.0));
+        } else {
+            second.push(clone_pc_with_offset(pc, split_y));
+        }
+    }
+    (first, second)
+}
+
+/// Split `children` for `SplitDecision::WithinChild`. The split-causing
+/// child at `within_idx` is excluded — the caller injects its first/second
+/// fragments. In-flow children before / after `within_idx` go to first /
+/// second halves; out-of-flow children replicate to both halves (with the
+/// second-half shift applied).
+fn split_children_for_within(
+    children: &[PositionedChild],
+    within_idx: usize,
+    second_y_offset: f32,
+) -> (Vec<PositionedChild>, Vec<PositionedChild>) {
+    let mut first = Vec::with_capacity(children.len());
+    let mut second = Vec::with_capacity(children.len());
+    for (i, pc) in children.iter().enumerate() {
+        if pc.out_of_flow {
+            first.push(clone_pc_with_offset(pc, 0.0));
+            second.push(clone_pc_with_offset(pc, second_y_offset));
+        } else if i < within_idx {
+            first.push(clone_pc_with_offset(pc, 0.0));
+        } else if i > within_idx {
+            second.push(clone_pc_with_offset(pc, second_y_offset));
+        }
+    }
+    (first, second)
+}
+
 /// Clone a slice of PositionedChild, optionally shifting y coordinates.
 /// When `y_offset` is 0.0, children are cloned as-is.
 /// A negative `y_offset` shifts children upward (subtracts from y).
 fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<PositionedChild> {
-    // Clamp at 0.0 so parallel siblings (grid/flex children sharing the same
-    // y as a split-causing child) don't end up at negative y on the second
-    // fragment, which would push their background+border above the page top
-    // and silently drop them. fulgur-86fo.
+    // In-flow children are clamped at 0.0 so parallel siblings (grid/flex
+    // children sharing the same y as a split-causing child) don't end up at
+    // negative y on the second fragment, which would push their
+    // background+border above the page top and silently drop them
+    // (fulgur-86fo).
+    //
+    // Out-of-flow children (CSS 2.1 §10.6.4 abs/fixed) preserve negative y
+    // so a tall abs element anchored at its CB's top:0 naturally extends
+    // above the second fragment's page area; Krilla clips outside the page,
+    // producing the correct slice on each page (fulgur-aijf).
     children
         .iter()
-        .map(|pc| PositionedChild {
-            child: pc.child.clone_box(),
-            x: pc.x,
-            y: (pc.y - y_offset).max(0.0),
+        .map(|pc| {
+            let shifted = pc.y - y_offset;
+            let y = if pc.out_of_flow {
+                shifted
+            } else {
+                shifted.max(0.0)
+            };
+            PositionedChild {
+                child: pc.child.clone_box(),
+                x: pc.x,
+                y,
+                out_of_flow: pc.out_of_flow,
+            }
         })
         .collect()
 }
@@ -1780,8 +1920,13 @@ impl Pageable for BlockPageable {
                 pc.child.wrap(avail_width, 10000.0);
             }
         }
-        // Use max of children's (y + height) for total height
+        // Use max of children's (y + height) for total height. Out-of-flow
+        // children (`position: absolute|fixed`) are excluded per CSS 2.1
+        // §10.6.4 — they do not contribute to the parent's flow height.
         let total_height = self.children.iter_mut().fold(0.0f32, |max_h, pc| {
+            if pc.out_of_flow {
+                return max_h;
+            }
             let child_h = pc.child.height();
             max_h.max(pc.y + child_h)
         });
@@ -1822,22 +1967,23 @@ impl Pageable for BlockPageable {
                     .map(|s| s.width)
                     .unwrap_or(0.0);
 
-                let mut first = clone_children(&self.children[..idx], 0.0);
+                let (mut first, mut second) =
+                    split_children_for_within(&self.children, idx, pc.y + consumed_height);
                 first.push(PositionedChild {
                     child: first_part,
                     x: pc.x,
                     y: pc.y,
+                    out_of_flow: false,
                 });
-
-                let mut second = vec![PositionedChild {
-                    child: second_part,
-                    x: pc.x,
-                    y: 0.0,
-                }];
-                second.extend(clone_children(
-                    &self.children[idx + 1..],
-                    pc.y + consumed_height,
-                ));
+                second.insert(
+                    0,
+                    PositionedChild {
+                        child: second_part,
+                        x: pc.x,
+                        y: 0.0,
+                        out_of_flow: false,
+                    },
+                );
 
                 let mut first_block = BlockPageable::with_positioned_children(first)
                     .with_pagination(self.pagination)
@@ -1881,8 +2027,7 @@ impl Pageable for BlockPageable {
                     .map(|s| s.width)
                     .unwrap_or(0.0);
 
-                let first = clone_children(&self.children[..split_index], 0.0);
-                let second = clone_children(&self.children[split_index..], split_y);
+                let (first, second) = split_children_at_index(&self.children, split_index, split_y);
 
                 let mut first_block = BlockPageable::with_positioned_children(first)
                     .with_pagination(self.pagination)
@@ -1916,7 +2061,7 @@ impl Pageable for BlockPageable {
             SplitDecision::NoSplit => Err(self),
 
             SplitDecision::WithinChild(idx, (first_part, second_part), consumed_height) => {
-                let mut me = *self;
+                let me = *self;
                 let split_child_x = me.children[idx].x;
                 let split_child_y = me.children[idx].y;
                 let first_height = split_child_y + consumed_height;
@@ -1931,32 +2076,28 @@ impl Pageable for BlockPageable {
                     .map(|s| s.width)
                     .unwrap_or(0.0);
 
-                let mut tail = me.children.split_off(idx + 1);
-                let _split_child = me.children.pop().unwrap(); // remove the split child
-                let mut first = me.children; // children[..idx]
+                // Use the clone-based helper so out-of-flow children
+                // (CSS abs/fixed) are correctly replicated to both halves.
+                // The split-causing in-flow child at `idx` is excluded by
+                // the helper; we inject its first/second fragments below.
+                let (mut first, mut second) =
+                    split_children_for_within(&me.children, idx, split_child_y + consumed_height);
 
                 first.push(PositionedChild {
                     child: first_part,
                     x: split_child_x,
                     y: split_child_y,
+                    out_of_flow: false,
                 });
-
-                // Rebase tail by split_y + consumed_height so siblings sit
-                // flush against the second fragment on page 2, with no extra
-                // gap equal to the first fragment's height. Clamp at 0.0 for
-                // parallel siblings (grid/flex same-row) so they don't end up
-                // above the page top — see clone_children for fulgur-86fo.
-                let tail_offset = split_child_y + consumed_height;
-                for pc in &mut tail {
-                    pc.y = (pc.y - tail_offset).max(0.0);
-                }
-
-                let mut second = vec![PositionedChild {
-                    child: second_part,
-                    x: split_child_x,
-                    y: 0.0,
-                }];
-                second.append(&mut tail);
+                second.insert(
+                    0,
+                    PositionedChild {
+                        child: second_part,
+                        x: split_child_x,
+                        y: 0.0,
+                        out_of_flow: false,
+                    },
+                );
 
                 let mut first_block = BlockPageable::with_positioned_children(first)
                     .with_pagination(me.pagination)
@@ -1984,7 +2125,7 @@ impl Pageable for BlockPageable {
             }
 
             SplitDecision::AtIndex(split_index) => {
-                let mut me = *self;
+                let me = *self;
 
                 if split_index == 0 || split_index >= me.children.len() {
                     return Err(Box::new(me));
@@ -2002,14 +2143,10 @@ impl Pageable for BlockPageable {
                     .map(|s| s.width)
                     .unwrap_or(0.0);
 
-                let mut second_children = me.children.split_off(split_index);
-                let first_children = me.children;
-
-                // Shift y coordinates on second fragment. Clamp at 0.0 for
-                // parallel siblings — see clone_children for fulgur-86fo.
-                for pc in &mut second_children {
-                    pc.y = (pc.y - split_y).max(0.0);
-                }
+                // Use the clone-based helper so out-of-flow children
+                // (CSS abs/fixed) are correctly replicated to both halves.
+                let (first_children, second_children) =
+                    split_children_at_index(&me.children, split_index, split_y);
 
                 let mut first_block = BlockPageable::with_positioned_children(first_children)
                     .with_pagination(me.pagination)
@@ -3560,6 +3697,7 @@ impl Pageable for TablePageable {
                 child: pc.child.clone_box(),
                 x: pc.x,
                 y: self.header_height + (pc.y - split_y),
+                out_of_flow: false,
             })
             .collect();
 
@@ -3788,6 +3926,81 @@ mod tests {
     }
 
     #[test]
+    fn clone_pc_with_offset_in_flow_clamps_negative_y() {
+        // In-flow child: y - offset < 0 should clamp to 0 (fulgur-86fo
+        // grid/flex parallel sibling protection).
+        let pc = PositionedChild::in_flow(make_spacer(10.0), 0.0, 50.0);
+        let cloned = clone_pc_with_offset(&pc, 80.0);
+        assert_eq!(cloned.y, 0.0);
+        assert!(!cloned.out_of_flow);
+    }
+
+    #[test]
+    fn clone_pc_with_offset_out_of_flow_preserves_negative_y() {
+        // Out-of-flow child (CSS abs/fixed): y - offset is allowed to go
+        // negative so the CB-anchored box slices across pages naturally.
+        let pc = PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0);
+        let cloned = clone_pc_with_offset(&pc, 50.0);
+        assert_eq!(cloned.y, -50.0);
+        assert!(cloned.out_of_flow);
+    }
+
+    #[test]
+    fn split_children_at_index_replicates_out_of_flow_to_both_halves() {
+        // Layout: [out_of_flow at y=0, in_flow at y=10, in_flow at y=20].
+        // Split at index 2 (in-flow boundary), split_y=20.
+        // Expected:
+        //   first  = [in_flow@10, out_of_flow@0]
+        //   second = [in_flow@0, out_of_flow@-20] (no clamp on out_of_flow)
+        let children = vec![
+            PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0),
+            PositionedChild::in_flow(make_spacer(5.0), 0.0, 10.0),
+            PositionedChild::in_flow(make_spacer(5.0), 0.0, 20.0),
+        ];
+        let (first, second) = split_children_at_index(&children, 2, 20.0);
+        // First: in-flow at y=10 + out-of-flow at y=0
+        assert_eq!(first.len(), 2);
+        let first_in_flow: Vec<_> = first.iter().filter(|p| !p.out_of_flow).collect();
+        let first_oof: Vec<_> = first.iter().filter(|p| p.out_of_flow).collect();
+        assert_eq!(first_in_flow.len(), 1);
+        assert_eq!(first_in_flow[0].y, 10.0);
+        assert_eq!(first_oof.len(), 1);
+        assert_eq!(first_oof[0].y, 0.0);
+        // Second: in-flow at y=0 (20-20) + out-of-flow at y=-20 (0-20, no clamp)
+        assert_eq!(second.len(), 2);
+        let second_in_flow: Vec<_> = second.iter().filter(|p| !p.out_of_flow).collect();
+        let second_oof: Vec<_> = second.iter().filter(|p| p.out_of_flow).collect();
+        assert_eq!(second_in_flow[0].y, 0.0);
+        assert_eq!(second_oof[0].y, -20.0);
+    }
+
+    #[test]
+    fn split_children_for_within_excludes_within_index() {
+        // Layout: [in_flow@0, in_flow@50 (split-causing), in_flow@100, out_of_flow@0].
+        // Within idx=1, second_y_offset=70 (split caused at y=50, consumed=20).
+        // Expected:
+        //   first  = [in_flow@0, out_of_flow@0]                  (idx=1 excluded)
+        //   second = [in_flow@30 (100-70), out_of_flow@-70]      (idx=1 excluded)
+        let children = vec![
+            PositionedChild::in_flow(make_spacer(50.0), 0.0, 0.0),
+            PositionedChild::in_flow(make_spacer(50.0), 0.0, 50.0),
+            PositionedChild::in_flow(make_spacer(10.0), 0.0, 100.0),
+            PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0),
+        ];
+        let (first, second) = split_children_for_within(&children, 1, 70.0);
+        // The split-causing child at idx=1 must NOT appear in either half;
+        // caller injects its fragments separately.
+        assert_eq!(first.len(), 2, "first: in_flow@0 + out_of_flow@0");
+        assert_eq!(second.len(), 2, "second: in_flow@30 + out_of_flow@-70");
+        // Verify no entry has y == 50 (the within_idx child's position).
+        assert!(first.iter().all(|p| p.y != 50.0));
+        assert!(second.iter().all(|p| p.y != 50.0));
+        // Verify out-of-flow replicated with no clamp on negative.
+        let second_oof = second.iter().find(|p| p.out_of_flow).unwrap();
+        assert_eq!(second_oof.y, -70.0);
+    }
+
+    #[test]
     fn test_block_fits_on_one_page() {
         let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
         block.wrap(200.0, 300.0);
@@ -3850,11 +4063,13 @@ mod tests {
                 child: Box::new(card_a),
                 x: 0.0,
                 y: 0.0,
+                out_of_flow: false,
             },
             PositionedChild {
                 child: Box::new(card_b),
                 x: 100.0,
                 y: 0.0,
+                out_of_flow: false,
             },
         ]);
         grid.wrap(200.0, 1000.0);
@@ -4026,6 +4241,7 @@ mod tests {
             child: make_spacer(30.0),
             x: 0.0,
             y: 0.0,
+            out_of_flow: false,
         }];
 
         // Three body rows at y=30, y=80, y=130 (each 50pt tall)
@@ -4034,16 +4250,19 @@ mod tests {
                 child: make_spacer(50.0),
                 x: 0.0,
                 y: 30.0,
+                out_of_flow: false,
             },
             PositionedChild {
                 child: make_spacer(50.0),
                 x: 0.0,
                 y: 80.0,
+                out_of_flow: false,
             },
             PositionedChild {
                 child: make_spacer(50.0),
                 x: 0.0,
                 y: 130.0,
+                out_of_flow: false,
             },
         ];
 
@@ -4874,11 +5093,13 @@ mod transform_wrapper_tests {
                 child: Box::new(top),
                 x: 0.0,
                 y: 0.0,
+                out_of_flow: false,
             },
             PositionedChild {
                 child: Box::new(bot),
                 x: 0.0,
                 y: 500.0,
+                out_of_flow: false,
             },
         ]);
         block.wrap(500.0, 1000.0);
@@ -5366,6 +5587,7 @@ mod forced_break_below_tests {
             child: Box::new(block),
             x: 0.0,
             y,
+            out_of_flow: false,
         }
     }
 
@@ -5474,6 +5696,7 @@ mod forced_break_below_tests {
             child: make_inner_with_forced_break(),
             x: 0.0,
             y: 0.0,
+            out_of_flow: false,
         }];
         let wrapped = TablePageable {
             header_cells: vec![],
@@ -5495,6 +5718,7 @@ mod forced_break_below_tests {
                 child: make_inner_without_forced_break(),
                 x: 0.0,
                 y: 0.0,
+                out_of_flow: false,
             }],
             header_height: 0.0,
             style: BlockStyle::default(),
@@ -5529,6 +5753,7 @@ mod forced_break_below_tests {
                 child: Box::new(body),
                 x: 0.0,
                 y: 0.0,
+                out_of_flow: false,
             }],
             35.0,
         );
@@ -5618,6 +5843,7 @@ mod forced_break_below_tests {
                     child: Box::new(inner),
                     x: 0.0,
                     y: 10.0,
+                    out_of_flow: false,
                 },
                 make_block_pc(10.0, BreakBefore::Auto, 40.0),
             ],
@@ -5667,6 +5893,7 @@ mod forced_break_below_tests {
                 child: Box::new(body),
                 x: 0.0,
                 y: 0.0,
+                out_of_flow: false,
             }],
             35.0,
         );

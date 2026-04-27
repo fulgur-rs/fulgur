@@ -158,6 +158,7 @@ fn collect_table_cells(
             child: cell_pageable,
             x: cx,
             y: cy,
+            out_of_flow: false,
         };
 
         if is_header {

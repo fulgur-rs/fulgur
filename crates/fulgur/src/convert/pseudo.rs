@@ -1,7 +1,6 @@
 use super::inline_root;
 use super::positioned::{
-    AbsCb, build_absolute_pseudo_children, is_absolutely_positioned,
-    try_build_absolute_pseudo_image,
+    AbsCb, build_absolute_children, is_absolutely_positioned, try_build_absolute_pseudo_image,
 };
 use super::replaced::{make_image_pageable, resolve_image_dimensions};
 use super::*;
@@ -111,7 +110,7 @@ pub(super) fn wrap_with_pseudo_content(
     let (before_img, after_img) = build_block_pseudo_images(doc, node, parent_cb, ctx.assets);
     let has_img_pseudo = before_img.is_some() || after_img.is_some();
     let mut out = wrap_with_block_pseudo_images(before_img, after_img, parent_cb, children);
-    let abs = build_absolute_pseudo_children(doc, node, ctx, depth);
+    let abs = build_absolute_children(doc, node, ctx, depth);
     let has_any_pseudo = has_img_pseudo || !abs.is_empty();
     out.extend(abs);
     (out, has_any_pseudo)
@@ -255,6 +254,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             child: Box::new(img),
             x: parent_cb.origin_x,
             y: parent_cb.origin_y,
+            out_of_flow: false,
         });
     }
     out.extend(children);
@@ -263,6 +263,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             child: Box::new(img),
             x: parent_cb.origin_x,
             y: parent_cb.origin_y + parent_cb.height,
+            out_of_flow: false,
         });
     }
     out

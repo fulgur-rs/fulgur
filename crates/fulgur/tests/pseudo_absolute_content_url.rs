@@ -52,7 +52,7 @@ fn collect_positioned_images<'a>(
         out.push((parent_x, parent_y, img));
     }
     if let Some(block) = root.as_any().downcast_ref::<BlockPageable>() {
-        for PositionedChild { child, x, y } in &block.children {
+        for PositionedChild { child, x, y, .. } in &block.children {
             collect_positioned_images(child.as_ref(), parent_x + *x, parent_y + *y, out);
         }
     }
@@ -210,6 +210,7 @@ fn find_marker_origin(root: &dyn Pageable, x: f32, y: f32) -> Option<(f32, f32)>
             child,
             x: cx,
             y: cy,
+            ..
         } in &block.children
         {
             if let Some(found) = find_marker_origin(child.as_ref(), x + *cx, y + *cy) {
