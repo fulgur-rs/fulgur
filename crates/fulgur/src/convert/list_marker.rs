@@ -1,6 +1,6 @@
 use super::inline_root;
 use super::*;
-use crate::blitz_adapter::{ListItemLayoutPosition, Marker};
+use crate::blitz_adapter::{ListItemLayoutPosition, Marker, marker_skrifa_text, marker_to_string};
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
@@ -158,13 +158,7 @@ pub(super) fn extract_marker_lines(
         ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
     };
 
-    let marker_text = match &list_item_data.marker {
-        Marker::Char(c) => {
-            let mut buf = [0u8; 4];
-            c.encode_utf8(&mut buf).to_string()
-        }
-        Marker::String(s) => s.clone(),
-    };
+    let marker_text = marker_to_string(&list_item_data.marker);
 
     let mut shaped_lines = Vec::new();
     let mut max_width: f32 = 0.0;
@@ -248,14 +242,7 @@ pub(super) fn find_marker_font(
     assets: Option<&AssetBundle>,
     children: &[PositionedChild],
 ) -> Option<(Arc<Vec<u8>>, u32)> {
-    let marker_text = match marker {
-        Marker::Char(c) => {
-            let mut s = String::new();
-            s.push(*c);
-            s
-        }
-        Marker::String(s) => s.clone(),
-    };
+    let marker_text = marker_to_string(marker);
     let check_chars: Vec<char> = marker_text.chars().filter(|c| !c.is_whitespace()).collect();
 
     // Try AssetBundle fonts first — check charmap coverage.
@@ -331,10 +318,7 @@ pub(super) fn shape_marker_with_skrifa(
     font_size: f32,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
-    let text = match marker {
-        Marker::Char(c) => format!("{c} "),
-        Marker::String(s) => s.clone(),
-    };
+    let text = marker_skrifa_text(marker);
 
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
     let charmap = font_ref.charmap();
