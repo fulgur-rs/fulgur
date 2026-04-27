@@ -627,6 +627,55 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    fn pdf_info_field(pdf: &[u8], key: &[u8]) -> Option<String> {
+        use std::io::Cursor;
+        let doc = lopdf::Document::load_from(Cursor::new(pdf)).ok()?;
+        let info_id = doc.trailer.get(b"Info").ok()?.as_reference().ok()?;
+        let info = match doc.get_object(info_id) {
+            Ok(lopdf::Object::Dictionary(d)) => d.clone(),
+            _ => return None,
+        };
+        let bytes = info.get(key).ok()?.as_str().ok()?;
+        Some(
+            if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+                let chars: Vec<u16> = bytes[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&chars).to_owned()
+            } else {
+                bytes.iter().map(|&b| b as char).collect()
+            },
+        )
+    }
+
+    fn pdf_page1_size(pdf: &[u8]) -> (f32, f32) {
+        use std::io::Cursor;
+        let doc = lopdf::Document::load_from(Cursor::new(pdf)).expect("valid PDF");
+        let pages = doc.get_pages();
+        let &page_id = pages.get(&1).expect("page 1 exists");
+        let page_dict = match doc.get_object(page_id).expect("page object") {
+            lopdf::Object::Dictionary(d) => d.clone(),
+            _ => panic!("page is not a dictionary"),
+        };
+        let arr = page_dict
+            .get(b"MediaBox")
+            .expect("MediaBox")
+            .as_array()
+            .expect("MediaBox is array")
+            .clone();
+        let to_f32 = |o: &lopdf::Object| match o {
+            lopdf::Object::Integer(i) => *i as f32,
+            lopdf::Object::Real(f) => *f,
+            _ => 0.0,
+        };
+        (
+            to_f32(&arr[2]) - to_f32(&arr[0]),
+            to_f32(&arr[3]) - to_f32(&arr[1]),
+        )
+    }
+
     // --- escape_attr ---
 
     #[test]
@@ -843,6 +892,13 @@ mod tests {
             .build();
         let pdf = render_to_pdf(simple_root(), &config).unwrap();
         assert_pdf_header(&pdf);
+        assert_eq!(pdf_info_field(&pdf, b"Title").as_deref(), Some("My Title"));
+        assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Alice"));
+        assert_eq!(
+            pdf_info_field(&pdf, b"Creator").as_deref(),
+            Some("my-creator")
+        );
+        assert!(pdf_info_field(&pdf, b"CreationDate").is_some());
     }
 
     #[test]
@@ -922,6 +978,15 @@ mod tests {
         )
         .unwrap();
         assert_pdf_header(&pdf);
+        let (w, h) = pdf_page1_size(&pdf);
+        assert!(
+            (w - 595.28).abs() < 1.0,
+            "expected A4 width ≈ 595.28 pt, got {w}"
+        );
+        assert!(
+            (h - 841.89).abs() < 1.0,
+            "expected A4 height ≈ 841.89 pt, got {h}"
+        );
     }
 
     #[test]
@@ -947,5 +1012,12 @@ mod tests {
         )
         .unwrap();
         assert_pdf_header(&pdf);
+        assert_eq!(
+            pdf_info_field(&pdf, b"Title").as_deref(),
+            Some("GCPM Title")
+        );
+        assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Author"));
+        assert_eq!(pdf_info_field(&pdf, b"Creator").as_deref(), Some("creator"));
+        assert!(pdf_info_field(&pdf, b"CreationDate").is_some());
     }
 }
