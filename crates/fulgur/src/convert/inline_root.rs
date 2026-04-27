@@ -522,3 +522,395 @@ pub(super) fn extract_paragraph(
     // `href="#top"` resolution.
     Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{find_tag, make_ctx};
+    use crate::engine::Engine;
+    use crate::pageable::{BlockPageable, Pageable, PositionedChild};
+    use crate::paragraph::{LineItem, LinkTarget, ParagraphPageable};
+    use std::ops::Deref;
+    use std::sync::Arc;
+
+    // ---- paragraph link tests ----
+
+    #[test]
+    fn paragraph_attaches_external_link_to_glyph_run_inside_anchor() {
+        let html =
+            r#"<html><body><p>Go to <a href="https://example.com">example</a>.</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        let mut found_external = false;
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    if let Some(ls) = &run.link {
+                        if let LinkTarget::External(u) = &ls.target {
+                            if u.as_str() == "https://example.com" {
+                                found_external = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_external,
+            "expected at least one glyph run under <a> to carry an External link"
+        );
+    }
+
+    #[test]
+    fn paragraph_attaches_internal_link_for_fragment_href() {
+        let html = r##"<html><body><p>See <a href="#intro">intro</a></p></body></html>"##;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        let mut found = false;
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    if let Some(ls) = &run.link {
+                        if let LinkTarget::Internal(frag) = &ls.target {
+                            if frag.as_str() == "intro" {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found,
+            "expected fragment link to produce LinkTarget::Internal(\"intro\")"
+        );
+    }
+
+    #[test]
+    fn paragraph_shares_arc_linkspan_across_glyph_runs_under_same_anchor() {
+        // <em> forces two separate glyph runs (different style) under one <a>.
+        let html =
+            r#"<html><body><p><a href="https://x.test"><em>foo</em> bar</a></p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        let mut links: Vec<Arc<crate::paragraph::LinkSpan>> = Vec::new();
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    if let Some(ls) = &run.link {
+                        links.push(Arc::clone(ls));
+                    }
+                }
+            }
+        }
+        assert!(
+            links.len() >= 2,
+            "expected at least two linked glyph runs (got {})",
+            links.len()
+        );
+        let first = &links[0];
+        for other in &links[1..] {
+            assert!(
+                Arc::ptr_eq(first, other),
+                "all glyph runs inside the same <a> must share one Arc<LinkSpan>"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_leaves_link_none_for_anchor_without_href() {
+        let html = r#"<html><body><p>Text <a>no href</a> here.</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    assert!(
+                        run.link.is_none(),
+                        "glyph runs under <a> without href must have link: None"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_leaves_link_none_for_anchor_with_empty_href() {
+        let html = r#"<html><body><p><a href="">empty</a></p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    assert!(
+                        run.link.is_none(),
+                        "glyph runs under <a href=\"\"> must have link: None"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_linkspan_alt_text_uses_anchor_text_content() {
+        let html = r#"<html><body><p><a href="https://x.test">hello world</a></p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        let mut alt: Option<String> = None;
+        for line in &para.lines {
+            for item in &line.items {
+                if let LineItem::Text(run) = item {
+                    if let Some(ls) = &run.link {
+                        alt = ls.alt_text.clone();
+                    }
+                }
+            }
+        }
+        assert_eq!(alt.as_deref(), Some("hello world"));
+    }
+
+    // ---- inline-block extraction tests ----
+
+    fn find_paragraph(root: &dyn Pageable) -> Option<&ParagraphPageable> {
+        if let Some(p) = root.as_any().downcast_ref::<ParagraphPageable>() {
+            return Some(p);
+        }
+        if let Some(block) = root.as_any().downcast_ref::<BlockPageable>() {
+            for PositionedChild { child, .. } in &block.children {
+                if let Some(p) = find_paragraph(child.as_ref()) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    fn build_tree(html: &str) -> Box<dyn Pageable> {
+        Engine::builder()
+            .build()
+            .build_pageable_for_testing_no_gcpm(html)
+    }
+
+    #[test]
+    fn inline_block_becomes_line_item_inline_box() {
+        let html = r#"<!DOCTYPE html><html><body><p>before <span style="display:inline-block;width:40px;height:20px;background:red"></span> after</p></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        let found = para
+            .lines
+            .iter()
+            .flat_map(|l| l.items.iter())
+            .find(|it| matches!(it, LineItem::InlineBox(_)));
+        assert!(
+            found.is_some(),
+            "inline-block should appear as LineItem::InlineBox"
+        );
+
+        // Value assertions: the extracted InlineBox must carry the CSS
+        // sizes (40px × 20px → 30pt × 15pt), be visible at full opacity,
+        // and sit at a non-zero x offset because it comes after "before ".
+        let ib = match found.unwrap() {
+            LineItem::InlineBox(ib) => ib,
+            _ => unreachable!(),
+        };
+        let expected_w = super::super::px_to_pt(40.0);
+        let expected_h = super::super::px_to_pt(20.0);
+        assert!(
+            (ib.width - expected_w).abs() < 0.5,
+            "width: expected ~{expected_w}pt, got {}pt",
+            ib.width
+        );
+        assert!(
+            (ib.height - expected_h).abs() < 0.5,
+            "height: expected ~{expected_h}pt, got {}pt",
+            ib.height
+        );
+        assert_eq!(ib.opacity, 1.0, "opacity should default to 1.0");
+        assert!(ib.visible, "InlineBox should be visible by default");
+        assert!(
+            ib.x_offset > 0.0,
+            "x_offset should be non-zero (text precedes the inline-block), got {}",
+            ib.x_offset
+        );
+    }
+
+    #[test]
+    fn inline_block_with_block_child_has_block_content() {
+        // Note: `<p>` cannot contain `<div>` in HTML5 (auto-closes). Use a
+        // `<div>` inline root so the parser keeps the block-child shape.
+        let html = r#"<!DOCTYPE html><html><body><div>text <span style="display:inline-block;width:40px;height:20px"><div>inner</div></span> more</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        // Locate the line containing the InlineBox and the box itself,
+        // so we can also assert the line-relative `computed_y` invariant.
+        let (line, ib) = para
+            .lines
+            .iter()
+            .find_map(|l| {
+                l.items.iter().find_map(|it| match it {
+                    LineItem::InlineBox(ib) => Some((l, ib)),
+                    _ => None,
+                })
+            })
+            .expect("InlineBox expected");
+        assert!(
+            ib.content
+                .as_any()
+                .downcast_ref::<BlockPageable>()
+                .is_some(),
+            "inline-block content should surface as BlockPageable"
+        );
+
+        // `computed_y` is line-relative. It may be negative for
+        // baseline-aligned inline-blocks: an empty inline-block has its
+        // baseline at its bottom edge (CSS 2.1 §10.8), so a box taller
+        // than the line's ascent legitimately extends above line-top.
+        // The invariant we can assert without rejecting that case is
+        // that the box overlaps the line box — bottom below line-top,
+        // top above line-bottom. That still catches "paragraph-relative
+        // leak" on a multi-line paragraph (y would push the box out of
+        // the first line entirely) and unconverted Parley values.
+        assert!(
+            ib.computed_y + ib.height > 0.0 && ib.computed_y < line.height,
+            "computed_y should place the box overlapping the line, got y={} h={} line.height={}",
+            ib.computed_y,
+            ib.height,
+            line.height
+        );
+    }
+
+    #[test]
+    fn inline_block_with_transform_preserves_wrapper() {
+        // Addresses the CodeRabbit "wrapper semantics drop" finding that
+        // prompted the `Box<dyn Pageable>` refactor of `InlineBoxContent`:
+        // an inline-block with a CSS `transform` is wrapped by `convert_node`
+        // in `TransformWrapperPageable`, and now that wrapper survives at
+        // the top of `ib.content` (previously it was peeled and the
+        // transform effect lost).
+        let html = r#"<!DOCTYPE html><html><body><div>text <span style="display:inline-block;transform:rotate(2deg);width:40px;height:20px;background:red">x</span> more</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+        let ib = para
+            .lines
+            .iter()
+            .flat_map(|l| l.items.iter())
+            .find_map(|it| match it {
+                LineItem::InlineBox(ib) => Some(ib),
+                _ => None,
+            })
+            .expect("inline-block should appear as LineItem::InlineBox");
+        assert!(
+            ib.content
+                .as_any()
+                .downcast_ref::<crate::pageable::TransformWrapperPageable>()
+                .is_some(),
+            "transform should survive as TransformWrapperPageable at the top \
+             of the inline-box content"
+        );
+    }
+
+    #[test]
+    fn inline_block_inner_id_is_registered_with_destination_registry() {
+        use crate::pageable::DestinationRegistry;
+        // A `<span id="target">` placed as an inline-block inside a paragraph
+        // must still register with the destination registry so that
+        // `href="#target"` links can resolve. Before Fix 2 to
+        // `ParagraphPageable::collect_ids`, the registry walk stopped at the
+        // paragraph and ignored nested inline-box content.
+        let html = r#"<!DOCTYPE html><html><body><div>before <span id="target" style="display:inline-block;width:40px;height:20px;background:red">x</span> after</div></body></html>"#;
+        let tree = build_tree(html);
+        let mut reg = DestinationRegistry::default();
+        tree.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
+        assert!(
+            reg.get("target").is_some(),
+            "inline-block inner id should be registered with DestinationRegistry"
+        );
+    }
+
+    #[test]
+    fn inline_block_baseline_aligns_with_surrounding_text() {
+        // An inline-block with text "boxed" inside, surrounded by "before" /
+        // "after" text. Per CSS 2.1 §10.8.1, the inline-block's baseline is
+        // the baseline of its last inner line, which should coincide with
+        // the baseline of the surrounding text line.
+        let html = r#"<!DOCTYPE html><html><body><div>before <span style="display:inline-block;padding:6px 10px;border:2px solid #333;background:#def">boxed</span> after</div></body></html>"#;
+        let tree = build_tree(html);
+        let para = find_paragraph(tree.as_ref()).expect("paragraph expected");
+
+        // Locate the inline-box and the line it sits on.
+        let (ib, line) = para
+            .lines
+            .iter()
+            .find_map(|l| {
+                l.items.iter().find_map(|it| match it {
+                    LineItem::InlineBox(ib) => Some((ib, l)),
+                    _ => None,
+                })
+            })
+            .expect("InlineBox expected");
+
+        // Compute the inner baseline of the inline-box (offset from its
+        // top edge).
+        let inner_baseline = crate::paragraph::inline_box_baseline_offset(ib.content.as_ref())
+            .expect("inline-box with visible text should have an inner baseline");
+
+        // Fixture places the inline-box on the first (and only) line, so
+        // `line_top = 0`. `ib.computed_y` is line-relative, and
+        // `line.baseline` is paragraph-relative; with `line_top = 0` they
+        // share the same origin, so we can compare directly.
+        let line_top = 0.0_f32;
+        let box_inner_baseline_abs = line_top + ib.computed_y + inner_baseline;
+        let expected = line.baseline;
+        let delta = (box_inner_baseline_abs - expected).abs();
+        assert!(
+            delta < 0.5,
+            "inline-block inner baseline {} should align with surrounding line baseline {} (delta={})",
+            box_inner_baseline_abs,
+            expected,
+            delta
+        );
+    }
+}
