@@ -32,6 +32,10 @@ mod list_marker;
 mod positioned;
 mod pseudo;
 mod replaced;
+// Local submodule shadows the Stylo extern crate `style` for any sibling that
+// uses `use super::*;`. Such siblings must reach Stylo via `::style::...`.
+// Code inside `convert/style/*.rs` is unaffected — `style::...` there resolves
+// to the extern crate via Rust 2018 absolute-path rules.
 mod style;
 mod table;
 
