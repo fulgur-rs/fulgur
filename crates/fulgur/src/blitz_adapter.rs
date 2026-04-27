@@ -32,6 +32,35 @@ use blitz_html::HtmlDocument;
 // が引数で受けるかは無関係——alias なので呼び出し元には透過。
 pub use blitz_dom::node::{ListItemLayoutPosition, Marker};
 pub use blitz_dom::{BaseDocument, Node, NodeData};
+
+/// `Marker` を空白追加なしの `String` に変換する。
+///
+/// `Marker::Char(c)` → `c.to_string()`、`Marker::String(s)` → `s.clone()`。
+/// `extract_marker_lines` と `find_marker_font` で使う。
+///
+/// Blitz 0.3 系で variant が増えた場合は adapter 内でハンドリングを追加すれば
+/// 呼び出し側 (convert/list_marker.rs) は無変更。
+pub fn marker_to_string(marker: &Marker) -> String {
+    match marker {
+        Marker::Char(c) => c.to_string(),
+        Marker::String(s) => s.clone(),
+    }
+}
+
+/// `Marker` を skrifa shape 入力用テキストに変換する（**非対称な空白付与**）。
+///
+/// - `Marker::Char(c)` → `format!("{c} ")`（**末尾空白あり**: Blitz の
+///   `build_inline_layout` が `format!("{char} ")` で生成するのと整合）
+/// - `Marker::String(s)` → `s.clone()`（空白なし: 通常 `"1. "` のように
+///   既に trailing space を含む形式が来る前提）
+///
+/// `shape_marker_with_skrifa` でのみ使用する。
+pub fn marker_skrifa_text(marker: &Marker) -> String {
+    match marker {
+        Marker::Char(c) => format!("{c} "),
+        Marker::String(s) => s.clone(),
+    }
+}
 use blitz_traits::net::NetProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use blitz_traits::net::Url;
@@ -3241,5 +3270,36 @@ li::marker { content: url("star.png"); }
             results.is_empty(),
             "empty text-content fallback must skip the outline entry, got: {results:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod marker_helper_tests {
+    use super::*;
+
+    #[test]
+    fn marker_to_string_char_returns_single_char_string() {
+        let m = Marker::Char('•');
+        assert_eq!(marker_to_string(&m), "•");
+    }
+
+    #[test]
+    fn marker_to_string_string_returns_owned_clone() {
+        let m = Marker::String("1.".to_string());
+        assert_eq!(marker_to_string(&m), "1.");
+    }
+
+    #[test]
+    fn marker_skrifa_text_char_appends_trailing_space() {
+        let m = Marker::Char('•');
+        assert_eq!(marker_skrifa_text(&m), "• ");
+    }
+
+    #[test]
+    fn marker_skrifa_text_string_keeps_as_is_no_trailing_space() {
+        // Marker::String は既に "1. " のように trailing space を含むケースを想定するため、
+        // helper では追加のスペースを付けない（list_marker.rs:336-339 と同等）。
+        let m = Marker::String("1.".to_string());
+        assert_eq!(marker_skrifa_text(&m), "1.");
     }
 }
