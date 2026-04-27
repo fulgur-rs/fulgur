@@ -884,4 +884,135 @@ mod tests {
             images
         );
     }
+
+    // ---- inline pseudo image inject tests ----
+
+    use super::super::tests::sample_png_arc;
+    use crate::image::ImageFormat;
+    use crate::paragraph::{
+        InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration,
+        VerticalAlign,
+    };
+
+    fn make_test_inline_image(w: f32, h: f32) -> InlineImage {
+        InlineImage {
+            data: sample_png_arc(),
+            format: ImageFormat::Png,
+            width: w,
+            height: h,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        }
+    }
+
+    fn make_test_text_run(x_offset: f32, advance: f32) -> ShapedGlyphRun {
+        ShapedGlyphRun {
+            font_data: sample_png_arc(), // dummy — not rendered in unit tests
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: advance / 12.0, // normalized by font_size
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".to_string(),
+            x_offset,
+            link: None,
+        }
+    }
+
+    #[test]
+    fn test_inject_before_shifts_existing_items() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(20.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, Some(img), None);
+
+        assert_eq!(lines[0].items.len(), 2);
+        // First item should be the image at x_offset 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01, "img x_offset={}", i.x_offset);
+            assert!((i.width - 20.0).abs() < 0.01);
+        } else {
+            panic!("expected Image at index 0");
+        }
+        // Second item (text) should be shifted by 20.0
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!(
+                (r.x_offset - 20.0).abs() < 0.01,
+                "text x_offset={}",
+                r.x_offset,
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_after_appends_at_end() {
+        let run = make_test_text_run(0.0, 60.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let img = make_test_inline_image(15.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, None, Some(img));
+
+        assert_eq!(lines[0].items.len(), 2);
+        // Last item should be the image
+        if let LineItem::Image(ref i) = lines[0].items[1] {
+            // Text run width = advance (normalized x_advance * font_size) = (60/12) * 12 = 60
+            assert!(
+                (i.x_offset - 60.0).abs() < 0.01,
+                "after img x_offset={}",
+                i.x_offset,
+            );
+        } else {
+            panic!("expected Image at index 1");
+        }
+    }
+
+    #[test]
+    fn test_inject_both_before_and_after() {
+        let run = make_test_text_run(0.0, 36.0);
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        let before = make_test_inline_image(10.0, 16.0);
+        let after = make_test_inline_image(10.0, 16.0);
+        super::inject_inline_pseudo_images(&mut lines, Some(before), Some(after));
+
+        assert_eq!(lines[0].items.len(), 3);
+        // Before image at 0
+        if let LineItem::Image(ref i) = lines[0].items[0] {
+            assert!((i.x_offset).abs() < 0.01);
+        }
+        // Text shifted by 10
+        if let LineItem::Text(ref r) = lines[0].items[1] {
+            assert!((r.x_offset - 10.0).abs() < 0.01);
+        }
+        // After image at 10 (before width) + 36 (text width) = 46
+        if let LineItem::Image(ref i) = lines[0].items[2] {
+            assert!(
+                (i.x_offset - 46.0).abs() < 0.01,
+                "after x_offset={}",
+                i.x_offset,
+            );
+        }
+    }
 }
