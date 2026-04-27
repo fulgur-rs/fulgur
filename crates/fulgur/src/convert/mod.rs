@@ -468,35 +468,49 @@ fn build_list_item_body(
         let before_inline = node
             .before
             .and_then(|id| doc.get_node(id))
-            .filter(|p| !is_block_pseudo(p))
+            .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
-                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                pseudo::build_inline_pseudo_image(
+                    p,
+                    content_box.width,
+                    content_box.height,
+                    ctx.assets,
+                )
             })
             .map(|mut img| {
-                attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
                 img
             });
         let after_inline = node
             .after
             .and_then(|id| doc.get_node(id))
-            .filter(|p| !is_block_pseudo(p))
+            .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
-                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                pseudo::build_inline_pseudo_image(
+                    p,
+                    content_box.width,
+                    content_box.height,
+                    ctx.assets,
+                )
             })
             .map(|mut img| {
-                attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
                 img
             });
 
         if let Some(mut paragraph) = paragraph_opt {
             if before_inline.is_some() || after_inline.is_some() {
-                inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                pseudo::inject_inline_pseudo_images(
+                    &mut paragraph.lines,
+                    before_inline,
+                    after_inline,
+                );
                 recalculate_paragraph_line_boxes(&mut paragraph.lines);
                 paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
             }
 
             let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
@@ -513,7 +527,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                 }];
-                let mut children = wrap_with_block_pseudo_images(
+                let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
@@ -540,7 +554,7 @@ fn build_list_item_body(
                 baseline: 0.0,
                 items: vec![],
             };
-            inject_inline_pseudo_images(
+            pseudo::inject_inline_pseudo_images(
                 std::slice::from_mut(&mut line),
                 before_inline,
                 after_inline,
@@ -551,7 +565,7 @@ fn build_list_item_body(
             paragraph.visible = visible;
 
             let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
@@ -566,7 +580,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                 }];
-                let mut children = wrap_with_block_pseudo_images(
+                let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
@@ -590,8 +604,14 @@ fn build_list_item_body(
             let layout_children_guard_1 = node.layout_children.borrow();
             let children: &[usize] = layout_children_guard_1.as_deref().unwrap_or(&node.children);
             let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-            let (positioned_children, _has_pseudo) =
-                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
+            let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
+                doc,
+                node,
+                ctx,
+                depth,
+                content_box,
+                positioned_children,
+            );
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
@@ -604,8 +624,14 @@ fn build_list_item_body(
         let layout_children_guard_2 = node.layout_children.borrow();
         let children: &[usize] = layout_children_guard_2.as_deref().unwrap_or(&node.children);
         let positioned_children = collect_positioned_children(doc, children, ctx, depth);
-        let (positioned_children, _has_pseudo) =
-            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
+        let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
+            doc,
+            node,
+            ctx,
+            depth,
+            content_box,
+            positioned_children,
+        );
         let mut block = BlockPageable::with_positioned_children(positioned_children)
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
@@ -814,7 +840,7 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let (positioned_children, _has_pseudo) = wrap_with_pseudo_content(
+                let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
                     doc,
                     node,
                     ctx,
@@ -883,8 +909,14 @@ fn convert_node_inner(
                 }
             }
 
-            let (positioned_children, _has_pseudo) =
-                wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
+            let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
+                doc,
+                node,
+                ctx,
+                depth,
+                content_box,
+                positioned_children,
+            );
             let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
@@ -940,23 +972,33 @@ fn convert_node_inner(
         let before_inline = node
             .before
             .and_then(|id| doc.get_node(id))
-            .filter(|p| !is_block_pseudo(p))
+            .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
-                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                pseudo::build_inline_pseudo_image(
+                    p,
+                    content_box.width,
+                    content_box.height,
+                    ctx.assets,
+                )
             })
             .map(|mut img| {
-                attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
                 img
             });
         let after_inline = node
             .after
             .and_then(|id| doc.get_node(id))
-            .filter(|p| !is_block_pseudo(p))
+            .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
-                build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
+                pseudo::build_inline_pseudo_image(
+                    p,
+                    content_box.width,
+                    content_box.height,
+                    ctx.assets,
+                )
             })
             .map(|mut img| {
-                attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
                 img
             });
 
@@ -968,7 +1010,11 @@ fn convert_node_inner(
             // ::before, so when list-style-image triggers marker injection we
             // must put it at index 0 last.
             if before_inline.is_some() || after_inline.is_some() {
-                inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
+                pseudo::inject_inline_pseudo_images(
+                    &mut paragraph.lines,
+                    before_inline,
+                    after_inline,
+                );
                 recalculate_paragraph_line_boxes(&mut paragraph.lines);
                 paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
             }
@@ -999,7 +1045,7 @@ fn convert_node_inner(
 
             // Then existing block pseudo check
             let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
@@ -1019,7 +1065,7 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let mut children = wrap_with_block_pseudo_images(
+                let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
@@ -1049,7 +1095,7 @@ fn convert_node_inner(
                 baseline: 0.0,
                 items: vec![],
             };
-            inject_inline_pseudo_images(
+            pseudo::inject_inline_pseudo_images(
                 std::slice::from_mut(&mut line),
                 before_inline,
                 after_inline,
@@ -1062,7 +1108,7 @@ fn convert_node_inner(
 
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
-                build_block_pseudo_images(doc, node, content_box, ctx.assets);
+                pseudo::build_block_pseudo_images(doc, node, content_box, ctx.assets);
             let abs_pseudos = build_absolute_pseudo_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
@@ -1077,7 +1123,7 @@ fn convert_node_inner(
                     x: child_x,
                     y: child_y,
                 }];
-                let mut children = wrap_with_block_pseudo_images(
+                let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
                     after_pseudo,
                     content_box,
@@ -1109,7 +1155,7 @@ fn convert_node_inner(
         // `<div class="icon"></div>` with `.icon::before { content: url(...) }`
         // should emit the image. Without this the pseudo is silently dropped.
         let (positioned_children, has_pseudo) =
-            wrap_with_pseudo_content(doc, node, ctx, depth, content_box, Vec::new());
+            pseudo::wrap_with_pseudo_content(doc, node, ctx, depth, content_box, Vec::new());
         let pagination = extract_pagination_from_column_css(ctx, node);
         if style.needs_block_wrapper()
             || has_pseudo
@@ -1137,7 +1183,7 @@ fn convert_node_inner(
     let style = extract_block_style(node, ctx.assets);
     let content_box = compute_content_box(node, &style);
     let (positioned_children, _has_pseudo) =
-        wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
+        pseudo::wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
 
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
@@ -1206,10 +1252,10 @@ fn collect_positioned_children(
         if ch == 0.0
             && cw == 0.0
             && child_effective_is_empty
-            && !node_has_block_pseudo_image(doc, child_node)
-            && !node_has_inline_pseudo_image(doc, child_node)
+            && !pseudo::node_has_block_pseudo_image(doc, child_node)
+            && !pseudo::node_has_inline_pseudo_image(doc, child_node)
             && !ctx.column_styles.contains_key(&child_id)
-            && !node_has_absolute_pseudo(doc, child_node)
+            && !pseudo::node_has_absolute_pseudo(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -1232,7 +1278,7 @@ fn collect_positioned_children(
         if ch == 0.0
             && cw == 0.0
             && !child_effective_is_empty
-            && !node_has_absolute_pseudo(doc, child_node)
+            && !pseudo::node_has_absolute_pseudo(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -1451,61 +1497,6 @@ fn make_image_pageable(
     img.opacity = opacity;
     img.visible = visible;
     img
-}
-
-/// Build an `ImagePageable` for a `::before`/`::after` pseudo-element node
-/// whose computed `content` resolves to a single `url(...)` image.
-///
-/// Returns `None` if:
-///
-/// - `assets` is `None`
-/// - the pseudo's computed content is not a single image URL
-/// - the URL cannot be resolved in the `AssetBundle` (silent skip — matches
-///   background-image handling in `extract_block_style`)
-/// - the image format is unsupported by `ImagePageable::detect_format`
-///
-/// `parent_content_width` / `parent_content_height` are the content-box
-/// dimensions of the pseudo's containing block, used to resolve percentage
-/// `width` / `height` on the pseudo itself. Passing the values separately
-/// (instead of a single `parent_size`) ensures `height: 50%` resolves
-/// against the parent height, not the parent width — which was the bug
-/// flagged by coderabbit in PR #70.
-fn build_pseudo_image(
-    pseudo_node: &Node,
-    parent_content_width: f32,
-    parent_content_height: f32,
-    assets: Option<&AssetBundle>,
-) -> Option<ImagePageable> {
-    let assets = assets?;
-
-    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
-    let asset_name = extract_asset_name(&raw_url);
-    let data = Arc::clone(assets.get_image(asset_name)?);
-    let format = ImagePageable::detect_format(&data)?;
-
-    // Read computed CSS width / height on the pseudo-element itself. Blitz
-    // does not propagate these to `final_layout` for pseudos that lack a text
-    // child, so we must go directly to stylo.
-    let styles = pseudo_node.primary_styles()?;
-    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
-    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
-
-    let (opacity, visible) = extract_opacity_visible(pseudo_node);
-    Some(make_image_pageable(
-        data, format, css_w, css_h, opacity, visible,
-    ))
-}
-
-/// True iff the pseudo-element has `display: block` outside.
-///
-/// Phase 1 only emits pseudo images for block-outside pseudos. Inline pseudos
-/// fall through to Phase 2 work (tracked separately) where the image has to
-/// be injected into `ParagraphPageable`'s line layout.
-fn is_block_pseudo(pseudo: &Node) -> bool {
-    use style::values::specified::box_::DisplayOutside;
-    pseudo
-        .primary_styles()
-        .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Block)
 }
 
 /// Whether `node`'s computed `position` is `absolute` or `fixed`.
@@ -1752,7 +1743,7 @@ fn build_absolute_pseudo_children(
                 // its own width/height. `effective_pseudo_size_px` consults
                 // the same fallback `build_absolute_pseudo_child` uses so
                 // both stay in sync.
-                let (pw, ph) = effective_pseudo_size_px(pseudo, node, Some(cb), ctx.assets);
+                let (pw, ph) = pseudo::effective_pseudo_size_px(pseudo, node, Some(cb), ctx.assets);
                 let left = resolve_inset_px(&pos.left, cb_w);
                 let right = resolve_inset_px(&pos.right, cb_w);
                 let top = resolve_inset_px(&pos.top, cb_h);
@@ -1890,136 +1881,7 @@ fn try_build_absolute_pseudo_image(
             px_to_pt(parent.final_layout.size.height),
         )
     };
-    build_pseudo_image(pseudo, basis_w_pt, basis_h_pt, assets)
-}
-
-/// Effective `(width, height)` of `pseudo` in CSS px, for inset resolution.
-///
-/// Taffy's `final_layout.size` is `(0, 0)` for textless `content:url(...)`
-/// pseudos (Blitz limitation documented in `build_pseudo_image`). Naively
-/// using it for `right` / `bottom` resolution makes the pseudo land at
-/// `cb_w - 0 - r = cb_w - r` instead of `cb_w - img_w - r`, shifting the
-/// pseudo by its own width.
-///
-/// We mirror the same shortcut `build_absolute_pseudo_child` takes for the
-/// child Pageable so the inset basis matches the rendered size. For pseudos
-/// where the shortcut does not apply (text content, visual style + content
-/// url, etc.), Taffy's `final_layout.size` is reliable and we use it
-/// directly.
-fn effective_pseudo_size_px(
-    pseudo: &Node,
-    parent: &Node,
-    cb: Option<AbsCb>,
-    assets: Option<&AssetBundle>,
-) -> (f32, f32) {
-    let layout = pseudo.final_layout.size;
-    if layout.width > 0.0 || layout.height > 0.0 {
-        return (layout.width, layout.height);
-    }
-    if let Some(img) = try_build_absolute_pseudo_image(pseudo, parent, cb, assets) {
-        return (pt_to_px(img.width), pt_to_px(img.height));
-    }
-    (layout.width, layout.height)
-}
-
-/// Orchestrator that combines block-pseudo-image wrapping with absolute
-/// pseudo positioning. Returns `(positioned_children, has_pseudo)` where
-/// `has_pseudo` is true if EITHER a block-pseudo image OR an
-/// absolutely-positioned pseudo contributed to the child vec.
-///
-/// Call sites previously did `build_block_pseudo_images` +
-/// `wrap_with_block_pseudo_images` back to back and computed `has_pseudo`
-/// from the pair of `Option<ImagePageable>`; that two-step is folded here
-/// so the absolute-pseudo path is picked up uniformly without duplicating
-/// boilerplate at every construction site.
-fn wrap_with_pseudo_content(
-    doc: &blitz_dom::BaseDocument,
-    node: &Node,
-    ctx: &mut ConvertContext<'_>,
-    depth: usize,
-    parent_cb: ContentBox,
-    children: Vec<PositionedChild>,
-) -> (Vec<PositionedChild>, bool) {
-    let (before_img, after_img) = build_block_pseudo_images(doc, node, parent_cb, ctx.assets);
-    let has_img_pseudo = before_img.is_some() || after_img.is_some();
-    let mut out = wrap_with_block_pseudo_images(before_img, after_img, parent_cb, children);
-    let abs = build_absolute_pseudo_children(doc, node, ctx, depth);
-    let has_any_pseudo = has_img_pseudo || !abs.is_empty();
-    out.extend(abs);
-    (out, has_any_pseudo)
-}
-
-/// Cheap probe: does `node` have at least one `::before` / `::after` pseudo
-/// slot whose computed `content` resolves to a block-display image URL?
-///
-/// Used by `collect_positioned_children` to opt zero-sized leaves (e.g.
-/// `<span class="icon"></span>`) out of its zero-size skip, so the leaf can
-/// reach `convert_node_inner`'s `children.is_empty()` branch and emit its
-/// pseudo image. Does not resolve the AssetBundle or decode the image — if
-/// the asset is missing, `build_block_pseudo_images` later silently skips,
-/// which is harmless but slightly wasteful; that trade-off is fine because
-/// zero-size elements with `content: url()` are rare.
-fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
-        if let Some(pseudo) = doc.get_node(pseudo_id)
-            && is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Returns `true` if `node` has a `::before` or `::after` pseudo-element that
-/// is an inline (non-block) pseudo with a `content: url(...)` image.
-///
-/// Used by the zero-size leaf filter to let elements like
-/// `<span class="icon"></span>` with `::before { content: url(...) }` through
-/// to `convert_node_inner` where the inline pseudo path can synthesize a
-/// `ParagraphPageable`.
-fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
-        if let Some(pseudo) = doc.get_node(pseudo_id)
-            && !is_block_pseudo(pseudo)
-            && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Returns `true` if `node` has a `::before` or `::after` pseudo-element
-/// whose computed `position` is `absolute` or `fixed`. Such a pseudo is
-/// emitted by `build_absolute_pseudo_children` when the node reaches
-/// `convert_node_inner`; we need `collect_positioned_children`'s zero-size
-/// leaf / container filter to NOT drop the node on the way there.
-///
-/// Without this probe, a pattern like
-///
-/// ```html
-/// <style>
-///   .marker { position: relative; width: 0; height: 0; }
-///   .marker::before {
-///     content: ""; position: absolute;
-///     width: 8px; height: 8px; background: red;
-///   }
-/// </style>
-/// <div class="marker"></div>
-/// ```
-///
-/// would be skipped by the zero-size-leaf branch of
-/// `collect_positioned_children` and the pseudo would never paint.
-fn node_has_absolute_pseudo(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
-        if let Some(pseudo) = doc.get_node(pseudo_id)
-            && is_absolutely_positioned(pseudo)
-        {
-            return true;
-        }
-    }
-    false
+    pseudo::build_pseudo_image(pseudo, basis_w_pt, basis_h_pt, assets)
 }
 
 /// Geometry of a parent's content-box, used by the pseudo-image helpers so
@@ -2054,191 +1916,6 @@ fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
         origin_y: top_inset,
         width: (border_w - left_inset - right_inset).max(0.0),
         height: (border_h - top_inset - bottom_inset).max(0.0),
-    }
-}
-
-/// Build `ImagePageable` instances for `::before` and `::after` pseudos on
-/// `parent` when their `content` resolves to a single `url(...)` image and
-/// their `display` is block-outside. Returns `(before, after)`, either of
-/// which may be `None`.
-///
-/// This is the single walk of the pseudo slots — callers use it both to
-/// decide whether to take the `BlockPageable` wrapping path in the
-/// inline-root branch and to materialize the children to inject.
-///
-/// Pseudo sizes resolve against the parent's content-box (`parent_cb.width`
-/// for `width`, `parent_cb.height` for `height`), so `width: 50%` and
-/// `height: 100%` behave per spec.
-///
-/// **Known limitation (fulgur-ai3 Phase 1):** Because Blitz assigns a
-/// zero-sized layout to text-less pseudo elements, the pseudo image does not
-/// push subsequent real children down. Authors can work around this by
-/// adding `margin-top` / `margin-bottom` on the first / last real child to
-/// reserve space. Properly pushing content will be handled in a follow-up
-/// issue that round-trips the synthetic pseudo size through Taffy.
-fn build_block_pseudo_images(
-    doc: &blitz_dom::BaseDocument,
-    parent: &Node,
-    parent_cb: ContentBox,
-    assets: Option<&AssetBundle>,
-) -> (Option<ImagePageable>, Option<ImagePageable>) {
-    if assets.is_none() {
-        return (None, None);
-    }
-    let load = |pseudo_id: Option<usize>| -> Option<ImagePageable> {
-        let pseudo = doc.get_node(pseudo_id?)?;
-        if !is_block_pseudo(pseudo) {
-            return None;
-        }
-        // Absolutely-positioned pseudos are handled by
-        // `build_absolute_pseudo_children`. CSS §9.7 blockifies them, so
-        // `is_block_pseudo` is true even with `position: absolute`, and
-        // without this guard a pseudo with both `content: url(...)` and
-        // `position: absolute` would be emitted twice (once as an
-        // `ImagePageable` here and once via the absolute path).
-        if is_absolutely_positioned(pseudo) {
-            return None;
-        }
-        build_pseudo_image(pseudo, parent_cb.width, parent_cb.height, assets)
-    };
-    (load(parent.before), load(parent.after))
-}
-
-/// Prepend / append block pseudo images around `children`. `::before` lands
-/// at the content-box top-left `(origin_x, origin_y)` and `::after` at the
-/// content-box bottom-left `(origin_x, origin_y + height)`.
-///
-/// This returns a new vec instead of mutating in place so `::before` does
-/// not trigger an O(n) shift on large child lists.
-fn wrap_with_block_pseudo_images(
-    before: Option<ImagePageable>,
-    after: Option<ImagePageable>,
-    parent_cb: ContentBox,
-    children: Vec<PositionedChild>,
-) -> Vec<PositionedChild> {
-    let mut out = Vec::with_capacity(children.len() + 2);
-    if let Some(img) = before {
-        out.push(PositionedChild {
-            child: Box::new(img),
-            x: parent_cb.origin_x,
-            y: parent_cb.origin_y,
-        });
-    }
-    out.extend(children);
-    if let Some(img) = after {
-        out.push(PositionedChild {
-            child: Box::new(img),
-            x: parent_cb.origin_x,
-            y: parent_cb.origin_y + parent_cb.height,
-        });
-    }
-    out
-}
-
-/// Build an `InlineImage` for a `::before`/`::after` pseudo-element whose
-/// computed `content` resolves to a single `url(...)` image and whose
-/// `display` is NOT block-outside (i.e. it is inline, the CSS default for
-/// pseudo-elements).
-///
-/// Returns `None` under the same conditions as `build_pseudo_image`.
-fn build_inline_pseudo_image(
-    pseudo_node: &Node,
-    parent_content_width: f32,
-    parent_content_height: f32,
-    assets: Option<&AssetBundle>,
-) -> Option<InlineImage> {
-    let assets = assets?;
-    let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
-    let asset_name = extract_asset_name(&raw_url);
-    let data = Arc::clone(assets.get_image(asset_name)?);
-    let format = ImagePageable::detect_format(&data)?;
-
-    let styles = pseudo_node.primary_styles()?;
-    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
-    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
-    let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
-    let (opacity, visible) = extract_opacity_visible(pseudo_node);
-    let vertical_align = crate::blitz_adapter::extract_vertical_align(pseudo_node);
-    Some(InlineImage {
-        data,
-        format,
-        width: w,
-        height: h,
-        x_offset: 0.0,
-        vertical_align,
-        opacity,
-        visible,
-        computed_y: 0.0,
-        link: None,
-    })
-}
-
-/// Populate the `link` field on an `InlineImage` built for a pseudo-element
-/// whose real originating node is `origin_node_id` (typically the pseudo's
-/// parent — the element that owns `::before` / `::after`). If that node is
-/// enclosed by an `<a href>` ancestor, attach a fresh `LinkSpan`.
-///
-/// We build a fresh `LinkSpan` here rather than sharing through the
-/// `extract_paragraph` cache because pseudo images are injected into the
-/// paragraph's line vector by callers, not emitted from within the glyph-run
-/// loop — they live on a separate control-flow path. Rect-dedup in a later
-/// task will be keyed on the LinkTarget+alt_text payload for pseudo images,
-/// not on Arc identity, and this is fine because most anchors contain at
-/// most one pseudo image.
-fn attach_link_to_inline_image(
-    img: &mut InlineImage,
-    doc: &blitz_dom::BaseDocument,
-    origin_node_id: usize,
-) {
-    if let Some((_, span)) = resolve_enclosing_anchor(doc, origin_node_id) {
-        img.link = Some(Arc::new(span));
-    }
-}
-
-/// Inject an inline pseudo image at the start (::before) and/or end (::after)
-/// of the shaped lines. The ::before image is prepended to the first line and
-/// all existing items are shifted right by its width. The ::after image is
-/// appended to the last line at the end of existing content.
-fn inject_inline_pseudo_images(
-    lines: &mut [ShapedLine],
-    before: Option<InlineImage>,
-    after: Option<InlineImage>,
-) {
-    if let Some(mut img) = before {
-        if let Some(first_line) = lines.first_mut() {
-            let shift = img.width;
-            for item in &mut first_line.items {
-                match item {
-                    LineItem::Text(run) => run.x_offset += shift,
-                    LineItem::Image(i) => i.x_offset += shift,
-                    LineItem::InlineBox(ib) => ib.x_offset += shift,
-                }
-            }
-            img.x_offset = 0.0;
-            first_line.items.insert(0, LineItem::Image(img));
-        }
-    }
-    if let Some(mut img) = after {
-        if let Some(last_line) = lines.last_mut() {
-            let last_end = last_line
-                .items
-                .iter()
-                .map(|item| match item {
-                    LineItem::Text(run) => {
-                        run.x_offset
-                            + run
-                                .glyphs
-                                .iter()
-                                .map(|g| g.x_advance * run.font_size)
-                                .sum::<f32>()
-                    }
-                    LineItem::Image(i) => i.x_offset + i.width,
-                    LineItem::InlineBox(ib) => ib.x_offset + ib.width,
-                })
-                .fold(0.0_f32, f32::max);
-            img.x_offset = last_end;
-            last_line.items.push(LineItem::Image(img));
-        }
     }
 }
 
@@ -2318,36 +1995,6 @@ fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
         line.baseline += new_y_acc;
         original_y_acc += original_height;
         new_y_acc += line.height;
-    }
-}
-
-/// Resolve a stylo `Size` (i.e. `width` / `height`) to an absolute `f32` in
-/// pt, or `None` if the size is `auto` or one of the intrinsic keywords.
-///
-/// Percentages resolve against `parent_width` — the containing block width.
-/// (Percentage heights on replaced elements technically reference the parent
-/// height, but Phase 1 only cares about block-display pseudo icons whose
-/// height is typically an explicit px value; using parent_width as the basis
-/// for both dimensions is a conscious simplification.)
-fn resolve_pseudo_size(size: &style::values::computed::Size, parent_width: f32) -> Option<f32> {
-    use style::values::computed::Length;
-    use style::values::generics::length::GenericSize;
-    match size {
-        GenericSize::LengthPercentage(lp) => {
-            // Stylo resolves length-percentages in CSS px space: absolute
-            // lengths (`48px`) come back as raw px, while percentages scale
-            // against whatever basis we hand in. Feeding it a CSS px basis
-            // and converting the result to pt keeps both branches consistent
-            // with the docstring's "f32 in pt" contract. The caller's basis
-            // is already pt (from Pageable tree geometry), so round-trip
-            // via pt → px → resolve → pt.
-            let basis_px = pt_to_px(parent_width);
-            Some(px_to_pt(lp.0.resolve(Length::new(basis_px)).px()))
-        }
-        // auto / min-content / max-content / fit-content / stretch etc. are
-        // all treated as "not specified" here. The `make_image_pageable`
-        // helper will fall back to intrinsic dimensions / aspect-ratio.
-        _ => None,
     }
 }
 
@@ -3790,7 +3437,7 @@ mod tests {
         let pseudo = doc.get_node(before_id).unwrap();
         let (parent_w, parent_h) = size_in_pt(doc.get_node(h1_id).unwrap().final_layout.size);
 
-        let img = build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle))
+        let img = super::pseudo::build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle))
             .expect("build_pseudo_image should return Some for content: url()");
         // 48 CSS px × 0.75 = 36 pt
         assert_eq!(img.width, 36.0);
@@ -3824,7 +3471,8 @@ mod tests {
         let pseudo = doc.get_node(before_id).unwrap();
         let (parent_w, parent_h) = size_in_pt(doc.get_node(h1_id).unwrap().final_layout.size);
 
-        let img = build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle)).unwrap();
+        let img =
+            super::pseudo::build_pseudo_image(pseudo, parent_w, parent_h, Some(&bundle)).unwrap();
         assert_eq!(img.width, 15.0);
         assert_eq!(img.height, 15.0);
     }
@@ -3841,7 +3489,7 @@ mod tests {
         let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
         let pseudo = doc.get_node(before_id).unwrap();
         assert!(
-            build_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle)).is_none(),
+            super::pseudo::build_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle)).is_none(),
             "missing asset should silently return None"
         );
     }
@@ -3856,7 +3504,7 @@ mod tests {
         let h1_id = find_h1(&doc);
         let before_id = doc.get_node(h1_id).unwrap().before.unwrap();
         let pseudo = doc.get_node(before_id).unwrap();
-        assert!(build_pseudo_image(pseudo, 800.0, 600.0, None).is_none());
+        assert!(super::pseudo::build_pseudo_image(pseudo, 800.0, 600.0, None).is_none());
     }
 
     #[test]
@@ -3888,7 +3536,7 @@ mod tests {
 
         // Explicitly call with distinguishable width (400) and height (200)
         // so we can verify which basis is used for `height: 50%`.
-        let img = build_pseudo_image(pseudo, 400.0, 200.0, Some(&bundle)).unwrap();
+        let img = super::pseudo::build_pseudo_image(pseudo, 400.0, 200.0, Some(&bundle)).unwrap();
         assert_eq!(
             img.height, 100.0,
             "height: 50% should resolve against parent_content_height (200.0)"
@@ -4226,7 +3874,7 @@ mod tests {
             items: vec![LineItem::Text(run)],
         }];
         let img = make_test_inline_image(20.0, 16.0);
-        inject_inline_pseudo_images(&mut lines, Some(img), None);
+        super::pseudo::inject_inline_pseudo_images(&mut lines, Some(img), None);
 
         assert_eq!(lines[0].items.len(), 2);
         // First item should be the image at x_offset 0
@@ -4257,7 +3905,7 @@ mod tests {
             items: vec![LineItem::Text(run)],
         }];
         let img = make_test_inline_image(15.0, 16.0);
-        inject_inline_pseudo_images(&mut lines, None, Some(img));
+        super::pseudo::inject_inline_pseudo_images(&mut lines, None, Some(img));
 
         assert_eq!(lines[0].items.len(), 2);
         // Last item should be the image
@@ -4283,7 +3931,7 @@ mod tests {
         }];
         let before = make_test_inline_image(10.0, 16.0);
         let after = make_test_inline_image(10.0, 16.0);
-        inject_inline_pseudo_images(&mut lines, Some(before), Some(after));
+        super::pseudo::inject_inline_pseudo_images(&mut lines, Some(before), Some(after));
 
         assert_eq!(lines[0].items.len(), 3);
         // Before image at 0
@@ -4329,11 +3977,11 @@ mod tests {
 
         // Inline pseudos have display: inline by default (not block)
         assert!(
-            !is_block_pseudo(pseudo),
+            !super::pseudo::is_block_pseudo(pseudo),
             "pseudo should be inline by default"
         );
 
-        let img = build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        let img = super::pseudo::build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
         assert!(img.is_some(), "should return Some for inline pseudo");
         let img = img.unwrap();
         // 24 CSS px × 0.75 = 18 pt
@@ -4365,7 +4013,7 @@ mod tests {
         let pseudo = doc.get_node(before_id).unwrap();
 
         assert!(
-            is_block_pseudo(pseudo),
+            super::pseudo::is_block_pseudo(pseudo),
             "pseudo with display:block should be block"
         );
 
@@ -4374,7 +4022,7 @@ mod tests {
         // itself still returns Some — the filtering is done at the call site)
         // Here we verify the function works, the call-site filter is tested
         // by the integration test above.
-        let img = build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
+        let img = super::pseudo::build_inline_pseudo_image(pseudo, 800.0, 600.0, Some(&bundle));
         // build_inline_pseudo_image doesn't check display, so this will be Some.
         // The call site filters with !is_block_pseudo.
         assert!(
