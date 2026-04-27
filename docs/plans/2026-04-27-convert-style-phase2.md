@@ -83,13 +83,14 @@ pub(super) fn extract_block_style(
 
 ## Execution discipline
 
-Each task follows the same five steps:
+Each task follows the same six steps:
 
 1. **Move:** create / edit the target files exactly as described.
 2. **Build:** `cargo build -p fulgur` — must compile with no warnings introduced by this task.
 3. **Lib tests:** `cargo test -p fulgur --lib` — must pass.
-4. **VRT byte-identical:** `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt` — must pass without `FULGUR_VRT_UPDATE=1`. *If this fails, stop and diagnose before moving on — do not continue stacking commits.*
-5. **Commit:** one commit per task. Conventional Commits style, `refactor(convert):` scope.
+4. **Crate-local clippy:** `cargo clippy -p fulgur --lib --all-targets -- -D warnings` — must be clean. (Workspace-wide clippy stays in Task 8; the per-task crate-local check is fast — ~3s — and prevents lint debt accumulating across Tasks 4–6 from per-task fixes-on-top.)
+5. **VRT byte-identical:** `FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt` — must pass without `FULGUR_VRT_UPDATE=1`. *If this fails, stop and diagnose before moving on — do not continue stacking commits.*
+6. **Commit:** one commit per task. Conventional Commits style, `refactor(convert):` scope.
 
 `cargo clippy --workspace -- -D warnings` and `cargo fmt --check` run **once** at the end (Task 8) — not per task — to keep iteration tight.
 

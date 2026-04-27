@@ -12,7 +12,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
 }
 
 /// Map a Stylo computed `Overflow` keyword to fulgur's axis-independent enum.
-pub(super) fn map(o: style::values::computed::Overflow) -> Overflow {
+fn map(o: style::values::computed::Overflow) -> Overflow {
     use style::values::computed::Overflow as S;
     match o {
         S::Visible => Overflow::Visible,

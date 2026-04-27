@@ -18,10 +18,10 @@ mod overflow;
 /// `background`). Keeping the four references on a single struct avoids
 /// long parameter lists as more helpers are extracted.
 pub(super) struct StyleContext<'a> {
-    pub styles: &'a style::properties::ComputedValues,
-    pub current_color: &'a style::color::AbsoluteColor,
-    pub layout: &'a taffy::Layout,
-    pub assets: Option<&'a AssetBundle>,
+    pub(super) styles: &'a style::properties::ComputedValues,
+    pub(super) current_color: &'a style::color::AbsoluteColor,
+    pub(super) layout: &'a taffy::Layout,
+    pub(super) assets: Option<&'a AssetBundle>,
 }
 
 /// Extract visual style (background, borders, padding, background-image) from a node.
@@ -34,7 +34,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
     if let Some(styles) = node.primary_styles() {
         let current_color = styles.clone_color();
         let ctx = StyleContext {
-            styles: &*styles,
+            styles: &styles,
             current_color: &current_color,
             layout: &layout,
             assets,
