@@ -26,6 +26,15 @@ use std::sync::Arc;
 
 use crate::MAX_DOM_DEPTH;
 
+mod block;
+mod inline_root;
+mod list_item;
+mod list_marker;
+mod positioned;
+mod pseudo;
+mod replaced;
+mod table;
+
 /// CSS px → PDF pt conversion factor (1 CSS px = 0.75 PDF pt).
 ///
 /// Taffy lays out in CSS px (because we feed Blitz a CSS px viewport), but
