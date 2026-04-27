@@ -31,6 +31,22 @@ use parley::FontContext;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Re-exports of the Blitz network trait surface used by [`crate::net`].
+///
+/// All `blitz_traits::net::*` and `blitz_dom::net::*` references in fulgur
+/// flow through this module so that upstream Blitz API churn (e.g. the
+/// `NetProvider<Resource>` generic removal in blitz-dom 0.3) is contained
+/// to `blitz_adapter.rs` — the same isolation rule documented in the file
+/// header. `crate::net::FulgurNetProvider`'s `impl NetProvider` block still
+/// has to be touched when the trait shape changes, but downstream call sites
+/// and tests no longer name the upstream crates directly.
+pub mod net {
+    pub use blitz_dom::net::Resource;
+    pub use blitz_traits::net::{
+        BoxedHandler, Bytes, NetHandler, NetProvider, Request, SharedCallback, Url,
+    };
+}
+
 /// Parse HTML and return a fully resolved document (styles + layout computed).
 ///
 /// We pass the content width as the viewport width so Taffy wraps text
