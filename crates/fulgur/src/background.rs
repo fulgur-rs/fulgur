@@ -558,11 +558,15 @@ fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
             i += 1;
             continue;
         }
-        // hint: 前後の color stop を取得 (型不変条件で必ず存在)
-        debug_assert!(
-            i > 0 && i + 1 < stops.len(),
-            "hint must be flanked by color stops"
-        );
+        // hint: 前後の color stop を取得。convert 段の validation で
+        // leading/trailing hint は drop されるため通常到達不能だが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で不正な
+        // 入力が来た場合に release build で usize underflow / OOB panic
+        // しないよう defensively skip する。
+        if i == 0 || i + 1 >= stops.len() {
+            i += 1;
+            continue;
+        }
         let a = stops[i - 1];
         let b = stops[i + 1];
         let span = b.pos - a.pos;
@@ -691,10 +695,9 @@ fn resolve_gradient_stops(
         })
         .collect();
 
-    // CSS Images 3 §3.5.3 interpolation hint expansion.
-    // 現状 convert 側は hint を含む layer を drop するため、ここに到達する
-    // stop 列に `is_hint=true` は含まれず実質 passthrough。Task 4 で convert を
-    // 切り替えると end-to-end で動く。
+    // CSS Images 3 §3.5.3 interpolation hint expansion. `is_hint=true` の
+    // marker stop を 8 個の中間 stop (累乗カーブ) に展開する。hint を含まない
+    // 入力は素通り。
     let after_hints: Vec<(f32, [u8; 4])> = expand_interpolation_hints(resolved);
 
     // 周期展開: repeating-* gradient は first/last stop 間の差を周期に取り、
@@ -3472,6 +3475,25 @@ mod expand_interpolation_hints_tests {
         ];
         let out = expand_interpolation_hints(input);
         assert_eq!(out.len(), 3 + 8 + 8, "3 endpoints + 8 + 8 samples");
+    }
+
+    #[test]
+    fn ill_formed_leading_or_trailing_hint_is_dropped_safely() {
+        // convert 段が validation を通常通り行えば到達しないが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で
+        // leading / trailing hint を持つ入力が来た場合に panic せず
+        // hint を silently drop して残りの color stop だけ返す。
+        let leading = vec![h(0.5), s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(leading);
+        assert_eq!(out.len(), 2, "leading hint dropped, two color stops remain");
+
+        let trailing = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255), h(0.5)];
+        let out = expand_interpolation_hints(trailing);
+        assert_eq!(
+            out.len(),
+            2,
+            "trailing hint dropped, two color stops remain"
+        );
     }
 }
 
