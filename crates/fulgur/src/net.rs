@@ -28,10 +28,11 @@
 //! cleaned CSS still contains every other declaration, so cascade,
 //! specificity and `@import` resolution remain delegated to stylo.
 
+use crate::blitz_adapter::net::{
+    BoxedHandler, Bytes, NetProvider, Request, Resource, SharedCallback,
+};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::parser::parse_gcpm;
-use blitz_dom::net::Resource;
-use blitz_traits::net::{BoxedHandler, Bytes, NetProvider, Request, SharedCallback};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -186,7 +187,7 @@ impl NetProvider<Resource> for FulgurNetProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blitz_traits::net::{NetHandler, Url};
+    use crate::blitz_adapter::net::{NetHandler, Url};
     use std::fs;
 
     fn make_request(url: &str) -> Request {
@@ -204,8 +205,8 @@ mod tests {
         fn bytes(
             self: Box<Self>,
             _doc_id: usize,
-            bytes: blitz_traits::net::Bytes,
-            _callback: blitz_traits::net::SharedCallback<Resource>,
+            bytes: Bytes,
+            _callback: SharedCallback<Resource>,
         ) {
             *self.bytes.lock().unwrap() = Some(bytes.to_vec());
         }
