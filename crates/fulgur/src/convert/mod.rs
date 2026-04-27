@@ -943,6 +943,7 @@ fn convert_node_inner(
         }
     }
 
+    // Replaced-element dispatch: <img>, <svg>, content: url() — see replaced::try_convert.
     if let Some(p) = replaced::try_convert(doc, node_id, ctx) {
         return p;
     }

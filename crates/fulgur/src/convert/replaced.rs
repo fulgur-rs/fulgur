@@ -16,13 +16,20 @@ pub(super) fn try_convert(
             if let Some(img) = convert_image(ctx, node, ctx.assets) {
                 return Some(img);
             }
+            // Fall through to generic handling below to preserve Taffy-computed dimensions
         }
         if tag == "svg" {
             if let Some(svg) = convert_svg(ctx, node, ctx.assets) {
                 return Some(svg);
             }
+            // Fall through — e.g., ImageData::None (parse failure upstream)
         }
     }
+    // CSS `content: url(...)` on a normal element replaces its children with
+    // the image (CSS Content L3 §2). Blitz 0.2.4 does not materialise this
+    // in layout, so we read the computed value and build an ImagePageable.
+    // Early return skips pseudo-element processing (spec-correct: replaced
+    // elements do not generate ::before/::after).
     convert_content_url(ctx, node, ctx.assets)
 }
 
