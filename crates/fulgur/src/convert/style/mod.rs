@@ -9,6 +9,20 @@ use blitz_dom::Node;
 use std::sync::Arc;
 
 mod box_metrics;
+mod overflow;
+
+/// Bundle of references threaded through the per-property style extractors.
+///
+/// `extract_block_style` constructs this once per call and forwards it to
+/// helper modules (currently `overflow`; later `border`, `shadow`,
+/// `background`). Keeping the four references on a single struct avoids
+/// long parameter lists as more helpers are extracted.
+pub(super) struct StyleContext<'a> {
+    pub styles: &'a style::properties::ComputedValues,
+    pub current_color: &'a style::color::AbsoluteColor,
+    pub layout: &'a taffy::Layout,
+    pub assets: Option<&'a AssetBundle>,
+}
 
 /// Extract visual style (background, borders, padding, background-image) from a node.
 pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle {
@@ -19,24 +33,30 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
     // Extract colors from computed styles
     if let Some(styles) = node.primary_styles() {
         let current_color = styles.clone_color();
+        let ctx = StyleContext {
+            styles: &*styles,
+            current_color: &current_color,
+            layout: &layout,
+            assets,
+        };
 
         // Background color — access the computed value directly
-        let bg = styles.clone_background_color();
-        let bg_rgba = absolute_to_rgba(bg.resolve_to_absolute(&current_color));
+        let bg = ctx.styles.clone_background_color();
+        let bg_rgba = absolute_to_rgba(bg.resolve_to_absolute(ctx.current_color));
         if bg_rgba[3] > 0 {
             style.background_color = Some(bg_rgba);
         }
 
         // Border color (use top border color for all sides for simplicity)
-        let bc = styles.clone_border_top_color();
-        style.border_color = absolute_to_rgba(bc.resolve_to_absolute(&current_color));
+        let bc = ctx.styles.clone_border_top_color();
+        style.border_color = absolute_to_rgba(bc.resolve_to_absolute(ctx.current_color));
 
         // Border radii. Stylo evaluates length-percentage values in CSS px
         // space, so we feed it the CSS-px border-box basis and convert the
         // returned radius to pt. border_radii is consumed downstream alongside
         // pt-space widths/heights (see `compute_padding_box_inner_radii`).
-        let width = layout.size.width;
-        let height = layout.size.height;
+        let width = ctx.layout.size.width;
+        let height = ctx.layout.size.height;
         let resolve_radius =
             |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
              basis: f32|
@@ -47,10 +67,10 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
                 )
             };
 
-        let tl = styles.clone_border_top_left_radius();
-        let tr = styles.clone_border_top_right_radius();
-        let br = styles.clone_border_bottom_right_radius();
-        let bl = styles.clone_border_bottom_left_radius();
+        let tl = ctx.styles.clone_border_top_left_radius();
+        let tr = ctx.styles.clone_border_top_right_radius();
+        let br = ctx.styles.clone_border_bottom_right_radius();
+        let bl = ctx.styles.clone_border_bottom_left_radius();
 
         style.border_radii = [
             [
@@ -72,7 +92,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
         ];
 
         // Box shadows
-        let shadow_list = styles.clone_box_shadow();
+        let shadow_list = ctx.styles.clone_box_shadow();
         for shadow in shadow_list.0.iter() {
             if shadow.inset {
                 log::warn!("box-shadow: inset is not yet supported; skipping");
@@ -86,7 +106,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
                     blur_px
                 );
             }
-            let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(&current_color));
+            let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(ctx.current_color));
             if rgba[3] == 0 {
                 continue; // fully transparent — skip
             }
@@ -116,39 +136,31 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
             }
         };
         style.border_styles = [
-            convert_border_style(styles.clone_border_top_style()),
-            convert_border_style(styles.clone_border_right_style()),
-            convert_border_style(styles.clone_border_bottom_style()),
-            convert_border_style(styles.clone_border_left_style()),
+            convert_border_style(ctx.styles.clone_border_top_style()),
+            convert_border_style(ctx.styles.clone_border_right_style()),
+            convert_border_style(ctx.styles.clone_border_bottom_style()),
+            convert_border_style(ctx.styles.clone_border_left_style()),
         ];
 
         // Overflow (CSS3 axis-independent interpretation)
         // PDF has no scroll concept: hidden/clip/scroll/auto all collapse to Clip.
-        let map_overflow = |o: style::values::computed::Overflow| -> crate::pageable::Overflow {
-            use style::values::computed::Overflow as S;
-            match o {
-                S::Visible => crate::pageable::Overflow::Visible,
-                S::Hidden | S::Clip | S::Scroll | S::Auto => crate::pageable::Overflow::Clip,
-            }
-        };
-        style.overflow_x = map_overflow(styles.clone_overflow_x());
-        style.overflow_y = map_overflow(styles.clone_overflow_y());
+        overflow::apply_to(&mut style, &ctx);
 
         // Background image layers. Skip the six secondary `clone_*` calls
         // (sizes/positions/repeats/origins/clips) if no layer is actually
         // populated — the vast majority of DOM nodes have only `Image::None`.
-        let bg_images = styles.clone_background_image();
+        let bg_images = ctx.styles.clone_background_image();
         let has_real_bg_image = bg_images
             .0
             .iter()
             .any(|i| !matches!(i, style::values::computed::image::Image::None));
         if has_real_bg_image {
-            let bg_sizes = styles.clone_background_size();
-            let bg_pos_x = styles.clone_background_position_x();
-            let bg_pos_y = styles.clone_background_position_y();
-            let bg_repeats = styles.clone_background_repeat();
-            let bg_origins = styles.clone_background_origin();
-            let bg_clips = styles.clone_background_clip();
+            let bg_sizes = ctx.styles.clone_background_size();
+            let bg_pos_x = ctx.styles.clone_background_position_x();
+            let bg_pos_y = ctx.styles.clone_background_position_y();
+            let bg_repeats = ctx.styles.clone_background_repeat();
+            let bg_origins = ctx.styles.clone_background_origin();
+            let bg_clips = ctx.styles.clone_background_clip();
 
             for (i, image) in bg_images.0.iter().enumerate() {
                 use style::values::computed::image::Image;
@@ -156,7 +168,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
                 // Resolve `content` + intrinsic size per image kind. URL images
                 // require an `AssetBundle`; gradients are self-contained.
                 let resolved: Option<(BgImageContent, f32, f32)> = match image {
-                    Image::Url(url) => assets.and_then(|a| {
+                    Image::Url(url) => ctx.assets.and_then(|a| {
                         let raw_src = match url {
                             style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
                             style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
@@ -206,9 +218,15 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
                         use style::values::computed::image::Gradient;
                         // g: &Box<Gradient> なので as_ref() で &Gradient を取って match。
                         match g.as_ref() {
-                            Gradient::Linear { .. } => resolve_linear_gradient(g, &current_color),
-                            Gradient::Radial { .. } => resolve_radial_gradient(g, &current_color),
-                            Gradient::Conic { .. } => resolve_conic_gradient(g, &current_color),
+                            Gradient::Linear { .. } => {
+                                resolve_linear_gradient(g, ctx.current_color)
+                            }
+                            Gradient::Radial { .. } => {
+                                resolve_radial_gradient(g, ctx.current_color)
+                            }
+                            Gradient::Conic { .. } => {
+                                resolve_conic_gradient(g, ctx.current_color)
+                            }
                         }
                     }
                     _ => None,
