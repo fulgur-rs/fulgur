@@ -116,3 +116,19 @@ margin_pt = 0.0
 [[fixture]]
 path = "paint/repeating-radial-gradient.html"
 margin_pt = 0.0
+
+[[fixture]]
+path = "paint/linear-gradient-hint-30pct.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/linear-gradient-hint-70pct.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/radial-gradient-hint.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "paint/repeating-linear-gradient-hint.html"
+margin_pt = 0.0
