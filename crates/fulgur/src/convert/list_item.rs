@@ -1,5 +1,6 @@
 use super::*;
 use super::{inline_root, list_marker, positioned, pseudo};
+use crate::blitz_adapter::ListItemLayoutPosition;
 
 /// Dispatcher entry for list-item nodes. Tries three branches in this order:
 ///
@@ -15,7 +16,7 @@ use super::{inline_root, list_marker, positioned, pseudo};
 ///
 /// MUST run before table/replaced/inline_root/block dispatch (see plan).
 pub(super) fn try_convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,
@@ -37,12 +38,10 @@ pub(super) fn try_convert(
     // upstream Blitz behavior — Blitz's inline-layout injection only fires for
     // inline-root elements.
     if let Some(elem_data) = node.element_data()
-        && elem_data.list_item_data.as_ref().is_some_and(|d| {
-            matches!(
-                d.position,
-                blitz_dom::node::ListItemLayoutPosition::Outside(_)
-            )
-        })
+        && elem_data
+            .list_item_data
+            .as_ref()
+            .is_some_and(|d| matches!(d.position, ListItemLayoutPosition::Outside(_)))
     {
         let (marker_lines, marker_width, marker_line_height) =
             list_marker::extract_marker_lines(doc, node, ctx);
@@ -150,10 +149,7 @@ pub(super) fn try_convert(
     // skrifa and inject it into the first child ParagraphPageable.
     if let Some(elem_data) = node.element_data()
         && let Some(list_data) = &elem_data.list_item_data
-        && matches!(
-            list_data.position,
-            blitz_dom::node::ListItemLayoutPosition::Inside
-        )
+        && matches!(list_data.position, ListItemLayoutPosition::Inside)
         && !node.flags.is_inline_root()
     {
         let marker = &list_data.marker;
@@ -317,7 +313,7 @@ pub(super) fn try_convert(
 /// pseudo-only items, and non-inline-root block child collection.
 #[allow(clippy::too_many_arguments)]
 fn build_list_item_body(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     style: BlockStyle,
     visible: bool,

@@ -1,5 +1,6 @@
 use super::inline_root;
 use super::*;
+use crate::blitz_adapter::{ListItemLayoutPosition, Marker};
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
@@ -109,10 +110,7 @@ pub(super) fn resolve_inside_image_marker(
 
     let elem_data = node.element_data()?;
     let list_data = elem_data.list_item_data.as_ref()?;
-    if !matches!(
-        list_data.position,
-        blitz_dom::node::ListItemLayoutPosition::Inside
-    ) {
+    if !matches!(list_data.position, ListItemLayoutPosition::Inside) {
         return None;
     }
     if first_line_height <= 0.0 {
@@ -143,7 +141,7 @@ pub(super) fn resolve_inside_image_marker(
 
 /// Extract shaped lines from a list marker's Parley layout.
 pub(super) fn extract_marker_lines(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
 ) -> (Vec<ShapedLine>, f32, f32) {
@@ -156,16 +154,16 @@ pub(super) fn extract_marker_lines(
         None => return (Vec::new(), 0.0, 0.0),
     };
     let parley_layout = match &list_item_data.position {
-        blitz_dom::node::ListItemLayoutPosition::Outside(layout) => layout,
-        blitz_dom::node::ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
+        ListItemLayoutPosition::Outside(layout) => layout,
+        ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
     };
 
     let marker_text = match &list_item_data.marker {
-        blitz_dom::node::Marker::Char(c) => {
+        Marker::Char(c) => {
             let mut buf = [0u8; 4];
             c.encode_utf8(&mut buf).to_string()
         }
-        blitz_dom::node::Marker::String(s) => s.clone(),
+        Marker::String(s) => s.clone(),
     };
 
     let mut shaped_lines = Vec::new();
@@ -246,17 +244,17 @@ pub(super) fn extract_marker_lines(
 /// Returns `None` only when no font source is available at all (empty `<li>`
 /// without asset fonts).
 pub(super) fn find_marker_font(
-    marker: &blitz_dom::node::Marker,
+    marker: &Marker,
     assets: Option<&AssetBundle>,
     children: &[PositionedChild],
 ) -> Option<(Arc<Vec<u8>>, u32)> {
     let marker_text = match marker {
-        blitz_dom::node::Marker::Char(c) => {
+        Marker::Char(c) => {
             let mut s = String::new();
             s.push(*c);
             s
         }
-        blitz_dom::node::Marker::String(s) => s.clone(),
+        Marker::String(s) => s.clone(),
     };
     let check_chars: Vec<char> = marker_text.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -327,15 +325,15 @@ pub(super) fn find_marker_font(
 /// `x_advance` values are normalized by `font_size` following fulgur convention
 /// (see `extract_marker_lines`).
 pub(super) fn shape_marker_with_skrifa(
-    marker: &blitz_dom::node::Marker,
+    marker: &Marker,
     font_data: &Arc<Vec<u8>>,
     font_index: u32,
     font_size: f32,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
     let text = match marker {
-        blitz_dom::node::Marker::Char(c) => format!("{c} "),
-        blitz_dom::node::Marker::String(s) => s.clone(),
+        Marker::Char(c) => format!("{c} "),
+        Marker::String(s) => s.clone(),
     };
 
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
