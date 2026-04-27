@@ -23,6 +23,15 @@
 use blitz_dom::DocumentConfig;
 use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
+
+// Type re-exports for adapter isolation (fulgur-x92a)
+//
+// `blitz_dom` 型は alias として再公開する。call site が `use crate::blitz_adapter::Node`
+// と書けば、Blitz 内部での move/rename を adapter 内 1 箇所で吸収できる。
+// 同じ alias を adapter 自身の public API（例: `extract_content_image_url(node: &blitz_dom::Node)`）
+// が引数で受けるかは無関係——alias なので呼び出し元には透過。
+pub use blitz_dom::node::{ListItemLayoutPosition, Marker};
+pub use blitz_dom::{BaseDocument, Node, NodeData};
 use blitz_traits::net::NetProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use blitz_traits::net::Url;
