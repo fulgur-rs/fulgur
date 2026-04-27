@@ -236,3 +236,182 @@ fn convert_svg(
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{collect_images, sample_png_arc};
+    use super::super::{ConvertContext, dom_to_pageable};
+    use crate::asset::AssetBundle;
+    use crate::image::ImageFormat;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_make_image_pageable_both_dimensions() {
+        let img = super::make_image_pageable(
+            sample_png_arc(),
+            ImageFormat::Png,
+            Some(100.0),
+            Some(50.0),
+            1.0,
+            true,
+        );
+        assert_eq!(img.width, 100.0);
+        assert_eq!(img.height, 50.0);
+        assert_eq!(img.opacity, 1.0);
+        assert!(img.visible);
+    }
+
+    #[test]
+    fn test_make_image_pageable_width_only_uses_intrinsic_aspect() {
+        // Intrinsic 1x1 → aspect 1.0 → width=40 produces height=40.
+        let img = super::make_image_pageable(
+            sample_png_arc(),
+            ImageFormat::Png,
+            Some(40.0),
+            None,
+            1.0,
+            true,
+        );
+        assert_eq!(img.width, 40.0);
+        assert_eq!(img.height, 40.0);
+    }
+
+    #[test]
+    fn test_make_image_pageable_height_only_uses_intrinsic_aspect() {
+        let img = super::make_image_pageable(
+            sample_png_arc(),
+            ImageFormat::Png,
+            None,
+            Some(25.0),
+            1.0,
+            true,
+        );
+        assert_eq!(img.width, 25.0);
+        assert_eq!(img.height, 25.0);
+    }
+
+    #[test]
+    fn test_make_image_pageable_intrinsic_fallback() {
+        let img =
+            super::make_image_pageable(sample_png_arc(), ImageFormat::Png, None, None, 0.5, false);
+        assert_eq!(img.width, 1.0);
+        assert_eq!(img.height, 1.0);
+        assert_eq!(img.opacity, 0.5);
+        assert!(!img.visible);
+    }
+
+    #[test]
+    fn test_convert_content_url_normal_element() {
+        // A normal element with `content: url(...)` + explicit width/height
+        // should produce an ImagePageable, replacing its text children.
+        let icon_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/image/icon.png"),
+        )
+        .unwrap();
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", icon_bytes);
+
+        let html = r#"<!doctype html><html><head><style>
+            .replaced { content: url("icon.png"); width: 24px; height: 24px; }
+        </style></head><body><div class="replaced">This text should be replaced</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.iter().any(|(w, h)| *w == 18.0 && *h == 18.0),
+            "expected an 18x18 pt ImagePageable (24 CSS px × 0.75) from content: url(), got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_convert_content_url_no_content_falls_through() {
+        // A normal div without content: url() should NOT produce an ImagePageable.
+        let html = r#"<!doctype html><html><head><style>
+            div { width: 100px; height: 50px; background: red; }
+        </style></head><body><div>Normal text</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.is_empty(),
+            "normal div without content: url() should not produce images, got {:?}",
+            images
+        );
+    }
+
+    #[test]
+    fn test_convert_content_url_missing_asset_falls_through() {
+        // content: url("missing.png") where the asset is not in the bundle
+        // should silently fall through to the normal conversion path.
+        let bundle = AssetBundle::new(); // empty bundle
+
+        let html = r#"<!doctype html><html><head><style>
+            .replaced { content: url("missing.png"); width: 24px; height: 24px; }
+        </style></head><body><div class="replaced">fallback text</div></body></html>"#;
+
+        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = ConvertContext {
+            running_store: &running_store,
+            assets: Some(&bundle),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles: crate::column_css::ColumnStyleTable::new(),
+            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            link_cache: Default::default(),
+        };
+        let tree = dom_to_pageable(&doc, &mut ctx);
+
+        let mut images = Vec::new();
+        collect_images(&*tree, &mut images);
+        assert!(
+            images.is_empty(),
+            "missing asset should not produce images, got {:?}",
+            images
+        );
+    }
+}
