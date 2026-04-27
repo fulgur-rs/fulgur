@@ -3361,9 +3361,10 @@ fn resolve_radial_gradient(
 /// Convert Stylo `Gradient::Conic` into `BgImageContent::ConicGradient`.
 ///
 /// stop position は `<angle>` を `angle / 2π` で fraction 化、`<percentage>` は
-/// そのまま fraction として扱い、共通 `GradientStop` (Auto / Fraction / LengthPx)
-/// に正規化する。描画は `background.rs::draw_conic_gradient` の path wedge 分解
-/// に委ねる。
+/// そのまま fraction として `GradientStopPosition::Fraction(f32)` に格納する。
+/// `[0, 1]` 範囲外の生値もそのまま許容し (例: `-30deg → -0.083`, `120% → 1.2`)、
+/// 最終的な周期展開 / 範囲ハンドリングは `background.rs::draw_conic_gradient`
+/// と `sample_conic_color` 側に委ねる。
 fn resolve_conic_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,

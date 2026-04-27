@@ -961,11 +961,23 @@ fn draw_conic_gradient(
         return;
     }
 
+    // origin rect への追加クリップ。`at <position>` が origin 外に解決された場合、
+    // wedge polygon の中心頂点 `(cx, cy)` が origin 外でも頂点として含まれてしまい、
+    // 既存 BgClip 用 `clip_path` だけでは `clip \ origin` 領域に塗りが漏れる
+    // (CSS Images §3 では origin の外は当該レイヤーで透明)。linear/radial は
+    // gradient 自体が origin 内で減衰するため顕在化しないが、conic は
+    // 中心からの放射なので明示的に origin で再クリップする。
+    let Some(origin_clip) = build_rect_path(ox, oy, ow, oh) else {
+        return;
+    };
+    surface.push_clip_path(&origin_clip, &krilla::paint::FillRule::default());
+
     let cx = ox + resolve_point(position_x, ow);
     let cy = oy + resolve_point(position_y, oh);
 
     let normalized = normalize_conic_stops(stops);
     if normalized.len() < 2 {
+        surface.pop();
         return;
     }
     let first = normalized.first().unwrap().0;
@@ -976,6 +988,9 @@ fn draw_conic_gradient(
 
     // 各 wedge の中点角度 (CSS fraction) で色をサンプル。repeating 時は
     // CSS Images 4 §3.x の周期展開で fraction を [first, last] にラップする。
+    // `mid_t` は意図的に clamp しない: stops は seam を跨いで負 / 1 超過しうる
+    // (例: `repeating-conic-gradient(red -30deg, blue 30deg)`)。
+    // `sample_conic_color` 側が範囲外を first / last 端点として吸収する。
     let colors: Vec<[u8; 4]> = (0..N)
         .map(|i| {
             let mid_f = (i as f32 + 0.5) / N as f32;
@@ -984,7 +999,7 @@ fn draw_conic_gradient(
             } else {
                 mid_f
             };
-            sample_conic_color(&normalized, mid_t.clamp(0.0, 1.0))
+            sample_conic_color(&normalized, mid_t)
         })
         .collect();
 
@@ -1028,6 +1043,7 @@ fn draw_conic_gradient(
         i = j;
     }
     surface.set_fill(None);
+    surface.pop();
 }
 
 /// CSS conic ray angle θ から box 辺との交点 (cx + t·sin θ, cy − t·cos θ) を返す

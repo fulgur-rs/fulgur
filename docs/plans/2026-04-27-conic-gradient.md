@@ -36,7 +36,10 @@ WeasyPrint と Prince はいずれも conic-gradient 自体を未実装である
 `BgImageContent::ConicGradient` variant を追加。`from_angle` (radians, CSS 規約:
 0=top, CW)、`position_x/y` (BgLengthPercentage)、`stops` (Vec<GradientStop>)、
 `repeating` を持つ。stop position は convert 時に `<percentage>` および `<angle>`
-を統一 fraction (0..1) に正規化済み。
+を **生 fraction** (`GradientStopPosition::Fraction(f32)`) として保持する
+(`<angle>` は `angle_rad / 2π` で換算)。`[0, 1]` 外の値もそのまま許容し
+(`-30deg → -0.083`, `120% → 1.2` 等)、最終的な範囲ハンドリングと repeating
+の周期展開は draw 時の `sample_conic_color` / `normalize_conic_stops` に委ねる。
 
 ### `crates/fulgur/src/convert.rs`
 
@@ -68,7 +71,10 @@ arm にも `BgImageContent::ConicGradient` を追加。
   - `sample_conic_color` の lerp 系 3 case
 - **Smoke (`crates/fulgur/tests/render_smoke.rs`):** 5 件
   - pie chart / smooth / repeating / from-angle / at-position
-  - すべて `Engine::builder().build().render_html(...)` で `assert!(!pdf.is_empty())`
+  - 各ケース `Engine::builder().build().render_html(...)` を呼び `assert!(!pdf.is_empty())`
+  - これは crash / シリアライズ smoke + codecov の line coverage 対象化が目的
+    (`krilla::Document::finish()` は何も描画しなくても non-empty PDF を返すため、
+    描画の正しさは保証しない)。視覚 / pixel 検証は VRT と WPT 側で行う
 - **VRT (`crates/fulgur-vrt/tests/conic_gradient_harness.rs`):** 1 件
   - 4-quadrant pie chart vs 4 個の絶対配置矩形 ref で pixel diff
   - tolerance: max channel diff 12 / max diff ratio 2%
