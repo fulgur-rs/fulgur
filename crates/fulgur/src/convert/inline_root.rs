@@ -870,6 +870,179 @@ mod tests {
         );
     }
 
+    // ---- metrics_from_line tests ----
+
+    /// Default fallback metrics returned by `metrics_from_line` when no
+    /// Text item with parseable font data is present. Mirrors the literal
+    /// values in the helper (line ~211).
+    const FALLBACK_METRICS: (f32, f32, f32, f32, f32) = (12.0, 4.0, 8.0, 4.0, 6.0);
+
+    #[test]
+    fn metrics_from_line_falls_back_when_line_has_no_text_items() {
+        use super::super::tests::sample_png_arc;
+        use crate::image::ImageFormat;
+        use crate::paragraph::{InlineImage, LineItem, ShapedLine, VerticalAlign};
+
+        // Line with only an Image item — the helper's loop continues over
+        // non-Text variants and falls through to the hardcoded defaults.
+        let line = ShapedLine {
+            height: 20.0,
+            baseline: 16.0,
+            items: vec![LineItem::Image(InlineImage {
+                data: sample_png_arc(),
+                format: ImageFormat::Png,
+                width: 8.0,
+                height: 8.0,
+                x_offset: 0.0,
+                vertical_align: VerticalAlign::Baseline,
+                opacity: 1.0,
+                visible: true,
+                computed_y: 0.0,
+                link: None,
+            })],
+        };
+        let m = super::metrics_from_line(&line);
+        let (a, d, x, sub, sup) = FALLBACK_METRICS;
+        assert!((m.ascent - a).abs() < 0.01, "ascent: {}", m.ascent);
+        assert!((m.descent - d).abs() < 0.01, "descent: {}", m.descent);
+        assert!((m.x_height - x).abs() < 0.01, "x_height: {}", m.x_height);
+        assert!(
+            (m.subscript_offset - sub).abs() < 0.01,
+            "subscript_offset: {}",
+            m.subscript_offset,
+        );
+        assert!(
+            (m.superscript_offset - sup).abs() < 0.01,
+            "superscript_offset: {}",
+            m.superscript_offset,
+        );
+    }
+
+    #[test]
+    fn metrics_from_line_returns_fallback_when_font_data_is_invalid() {
+        use crate::paragraph::{LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration};
+
+        // Garbage bytes — `skrifa::FontRef::from_index` will return Err and
+        // the helper falls through the loop to the default metrics.
+        let bad_font = Arc::new(vec![0u8; 16]);
+        let run = ShapedGlyphRun {
+            font_data: bad_font,
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: 1.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".to_string(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 20.0,
+            baseline: 16.0,
+            items: vec![LineItem::Text(run)],
+        };
+        let m = super::metrics_from_line(&line);
+        let (a, d, x, sub, sup) = FALLBACK_METRICS;
+        assert!(
+            (m.ascent - a).abs() < 0.01,
+            "garbage font_data must hit fallback ascent, got {}",
+            m.ascent,
+        );
+        assert!((m.descent - d).abs() < 0.01);
+        assert!((m.x_height - x).abs() < 0.01);
+        assert!((m.subscript_offset - sub).abs() < 0.01);
+        assert!((m.superscript_offset - sup).abs() < 0.01);
+    }
+
+    #[test]
+    fn metrics_from_line_picks_first_text_item_in_mixed_line() {
+        use super::super::tests::sample_png_arc;
+        use crate::image::ImageFormat;
+        use crate::paragraph::{InlineImage, LineItem, ShapedLine, VerticalAlign};
+
+        // Round-trip a real document through `extract_paragraph` to obtain a
+        // genuine font_data that skrifa can parse. Then build a fresh line
+        // whose items are: Image, the recovered Text run, InlineBox-skipped
+        // (we only need Image then Text to prove "first Text wins").
+        let html = r#"<html><body><p>hello</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = make_ctx!(store);
+        let p_id = find_tag(&doc, "p").expect("p exists");
+        let p_node = doc.get_node(p_id).expect("p node");
+        let para = super::extract_paragraph(doc.deref(), p_node, &mut ctx, 0).expect("paragraph");
+
+        // Pull a real ShapedGlyphRun out of the rendered paragraph.
+        let real_run = para
+            .lines
+            .iter()
+            .flat_map(|l| l.items.iter())
+            .find_map(|it| match it {
+                LineItem::Text(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("at least one Text item in <p>hello</p>");
+
+        // Construct a fresh line with: an Image first (must be skipped),
+        // then the real Text run (must be selected).
+        let img = InlineImage {
+            data: sample_png_arc(),
+            format: ImageFormat::Png,
+            width: 8.0,
+            height: 8.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 20.0,
+            baseline: 16.0,
+            items: vec![LineItem::Image(img), LineItem::Text(real_run)],
+        };
+
+        let m = super::metrics_from_line(&line);
+        // Anything other than the literal fallback proves we picked up the
+        // real font (skrifa-derived metrics for a typical text font are not
+        // 12/4/8/4/6 by coincidence).
+        let (a, d, x, sub, sup) = FALLBACK_METRICS;
+        let is_fallback = (m.ascent - a).abs() < 0.01
+            && (m.descent - d).abs() < 0.01
+            && (m.x_height - x).abs() < 0.01
+            && (m.subscript_offset - sub).abs() < 0.01
+            && (m.superscript_offset - sup).abs() < 0.01;
+        assert!(
+            !is_fallback,
+            "expected real-font metrics for a parseable Text item, got fallback: \
+             ascent={}, descent={}, x_height={}, sub={}, sup={}",
+            m.ascent, m.descent, m.x_height, m.subscript_offset, m.superscript_offset,
+        );
+        // Sanity: skrifa derives subscript_offset = ascent * 0.3 and
+        // superscript_offset = ascent * 0.4 (see helper body).
+        assert!(
+            (m.subscript_offset - m.ascent * 0.3).abs() < 0.01,
+            "subscript_offset should be ascent*0.3, got sub={} ascent={}",
+            m.subscript_offset,
+            m.ascent,
+        );
+        assert!(
+            (m.superscript_offset - m.ascent * 0.4).abs() < 0.01,
+            "superscript_offset should be ascent*0.4, got sup={} ascent={}",
+            m.superscript_offset,
+            m.ascent,
+        );
+    }
+
     // ---- recalculate_paragraph_line_boxes tests ----
 
     #[test]
