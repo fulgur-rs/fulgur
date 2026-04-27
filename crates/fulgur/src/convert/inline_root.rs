@@ -159,7 +159,6 @@ pub(super) fn try_convert(
             let font_metrics = metrics_from_line(&line);
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             let mut paragraph = ParagraphPageable::new(vec![line]);
-            paragraph.opacity = opacity;
             paragraph.visible = visible;
 
             // Check for block pseudo images too
@@ -196,6 +195,7 @@ pub(super) fn try_convert(
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }
+            paragraph.opacity = opacity;
             return Some(Box::new(paragraph));
         }
         // Fall through: inline root with no text and no inline pseudo images
