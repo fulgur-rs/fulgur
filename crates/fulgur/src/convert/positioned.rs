@@ -8,7 +8,7 @@ use super::*;
 /// keeps the marker with its associated content when pagination pushes the
 /// content to the next page.
 pub(super) fn collect_positioned_children(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     child_ids: &[usize],
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -228,11 +228,7 @@ fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
 /// parent chains, matching the defensive bounds applied elsewhere in
 /// `convert.rs` (`debug_print_tree`, `collect_positioned_children`,
 /// `resolve_enclosing_anchor`).
-fn resolve_cb_for_absolute(
-    doc: &blitz_dom::BaseDocument,
-    parent: &Node,
-    is_fixed: bool,
-) -> Option<AbsCb> {
+fn resolve_cb_for_absolute(doc: &BaseDocument, parent: &Node, is_fixed: bool) -> Option<AbsCb> {
     let mut offset_x = parent.final_layout.location.x;
     let mut offset_y = parent.final_layout.location.y;
     let mut cur_id = parent.parent;
@@ -310,7 +306,7 @@ fn resolve_inset_px(
 /// construct a `BlockPageable` wrapping a node with pseudos; see
 /// fulgur-vlr3 for the full investigation.
 pub(super) fn build_absolute_pseudo_children(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -451,7 +447,7 @@ pub(super) fn build_absolute_pseudo_children(
 /// (absolute pseudo + content:url + visual style + zero final_layout) is
 /// narrow enough to defer to a follow-up.
 fn build_absolute_pseudo_child(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     parent: &Node,
     pseudo: &Node,
     pseudo_id: usize,

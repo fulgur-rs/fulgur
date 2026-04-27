@@ -8,7 +8,7 @@ use super::*;
 /// `convert_table` recurses into child rows/cells and must propagate the
 /// `MAX_DOM_DEPTH` budget.
 pub(super) fn try_convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,
@@ -23,7 +23,7 @@ pub(super) fn try_convert(
 
 /// Convert a table element into a TablePageable with header/body cell groups.
 fn convert_table(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -84,7 +84,7 @@ fn is_table_section(node: &Node, section_name: &str) -> bool {
 
 /// Recursively collect table cells (td/th) from a table subtree.
 fn collect_table_cells(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     is_header: bool,
     header_cells: &mut Vec<PositionedChild>,
