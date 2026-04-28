@@ -119,7 +119,7 @@ pub struct ConvertContext<'a> {
     /// Currently captured but not yet consumed — the next phase
     /// (parity assertion) reads `implied_page_count` from this table
     /// and compares it to `paginate(...).len()` to catch divergence
-    /// between the spike fragmenter and Pageable's split decisions.
+    /// between the fragmenter and Pageable's split decisions.
     /// Empty when the document had no body or no in-flow children.
     /// Keyed by source `usize` NodeId — same convention as
     /// `column_styles` and `multicol_geometry`.

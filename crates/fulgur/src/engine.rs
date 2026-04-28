@@ -227,7 +227,7 @@ impl Engine {
         //
         // fulgur-s67g Phase 2.6 (`@page` size / margin resolution):
         // resolve the page-1 size + margin from `gcpm.page_settings`
-        // before driving the spike, so its strip height matches
+        // before driving the fragmenter, so its strip height matches
         // `render_to_pdf_with_gcpm`'s `content_height` exactly. Both
         // sides use the page-1 result for *all* pages — Pageable
         // does the same in `render.rs:283-291` and does not re-resolve
@@ -235,7 +235,7 @@ impl Engine {
         // This lets the parity gates drop the
         // `(content_height - config.content_height()).abs() < 0.001`
         // skip: documents that override page size / margin via
-        // `@page { size: ...; margin: ...; }` now feed the spike a
+        // `@page { size: ...; margin: ...; }` now feed the fragmenter a
         // matching strip height by construction.
         let default_page_rules: Vec<_> = gcpm
             .page_settings
@@ -297,7 +297,7 @@ impl Engine {
         // release.
         let string_set_by_node_for_parity = string_set_by_node.clone();
         // Counter ops use a `BTreeMap` for the parity assertion to
-        // match the spike's deterministic-iteration signature.
+        // match the fragmenter's deterministic-iteration signature.
         let counter_ops_by_node_for_parity: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> =
             counter_ops_map
                 .iter()
