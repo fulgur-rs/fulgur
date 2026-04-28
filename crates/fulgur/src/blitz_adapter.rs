@@ -111,24 +111,32 @@ pub mod net {
 /// Parse HTML and return a fully resolved document (styles + layout computed).
 ///
 /// We pass the content width as the viewport width so Taffy wraps text
-/// at the right column. The viewport height is set very large so that
-/// Taffy lays out the full document without clipping — our own pagination
-/// algorithm handles page breaks.
+/// at the right column. The viewport height is forwarded to stylo so that
+/// `vh` units and viewport-height media queries resolve consistently with
+/// `Engine::render_html`'s `parse_html_with_local_resources` path; this
+/// helper used to drop the height into a 10000px placeholder, which broke
+/// `100vh`-anchored fixtures.
 ///
 /// **Layout parity with `Engine::render_html`**: in addition to stylo + Taffy
 /// resolution this also runs [`relayout_position_fixed`], so unit tests
 /// that build documents through this helper observe the same fixed-position
-/// sizing the renderer produces. The `viewport_height` argument is now used
-/// (previously ignored) as the relayout pass's available height; pass the
-/// same value the renderer would use (`Config::content_height` in CSS px)
-/// for an exact match.
+/// sizing the renderer produces. Pass the same viewport dimensions the
+/// renderer would use (`Config::content_width` / `Config::content_height`
+/// in CSS px) for an exact match.
 pub fn parse_and_layout(
     html: &str,
     viewport_width: f32,
     viewport_height: f32,
     font_data: &[Arc<Vec<u8>>],
 ) -> HtmlDocument {
-    let mut doc = parse(html, viewport_width, font_data);
+    let mut doc = parse_inner(
+        html,
+        viewport_width,
+        viewport_height as u32,
+        font_data,
+        None,
+        None,
+    );
     resolve(&mut doc);
     relayout_position_fixed(&mut doc, viewport_width, viewport_height);
     doc
