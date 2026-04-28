@@ -132,12 +132,12 @@ fn assert_pageable_fragmenter_parity(
     }
     let pageable_count = pages.len() as u32;
     let fragmenter_count = crate::pagination_layout::implied_page_count(geometry);
-    // fulgur-s67g Phase 2.6: when Pageable splits an oversized element
-    // across pages (mid-element split, e.g. `.huge { break-inside: avoid }`
-    // taller than `@page`), Pageable emits more pages than the fragmenter's
-    // strip-based pass currently models. That gap is Phase 3 work
-    // (per-strip layout pass / `fulgur-g9e3`); until then, skip parity
-    // when Pageable > fragmenter. The reverse direction is still a regression.
+    // fulgur-g9e3.1 follow-up: Pageable still produces extra pages when
+    // a forced `break-before: page` lives on a body-direct child or a
+    // descendant the fragmenter does not recurse into for break detection
+    // (e.g. zero-height elements, nested `<li>` under `<ul>`). Skip
+    // parity in that direction until that gap is closed; the reverse
+    // (fragmenter > Pageable) is still a regression.
     if pageable_count > fragmenter_count {
         return;
     }
@@ -147,11 +147,16 @@ fn assert_pageable_fragmenter_parity(
     );
 }
 
-/// Detect mid-element split: Pageable produces more pages than fragmenter's
-/// `implied_page_count`. See `assert_pageable_fragmenter_parity` for the
-/// rationale — this is Phase 3 territory and the dependent parity
-/// assertions can't be meaningfully compared either.
-fn mid_element_split_skipped(
+/// Detect the "Pageable saw a forced break the fragmenter missed" case:
+/// Pageable produces more pages than the fragmenter's
+/// `implied_page_count`. As of fulgur-g9e3.1 (mid-element split landed)
+/// this no longer fires for oversized-block-with-children — the
+/// remaining cause is forced-break recursion gaps in
+/// `fragment_pagination_root` (body-direct break-before on zero-height
+/// elements, nested break-before below a body-direct ancestor). The
+/// dependent parity assertions can't be meaningfully compared while
+/// the fragmenter under-counts pages, so skip them in that direction.
+fn forced_break_skipped(
     pageable_pages: usize,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> bool {
@@ -177,7 +182,7 @@ fn assert_string_set_states_parity(
     if !cfg!(debug_assertions) || geometry.is_empty() {
         return;
     }
-    if mid_element_split_skipped(pageable_states.len(), geometry) {
+    if forced_break_skipped(pageable_states.len(), geometry) {
         return;
     }
     let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
@@ -231,7 +236,7 @@ fn assert_counter_states_parity(
     {
         return;
     }
-    if mid_element_split_skipped(pageable_states.len(), geometry) {
+    if forced_break_skipped(pageable_states.len(), geometry) {
         return;
     }
     let fragmenter_states =
@@ -269,7 +274,7 @@ fn assert_bookmark_entries_parity(
     if !cfg!(debug_assertions) || geometry.is_empty() {
         return;
     }
-    if mid_element_split_skipped(total_pages, geometry) {
+    if forced_break_skipped(total_pages, geometry) {
         return;
     }
     let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
