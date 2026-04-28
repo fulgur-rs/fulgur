@@ -578,15 +578,73 @@ impl<'a> PaginationLayoutTree<'a> {
             }
 
             // Block fallback: child overflows the current page strip →
-            // advance to the next page first. A child taller than a
-            // full page is still emitted whole on its starting page.
-            // (`break-inside: avoid` already collapses to this path
-            // via `avoid_inside` above — it just suppresses the inline
+            // advance to the next page first.
+            //
+            // `break-inside: avoid` already collapses to this path via
+            // `avoid_inside` above — it just suppresses the inline
             // split branch; the remaining-strip overflow handling is
-            // identical.)
+            // identical.
             if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
                 page_index += 1;
                 cursor_y = 0.0;
+            }
+
+            // fulgur-g9e3.1: when the child is taller than a full page
+            // strip and has DOM children, recurse to split among
+            // grandchildren instead of emitting it whole on a single
+            // page. This is the truly-oversized branch of
+            // `BlockPageable::find_split_point`'s overflow→split path
+            // (`pageable.rs:1242` onward).
+            //
+            // The in-place split case (`cursor_y + child_h > page_h`
+            // with `child_h <= page_h`) requires a pre-flight check
+            // that recursion would actually cross a boundary —
+            // otherwise the recursion produces a parent fragment whose
+            // height is sum-of-children rather than parent's CSS-set
+            // height (e.g. a 600px div containing a 30px h2 emits
+            // h=30 instead of h=600). That belongs in `fulgur-a9qf`
+            // (Phase 3.1.5) alongside the forced-break recursion fix;
+            // until then, the in-place case falls through to the
+            // existing whole-emit path on the next page (page-advance
+            // already happened above), and the `forced_break_skipped`
+            // gate in `render.rs` keeps parity assertions quiet on
+            // tests that exercise it.
+            //
+            // `break-inside: avoid` + truly-oversized → fall through
+            // to splitting too (matches Pageable's
+            // `total_height > page_height` override at
+            // `pageable.rs:1165`).
+            if child_h > self.page_height_px {
+                let has_splittable_children = self
+                    .doc
+                    .get_node(child_id)
+                    .is_some_and(|n| !n.children.is_empty());
+                if has_splittable_children {
+                    let child_x_in_body = body_x + layout.location.x;
+                    let (new_page, new_cursor) = fragment_block_subtree(
+                        &mut self.geometry,
+                        self.doc,
+                        child_id,
+                        child_w,
+                        child_x_in_body,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                        0,
+                    );
+                    page_index = new_page;
+                    cursor_y = new_cursor;
+                    emitted += 1;
+                    prev_bottom_y_in_body = this_top_in_body + child_h;
+                    if matches!(
+                        break_props.break_after,
+                        Some(crate::pageable::BreakAfter::Page)
+                    ) {
+                        page_index += 1;
+                        cursor_y = 0.0;
+                    }
+                    continue;
+                }
             }
 
             let frag = Fragment {
@@ -720,6 +778,272 @@ fn record_subtree_descendants(
             depth + 1,
         );
     }
+}
+
+/// fulgur-g9e3.1: split a block element across pages by walking its DOM
+/// children and emitting per-page fragments for both the block itself
+/// and its children.
+///
+/// Mirrors the geometry-overflow path of `BlockPageable::find_split_point`
+/// (`pageable.rs:1242` onward): for each in-flow child, if it does not
+/// fit in the remaining strip, advance the page boundary and continue
+/// placing on a fresh strip. Children with their own DOM children that
+/// are taller than a full page recurse so the split walks all the way
+/// down to where overflow actually resolves.
+///
+/// Per-page parent fragments capture the height consumed by children on
+/// each page (`cursor - page_start_y`). This matches Pageable's
+/// `BlockPageable::split` head/tail-height semantics so the parity
+/// gates downstream (`collect_string_set_states` / `collect_counter_states`
+/// / `collect_bookmark_entries`) line up with Pageable's tree walk for
+/// counter / string-set / bookmark ops attached to elements that fit
+/// on a single page span within the parent.
+///
+/// Forced breaks (`break-before` / `break-after` / nested
+/// `has_forced_break_below`) are intentionally **not** handled here —
+/// that's `fulgur-a9qf` (Phase 3.1.5). Children flagged with break-*
+/// fall through the same overflow check the rest of the children take
+/// and may land slightly differently from Pageable in those cases; the
+/// `forced_break_skipped` gate in `render.rs` keeps parity assertions
+/// quiet on those tests until 3.1.5 lands.
+///
+/// Skips OOF / whitespace-text children, same convention as
+/// `fragment_pagination_root`. Bails at [`crate::MAX_DOM_DEPTH`] —
+/// any nodes below that depth go unrecorded (matches
+/// `record_subtree_descendants`).
+///
+/// ## Known gaps deferred to `fulgur-a9qf` (Phase 3.1.5)
+///
+/// `fragment_block_subtree` does **not** mirror `fragment_pagination_root`
+/// in three respects. None of these surface in the current test corpus
+/// (`cargo test -p fulgur` 1111 / 0); each is tracked as a regression
+/// scope-add on `fulgur-a9qf` (notes §5a / §5b / §5c) so they close
+/// alongside in-place mid-element split:
+///
+/// - **Nested `position: running()` markers are not skipped here.** The
+///   helper has no access to `running_store`, so a running marker that
+///   sits inside an oversized subtree is treated as in-flow and
+///   over-advances `cursor_y`. Body-level filtering is intact; only the
+///   recursion path is affected.
+/// - **Nested inline roots are not split at line edges.** When a tall
+///   `<p>` (multi-line inline root) lives inside an oversized ancestor,
+///   the recursion falls back to DOM-child block split rather than
+///   calling `collect_inline_line_metrics` / `fragment_inline_root` like
+///   the body-level walker does.
+/// - **Multi-page recursive traversal does not emit per-page parent
+///   fragments for intermediate pages.** When the recursive call
+///   advances more than one page, only the first and last page get a
+///   parent-`parent_id` fragment via the pre-recursion overflow close
+///   and the trailing close at the end of this function. Counter /
+///   string-set / bookmark ops attached to `parent_id` itself would
+///   then miss the intermediate pages — the existing tests attach ops
+///   to leaf children, so this stays masked until 3.1.5.
+///
+/// Returns `(final_page_index, final_cursor_y)`: the page and y where
+/// the parent's last child finished. The caller resumes its outer
+/// cursor from these values.
+#[allow(clippy::too_many_arguments)]
+fn fragment_block_subtree(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    parent_id: usize,
+    parent_w: f32,
+    parent_x_in_body: f32,
+    page_in: u32,
+    cursor_in: f32,
+    page_height_px: f32,
+    depth: usize,
+) -> (u32, f32) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        // Bailed: emit a single whole-fragment for the parent at its
+        // entry coordinates so geometry still has an entry for it.
+        let h = doc
+            .get_node(parent_id)
+            .map(|n| n.final_layout.size.height)
+            .unwrap_or(0.0);
+        geometry
+            .entry(parent_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: page_in,
+                x: parent_x_in_body,
+                y: cursor_in,
+                width: parent_w,
+                height: h,
+            });
+        return (page_in, cursor_in + h);
+    }
+    let Some(parent) = doc.get_node(parent_id) else {
+        return (page_in, cursor_in);
+    };
+
+    let mut page_index = page_in;
+    let mut cursor_y = cursor_in;
+    // Y on `page_index` where the parent's current-page fragment
+    // starts. We close one parent fragment and start a new one each
+    // time we cross a page boundary.
+    let mut page_start_y = cursor_in;
+    let mut prev_bottom_in_parent: f32 = 0.0;
+
+    for &child_id in &parent.children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        // Whitespace-only text — same skip as `fragment_pagination_root`.
+        if let Some(text) = child.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
+            continue;
+        }
+        // CSS 2.1 §10.6.4: out-of-flow children do not contribute to
+        // their containing block's normal-flow height.
+        {
+            use ::style::properties::longhands::position::computed_value::T as Pos;
+            let is_out_of_flow = child.primary_styles().is_some_and(|s| {
+                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            });
+            if is_out_of_flow {
+                continue;
+            }
+        }
+        let layout = child.final_layout;
+        let child_h = layout.size.height;
+        let child_w = if layout.size.width > 0.0 {
+            layout.size.width
+        } else {
+            parent_w
+        };
+        if child_h <= 0.0 {
+            // Phase 2.3 fix: zero-height **element** nodes still
+            // need to enter geometry so their counter / string-set
+            // / bookmark markers participate in the parity walks.
+            if child.element_data().is_some() {
+                geometry
+                    .entry(child_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body + layout.location.x,
+                        y: cursor_y,
+                        width: child_w,
+                        height: 0.0,
+                    });
+            }
+            continue;
+        }
+
+        // Inter-child gap (collapsed margins, padding) in parent
+        // coordinates — same convention as `fragment_pagination_root`.
+        let this_top_in_parent = layout.location.y;
+        let gap = (this_top_in_parent - prev_bottom_in_parent).max(0.0);
+        cursor_y += gap;
+
+        // Child does not fit in the remaining strip → cut a page.
+        if cursor_y > page_start_y && cursor_y + child_h > page_height_px {
+            // Close the parent's fragment for the current page,
+            // covering the children that landed on it.
+            geometry
+                .entry(parent_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: parent_x_in_body,
+                    y: page_start_y,
+                    width: parent_w,
+                    height: cursor_y - page_start_y,
+                });
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
+        }
+
+        let child_x_in_body = parent_x_in_body + layout.location.x;
+
+        // Child is itself oversized → recurse to split among its
+        // grandchildren (same overflow→split rule we used to enter
+        // this function).
+        if child_h > page_height_px {
+            let has_splittable_children = !child.children.is_empty();
+            if has_splittable_children {
+                let (np, nc) = fragment_block_subtree(
+                    geometry,
+                    doc,
+                    child_id,
+                    child_w,
+                    child_x_in_body,
+                    page_index,
+                    cursor_y,
+                    page_height_px,
+                    depth + 1,
+                );
+                page_index = np;
+                cursor_y = nc;
+                // The recursion may have moved us off `page_start_y`'s
+                // page; restart the parent fragment on whatever page
+                // we're on now.
+                if page_index != page_in || nc < page_start_y {
+                    page_start_y = 0.0;
+                }
+                prev_bottom_in_parent = this_top_in_parent + child_h;
+                continue;
+            }
+            // Atomic oversized leaf — fall through to whole-emit; it
+            // will simply spill below the page strip on its starting
+            // page. Pageable's same-shaped fallback at
+            // `pageable.rs:1252` (`in_flow_count == 1` → NoSplit) lands
+            // here too.
+        }
+
+        // Child fits (or is atomic-oversized-fallback). Emit its
+        // fragment and recurse into its descendants on the same page.
+        geometry
+            .entry(child_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: child_x_in_body,
+                y: cursor_y,
+                width: child_w,
+                height: child_h,
+            });
+        record_subtree_descendants(
+            geometry,
+            doc,
+            child_id,
+            page_index,
+            cursor_y,
+            child_x_in_body,
+            depth + 1,
+        );
+        cursor_y += child_h;
+        prev_bottom_in_parent = this_top_in_parent + child_h;
+    }
+
+    // Close the parent's fragment for the final page span. Always
+    // emit at least one fragment so the parent is represented in
+    // geometry — `collect_counter_states` and friends look up nodes
+    // by id, and a missing entry would silently bypass the parity
+    // gate via the early `counter_ops_by_node ⊄ geometry` check in
+    // `render.rs`. Height may be 0 when every child was skipped
+    // (whitespace / OOF / running) — that's intentional and
+    // matches `fragment_pagination_root`'s zero-height-element path.
+    geometry
+        .entry(parent_id)
+        .or_default()
+        .fragments
+        .push(Fragment {
+            page_index,
+            x: parent_x_in_body,
+            y: page_start_y,
+            width: parent_w,
+            height: cursor_y - page_start_y,
+        });
+
+    (page_index, cursor_y)
 }
 
 /// fulgur-p55h: read per-line `(min_coord, max_coord)` pairs from a
@@ -2198,6 +2522,49 @@ mod compare_with_pageable {
             disagreements.is_empty(),
             "Pageable vs fragmenter disagreement (or unexpected agreement) for:\n  - {}",
             disagreements.join("\n  - "),
+        );
+    }
+
+    /// fulgur-g9e3.1: mid-element split must produce per-page parent
+    /// fragments whose `(y, height)` line up with what
+    /// `BlockPageable::split` emits as head/tail. If they diverge,
+    /// `collect_counter_states` (and the string-set / bookmark variants)
+    /// see different per-page entries on the fragmenter side and the
+    /// parity gate in `render.rs` fires.
+    ///
+    /// Smoke test: run the engine end-to-end on an oversized
+    /// `break-inside: avoid` block whose children carry a counter
+    /// operation. Debug-build parity assertions (`forced_break_skipped`
+    /// is `false` here because Pageable and fragmenter agree on page
+    /// count) panic if the per-page parent heights are wrong, so a
+    /// non-empty PDF is sufficient evidence.
+    #[test]
+    fn mid_element_split_keeps_counter_states_in_sync() {
+        let html = r#"<!doctype html><html><head><style>
+            @page { size: 200pt 200pt; margin: 0; }
+            body { margin: 0; counter-reset: chapter; }
+            .huge { break-inside: avoid; }
+            .row { height: 80pt; counter-increment: chapter; }
+        </style></head><body>
+          <div class="huge">
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+          </div>
+        </body></html>"#;
+        let engine = Engine::builder()
+            // 200pt × 200pt expressed in mm, same as
+            // tests/break_inside_avoid.rs.
+            .page_size(PageSize::custom(70.5556, 70.5556))
+            .build();
+        let pdf = engine.render_html(html).expect("render");
+        assert!(
+            !pdf.is_empty(),
+            "engine returned empty PDF — parity assertion likely panicked",
         );
     }
 }
