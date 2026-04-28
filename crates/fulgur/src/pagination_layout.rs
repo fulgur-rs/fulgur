@@ -101,6 +101,29 @@ pub struct PaginationLayoutTree<'a> {
     /// fragmentation root for the block-only spike. `None` means the
     /// document had no body and the pass becomes a no-op.
     pub(crate) body_id: Option<usize>,
+    /// Available-space mode for `drive_taffy_root_layout`. Set via
+    /// [`run_pass_constrained`] (fulgur-ik6o spike); the default
+    /// [`run_pass`] keeps `MaxContent` so the post-walk reads natural
+    /// child heights.
+    pub(crate) strip_mode: StripMode,
+}
+
+/// `available_space.height` mode passed to `taffy::compute_root_layout`
+/// when driving the body's layout.
+///
+/// The `MaxContent` variant matches the original spike: body is laid
+/// out at its natural height, and the spike post-walks `final_layout`
+/// to fragment children. `Definite` is the fulgur-ik6o experiment —
+/// constrain Taffy to one page strip and see what happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripMode {
+    /// Pass `AvailableSpace::MaxContent` so children retain natural
+    /// heights and the spike's post-walk does the fragmentation.
+    MaxContent,
+    /// Pass `AvailableSpace::Definite(page_height_px)` and observe
+    /// whether Taffy/Blitz produces a strip-constrained layout we
+    /// can fragment differently.
+    Definite,
 }
 
 /// One-shot entry: run the block-only fragmenter for `doc` against a
@@ -121,7 +144,29 @@ pub struct PaginationLayoutTree<'a> {
 /// Callers should treat the returned table as observational only — it is
 /// not wired into the existing `Pageable` / `paginate` path.
 pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeometryTable {
+    run_pass_with_mode(doc, page_height_px, StripMode::MaxContent)
+}
+
+/// fulgur-ik6o variant: drive `compute_root_layout` with
+/// `AvailableSpace::Definite(page_height_px)` instead of `MaxContent`.
+///
+/// Observational entry — used by the comparison harness to record per-
+/// fixture differences between the two modes. Same caveat as
+/// [`run_pass`]: not wired into production.
+pub fn run_pass_constrained(
+    doc: &mut BaseDocument,
+    page_height_px: f32,
+) -> PaginationGeometryTable {
+    run_pass_with_mode(doc, page_height_px, StripMode::Definite)
+}
+
+fn run_pass_with_mode(
+    doc: &mut BaseDocument,
+    page_height_px: f32,
+    strip_mode: StripMode,
+) -> PaginationGeometryTable {
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
+    tree.strip_mode = strip_mode;
     if tree.body_id.is_some() && page_height_px > 0.0 {
         tree.drive_taffy_root_layout();
     }
@@ -136,6 +181,7 @@ impl<'a> PaginationLayoutTree<'a> {
             page_height_px,
             geometry: BTreeMap::new(),
             body_id,
+            strip_mode: StripMode::MaxContent,
         }
     }
 
@@ -178,9 +224,20 @@ impl<'a> PaginationLayoutTree<'a> {
             .map(|n| n.final_layout)
             .unwrap_or_default();
 
+        let avail_height = match self.strip_mode {
+            StripMode::MaxContent => AvailableSpace::MaxContent,
+            StripMode::Definite => AvailableSpace::Definite(self.page_height_px.max(1.0)),
+        };
+        // Constrained mode invalidates the cache so Taffy actually re-
+        // runs body's layout against the new available_space rather
+        // than returning the cached MaxContent result. Unconstrained
+        // mode is happy to read whatever Blitz already cached.
+        if matches!(self.strip_mode, StripMode::Definite) {
+            self.cache_clear(nid);
+        }
         let avail = Size {
             width: AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
-            height: AvailableSpace::MaxContent,
+            height: avail_height,
         };
         taffy::compute_root_layout(self, nid, avail);
 
@@ -614,10 +671,21 @@ mod compare_with_pageable {
     /// Re-parses (deterministic) so we get a fresh `BaseDocument` and
     /// can mutate it without unsafe shenanigans.
     fn spike_page_count_for(html: &str) -> u32 {
+        spike_page_count_with_mode(html, super::StripMode::MaxContent)
+    }
+
+    /// fulgur-ik6o probe: re-run the spike with
+    /// `AvailableSpace::Definite(page_height_px)` instead of
+    /// `MaxContent`. Returns the spike's page count under that mode
+    /// for comparison.
+    fn spike_page_count_constrained(html: &str) -> u32 {
+        spike_page_count_with_mode(html, super::StripMode::Definite)
+    }
+
+    fn spike_page_count_with_mode(html: &str, mode: super::StripMode) -> u32 {
         use crate::blitz_adapter;
         let engine = Engine::builder().page_size(PageSize::A4).build();
         let cfg = engine.config();
-        // Same parse parameters as `build_pageable_for_testing_no_gcpm`.
         let (mut doc, _gcpm) = blitz_adapter::parse_html_with_local_resources(
             html,
             pt_to_px(cfg.content_width()),
@@ -626,11 +694,16 @@ mod compare_with_pageable {
             None,
         );
         blitz_adapter::resolve(&mut doc);
-        // Match `build_pageable_for_testing_no_gcpm`'s pipeline so the
-        // doc state is identical when we read final_layout.
         let column_styles = blitz_adapter::extract_column_style_table(&doc);
         let _multicol = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let table = run_pass(doc.deref_mut(), pt_to_px(cfg.content_height()));
+        let table = match mode {
+            super::StripMode::MaxContent => {
+                super::run_pass(doc.deref_mut(), pt_to_px(cfg.content_height()))
+            }
+            super::StripMode::Definite => {
+                super::run_pass_constrained(doc.deref_mut(), pt_to_px(cfg.content_height()))
+            }
+        };
         spike_page_count(&table)
     }
 
@@ -822,6 +895,30 @@ mod compare_with_pageable {
             disagreements.is_empty(),
             "Pageable vs spike disagreement (or unexpected agreement) for:\n  - {}",
             disagreements.join("\n  - "),
+        );
+    }
+
+    /// fulgur-ik6o probe: tabulate page counts under both
+    /// `StripMode::MaxContent` and `StripMode::Definite` for every
+    /// fixture, printed via `eprintln!` for human inspection. The test
+    /// itself only asserts that the constrained-mode pass does not
+    /// panic, so this serves as observation without locking in expected
+    /// outcomes — those go into the design doc once we know what
+    /// `AvailableSpace::Definite(page_height_px)` actually does.
+    #[test]
+    fn strip_mode_observation_table() {
+        let fixtures = fixtures();
+        eprintln!(
+            "┌ fixture ──────────────────────────────────────────── pageable max_content definite"
+        );
+        for (label, html, _) in &fixtures {
+            let pageable_pages = pageable_page_count(html) as u32;
+            let max_content = spike_page_count_for(html);
+            let definite = spike_page_count_constrained(html);
+            eprintln!("│ {label:<55} {pageable_pages:>9} {max_content:>11} {definite:>9}",);
+        }
+        eprintln!(
+            "└────────────────────────────────────────────────────────────────────────────────"
         );
     }
 }
