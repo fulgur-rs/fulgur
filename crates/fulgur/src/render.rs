@@ -207,6 +207,51 @@ fn assert_counter_states_parity(
     }
 }
 
+/// fulgur-s67g Phase 2.4: in debug builds, assert that the spike's
+/// `pagination_layout::collect_bookmark_entries` produces the same
+/// `(page_idx, level, label)` triples Pageable's collector emits at
+/// draw time. `y_pt` is intentionally not compared — see the
+/// docstring on `collect_bookmark_entries` for the rationale.
+fn assert_bookmark_entries_parity(
+    pageable_entries: &[crate::pageable::BookmarkEntry],
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
+) {
+    if !cfg!(debug_assertions) || geometry.is_empty() {
+        return;
+    }
+    let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
+        .iter()
+        .map(|e| crate::pagination_layout::BookmarkPageEntry {
+            page_idx: e.page_idx,
+            level: e.level,
+            label: e.label.clone(),
+        })
+        .collect();
+    let mut spike_triples =
+        crate::pagination_layout::collect_bookmark_entries(geometry, bookmark_by_node);
+    // Sort both by (page_idx, label) so iteration order from BTreeMap
+    // (NodeId-ordered) matches Pageable's draw-order recording when
+    // the source order happens to disagree on tie-breaks.
+    let mut sorted_pageable = pageable_triples.clone();
+    sorted_pageable.sort_by(|a, b| {
+        a.page_idx
+            .cmp(&b.page_idx)
+            .then(a.level.cmp(&b.level))
+            .then(a.label.cmp(&b.label))
+    });
+    spike_triples.sort_by(|a, b| {
+        a.page_idx
+            .cmp(&b.page_idx)
+            .then(a.level.cmp(&b.level))
+            .then(a.label.cmp(&b.label))
+    });
+    debug_assert_eq!(
+        sorted_pageable, spike_triples,
+        "bookmark entries drift:\n  pageable = {sorted_pageable:#?}\n  spike    = {spike_triples:#?}",
+    );
+}
+
 /// Build krilla Metadata from Config.
 fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
     let mut metadata = krilla::metadata::Metadata::new();
@@ -341,6 +386,7 @@ pub fn render_to_pdf_with_gcpm(
     pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
 ) -> Result<Vec<u8>> {
     // Resolve the default (no-selector) CSS @page margin for initial pagination.
     // :first/:left/:right overrides are applied per-page during rendering below.
@@ -733,6 +779,14 @@ pub fn render_to_pdf_with_gcpm(
 
     if let Some(c) = collector {
         let entries = c.into_entries();
+        // fulgur-s67g Phase 2.4: parity-check the spike's
+        // geometry-driven bookmark walk against Pageable's draw-time
+        // collector output. Compares only `(page_idx, level, label)`
+        // — the spike does not work in PDF-pt frames so y_pt parity
+        // is deferred to Phase 4 (convert / render rewrite).
+        if !entries.is_empty() && (content_height - config.content_height()).abs() < 0.001 {
+            assert_bookmark_entries_parity(&entries, pagination_geometry, bookmark_by_node);
+        }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
         }
@@ -1078,6 +1132,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1097,6 +1152,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1113,6 +1169,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1139,6 +1196,7 @@ mod tests {
             &gcpm,
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1176,6 +1234,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
