@@ -2058,6 +2058,64 @@ pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[Link
 mod tests {
     use super::*;
 
+    /// `relayout_position_fixed` must reshape every `position: fixed`
+    /// subtree against the supplied viewport, not against the nearest
+    /// positioned ancestor (the size that Taffy assigned during the
+    /// first pass through `stylo_taffy::convert::map_position` flattens
+    /// Fixed → Absolute). We construct a fixed div nested inside a
+    /// 50px-wide abs ancestor with text wider than 50px, run the
+    /// relayout, and assert the fixed element's `final_layout.size.width`
+    /// expanded past the parent's 50px constraint — which only happens
+    /// if Taffy was re-invoked with viewport-sized available space.
+    #[test]
+    fn relayout_position_fixed_reshapes_against_viewport() {
+        let html = r#"<!doctype html>
+<html><body style="margin:0">
+<div id="abs" style="position:absolute; width:50px">
+  <div id="fix" style="position:fixed">This text needs more than fifty pixels</div>
+</div>
+</body></html>"#;
+        let mut doc = parse(html, 600.0, &[]);
+        resolve(&mut doc);
+
+        // Locate the fixed div before relayout to capture its size.
+        fn find_by_id(doc: &HtmlDocument, id: &str) -> Option<usize> {
+            fn walk(doc: &HtmlDocument, node_id: usize, target: &str) -> Option<usize> {
+                let n = doc.get_node(node_id)?;
+                if let Some(elem) = n.element_data()
+                    && elem.attr(blitz_dom::LocalName::from("id")) == Some(target)
+                {
+                    return Some(node_id);
+                }
+                for &c in &n.children {
+                    if let Some(found) = walk(doc, c, target) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, id)
+        }
+        let fix_id = find_by_id(&doc, "fix").expect("fixed div id=fix");
+        let pre_width = doc.get_node(fix_id).unwrap().final_layout.size.width;
+        // Sanity: first pass constrained the fixed element to the
+        // abs ancestor's 50px box, so the long text wraps to multiple
+        // lines and the box stays narrow.
+        assert!(
+            pre_width <= 50.5,
+            "first-pass width should be capped at the abs's 50px; got {pre_width}"
+        );
+
+        // Now run the second pass with a 600 × 800 viewport and recheck.
+        relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let post_width = doc.get_node(fix_id).unwrap().final_layout.size.width;
+        assert!(
+            post_width > 50.5,
+            "viewport relayout should widen the fixed box past the 50px parent; \
+             got {post_width} (pre was {pre_width})"
+        );
+    }
+
     #[test]
     fn parse_html_with_local_resources_orders_imports_before_parent() {
         // CSS cascade: `@import "child.css"` in parent.css must be
