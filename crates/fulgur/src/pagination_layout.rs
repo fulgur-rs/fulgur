@@ -652,6 +652,135 @@ pub fn collect_string_set_states(
     result
 }
 
+/// fulgur-jkl5: enumerate `position: fixed` elements and emit one
+/// fragment per page so downstream rendering can repeat them on every
+/// page (Chrome-compatible behaviour for paged media — see WPT
+/// fixedpos-* family).
+///
+/// `total_pages` is the document's resolved page count, typically
+/// computed from `PaginationGeometryTable`'s max `page_index + 1` after
+/// `run_pass*` has run. `0` is normalised to `1` so even an empty
+/// document gets a valid fragment for any fixed element on it.
+///
+/// The fragment's `(x, y, width, height)` come from each fixed
+/// element's existing `final_layout` — same coordinate frame the
+/// non-paginated convert path already uses. **This function relies on
+/// `blitz_adapter::relayout_position_fixed` (added in fulgur-tbxs,
+/// branch `feat/fixedpos-viewport-cb`) having run beforehand** so
+/// that `final_layout` reflects viewport-CB resolution rather than
+/// the inherited (often wrong) abs-position layout. The spike branch
+/// does not yet include `relayout_position_fixed`; once both land on
+/// `main` this function picks up the corrected positions automatically.
+///
+/// The emitted fragments are appended to `geometry` (typically the
+/// table returned by `run_pass`) so a single side-table carries both
+/// the body-fragmentation geometry and the fixed-element repetition.
+/// Convert-side consumers (`convert::positioned.rs`) iterate the
+/// node's `Vec<Fragment>` to place one copy of the element per page.
+pub fn append_position_fixed_fragments(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    total_pages: u32,
+) {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+
+    let pages = total_pages.max(1);
+    let mut fixed_ids: Vec<usize> = Vec::new();
+    let root_id = doc.root_element().id;
+    walk_for_position_fixed(doc, root_id, &mut fixed_ids, 0);
+
+    for id in fixed_ids {
+        let Some(node) = doc.get_node(id) else {
+            continue;
+        };
+        // Re-check style here even though `walk_for_position_fixed`
+        // already filtered — guards against nodes whose style was
+        // mutated between the walk and this read (defensive only,
+        // single-threaded code path).
+        let is_fixed = node
+            .primary_styles()
+            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed));
+        if !is_fixed {
+            continue;
+        }
+        let layout = node.final_layout;
+        let (w, h) = (layout.size.width, layout.size.height);
+        let (x, y) = (layout.location.x, layout.location.y);
+
+        let entry = geometry.entry(id).or_default();
+        // Replace any prior placements (e.g. if the fixed element was
+        // also walked by `fragment_pagination_root` and emitted as a
+        // single fragment). Per-page repetition is the canonical
+        // representation for fixed content.
+        entry.fragments.clear();
+        for page_index in 0..pages {
+            entry.fragments.push(Fragment {
+                page_index,
+                x,
+                y,
+                width: w,
+                height: h,
+            });
+        }
+    }
+
+    // Don't allocate empty entries for nodes without fragments.
+    geometry.retain(|_, geom| !geom.fragments.is_empty());
+}
+
+/// Recursive walker that collects every node id whose computed
+/// `position` is `fixed`. Mirrors the helper of the same shape in
+/// `blitz_adapter::relayout_position_fixed` (branch
+/// `feat/fixedpos-viewport-cb`). Visits raw `node.children` rather
+/// than `layout_children` because the latter may be invalidated by
+/// the time this runs, and pseudo-elements (`::before` / `::after`)
+/// live in `node.before` / `node.after` outside the children vec.
+fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usize>, depth: usize) {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    let is_fixed = node
+        .primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed));
+    if is_fixed {
+        out.push(node_id);
+    }
+    for &child_id in &node.children {
+        walk_for_position_fixed(doc, child_id, out, depth + 1);
+    }
+    // Pseudo-elements: a `::before { position: fixed }` would
+    // otherwise be missed by the children-only walk. The `before` /
+    // `after` slots live directly on `Node`, not on `ElementData`.
+    if let Some(pseudo_id) = node.before {
+        walk_for_position_fixed(doc, pseudo_id, out, depth + 1);
+    }
+    if let Some(pseudo_id) = node.after {
+        walk_for_position_fixed(doc, pseudo_id, out, depth + 1);
+    }
+}
+
+/// fulgur-jkl5: total page count implied by a geometry table.
+///
+/// Convention matches `compare_with_pageable::spike_page_count`:
+/// returns `max(page_index) + 1` if the table has any fragments, else
+/// `1` (Pageable's "always at least one page" guarantee). Exposed as
+/// a helper so callers that need to thread `total_pages` into
+/// [`append_position_fixed_fragments`] can do so without re-computing.
+pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
+    geometry
+        .values()
+        .flat_map(|g| g.fragments.iter())
+        .map(|f| f.page_index)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1)
+}
+
 /// Locate the `<body>` element id by walking the html root's children.
 ///
 /// Prefers the first child whose tag name is `body`. Falls back to
@@ -816,6 +945,7 @@ fn compute_pagination_layout(
 mod tests {
     use super::*;
     use crate::blitz_adapter;
+    use std::ops::DerefMut;
     use std::sync::Arc;
 
     fn parse(html: &str, viewport_w: f32, viewport_h: u32) -> blitz_html::HtmlDocument {
@@ -1020,6 +1150,96 @@ mod tests {
         let states = super::collect_string_set_states(&geom, &markers);
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
+    }
+
+    /// fulgur-jkl5: `position: fixed` element should emit one
+    /// fragment per page so downstream rendering can repeat it.
+    #[test]
+    fn position_fixed_repeats_per_page() {
+        let html = r#"
+            <html><body>
+              <div style="height: 600px"></div>
+              <div style="height: 600px"></div>
+              <div style="position: fixed; top: 10px; left: 20px;
+                          width: 100px; height: 50px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0, 1000);
+
+        let mut geom = super::run_pass(doc.deref_mut(), 800.0);
+        let pages_before = super::implied_page_count(&geom);
+        assert!(
+            pages_before >= 2,
+            "two 600px blocks on 800px page should split → {pages_before} pages",
+        );
+
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), pages_before);
+
+        // The fixed div should now appear in `geom` with one fragment
+        // per page. We don't know its NodeId statically, so locate it
+        // by the per-fragment width = 100.0.
+        let fixed_entries: Vec<_> = geom
+            .iter()
+            .filter(|(_, g)| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
+            })
+            .collect();
+        assert_eq!(
+            fixed_entries.len(),
+            1,
+            "exactly one fixed element entry expected, got {}",
+            fixed_entries.len()
+        );
+        let (_, fixed_geom) = fixed_entries[0];
+        assert_eq!(
+            fixed_geom.fragments.len() as u32,
+            pages_before,
+            "fixed element should have one fragment per page",
+        );
+        let pages_seen: Vec<u32> = fixed_geom.fragments.iter().map(|f| f.page_index).collect();
+        assert_eq!(pages_seen, (0..pages_before).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn position_fixed_with_no_pages_normalises_to_one_page() {
+        // append_position_fixed_fragments(geom, doc, 0) should still
+        // emit exactly one fragment per fixed element (the Pageable
+        // "always at least one page" convention applied to fixed
+        // repetition).
+        let html = r#"
+            <html><body>
+              <div style="position: fixed; top: 0; left: 0;
+                          width: 50px; height: 30px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0, 1000);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 0);
+        assert_eq!(geom.len(), 1);
+        let (_, g) = geom.iter().next().unwrap();
+        assert_eq!(g.fragments.len(), 1);
+        assert_eq!(g.fragments[0].page_index, 0);
+    }
+
+    #[test]
+    fn implied_page_count_is_one_for_empty_geometry() {
+        let geom = PaginationGeometryTable::new();
+        assert_eq!(super::implied_page_count(&geom), 1);
+    }
+
+    #[test]
+    fn implied_page_count_uses_max_index_plus_one() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(1).or_default().fragments.push(Fragment {
+            page_index: 2,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        assert_eq!(super::implied_page_count(&geom), 3);
     }
 
     #[test]
