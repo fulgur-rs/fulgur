@@ -610,59 +610,56 @@ impl<'a> PaginationLayoutTree<'a> {
                 continue;
             }
 
-            // Block fallback: child overflows the current page strip →
-            // advance to the next page first.
+            // fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5: unified
+            // recursion gate covering all three cases that
+            // `BlockPageable::find_split_point` handles —
+            //   - truly oversized (`child_h > page_h_px`) caught
+            //     here when `would_split_block_subtree` finds the
+            //     overflowing grandchild,
+            //   - in-place mid-element split (`cursor_y + child_h >
+            //     page_h_px` with `child_h <= page_h_px`),
+            //   - forced break declared anywhere in the subtree.
             //
-            // `break-inside: avoid` already collapses to this path via
-            // `avoid_inside` above — it just suppresses the inline
-            // split branch; the remaining-strip overflow handling is
-            // identical.
-            if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
-                page_index += 1;
-                cursor_y = 0.0;
-            }
-
-            // fulgur-g9e3.1: when the child is taller than a full page
-            // strip and has DOM children, recurse to split among
-            // grandchildren instead of emitting it whole on a single
-            // page. This is the truly-oversized branch of
-            // `BlockPageable::find_split_point`'s overflow→split path
-            // (`pageable.rs:1242` onward).
+            // The recursion enters from the **current** cursor (not
+            // a pre-advanced 0), so an in-place split with `cursor_y
+            // > 0` produces a `WithinChild`-shaped result on the
+            // current page and a tail on the next, matching
+            // Pageable's behaviour.
             //
-            // The in-place split case (`cursor_y + child_h > page_h`
-            // with `child_h <= page_h`) requires a pre-flight check
-            // that recursion would actually cross a boundary —
-            // otherwise the recursion produces a parent fragment whose
-            // height is sum-of-children rather than parent's CSS-set
-            // height (e.g. a 600px div containing a 30px h2 emits
-            // h=30 instead of h=600). That belongs in `fulgur-a9qf`
-            // (Phase 3.1.5) alongside the forced-break recursion fix;
-            // until then, the in-place case falls through to the
-            // existing whole-emit path on the next page (page-advance
-            // already happened above), and the `forced_break_skipped`
-            // gate in `render.rs` keeps parity assertions quiet on
-            // tests that exercise it.
+            // `would_split_block_subtree` is a cheap simulator that
+            // walks the DOM children once with the same gap / OOF /
+            // whitespace skips `fragment_block_subtree` uses — it
+            // returns `false` when the children all fit in the
+            // available strip, so the in-place case where the
+            // parent's CSS height exceeds children's sum (e.g. a
+            // 600px div with one 30px h2) falls through to the
+            // existing whole-emit path and avoids the children-sum
+            // parent-height bug.
             //
-            // `break-inside: avoid` + truly-oversized → fall through
-            // to splitting too (matches Pageable's
-            // `total_height > page_height` override at
-            // `pageable.rs:1165`).
-            // fulgur-a36m (Phase 3.1.5b): also recurse when the
-            // body-direct child fits the strip but its DOM subtree
-            // declares a forced break (e.g. body has `<ul>` whose
-            // `<li class="icon">` carries `break-before: page`).
-            // Without recursion, the nested break would be emitted
-            // inside the body child's whole fragment with no page
-            // boundary, mismatching Pageable's
-            // `BlockPageable::find_split_point` `has_forced_break_below`
-            // path (`pageable.rs:1196-1203`).
-            let has_splittable_children = self
-                .doc
-                .get_node(child_id)
-                .is_some_and(|n| !n.children.is_empty());
+            // `break-inside: avoid` + truly-oversized → still falls
+            // through to splitting (Pageable's `total_height >
+            // page_height` override at `pageable.rs:1165`).
+            let child_node = self.doc.get_node(child_id);
+            let has_splittable_children = child_node.is_some_and(|n| !n.children.is_empty());
+            // fulgur-7hf5: multicol containers (`column-count > 1` /
+            // `column-width: <len>`) distribute children across
+            // columns; their DOM children's flow does not match the
+            // visual flow `would_split_block_subtree` simulates. Skip
+            // recursion for them — Pageable's `ColumnGroupPageable`
+            // handles their split internally and emits whole when the
+            // multicol box itself fits the strip.
+            let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
+            let available_strip = (self.page_height_px - cursor_y).max(0.0);
             let needs_recursion = has_splittable_children
-                && (child_h > self.page_height_px
-                    || has_forced_break_below(self.doc, child_id, self.column_styles, 0));
+                && !is_multicol
+                && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
+                    || would_split_block_subtree(
+                        self.doc,
+                        child_id,
+                        available_strip,
+                        self.page_height_px,
+                        0,
+                    ));
             if needs_recursion {
                 let child_x_in_body = body_x + layout.location.x;
                 let (new_page, new_cursor) = fragment_block_subtree(
@@ -689,6 +686,17 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y = 0.0;
                 }
                 continue;
+            }
+
+            // No recursion needed — apply the existing strip-overflow
+            // page advance for non-splittable / fits-fine children.
+            // `break-inside: avoid` collapses to this path via
+            // `avoid_inside` above (it just suppresses the inline
+            // split branch; remaining-strip overflow handling is
+            // identical).
+            if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
+                page_index += 1;
+                cursor_y = 0.0;
             }
 
             let frag = Fragment {
@@ -822,6 +830,78 @@ fn record_subtree_descendants(
             depth + 1,
         );
     }
+}
+
+/// fulgur-7hf5 (Phase 3.1.5c): pre-flight check for the recursion
+/// gate — true if walking `parent_id`'s direct children would cross
+/// a page boundary at `available_h`.
+///
+/// Cheaper-than-real `fragment_block_subtree` simulator: same gap /
+/// OOF / whitespace skips, but no fragment emission. Returns `true`
+/// on the first overflow detected. Lets the caller decide "should I
+/// recurse here?" without paying the cost of recursion when recursion
+/// would not actually split — preserves Pageable's
+/// `BlockPageable::find_split_point` distinction between
+/// `WithinChild` (recurse and split) and `AtIndex` / `NoSplit`
+/// (push child to next page or emit whole).
+///
+/// `available_h` is the strip height left below the parent's entry
+/// cursor on the current page. `page_h_px` lets the simulator detect
+/// grandchildren taller than a full page (which would themselves
+/// recurse and therefore split, regardless of `available_h`).
+fn would_split_block_subtree(
+    doc: &BaseDocument,
+    parent_id: usize,
+    available_h: f32,
+    page_h_px: f32,
+    depth: usize,
+) -> bool {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(parent) = doc.get_node(parent_id) else {
+        return false;
+    };
+    let mut cursor: f32 = 0.0;
+    let mut prev_bottom: f32 = 0.0;
+    for &child_id in &parent.children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        if let Some(text) = child.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
+            continue;
+        }
+        {
+            use ::style::properties::longhands::position::computed_value::T as Pos;
+            let is_oof = child.primary_styles().is_some_and(|s| {
+                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            });
+            if is_oof {
+                continue;
+            }
+        }
+        let layout = child.final_layout;
+        let h = layout.size.height;
+        if h <= 0.0 {
+            continue;
+        }
+        let this_top = layout.location.y;
+        let gap = (this_top - prev_bottom).max(0.0);
+        cursor += gap;
+        if cursor + h > available_h {
+            return true;
+        }
+        if h > page_h_px {
+            // Grandchild itself oversized → would recurse → would
+            // split, regardless of `available_h` budget.
+            return true;
+        }
+        cursor += h;
+        prev_bottom = this_top + h;
+    }
+    false
 }
 
 /// fulgur-a36m (Phase 3.1.5b): true if any descendant of `node_id`
@@ -1106,37 +1186,36 @@ fn fragment_block_subtree(
             page_start_y = 0.0;
         }
 
-        // Child does not fit in the remaining strip → cut a page.
-        if cursor_y > page_start_y && cursor_y + child_h > page_height_px {
-            // Close the parent's fragment for the current page,
-            // covering the children that landed on it.
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body,
-                    y: page_start_y,
-                    width: parent_w,
-                    height: cursor_y - page_start_y,
-                });
-            page_index += 1;
-            cursor_y = 0.0;
-            page_start_y = 0.0;
-        }
+        // (Strip-overflow page cut moved below the recursion gate as
+        // part of fulgur-7hf5 — see the `if cursor_y > page_start_y
+        // && cursor_y + child_h > page_height_px` block after the
+        // gate. The gate must run from the **current** cursor so an
+        // in-place split produces a `WithinChild`-shaped result on
+        // the current strip, not a pre-advanced fresh page.)
 
         let child_x_in_body = parent_x_in_body + layout.location.x;
 
-        // Child needs recursion when:
-        //   - itself oversized (Phase 3.1, mirrors
-        //     `find_split_point`'s overflow→split path), OR
-        //   - subtree contains a forced break (Phase 3.1.5b,
-        //     mirrors `find_split_point`'s `has_forced_break_below`
-        //     check at `pageable.rs:1196-1203`).
+        // fulgur-7hf5 (Phase 3.1.5c): unified recursion gate matching
+        // `fragment_pagination_root`'s body-direct branch — recurse
+        // whenever the child's subtree would split (in-place,
+        // truly-oversized, or forced-break-below). The recursion
+        // enters from the current cursor so an in-place split
+        // produces a `WithinChild`-shaped result on the current page
+        // strip and a tail on the next.
+        //
+        // `would_split_block_subtree` returns `false` when all the
+        // child's grandchildren fit the available strip — protects
+        // against the "parent CSS height > children sum" case where
+        // recursion would emit a parent fragment shorter than
+        // expected.
+        let available_strip = (page_height_px - cursor_y).max(0.0);
+        // fulgur-7hf5: see body-direct branch — multicol containers
+        // are atomic from the fragmenter's perspective.
+        let is_multicol = crate::blitz_adapter::is_multicol_container(child);
         let needs_recursion = !child.children.is_empty()
-            && (child_h > page_height_px
-                || has_forced_break_below(doc, child_id, column_styles, 0));
+            && !is_multicol
+            && (has_forced_break_below(doc, child_id, column_styles, 0)
+                || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
         if needs_recursion {
             let pre_recursion_page = page_index;
             let (np, nc) = fragment_block_subtree(
@@ -1179,6 +1258,27 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
             }
             continue;
+        }
+
+        // No recursion — apply the strip-overflow page cut for
+        // children that don't split (non-splittable, or splittable
+        // but all grandchildren fit the available strip — the
+        // parent-CSS-height-vs-children-sum case stays here).
+        if cursor_y > page_start_y && cursor_y + child_h > page_height_px {
+            geometry
+                .entry(parent_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: parent_x_in_body,
+                    y: page_start_y,
+                    width: parent_w,
+                    height: cursor_y - page_start_y,
+                });
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
         }
 
         // Child fits the strip (or is an atomic oversized leaf that
@@ -2849,6 +2949,45 @@ mod compare_with_pageable {
             // 200pt × 200pt expressed in mm, same as
             // tests/break_inside_avoid.rs.
             .page_size(PageSize::custom(70.5556, 70.5556))
+            .build();
+        let pdf = engine.render_html(html).expect("render");
+        assert!(
+            !pdf.is_empty(),
+            "engine returned empty PDF — parity assertion likely panicked",
+        );
+    }
+
+    /// fulgur-7hf5 (Phase 3.1.5c): in-place mid-element split with
+    /// non-zero entry cursor. A spacer ahead of a splittable container
+    /// pushes the recursion's entry cursor above 0, so the
+    /// `would_split_block_subtree` pre-flight gate decides whether to
+    /// split in-place (`WithinChild` semantics, head on the current
+    /// page strip and tail on the next) or push the whole container
+    /// to the next page (`AtIndex` semantics).
+    ///
+    /// Counter ops on the rows make this a load-bearing parity check
+    /// — `assert_counter_states_parity` panics in debug builds if
+    /// the per-page entries diverge.
+    #[test]
+    fn in_place_mid_element_split_with_non_zero_cursor() {
+        let html = r#"<!doctype html><html><head><style>
+            @page { size: 300pt 400pt; margin: 0; }
+            body { margin: 0; counter-reset: chapter; }
+            .spacer { height: 200pt; background: #eee; }
+            .splittable { /* no explicit height; flows from children */ }
+            .row { height: 120pt; counter-increment: chapter; background: #036; }
+        </style></head><body>
+          <div class="spacer"></div>
+          <div class="splittable">
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+            <div class="row"></div>
+          </div>
+        </body></html>"#;
+        let engine = Engine::builder()
+            // 300pt × 400pt expressed in mm.
+            .page_size(PageSize::custom(105.8333, 141.1111))
             .build();
         let pdf = engine.render_html(html).expect("render");
         assert!(
