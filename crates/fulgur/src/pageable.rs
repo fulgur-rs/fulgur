@@ -1611,34 +1611,14 @@ fn split_children_for_within(
 /// Clone a slice of PositionedChild, optionally shifting y coordinates.
 /// When `y_offset` is 0.0, children are cloned as-is.
 /// A negative `y_offset` shifts children upward (subtracts from y).
+///
+/// Delegates to `clone_pc_with_offset` so the in-flow / out-of-flow / fixed
+/// branches stay in lockstep — a fixed child cloned through here keeps its
+/// viewport-relative y, just like in the split paths above.
 fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<PositionedChild> {
-    // In-flow children are clamped at 0.0 so parallel siblings (grid/flex
-    // children sharing the same y as a split-causing child) don't end up at
-    // negative y on the second fragment, which would push their
-    // background+border above the page top and silently drop them
-    // (fulgur-86fo).
-    //
-    // Out-of-flow children (CSS 2.1 §10.6.4 abs/fixed) preserve negative y
-    // so a tall abs element anchored at its CB's top:0 naturally extends
-    // above the second fragment's page area; Krilla clips outside the page,
-    // producing the correct slice on each page (fulgur-aijf).
     children
         .iter()
-        .map(|pc| {
-            let shifted = pc.y - y_offset;
-            let y = if pc.out_of_flow {
-                shifted
-            } else {
-                shifted.max(0.0)
-            };
-            PositionedChild {
-                child: pc.child.clone_box(),
-                x: pc.x,
-                y,
-                out_of_flow: pc.out_of_flow,
-                is_fixed: false,
-            }
-        })
+        .map(|pc| clone_pc_with_offset(pc, y_offset))
         .collect()
 }
 
@@ -4173,6 +4153,37 @@ mod tests {
         // Verify out-of-flow replicated with no clamp on negative.
         let second_oof = second.iter().find(|p| p.out_of_flow).unwrap();
         assert_eq!(second_oof.y, -70.0);
+    }
+
+    /// fulgur-jkl5 follow-up (Devin / CodeRabbit on PR #263): `clone_children`
+    /// is the bulk-cloning helper used by `TablePageable::split` etc., and
+    /// it must mirror `clone_pc_with_offset`'s three-way branch — in-flow
+    /// clamps at 0, out-of-flow keeps negative y, and **fixed** children
+    /// preserve their original viewport-relative y. Previously this
+    /// function hardcoded `is_fixed: false` and treated fixed children as
+    /// out-of-flow, which would silently lose the flag if any caller ever
+    /// passed fixed children through it.
+    #[test]
+    fn clone_children_preserves_in_flow_out_of_flow_and_fixed() {
+        let children = vec![
+            PositionedChild::in_flow(make_spacer(10.0), 0.0, 50.0),
+            PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0),
+            PositionedChild::fixed(make_spacer(5.0), 0.0, 10.0),
+        ];
+        let cloned = clone_children(&children, 80.0);
+        assert_eq!(cloned.len(), 3);
+        // In-flow: y - offset = 50 - 80 = -30 → clamped to 0.
+        assert_eq!(cloned[0].y, 0.0);
+        assert!(!cloned[0].out_of_flow);
+        assert!(!cloned[0].is_fixed);
+        // Out-of-flow: y - offset = 0 - 80 = -80, no clamp.
+        assert_eq!(cloned[1].y, -80.0);
+        assert!(cloned[1].out_of_flow);
+        assert!(!cloned[1].is_fixed);
+        // Fixed: y stays at 10 regardless of offset.
+        assert_eq!(cloned[2].y, 10.0);
+        assert!(cloned[2].out_of_flow);
+        assert!(cloned[2].is_fixed);
     }
 
     #[test]
