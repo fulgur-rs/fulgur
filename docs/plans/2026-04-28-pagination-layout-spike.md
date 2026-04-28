@@ -175,6 +175,20 @@ docstring) can plug a `Vec<Fragment>` per node into
    doing more work than necessary, or it may surface child clipping
    that needs a workaround.
 
+   **Result (fulgur-ik6o, executed)**: no observable difference. All
+   10 comparison fixtures produced identical page counts under
+   `StripMode::MaxContent` and `StripMode::Definite(page_height_px)`,
+   including the long-paragraph case that disagrees with Pageable.
+   Conclusion: Taffy's block layout does not use
+   `available_space.height` to drive mid-element splitting (it is
+   only consulted for shrink-to-fit / orthogonal-flow corner cases).
+   This rules out the "free fragmentation by constraining
+   available_space" hypothesis — true pagination requires the hook
+   to iterate strip-by-strip and re-issue per-child layouts itself.
+   The `StripMode` enum and `run_pass_constrained` entry are kept in
+   the spike code as reproducible instrumentation, but they do not
+   change behaviour.
+
 3. **inline-aware fragmenter prototype** —
    the F2 work. Either parallel ParagraphPageable-like, or
    Parley line-box probe. Highest-value since it closes the only
