@@ -595,3 +595,386 @@ fn convert_bg_clip(
         C::ContentBox => BgClip::ContentBox,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{AssetBundle, Engine};
+
+    /// 1×1 red PNG (minimal valid file with correct CRC sums).
+    const PNG_1X1_RED: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn render_bg(bg_css: &str) -> Vec<u8> {
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{bg_css}"></div></body></html>"#
+        );
+        Engine::builder()
+            .build()
+            .render_html(&html)
+            .expect("render should succeed")
+    }
+
+    fn assert_pdf(pdf: &[u8], label: &str) {
+        assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF header");
+    }
+
+    fn render_with_style(style: &str, label: &str) {
+        let html = format!(r#"<html><body><div style="{style}"></div></body></html>"#);
+        let pdf = Engine::builder()
+            .build()
+            .render_html(&html)
+            .unwrap_or_else(|_| panic!("render failed for {label}"));
+        assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF");
+    }
+
+    // ── resolve_linear_gradient: direction arms ───────────────────────────────
+
+    /// Exercises all nine `LineDirection` arms of `resolve_linear_gradient`:
+    /// `Angle`, `Horizontal(Left)`, `Horizontal(Right)`, `Vertical(Top)`,
+    /// `Vertical(Bottom)`, and all four `Corner` variants.
+    #[test]
+    fn linear_gradient_direction_variants() {
+        let cases = [
+            ("angle", "linear-gradient(45deg,red,blue)"),
+            ("to_right", "linear-gradient(to right,red,blue)"),
+            ("to_left", "linear-gradient(to left,red,blue)"),
+            ("to_top", "linear-gradient(to top,red,blue)"),
+            ("to_bottom", "linear-gradient(to bottom,red,blue)"),
+            ("to_top_right", "linear-gradient(to top right,red,blue)"),
+            ("to_top_left", "linear-gradient(to top left,red,blue)"),
+            ("to_bottom_left", "linear-gradient(to bottom left,red,blue)"),
+            (
+                "to_bottom_right",
+                "linear-gradient(to bottom right,red,blue)",
+            ),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    // ── resolve_radial_gradient: shape arms ───────────────────────────────────
+
+    /// Exercises `EndingShape::Circle(Circle::Radius(...))`.
+    #[test]
+    fn radial_gradient_circle_explicit_radius() {
+        assert_pdf(
+            &render_bg("radial-gradient(circle 40px at center,red,blue)"),
+            "circle_radius",
+        );
+    }
+
+    /// Exercises `Circle::Extent` and `Ellipse::Extent` for all four
+    /// `ShapeExtent` keyword values (ClosestSide / FarthestSide /
+    /// ClosestCorner / FarthestCorner), which also covers `map_extent`.
+    #[test]
+    fn radial_gradient_extent_variants() {
+        let cases = [
+            (
+                "circle_closest_side",
+                "radial-gradient(closest-side circle,red,blue)",
+            ),
+            (
+                "circle_farthest_side",
+                "radial-gradient(farthest-side circle,red,blue)",
+            ),
+            (
+                "circle_closest_corner",
+                "radial-gradient(closest-corner circle,red,blue)",
+            ),
+            (
+                "circle_farthest_corner",
+                "radial-gradient(farthest-corner circle,red,blue)",
+            ),
+            (
+                "ellipse_closest_side",
+                "radial-gradient(closest-side ellipse,red,blue)",
+            ),
+            (
+                "ellipse_farthest_side",
+                "radial-gradient(farthest-side ellipse,red,blue)",
+            ),
+            (
+                "ellipse_closest_corner",
+                "radial-gradient(closest-corner ellipse,red,blue)",
+            ),
+            (
+                "ellipse_farthest_corner",
+                "radial-gradient(farthest-corner ellipse,red,blue)",
+            ),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    /// Exercises `EndingShape::Ellipse(Ellipse::Radii(...))` and the
+    /// `try_convert_lp_to_bg` calls for both rx and ry.
+    #[test]
+    fn radial_gradient_ellipse_explicit_radii() {
+        assert_pdf(
+            &render_bg("radial-gradient(ellipse 50px 30px at center,red,blue)"),
+            "ellipse_radii",
+        );
+    }
+
+    /// Exercises the `position_x` / `position_y` arms of
+    /// `resolve_radial_gradient` with a percentage center.
+    #[test]
+    fn radial_gradient_percentage_position() {
+        assert_pdf(
+            &render_bg("radial-gradient(circle at 25% 75%,red,blue)"),
+            "radial_at_position",
+        );
+    }
+
+    /// `repeating-radial-gradient` exercises the `repeating: true` flag.
+    #[test]
+    fn radial_gradient_repeating() {
+        assert_pdf(
+            &render_bg("repeating-radial-gradient(circle 30px,red,blue)"),
+            "radial_repeating",
+        );
+    }
+
+    // ── resolve_conic_gradient: arms ─────────────────────────────────────────
+
+    /// Exercises the `from_angle` field and basic `SimpleColorStop` items.
+    #[test]
+    fn conic_gradient_from_angle() {
+        assert_pdf(
+            &render_bg("conic-gradient(from 45deg,red,blue)"),
+            "conic_from_angle",
+        );
+    }
+
+    /// Exercises position_x / position_y via `at <position>`.
+    #[test]
+    fn conic_gradient_at_position() {
+        assert_pdf(
+            &render_bg("conic-gradient(at 30% 70%,red,blue)"),
+            "conic_at_pos",
+        );
+    }
+
+    /// `ComplexColorStop` with `Percentage` → `GradientStopPosition::Fraction`.
+    #[test]
+    fn conic_gradient_percentage_stops() {
+        assert_pdf(
+            &render_bg("conic-gradient(red 0%,blue 50%,red 100%)"),
+            "conic_pct_stops",
+        );
+    }
+
+    /// `ComplexColorStop` with `Angle` → fraction via `angle / TAU`.
+    #[test]
+    fn conic_gradient_angle_stops() {
+        assert_pdf(
+            &render_bg("conic-gradient(red 0deg,blue 90deg,red 360deg)"),
+            "conic_angle_stops",
+        );
+    }
+
+    /// `repeating-conic-gradient` exercises the `repeating: true` flag.
+    #[test]
+    fn conic_gradient_repeating() {
+        assert_pdf(
+            &render_bg("repeating-conic-gradient(red 0deg,blue 30deg)"),
+            "conic_repeating",
+        );
+    }
+
+    // ── resolve_color_stops: GradientStopPosition variants ───────────────────
+
+    /// `ComplexColorStop` with `to_length()` → `GradientStopPosition::LengthPx`.
+    #[test]
+    fn linear_gradient_length_px_stops() {
+        assert_pdf(
+            &render_bg("linear-gradient(red 0px,blue 80px)"),
+            "length_px_stops",
+        );
+    }
+
+    /// `ComplexColorStop` with `to_percentage()` → `GradientStopPosition::Fraction`.
+    #[test]
+    fn linear_gradient_fraction_stops() {
+        assert_pdf(
+            &render_bg("linear-gradient(red 0%,blue 100%)"),
+            "fraction_stops",
+        );
+    }
+
+    /// Valid interpolation hint between two color stops. The hint is at 30%
+    /// and drives the power-curve expansion in `expand_interpolation_hints`.
+    #[test]
+    fn linear_gradient_valid_interpolation_hint() {
+        assert_pdf(&render_bg("linear-gradient(red,30%,blue)"), "valid_hint");
+    }
+
+    /// Invalid hint placements cause `resolve_color_stops` to return `None`
+    /// (layer dropped). The element still renders — just without the gradient.
+    #[test]
+    fn linear_gradient_invalid_hint_cases_drop_layer() {
+        let cases = [
+            ("leading_hint", "linear-gradient(30%,red,blue)"),
+            ("trailing_hint", "linear-gradient(red,blue,70%)"),
+            ("consecutive_hints", "linear-gradient(red,30%,60%,blue)"),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    // ── convert_bg_size: BackgroundSize variant arms ──────────────────────────
+
+    /// All `background-size` keyword / value combinations exercise every arm
+    /// of `convert_bg_size` (Cover, Contain, ExplicitSize with various
+    /// auto/length/percentage combinations).
+    #[test]
+    fn bg_size_variants() {
+        let cases = [
+            ("cover", "background-size:cover"),
+            ("contain", "background-size:contain"),
+            ("explicit_px", "background-size:50px 40px"),
+            ("auto_height", "background-size:50px auto"),
+            ("auto_width", "background-size:auto 40px"),
+            ("auto_auto", "background-size:auto auto"),
+            ("pct", "background-size:50% 50%"),
+        ];
+        for (name, size_css) in cases {
+            render_with_style(
+                &format!("width:120px;height:80px;background:linear-gradient(red,blue);{size_css}"),
+                name,
+            );
+        }
+    }
+
+    // ── convert_bg_repeat: BackgroundRepeat variant arms ─────────────────────
+
+    /// All four `BackgroundRepeatKeyword` values exercise every arm of
+    /// `convert_bg_repeat`.
+    #[test]
+    fn bg_repeat_variants() {
+        let cases = [
+            ("repeat", "background-repeat:repeat"),
+            ("no_repeat", "background-repeat:no-repeat"),
+            ("space", "background-repeat:space"),
+            ("round", "background-repeat:round"),
+        ];
+        for (name, repeat_css) in cases {
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;background:linear-gradient(red,blue);background-size:30px 20px;{repeat_css}"
+                ),
+                name,
+            );
+        }
+    }
+
+    // ── convert_bg_origin / convert_bg_clip: box-type variant arms ───────────
+
+    /// All three `background-origin` + `background-clip` keyword pairs exercise
+    /// every arm of `convert_bg_origin` and `convert_bg_clip`.
+    #[test]
+    fn bg_origin_clip_variants() {
+        let cases = [
+            (
+                "border_box",
+                "background-origin:border-box;background-clip:border-box",
+            ),
+            (
+                "padding_box",
+                "background-origin:padding-box;background-clip:padding-box",
+            ),
+            (
+                "content_box",
+                "background-origin:content-box;background-clip:content-box",
+            ),
+        ];
+        for (name, extra_css) in cases {
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;padding:10px;background:linear-gradient(red,blue);{extra_css}"
+                ),
+                name,
+            );
+        }
+    }
+
+    // ── apply_to: background-image URL arms ──────────────────────────────────
+
+    /// `Image::Url` → `AssetKind::Raster` → `BgImageContent::Raster` arm.
+    #[test]
+    fn bg_image_url_raster_png() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(html)
+            .expect("render raster bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → `AssetKind::Svg` → `BgImageContent::Svg` arm.
+    #[test]
+    fn bg_image_url_svg() {
+        let svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='red'/></svg>";
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("bg.svg", svg.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(bg.svg)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(html)
+            .expect("render svg bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → SVG bytes that fail `usvg::Tree::from_data` → `None` arm
+    /// (layer dropped; element still renders).
+    #[test]
+    fn bg_image_url_invalid_svg_falls_back() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("broken.svg", b"<svg<<NOT_VALID_XML".to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(broken.svg)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(html)
+            .expect("render broken-svg bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → `AssetKind::Unknown` arm → `None` (layer dropped).
+    #[test]
+    fn bg_image_url_unknown_asset_kind() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("file.dat", b"NOT_AN_IMAGE_OR_SVG".to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(file.dat)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(html)
+            .expect("render unknown-asset bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` when no `AssetBundle` is set → `ctx.assets.is_none()` →
+    /// `and_then` returns `None` (layer dropped silently).
+    #[test]
+    fn bg_image_url_without_bundle_returns_none() {
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(img.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render_html(html)
+            .expect("render missing-bundle bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+}
