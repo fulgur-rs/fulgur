@@ -210,20 +210,37 @@ Create a worktree (`superpowers:using-git-worktrees`) and:
    cargo test -p fulgur 2>&1 | grep "test result:"
    ```
 
-If you added pure helpers in `pageable.rs`, also add unit tests in
-`#[cfg(test)] mod tests` per CLAUDE.md's "Coverage scope" rule —
-codecov's patch coverage doesn't count VRT-only paths.
+If you added **new** pure helpers in `pageable.rs`, also add unit tests
+in `#[cfg(test)] mod tests` per CLAUDE.md's "Coverage scope" rule —
+codecov's patch coverage doesn't count VRT-only paths. Helpers that
+were only relocated across modules without behavioural changes can
+defer test relocation to a follow-up issue.
 
 ## Step 6 — Run the WPT runner
 
+Two placeholders here — they look similar but refer to different
+artifacts and must NOT be conflated:
+
+- `<test-bin>` — the cargo test binary file name in
+  `crates/fulgur-wpt/tests/` (e.g. `wpt_css_page`, `wpt_lists`,
+  `wpt_smoke`). This goes after `--test`.
+- `<phase>` — the WPT phase / subdirectory name (e.g. `css-page`,
+  `lists`, `smoke`). This is what appears in
+  `target/wpt-report/<phase>/` and the runner's `<phase> report at`
+  log line.
+
 ```bash
 ln -sf /home/ubuntu/fulgur/target/wpt target/wpt  # if not present
-FULGUR_WPT_REQUIRED=1 cargo test -p fulgur-wpt --test wpt_<phase> --release \
+FULGUR_WPT_REQUIRED=1 cargo test -p fulgur-wpt --test <test-bin> --release \
   -- --nocapture 2>&1 | grep -E "regressions=|promotions=|<phase> report"
 ```
 
-Phases: `wpt_css_page`, `wpt_lists`, `wpt_smoke`. The phase name maps to
-`target/wpt/css/<subdir>/`.
+Mapping (`<test-bin>` → `<phase>` → WPT subdir):
+
+- `wpt_css_page` → `css-page` → `target/wpt/css/css-page/`
+- `wpt_lists` → `lists` → list-driven cherry-picks (see
+  `expectations/lists/<name>.txt`)
+- `wpt_smoke` → `smoke` → fast smoke subset
 
 After it runs, parse the report:
 
