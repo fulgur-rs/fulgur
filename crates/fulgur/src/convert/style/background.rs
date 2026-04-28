@@ -938,9 +938,9 @@ mod tests {
     }
 
     /// `Image::Url` → SVG bytes that fail `usvg::Tree::from_data` → `None` arm
-    /// (logs a warning, layer dropped, element still renders).
+    /// (layer dropped; element still renders).
     #[test]
-    fn bg_image_url_invalid_svg_logs_and_falls_back() {
+    fn bg_image_url_invalid_svg_falls_back() {
         let mut bundle = AssetBundle::default();
         bundle.add_image("broken.svg", b"<svg<<NOT_VALID_XML".to_vec());
         let html = r#"<html><body><div style="width:80px;height:80px;background:url(broken.svg)"></div></body></html>"#;
