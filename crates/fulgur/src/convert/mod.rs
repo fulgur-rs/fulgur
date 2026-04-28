@@ -123,6 +123,17 @@ pub struct ConvertContext<'a> {
     /// the emitted PDF (LinkCollector dedupes by `Arc::ptr_eq`). A single
     /// long-lived cache guarantees pointer identity across the whole tree.
     pub(crate) link_cache: LinkCache,
+    /// Initial CB approximation: page area dimensions in CSS px.
+    /// `position: fixed` resolves its containing block against the viewport
+    /// (CSS 2.1 §10.1.5), but Blitz lays the body out with height = sum of
+    /// in-flow children — which is `0` when every direct child is
+    /// out-of-flow (the fixedpos-* WPT family). Without this fallback,
+    /// `bottom: 0` against body would resolve to `0 - child_h = -child_h`
+    /// and the fixed element snaps to the top of the page instead of the
+    /// bottom. `None` (the test harness default) falls back to the body's
+    /// Taffy size, preserving the historical behavior for unit tests that
+    /// don't run through `Engine::render_html`.
+    pub viewport_size_px: Option<(f32, f32)>,
 }
 
 impl ConvertContext<'_> {
@@ -810,6 +821,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -858,6 +870,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -922,6 +935,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let root = dom_to_pageable(&doc, &mut ctx);
 
@@ -989,6 +1003,7 @@ mod tests {
                 column_styles: $crate::column_css::ColumnStyleTable::new(),
                 multicol_geometry: $crate::multicol_layout::MulticolGeometryTable::new(),
                 link_cache: Default::default(),
+                viewport_size_px: None,
             }
         }};
     }

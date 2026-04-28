@@ -1777,6 +1777,7 @@ mod link_collect_tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
         let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
