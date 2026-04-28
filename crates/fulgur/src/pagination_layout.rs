@@ -619,11 +619,11 @@ fn fragment_inline_root(
 /// `string-set` state across pages, mirroring
 /// [`crate::paginate::collect_string_set_states`].
 ///
-/// Currently exercised only by in-crate unit tests (no production
-/// consumer yet). The function is kept as the spike's documented
-/// extension point — when a future PR replaces Pageable's string-set
-/// walk, this gates off `#[cfg(test)]` and joins the public surface.
-#[cfg(test)]
+/// Used by fulgur-cj6u Phase 1.3 as the spike-side input to a
+/// per-page state parity assertion against `paginate`'s walk in
+/// `render_to_pdf_with_gcpm`. Drift between the two outputs is the
+/// regression signal that catches geometry-vs-Pageable divergence
+/// for `string-set` resolution.
 ///
 /// For each page index 0..max_page:
 ///
