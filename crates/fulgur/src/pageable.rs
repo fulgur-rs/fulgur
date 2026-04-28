@@ -931,12 +931,39 @@ impl BlockStyle {
 /// replicated to BOTH halves of `BlockPageable::split` with their CB-relative
 /// `y` preserved (negative values allowed) so a tall abs element naturally
 /// slices across the pages where its CB overlaps.
+///
+/// `is_fixed` is the additional sub-classification for `position: fixed`
+/// (fulgur-jkl5). Both `position: absolute` and `position: fixed` are
+/// `out_of_flow`, but they differ in **how the second-half y shift is
+/// applied during pagination**:
+///
+/// - `position: absolute` is anchored to its abs-CB (typically body or
+///   the nearest positioned ancestor). When body splits across pages,
+///   the abs CB slides with body, so the child's y is shifted by
+///   `split_y` to follow it. A tall abs element with `top: 0` naturally
+///   becomes negative-y on the second page and Krilla clips the
+///   already-painted top half — producing the correct slice.
+/// - `position: fixed` is anchored to the **viewport / page area**, not
+///   to body. It must appear at the same on-page coordinates on every
+///   page. The second-half shift therefore has to be **suppressed** so
+///   `y` stays at its viewport-relative value. Without this fix, a
+///   fixed element placed at `top: 10px` ends up at
+///   `10 - page_height` (i.e. ~-760pt for A4) on page 2 and is clipped
+///   off the top of every page after the first.
 #[derive(Clone)]
 pub struct PositionedChild {
     pub child: Box<dyn Pageable>,
     pub x: Pt,
     pub y: Pt,
     pub out_of_flow: bool,
+    /// fulgur-jkl5: subset of `out_of_flow` where the child is
+    /// `position: fixed`. Suppresses the y shift in
+    /// `clone_pc_with_offset` so the element appears on every page at
+    /// the same viewport-relative coordinates. Always implies
+    /// `out_of_flow`. Defaults to `false`; constructors `in_flow` /
+    /// `out_of_flow` keep it `false`, callers that need the fixed
+    /// distinction use [`Self::fixed`] or set the field explicitly.
+    pub is_fixed: bool,
 }
 
 impl PositionedChild {
@@ -947,10 +974,11 @@ impl PositionedChild {
             x,
             y,
             out_of_flow: false,
+            is_fixed: false,
         }
     }
 
-    /// Construct an out-of-flow child (`position: absolute|fixed`). The
+    /// Construct an out-of-flow child (`position: absolute`). The
     /// caller must have already resolved `(x, y)` against the appropriate
     /// containing block (CSS 2.1 §10.3.7 / §10.6.4) and expressed it
     /// relative to the parent's border-box.
@@ -960,6 +988,22 @@ impl PositionedChild {
             x,
             y,
             out_of_flow: true,
+            is_fixed: false,
+        }
+    }
+
+    /// Construct a viewport-anchored child (`position: fixed`).
+    /// Differs from [`Self::out_of_flow`] only in `is_fixed: true` —
+    /// the y coordinate is preserved verbatim across page splits so
+    /// the element appears at the same on-page position on every page
+    /// (Chrome-compatible repetition for paged media — fulgur-jkl5).
+    pub fn fixed(child: Box<dyn Pageable>, x: Pt, y: Pt) -> Self {
+        Self {
+            child,
+            x,
+            y,
+            out_of_flow: true,
+            is_fixed: true,
         }
     }
 }
@@ -1030,6 +1074,7 @@ impl BlockPageable {
                     x: 0.0,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }
             })
             .collect();
@@ -1466,17 +1511,29 @@ fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) ->
 /// out-of-flow children preserve negative y so their CB-anchored position
 /// extends naturally across pages (Krilla clips outside the page area).
 fn clone_pc_with_offset(pc: &PositionedChild, y_offset: f32) -> PositionedChild {
-    let shifted = pc.y - y_offset;
-    let y = if pc.out_of_flow {
-        shifted
+    // fulgur-jkl5: position: fixed children are anchored to the
+    // viewport/page area, not to the abs-CB that slides with body
+    // across page splits. Skip the shift so they appear at the same
+    // y coordinate on every page; the body's pagination does the
+    // page-by-page replication via split_children_for_block /
+    // split_children_for_within copying out_of_flow children to both
+    // halves.
+    let y = if pc.is_fixed {
+        pc.y
     } else {
-        shifted.max(0.0)
+        let shifted = pc.y - y_offset;
+        if pc.out_of_flow {
+            shifted
+        } else {
+            shifted.max(0.0)
+        }
     };
     PositionedChild {
         child: pc.child.clone_box(),
         x: pc.x,
         y,
         out_of_flow: pc.out_of_flow,
+        is_fixed: pc.is_fixed,
     }
 }
 
@@ -1554,33 +1611,14 @@ fn split_children_for_within(
 /// Clone a slice of PositionedChild, optionally shifting y coordinates.
 /// When `y_offset` is 0.0, children are cloned as-is.
 /// A negative `y_offset` shifts children upward (subtracts from y).
+///
+/// Delegates to `clone_pc_with_offset` so the in-flow / out-of-flow / fixed
+/// branches stay in lockstep — a fixed child cloned through here keeps its
+/// viewport-relative y, just like in the split paths above.
 fn clone_children(children: &[PositionedChild], y_offset: f32) -> Vec<PositionedChild> {
-    // In-flow children are clamped at 0.0 so parallel siblings (grid/flex
-    // children sharing the same y as a split-causing child) don't end up at
-    // negative y on the second fragment, which would push their
-    // background+border above the page top and silently drop them
-    // (fulgur-86fo).
-    //
-    // Out-of-flow children (CSS 2.1 §10.6.4 abs/fixed) preserve negative y
-    // so a tall abs element anchored at its CB's top:0 naturally extends
-    // above the second fragment's page area; Krilla clips outside the page,
-    // producing the correct slice on each page (fulgur-aijf).
     children
         .iter()
-        .map(|pc| {
-            let shifted = pc.y - y_offset;
-            let y = if pc.out_of_flow {
-                shifted
-            } else {
-                shifted.max(0.0)
-            };
-            PositionedChild {
-                child: pc.child.clone_box(),
-                x: pc.x,
-                y,
-                out_of_flow: pc.out_of_flow,
-            }
-        })
+        .map(|pc| clone_pc_with_offset(pc, y_offset))
         .collect()
 }
 
@@ -2032,12 +2070,14 @@ impl Pageable for BlockPageable {
                     x: pc.x,
                     y: pc.y,
                     out_of_flow: false,
+                    is_fixed: false,
                 };
                 let second_pc = PositionedChild {
                     child: second_part,
                     x: pc.x,
                     y: 0.0,
                     out_of_flow: false,
+                    is_fixed: false,
                 };
                 let (first, second) = split_children_for_within(
                     &self.children,
@@ -2148,12 +2188,14 @@ impl Pageable for BlockPageable {
                     x: split_child_x,
                     y: split_child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 };
                 let second_pc = PositionedChild {
                     child: second_part,
                     x: split_child_x,
                     y: 0.0,
                     out_of_flow: false,
+                    is_fixed: false,
                 };
                 let (first, second) = split_children_for_within(
                     &me.children,
@@ -3769,6 +3811,7 @@ impl Pageable for TablePageable {
                 x: pc.x,
                 y: self.header_height + (pc.y - split_y),
                 out_of_flow: false,
+                is_fixed: false,
             })
             .collect();
 
@@ -4008,12 +4051,32 @@ mod tests {
 
     #[test]
     fn clone_pc_with_offset_out_of_flow_preserves_negative_y() {
-        // Out-of-flow child (CSS abs/fixed): y - offset is allowed to go
+        // Out-of-flow child (CSS abs): y - offset is allowed to go
         // negative so the CB-anchored box slices across pages naturally.
         let pc = PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0);
         let cloned = clone_pc_with_offset(&pc, 50.0);
         assert_eq!(cloned.y, -50.0);
         assert!(cloned.out_of_flow);
+        assert!(!cloned.is_fixed);
+    }
+
+    /// fulgur-jkl5: position:fixed children are anchored to the
+    /// viewport / page area, not to the abs-CB. The y-shift applied
+    /// to the second-half of a page split must be **suppressed** so
+    /// the element stays at the same on-page coordinates on every
+    /// page. Without this, fixed elements positioned at top:10px
+    /// land at y = 10 - page_height (negative, off the top of the
+    /// page) on every page after the first and silently disappear.
+    #[test]
+    fn clone_pc_with_offset_fixed_preserves_y_across_pages() {
+        let pc = PositionedChild::fixed(make_spacer(50.0), 20.0, 10.0);
+        // Even with a 770pt offset (A4 content area split), y stays
+        // at 10pt — Krilla draws the element at the same on-page
+        // position on the second half.
+        let cloned = clone_pc_with_offset(&pc, 770.0);
+        assert_eq!(cloned.y, 10.0);
+        assert!(cloned.out_of_flow);
+        assert!(cloned.is_fixed);
     }
 
     #[test]
@@ -4092,6 +4155,37 @@ mod tests {
         assert_eq!(second_oof.y, -70.0);
     }
 
+    /// fulgur-jkl5 follow-up (Devin / CodeRabbit on PR #263): `clone_children`
+    /// is the bulk-cloning helper used by `TablePageable::split` etc., and
+    /// it must mirror `clone_pc_with_offset`'s three-way branch — in-flow
+    /// clamps at 0, out-of-flow keeps negative y, and **fixed** children
+    /// preserve their original viewport-relative y. Previously this
+    /// function hardcoded `is_fixed: false` and treated fixed children as
+    /// out-of-flow, which would silently lose the flag if any caller ever
+    /// passed fixed children through it.
+    #[test]
+    fn clone_children_preserves_in_flow_out_of_flow_and_fixed() {
+        let children = vec![
+            PositionedChild::in_flow(make_spacer(10.0), 0.0, 50.0),
+            PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0),
+            PositionedChild::fixed(make_spacer(5.0), 0.0, 10.0),
+        ];
+        let cloned = clone_children(&children, 80.0);
+        assert_eq!(cloned.len(), 3);
+        // In-flow: y - offset = 50 - 80 = -30 → clamped to 0.
+        assert_eq!(cloned[0].y, 0.0);
+        assert!(!cloned[0].out_of_flow);
+        assert!(!cloned[0].is_fixed);
+        // Out-of-flow: y - offset = 0 - 80 = -80, no clamp.
+        assert_eq!(cloned[1].y, -80.0);
+        assert!(cloned[1].out_of_flow);
+        assert!(!cloned[1].is_fixed);
+        // Fixed: y stays at 10 regardless of offset.
+        assert_eq!(cloned[2].y, 10.0);
+        assert!(cloned[2].out_of_flow);
+        assert!(cloned[2].is_fixed);
+    }
+
     #[test]
     fn test_block_fits_on_one_page() {
         let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
@@ -4156,12 +4250,14 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: Box::new(card_b),
                 x: 100.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ]);
         grid.wrap(200.0, 1000.0);
@@ -4334,6 +4430,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             out_of_flow: false,
+            is_fixed: false,
         }];
 
         // Three body rows at y=30, y=80, y=130 (each 50pt tall)
@@ -4343,18 +4440,21 @@ mod tests {
                 x: 0.0,
                 y: 30.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: make_spacer(50.0),
                 x: 0.0,
                 y: 80.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: make_spacer(50.0),
                 x: 0.0,
                 y: 130.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ];
 
@@ -5189,12 +5289,14 @@ mod transform_wrapper_tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: Box::new(bot),
                 x: 0.0,
                 y: 500.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ]);
         block.wrap(500.0, 1000.0);
@@ -5683,6 +5785,7 @@ mod forced_break_below_tests {
             x: 0.0,
             y,
             out_of_flow: false,
+            is_fixed: false,
         }
     }
 
@@ -5792,6 +5895,7 @@ mod forced_break_below_tests {
             x: 0.0,
             y: 0.0,
             out_of_flow: false,
+            is_fixed: false,
         }];
         let wrapped = TablePageable {
             header_cells: vec![],
@@ -5814,6 +5918,7 @@ mod forced_break_below_tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             }],
             header_height: 0.0,
             style: BlockStyle::default(),
@@ -5849,6 +5954,7 @@ mod forced_break_below_tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             }],
             35.0,
         );
@@ -5939,6 +6045,7 @@ mod forced_break_below_tests {
                     x: 0.0,
                     y: 10.0,
                     out_of_flow: false,
+                    is_fixed: false,
                 },
                 make_block_pc(10.0, BreakBefore::Auto, 40.0),
             ],
@@ -5989,6 +6096,7 @@ mod forced_break_below_tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             }],
             35.0,
         );
