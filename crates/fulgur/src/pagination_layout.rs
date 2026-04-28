@@ -929,6 +929,64 @@ pub fn collect_counter_states(
     result
 }
 
+/// fulgur-s67g Phase 2.4: walk the geometry table and emit
+/// `(page_idx, level, label)` triples for every body child whose
+/// `BookmarkInfo` is registered. Mirrors what
+/// `pageable::BookmarkMarkerPageable::record_if_collecting`
+/// records during draw, except the spike works off the
+/// `PaginationGeometryTable` directly without traversing the
+/// Pageable tree.
+///
+/// Source order is `BTreeMap<NodeId, _>` iteration — same
+/// approximation as [`collect_string_set_states`] and
+/// [`collect_counter_states`]. A node that registers a bookmark
+/// emits one triple on the page where its first fragment lands
+/// (subsequent split fragments do not re-emit, matching
+/// `BookmarkMarkerWrapperPageable`'s "marker travels with the
+/// first split fragment" invariant).
+///
+/// `y_pt` is intentionally **not** returned: the spike works in
+/// CSS px / fragment frames while Pageable records absolute PDF
+/// pt at draw time (after applying `config.margin.top` and
+/// per-page running-element offsets). The Phase 2.4 parity
+/// assertion in `render_to_pdf_with_gcpm` compares only
+/// `(page_idx, level, label)` triples, which are sufficient to
+/// detect a regression in the bookmark-to-page mapping. Y-pt
+/// matching is a downstream concern handled by the convert /
+/// render path that will eventually consume this geometry
+/// directly (Phase 4).
+pub fn collect_bookmark_entries(
+    geometry: &PaginationGeometryTable,
+    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
+) -> Vec<BookmarkPageEntry> {
+    let mut result = Vec::new();
+    for (&node_id, geom) in geometry {
+        let Some(first_frag) = geom.fragments.first() else {
+            continue;
+        };
+        let Some(info) = bookmark_by_node.get(&node_id) else {
+            continue;
+        };
+        result.push(BookmarkPageEntry {
+            page_idx: first_frag.page_index as usize,
+            level: info.level,
+            label: info.label.clone(),
+        });
+    }
+    result
+}
+
+/// Reduced view of `pageable::BookmarkEntry` exposed by
+/// [`collect_bookmark_entries`]. Drops `y_pt` because the spike
+/// does not work in PDF-pt frames; see the function's docstring
+/// for the parity rationale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookmarkPageEntry {
+    pub page_idx: usize,
+    pub level: u8,
+    pub label: String,
+}
+
 /// fulgur-jkl5: enumerate `position: fixed` elements and emit one
 /// fragment per page so downstream rendering can repeat them on every
 /// page (Chrome-compatible behaviour for paged media — see WPT
