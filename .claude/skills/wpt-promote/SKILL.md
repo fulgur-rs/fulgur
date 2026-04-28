@@ -13,17 +13,65 @@ expectations + downgrade unavoidable regressions → ship.
 
 **Announce at start:** "Using wpt-promote to flip <test name> from FAIL to PASS."
 
-## Inputs
+## Usage
 
-The agent enters with one of:
+```text
+/wpt-promote <target> [<target>...]
+```
 
-- **A beads issue** (e.g. `fulgur-aijf`) whose acceptance criteria names
-  specific WPT tests. Read the issue first via `bd show <id>` — the
-  description usually contains the test path and current FAIL reason.
-- **A direct test name** (e.g. `css/css-page/page-background-002-print.html`)
-  passed in conversation.
+`<target>` accepts any of these forms (mix-and-match across positional args):
 
-If neither is present, ask the user which test to target.
+| Form | Example | Resolution |
+|---|---|---|
+| Full WPT path | `css/css-page/page-background-002-print.html` | Used verbatim |
+| Phase-relative path | `css-page/page-background-002-print.html` | Prefix `css/` |
+| Test stem | `page-background-002` | Search expectations across all `<phase>.txt` for the matching FAIL line; auto-append `-print.html` if needed |
+| Beads issue ID | `fulgur-aijf` | `bd show <id>` then extract every WPT test path mentioned in description / acceptance criteria |
+| `--issue <id>` | `--issue fulgur-aijf` | Explicit beads issue form (use when ambiguous with stems) |
+| `--phase <name>` | `--phase css-page page-background-002` | Disambiguate stems when the same name exists in multiple phases |
+
+Multiple targets are allowed and **encouraged** when they share a root
+cause — they'll be promoted together by one underlying fix.
+
+If no argument is given, list `bd ready` issues whose acceptance
+criteria mention WPT and ask which to target.
+
+### Argument resolution
+
+Resolve targets to full WPT paths before any other work:
+
+```bash
+# 1. Direct path (already full)
+case "$arg" in
+  css/*) target_path="$arg" ;;
+  css-*/*) target_path="css/$arg" ;;
+esac
+
+# 2. Beads issue ID (matches fulgur-XXXX)
+if [[ "$arg" =~ ^fulgur-[a-z0-9]+$ ]] || [ "$arg" = "--issue" ]; then
+  bd show <id> | grep -oE "css/[^ ]+-print\.html"   # extract paths
+fi
+
+# 3. Stem (e.g. page-background-002): grep across expectations
+if [ -z "$target_path" ]; then
+  grep -lE "^FAIL\s+css/.+/${arg}(-print)?\.html" \
+    crates/fulgur-wpt/expectations/*.txt
+fi
+```
+
+Confirm each resolved path exists under `target/wpt/` before proceeding.
+If a stem matches more than one phase, ask the user (or take `--phase`).
+
+## Inputs (after resolution)
+
+The agent now has:
+
+- One or more **WPT test paths** (e.g.
+  `css/css-page/page-background-002-print.html`)
+- Optionally an associated **beads issue** for tracking design/notes
+- The matching **`<phase>.txt`** file in
+  `crates/fulgur-wpt/expectations/` (or `expectations/lists/<name>.txt`
+  for cherry-picked lists)
 
 ## Workflow
 
@@ -63,14 +111,27 @@ digraph wpt_promote {
 
 ## Step 1 — Identify the target test(s)
 
-Read the beads issue (if any) and extract:
+The argument resolution above already produced one or more WPT test
+paths. For each, extract:
 
-- The test path (e.g. `css/css-page/page-background-002-print.html`)
-- The expected `ref` (usually `<name>-print-ref.html` next to it)
-- The current FAIL reason (page count mismatch / pixel diff / etc.)
+- The matching **`ref` file** (usually `<name>-print-ref.html` next to
+  the test under `target/wpt/`)
+- The **current FAIL reason** from `crates/fulgur-wpt/expectations/<phase>.txt`
+  (`page count mismatch: test=N ref=M`, `page 1 diff: N pixels...`,
+  etc.) — the comment after `#` carries this
+- If a beads issue is the entry point, also note its **acceptance
+  criteria** for any extra hints on related tests sharing the root
+  cause
 
-If multiple WPT tests share the same root cause, **list them all** —
-expectations promote together when the underlying fix lands.
+```bash
+# Quick lookup of FAIL reason for a target
+grep "<test-path>" crates/fulgur-wpt/expectations/<phase>.txt
+```
+
+If multiple targets share the same root cause, **list them all** —
+expectations promote together when the underlying fix lands. The
+"promotion candidates" line in the WPT summary later confirms which
+tests went green from a single fix.
 
 ## Step 2 — Reproduce locally
 
@@ -254,6 +315,31 @@ After the PR is up, hand off to **`resolving-ai-review`** for coderabbit
 / Devin Review iteration. That skill polls for re-reviews, triages
 findings, and cycles fix → push → poll until coderabbit no longer
 requests changes. Don't manually re-poll.
+
+## Examples
+
+```text
+# Beads issue with WPT in acceptance criteria
+/wpt-promote fulgur-puml
+
+# Single test, full path
+/wpt-promote css/css-page/fixedpos-002-print.html
+
+# Single test, stem (skill grep's expectations to find phase)
+/wpt-promote fixedpos-002
+
+# Multiple tests sharing a root cause (same fix promotes both)
+/wpt-promote fixedpos-002 fixedpos-004 fixedpos-005 fixedpos-006
+
+# Phase-relative shorthand (skill prefixes css/)
+/wpt-promote css-page/page-background-002-print.html
+
+# Disambiguate stems that match multiple phases
+/wpt-promote --phase css-page fixedpos-002
+
+# Explicit beads issue form when stem is ambiguous with an issue ID
+/wpt-promote --issue fulgur-aijf
+```
 
 ## Common pitfalls
 
