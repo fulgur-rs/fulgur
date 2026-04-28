@@ -131,6 +131,15 @@ pub struct PaginationLayoutTree<'a> {
     /// extraction. `None` means "no break properties set anywhere",
     /// which the fragmenter treats as all-`Auto`.
     pub(crate) column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
+    /// fulgur-s67g Phase 2.2: `position: running()` element instances
+    /// registered by [`crate::blitz_adapter::RunningElementPass`].
+    /// `fragment_pagination_root` consults this store to skip running-
+    /// named children — they are placed into `@page` margin boxes per
+    /// page, not into the body's flow, so they must not contribute to
+    /// the body cursor or page-fragment geometry. `None` (the default
+    /// for unit-test entry points) means "no running mappings"; the
+    /// fragmenter treats every body child as in-flow.
+    pub(crate) running_store: Option<&'a crate::gcpm::running::RunningElementStore>,
 }
 
 /// One-shot entry: run the block-level fragmenter for `doc` against a
@@ -156,7 +165,7 @@ pub struct PaginationLayoutTree<'a> {
 /// `ColumnStyleTable` are honoured.
 #[cfg(test)]
 pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeometryTable {
-    run_pass_with_break_styles_inner(doc, page_height_px, None)
+    run_pass_inner(doc, page_height_px, None, None)
 }
 
 /// fulgur-k0g0 variant: thread the document's `break-before` /
@@ -170,16 +179,38 @@ pub fn run_pass_with_break_styles<'a>(
     page_height_px: f32,
     column_styles: &'a crate::column_css::ColumnStyleTable,
 ) -> PaginationGeometryTable {
-    run_pass_with_break_styles_inner(doc, page_height_px, Some(column_styles))
+    run_pass_inner(doc, page_height_px, Some(column_styles), None)
 }
 
-fn run_pass_with_break_styles_inner<'a>(
+/// fulgur-s67g Phase 2.2 variant: extends
+/// [`run_pass_with_break_styles`] with awareness of `position:
+/// running()` element instances. Running children are skipped during
+/// the body walk so they do not contribute to body cursor or page
+/// fragments — Pageable handles their per-page placement via
+/// [`crate::paginate::collect_running_element_states`].
+pub fn run_pass_with_break_and_running<'a>(
+    doc: &'a mut BaseDocument,
+    page_height_px: f32,
+    column_styles: &'a crate::column_css::ColumnStyleTable,
+    running_store: &'a crate::gcpm::running::RunningElementStore,
+) -> PaginationGeometryTable {
+    run_pass_inner(
+        doc,
+        page_height_px,
+        Some(column_styles),
+        Some(running_store),
+    )
+}
+
+fn run_pass_inner<'a>(
     doc: &'a mut BaseDocument,
     page_height_px: f32,
     column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
+    running_store: Option<&'a crate::gcpm::running::RunningElementStore>,
 ) -> PaginationGeometryTable {
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
     tree.column_styles = column_styles;
+    tree.running_store = running_store;
     if tree.body_id.is_some() && page_height_px > 0.0 {
         // Read body's children's existing `final_layout` (populated by
         // Blitz's `resolve()` and `multicol_layout::run_pass`) and
@@ -212,6 +243,7 @@ impl<'a> PaginationLayoutTree<'a> {
             geometry: BTreeMap::new(),
             body_id,
             column_styles: None,
+            running_store: None,
         }
     }
 
@@ -369,6 +401,19 @@ impl<'a> PaginationLayoutTree<'a> {
                     continue;
                 }
             }
+            // fulgur-s67g Phase 2.2: skip `position: running()` named
+            // children. They are removed from body flow and placed
+            // into `@page` margin boxes per page; including them in
+            // the body cursor would over-count height and diverge
+            // from Pageable's view (which sees them as
+            // `RunningElementWrapperPageable` markers with zero
+            // contribution to body height).
+            if self
+                .running_store
+                .is_some_and(|s| s.instance_for_node(child_id).is_some())
+            {
+                continue;
+            }
             let layout = child.final_layout;
             let child_h = layout.size.height;
             let child_w = if layout.size.width > 0.0 {
@@ -430,6 +475,23 @@ impl<'a> PaginationLayoutTree<'a> {
                 collect_inline_line_metrics(child)
             };
             if line_metrics.len() > 1 {
+                // fulgur-s67g Phase 2.2: if the paragraph cannot fit
+                // the remaining space on the current page strip but
+                // would fit (or at least start fresh) on a new page,
+                // advance the page boundary before calling
+                // `fragment_inline_root`. Mirrors Pageable's
+                // `BlockPageable::split` falling back to `AtIndex`
+                // (split before the child) when
+                // `ParagraphPageable::split` cannot honour widow /
+                // orphan and returns `None`.
+                let para_total_h = line_metrics
+                    .last()
+                    .map(|l| l.1 - line_metrics[0].0)
+                    .unwrap_or(child_h);
+                if cursor_y > 0.0 && cursor_y + para_total_h > self.page_height_px {
+                    page_index += 1;
+                    cursor_y = 0.0;
+                }
                 let para_x = layout.location.x;
                 let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
                     &mut self.geometry,

@@ -208,7 +208,7 @@ impl Engine {
         // per-page fixed repetition redesign — can read it without
         // re-walking layout.
         //
-        // Side-effect safety: `run_pass_with_break_styles` is a
+        // Side-effect safety: `run_pass_with_break_and_running` is a
         // read-only walk of `final_layout` via
         // `fragment_pagination_root` — it does not re-drive Taffy or
         // mutate any node's layout. The wrapper's `LayoutPartialTree`
@@ -219,10 +219,16 @@ impl Engine {
         // `pagination_layout.rs` module docs). VRT /
         // examples_determinism / WPT all stay byte-identical with
         // this call inserted.
-        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        //
+        // fulgur-s67g Phase 2.2: thread `running_store` so the
+        // fragmenter skips `position: running()` named children. They
+        // belong in `@page` margin boxes, not body flow, so including
+        // their height would over-count and diverge from Pageable.
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
             doc.deref_mut(),
             crate::convert::pt_to_px(self.config.content_height()),
             &column_styles,
+            &running_store,
         );
 
         // --- Convert DOM to Pageable and render ---
