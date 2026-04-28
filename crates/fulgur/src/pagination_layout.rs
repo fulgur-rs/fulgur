@@ -987,31 +987,31 @@ fn fragment_block_subtree(
             Some(crate::pageable::BreakAfter::Page)
         );
 
-        // Honour `break-before: page`. Leading collapse: only fires
-        // when some content has already been placed on this page —
-        // gated by `cursor_y > page_start_y` (mirrors body-level's
-        // `cursor_y > 0.0` since body's implicit page_start is 0).
-        if break_before_page && cursor_y > page_start_y {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body,
-                    y: page_start_y,
-                    width: parent_w,
-                    height: cursor_y - page_start_y,
-                });
-            page_index += 1;
-            cursor_y = 0.0;
-            page_start_y = 0.0;
-        }
-
         if child_h <= 0.0 {
             // Phase 2.3 fix: zero-height **element** nodes still
             // need to enter geometry so their counter / string-set
             // / bookmark markers participate in the parity walks.
+            //
+            // Zero-height children skip the inter-child gap (matching
+            // `fragment_pagination_root`'s zero-height branch where
+            // `continue` happens before the gap calc), so break-before
+            // can fire here without first folding gap into cursor_y.
+            if break_before_page && cursor_y > page_start_y {
+                geometry
+                    .entry(parent_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body,
+                        y: page_start_y,
+                        width: parent_w,
+                        height: cursor_y - page_start_y,
+                    });
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+            }
             if child.element_data().is_some() {
                 geometry
                     .entry(child_id)
@@ -1049,9 +1049,35 @@ fn fragment_block_subtree(
 
         // Inter-child gap (collapsed margins, padding) in parent
         // coordinates — same convention as `fragment_pagination_root`.
+        // The gap MUST be folded into `cursor_y` before the break-before
+        // check so a forced break properly discards the gap (cursor_y
+        // is reset to 0 on the new page). Doing break-before first
+        // would re-apply the gap on the new page, placing the child at
+        // y=gap instead of y=0 (Devin Review on PR #285).
         let this_top_in_parent = layout.location.y;
         let gap = (this_top_in_parent - prev_bottom_in_parent).max(0.0);
         cursor_y += gap;
+
+        // Honour `break-before: page`. Leading collapse: only fires
+        // when some content has already been placed on this page —
+        // gated by `cursor_y > page_start_y` (mirrors body-level's
+        // `cursor_y > 0.0` since body's implicit page_start is 0).
+        if break_before_page && cursor_y > page_start_y {
+            geometry
+                .entry(parent_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: parent_x_in_body,
+                    y: page_start_y,
+                    width: parent_w,
+                    height: cursor_y - page_start_y,
+                });
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
+        }
 
         // Child does not fit in the remaining strip → cut a page.
         if cursor_y > page_start_y && cursor_y + child_h > page_height_px {
@@ -2246,6 +2272,58 @@ mod tests {
         for (id, direct) in &direct_geom {
             let taffy = taffy_geom.get(id).expect("same node id in both passes");
             assert_eq!(direct.fragments, taffy.fragments, "node {id}");
+        }
+    }
+
+    /// Devin Review on PR #285 (fulgur-a36m Phase 3.1.5b):
+    /// `fragment_block_subtree` had `break-before: page` firing BEFORE
+    /// the inter-child gap was folded into `cursor_y`, so the gap was
+    /// re-applied AFTER the break-before reset — placing the child at
+    /// `y=gap` on the new page instead of `y=0`. The body-level
+    /// `fragment_pagination_root` had the correct ordering. This test
+    /// pins B's y-coordinate on the new page and would catch the
+    /// pre-fix value (gap≈20, was 26.6 in CSS px after Stylo's pt→px).
+    ///
+    /// Setup: outer wrapper triggers recursion via
+    /// `has_forced_break_below`. Inside, A (h=100) at y=0 and B
+    /// (h=100) at y=120 with `break-before: page`. The `margin-top:
+    /// 20px` on B creates a 20px gap that the bug would leak through.
+    #[test]
+    fn fragment_block_subtree_break_before_after_gap_places_child_at_y_zero() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div id="outer" style="margin: 0; padding: 0">
+                <div id="a" style="height: 100px; margin: 0"></div>
+                <div id="b" style="margin-top: 20px; break-before: page; height: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+
+        // Find every fragment with height ≈ 100 on page 1; B is the
+        // only such fragment (outer's page-1 fragment height is the
+        // total parent strip, which equals 100 after the fix because
+        // only B sits on page 1; outer's page-0 fragment carries
+        // A + gap = 120; A is on page 0).
+        let b_on_page1: Vec<&Fragment> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.height - 100.0).abs() < 0.5)
+            .collect();
+        assert!(
+            !b_on_page1.is_empty(),
+            "expected B fragment on page 1, geom={geom:?}"
+        );
+        for f in &b_on_page1 {
+            assert!(
+                f.y.abs() < 0.5,
+                "B should land at y=0 on the new page (forced break discards \
+                 the inter-child gap), but got y={} (gap leaked through \
+                 break-before — see Devin Review on PR #285). frag={f:?}",
+                f.y,
+            );
         }
     }
 
