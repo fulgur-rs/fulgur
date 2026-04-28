@@ -319,10 +319,34 @@ impl<'a> PaginationLayoutTree<'a> {
                 continue;
             }
 
-            // If the child overflows the current page strip, advance to
-            // the next page first. A child taller than a full page is
-            // still emitted whole on its starting page in this spike —
-            // true mid-element splitting is the next iteration.
+            // fulgur-p55h: if the child carries a Parley inline layout,
+            // probe its line metrics and split at line boundaries —
+            // mirrors `paragraph::ParagraphPageable::split` (line 945)
+            // but inside the Taffy hook rather than post-conversion.
+            let line_metrics = collect_inline_line_metrics(child);
+            if line_metrics.len() > 1 {
+                let para_x = layout.location.x;
+                let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
+                    &mut self.geometry,
+                    child_id,
+                    body_x + para_x,
+                    child_w,
+                    cursor_y,
+                    page_index,
+                    self.page_height_px,
+                    &line_metrics,
+                );
+                page_index = new_page_index;
+                cursor_y = new_cursor_y;
+                emitted += frag_count;
+                continue;
+            }
+
+            // Block fallback: child overflows the current page strip →
+            // advance to the next page first. A child taller than a
+            // full page is still emitted whole on its starting page;
+            // true mid-element block split needs break-inside support
+            // tracked separately (fulgur-k0g0).
             if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
                 page_index += 1;
                 cursor_y = 0.0;
@@ -347,6 +371,118 @@ impl<'a> PaginationLayoutTree<'a> {
 
         emitted
     }
+}
+
+/// fulgur-p55h: read per-line `(min_coord, max_coord)` pairs from a
+/// node's Parley `inline_layout_data`, if any.
+///
+/// `min_coord` is the line's top-most Y in the paragraph's local
+/// coordinate system; `max_coord` is its bottom-most Y. Both are in
+/// CSS pixels and accumulate top-to-bottom across the line vector.
+/// Returns an empty vec for non-inline-root nodes (block / text /
+/// element with no inline children) so callers can branch on
+/// `metrics.len() > 1` to decide between line-aware and block paths.
+fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
+    let Some(elem) = node.element_data() else {
+        return Vec::new();
+    };
+    let Some(text_layout) = elem.inline_layout_data.as_deref() else {
+        return Vec::new();
+    };
+    text_layout
+        .layout
+        .lines()
+        .map(|line| {
+            let m = line.metrics();
+            (m.min_coord, m.max_coord)
+        })
+        .collect()
+}
+
+/// fulgur-p55h: split a multi-line inline root across page boundaries
+/// at line edges, append one Fragment per page span to the geometry
+/// table, and return the updated `(page_index, cursor_y, fragments_emitted)`.
+///
+/// Mirrors `paragraph::ParagraphPageable::split` (paragraph.rs:945+):
+/// walk lines, track the first line of the current fragment in
+/// `fragment_start_idx`, and split when the cumulative height in
+/// paragraph-local coords would push the bottom past
+/// `page_height_px - paragraph_top_in_body`.
+///
+/// Output:
+///
+/// - On a single-page paragraph (no overflow), one Fragment is appended
+///   covering all lines. `cursor_y` advances by the paragraph's natural
+///   height.
+/// - On a multi-page paragraph, one Fragment per page is appended. The
+///   final `cursor_y` is the height consumed on the last page (lines
+///   ending on a partial page leave room for a following sibling).
+///
+/// Edge case: if the very first line on a fresh page is taller than
+/// the page strip, the line is emitted as an oversized fragment (no
+/// further mid-line split) — same fallback as the block branch.
+#[allow(clippy::too_many_arguments)]
+fn fragment_inline_root(
+    geometry: &mut PaginationGeometryTable,
+    child_id: usize,
+    paragraph_x: f32,
+    width: f32,
+    initial_cursor_y: f32,
+    initial_page_index: u32,
+    page_height_px: f32,
+    line_metrics: &[(f32, f32)],
+) -> (u32, f32, usize) {
+    if line_metrics.is_empty() {
+        return (initial_page_index, initial_cursor_y, 0);
+    }
+
+    let mut page_index = initial_page_index;
+    let mut paragraph_top_in_body = initial_cursor_y;
+    let mut fragment_start_idx: usize = 0;
+    let mut emitted = 0usize;
+
+    for (i, &(_line_top_local, line_bottom_local)) in line_metrics.iter().enumerate() {
+        let frag_top_local = line_metrics[fragment_start_idx].0;
+        let projected_bottom_in_body = paragraph_top_in_body + (line_bottom_local - frag_top_local);
+
+        if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
+            // Lines [fragment_start_idx, i) fit on the current page.
+            // Emit them as one fragment, advance to the next page, and
+            // start the next fragment at line i.
+            let prev_line_bottom = line_metrics[i - 1].1;
+            let frag_h = prev_line_bottom - frag_top_local;
+            let frag = Fragment {
+                page_index,
+                x: paragraph_x,
+                y: paragraph_top_in_body,
+                width,
+                height: frag_h,
+            };
+            geometry.entry(child_id).or_default().fragments.push(frag);
+            emitted += 1;
+
+            page_index += 1;
+            paragraph_top_in_body = 0.0;
+            fragment_start_idx = i;
+        }
+    }
+
+    // Final fragment covers lines [fragment_start_idx, end).
+    let frag_top_local = line_metrics[fragment_start_idx].0;
+    let last_bottom_local = line_metrics.last().expect("non-empty checked above").1;
+    let frag_h = last_bottom_local - frag_top_local;
+    let frag = Fragment {
+        page_index,
+        x: paragraph_x,
+        y: paragraph_top_in_body,
+        width,
+        height: frag_h,
+    };
+    geometry.entry(child_id).or_default().fragments.push(frag);
+    emitted += 1;
+
+    let cursor_y = paragraph_top_in_body + frag_h;
+    (page_index, cursor_y, emitted)
 }
 
 /// Locate the `<body>` element id by walking the html root's children.
@@ -635,7 +771,6 @@ mod tests {
 /// directly without touching the public surface.
 #[cfg(test)]
 mod compare_with_pageable {
-    use super::run_pass;
     use crate::convert::pt_to_px;
     use crate::paginate::paginate;
     use crate::{Engine, PageSize};
@@ -824,15 +959,13 @@ mod compare_with_pageable {
             ),
             (
                 "long paragraph wraps into multiple pages",
-                // The block-only spike's known weak case: inline content.
-                // Pageable wraps a tall paragraph into `ParagraphPageable`
-                // which knows about Parley line boxes and splits at line
-                // boundaries → multi-page. The spike sees the paragraph
-                // as a single block child and emits it as one oversized
-                // fragment on page 0 → 1 page. Surface the divergence
-                // explicitly so a future inline-aware fragmenter can
-                // flip this fixture to `expected_agreement = true` as
-                // its acceptance test.
+                // fulgur-p55h: the spike now probes Parley's line
+                // metrics (`Layout::lines()` → `LineMetrics`) and
+                // splits inline roots at line boundaries via
+                // `fragment_inline_root`. This fixture flipped from
+                // `expected_agreement = false` to `true` once the
+                // inline-aware path landed — leaving it as a
+                // regression gate for future changes.
                 // 50px font-size + line-height 1.5 → ~75 px per line.
                 // Lorem ipsum block wraps into ~70 lines at A4 content
                 // width → ~5250 px total, comfortably overflowing 2+
@@ -850,7 +983,7 @@ mod compare_with_pageable {
                     occaecat cupidatat non proident, sunt in culpa qui officia
                     deserunt mollit anim id est laborum.
                 </p></body></html>"#,
-                false,
+                true,
             ),
             (
                 "small lead block then oversized block forces page break",

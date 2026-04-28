@@ -50,14 +50,19 @@ and `pagination_layout::run_pass` (spike side). Page counts:
 | two 50vh divs sum to 100vh | 2 | 2 | ✓ |
 | one 1028px div (just over content) | 1 | 1 | ✓ |
 | nested 100% height with no parent height | 1 | 1 | ✓ |
-| long paragraph wraps into multiple pages | **2** | **1** | ✗ |
+| long paragraph wraps into multiple pages (initial) | 2 | **1** | ✗ |
+| long paragraph wraps into multiple pages (after p55h) | 2 | **2** | ✓ |
 | small lead block + oversized block | 2 | 2 | ✓ |
 
-9 of 10 agree. The single disagreement is the **inline text wrapping**
-case: Pageable's `ParagraphPageable::split` (paragraph.rs:945) splits
-at Parley line boundaries, so a tall paragraph spans multiple pages.
-The block-only spike treats the paragraph as one block child and emits
-it as a single oversized fragment.
+10/10 agree after fulgur-p55h landed the Parley line-box probe in
+`fragment_inline_root`. The original disagreement (block-only spike
+treating a tall paragraph as a single oversized fragment) was
+closed by reading `node.element_data().inline_layout_data` — a
+`Box<TextLayout>` carrying a `parley::Layout` — and splitting at line
+boundaries via `LineMetrics::min_coord` / `max_coord`. Pageable's
+`ParagraphPageable::split` (paragraph.rs:945) and the spike's
+`fragment_inline_root` now produce identical page counts for this
+fixture.
 
 ## Findings
 
@@ -167,6 +172,8 @@ docstring) can plug a `Vec<Fragment>` per node into
    `break-before: page`. Cheap, expands the agreement to a few
    `break-*` fixtures.
 
+   **Filed as fulgur-k0g0.**
+
 2. **per-strip `available_space` constraint experiment**
    — change `drive_taffy_root_layout` to call
    `compute_root_layout` with
@@ -193,6 +200,26 @@ docstring) can plug a `Vec<Fragment>` per node into
    the F2 work. Either parallel ParagraphPageable-like, or
    Parley line-box probe. Highest-value since it closes the only
    observed disagreement.
+
+   **Filed as fulgur-p55h. Resolved (2026-04-28)**: chose option
+   (a), the Parley line-box probe. Implementation reads
+   `node.element_data().inline_layout_data` (a Box<TextLayout>
+   wrapping `parley::Layout`), iterates `Layout::lines()`, and
+   collects `LineMetrics::min_coord` / `max_coord` per line. The
+   new `fragment_inline_root` helper splits at line boundaries
+   when the cumulative paragraph-local height plus the current
+   `cursor_y` would push the next line past the page strip. This
+   is ~80 lines added to `pagination_layout.rs` versus the
+   estimated several hundred lines that option (b) (parallel
+   ParagraphPageable representation) would have required.
+
+   Outcome: the `long paragraph wraps into multiple pages` fixture
+   flipped from `expected_agreement = false` to `true` (both sides
+   now report 2 pages). All 10 comparison fixtures agree. No
+   widow / orphan support yet — that lands when a fixture demands
+   it. The Parley line-box approach generalises trivially to other
+   inline roots (any node with `inline_layout_data` populated by
+   Blitz's first-pass `resolve()`).
 
 4. **per-page `position: fixed` repetition** — already on
    the roadmap (`blitz_adapter::relayout_position_fixed` doc
