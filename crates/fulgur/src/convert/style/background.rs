@@ -623,6 +623,15 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF header");
     }
 
+    fn render_with_style(style: &str, label: &str) {
+        let html = format!(r#"<html><body><div style="{style}"></div></body></html>"#);
+        let pdf = Engine::builder()
+            .build()
+            .render_html(&html)
+            .unwrap_or_else(|_| panic!("render failed for {label}"));
+        assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF");
+    }
+
     // ── resolve_linear_gradient: direction arms ───────────────────────────────
 
     /// Exercises all nine `LineDirection` arms of `resolve_linear_gradient`:
@@ -838,14 +847,10 @@ mod tests {
             ("pct", "background-size:50% 50%"),
         ];
         for (name, size_css) in cases {
-            let html = format!(
-                r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red,blue);{size_css}"></div></body></html>"#
+            render_with_style(
+                &format!("width:120px;height:80px;background:linear-gradient(red,blue);{size_css}"),
+                name,
             );
-            let pdf = Engine::builder()
-                .build()
-                .render_html(&html)
-                .unwrap_or_else(|_| panic!("render failed for {name}"));
-            assert!(pdf.starts_with(b"%PDF"), "{name}: expected PDF");
         }
     }
 
@@ -862,14 +867,12 @@ mod tests {
             ("round", "background-repeat:round"),
         ];
         for (name, repeat_css) in cases {
-            let html = format!(
-                r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red,blue);background-size:30px 20px;{repeat_css}"></div></body></html>"#
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;background:linear-gradient(red,blue);background-size:30px 20px;{repeat_css}"
+                ),
+                name,
             );
-            let pdf = Engine::builder()
-                .build()
-                .render_html(&html)
-                .unwrap_or_else(|_| panic!("render failed for {name}"));
-            assert!(pdf.starts_with(b"%PDF"), "{name}: expected PDF");
         }
     }
 
@@ -894,14 +897,12 @@ mod tests {
             ),
         ];
         for (name, extra_css) in cases {
-            let html = format!(
-                r#"<html><body><div style="width:120px;height:80px;padding:10px;background:linear-gradient(red,blue);{extra_css}"></div></body></html>"#
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;padding:10px;background:linear-gradient(red,blue);{extra_css}"
+                ),
+                name,
             );
-            let pdf = Engine::builder()
-                .build()
-                .render_html(&html)
-                .unwrap_or_else(|_| panic!("render failed for {name}"));
-            assert!(pdf.starts_with(b"%PDF"), "{name}: expected PDF");
         }
     }
 
