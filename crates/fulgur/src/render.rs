@@ -156,17 +156,6 @@ fn assert_string_set_states_parity(
     if !cfg!(debug_assertions) || geometry.is_empty() {
         return;
     }
-    // `fragment_pagination_root` skips zero-height body children
-    // (an empty `<div>`), so a node carrying a string-set marker
-    // can be absent from `geometry` while Pageable's tree walk
-    // still applies it. Skip the assertion in that case — it's a
-    // documented spike-coverage gap, not a regression.
-    if string_set_by_node
-        .keys()
-        .any(|id| !geometry.contains_key(id))
-    {
-        return;
-    }
     let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
         .iter()
         .map(|(k, v)| (*k, v.clone()))
@@ -242,13 +231,6 @@ fn assert_bookmark_entries_parity(
     bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
 ) {
     if !cfg!(debug_assertions) || geometry.is_empty() {
-        return;
-    }
-    // Same coverage guard as `assert_counter_states_parity`: a
-    // bookmark attached to a zero-height body child won't appear in
-    // the spike's geometry but Pageable still records it. Skip the
-    // assertion when the spike can't see every bookmarked node.
-    if bookmark_by_node.keys().any(|id| !geometry.contains_key(id)) {
         return;
     }
     let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
