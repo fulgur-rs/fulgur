@@ -647,37 +647,48 @@ impl<'a> PaginationLayoutTree<'a> {
             // to splitting too (matches Pageable's
             // `total_height > page_height` override at
             // `pageable.rs:1165`).
-            if child_h > self.page_height_px {
-                let has_splittable_children = self
-                    .doc
-                    .get_node(child_id)
-                    .is_some_and(|n| !n.children.is_empty());
-                if has_splittable_children {
-                    let child_x_in_body = body_x + layout.location.x;
-                    let (new_page, new_cursor) = fragment_block_subtree(
-                        &mut self.geometry,
-                        self.doc,
-                        child_id,
-                        child_w,
-                        child_x_in_body,
-                        page_index,
-                        cursor_y,
-                        self.page_height_px,
-                        0,
-                    );
-                    page_index = new_page;
-                    cursor_y = new_cursor;
-                    emitted += 1;
-                    prev_bottom_y_in_body = this_top_in_body + child_h;
-                    if matches!(
-                        break_props.break_after,
-                        Some(crate::pageable::BreakAfter::Page)
-                    ) {
-                        page_index += 1;
-                        cursor_y = 0.0;
-                    }
-                    continue;
+            // fulgur-a36m (Phase 3.1.5b): also recurse when the
+            // body-direct child fits the strip but its DOM subtree
+            // declares a forced break (e.g. body has `<ul>` whose
+            // `<li class="icon">` carries `break-before: page`).
+            // Without recursion, the nested break would be emitted
+            // inside the body child's whole fragment with no page
+            // boundary, mismatching Pageable's
+            // `BlockPageable::find_split_point` `has_forced_break_below`
+            // path (`pageable.rs:1196-1203`).
+            let has_splittable_children = self
+                .doc
+                .get_node(child_id)
+                .is_some_and(|n| !n.children.is_empty());
+            let needs_recursion = has_splittable_children
+                && (child_h > self.page_height_px
+                    || has_forced_break_below(self.doc, child_id, self.column_styles, 0));
+            if needs_recursion {
+                let child_x_in_body = body_x + layout.location.x;
+                let (new_page, new_cursor) = fragment_block_subtree(
+                    &mut self.geometry,
+                    self.doc,
+                    self.column_styles,
+                    child_id,
+                    child_w,
+                    child_x_in_body,
+                    page_index,
+                    cursor_y,
+                    self.page_height_px,
+                    0,
+                );
+                page_index = new_page;
+                cursor_y = new_cursor;
+                emitted += 1;
+                prev_bottom_y_in_body = this_top_in_body + child_h;
+                if matches!(
+                    break_props.break_after,
+                    Some(crate::pageable::BreakAfter::Page)
+                ) {
+                    page_index += 1;
+                    cursor_y = 0.0;
                 }
+                continue;
             }
 
             let frag = Fragment {
@@ -813,6 +824,43 @@ fn record_subtree_descendants(
     }
 }
 
+/// fulgur-a36m (Phase 3.1.5b): true if any descendant of `node_id`
+/// declares `break-before: page` or `break-after: page` in
+/// `column_styles`. Walks the entire DOM subtree, bails at
+/// [`crate::MAX_DOM_DEPTH`].
+///
+/// Mirrors `BlockPageable::has_forced_break_below()` from `pageable.rs`,
+/// but works on Blitz nodes via the column-style side-table rather
+/// than the converted Pageable tree. Used by `fragment_pagination_root`
+/// and `fragment_block_subtree` to decide whether a body-direct (or
+/// nested) child needs to be entered for break recursion even when it
+/// fits the current page strip whole.
+fn has_forced_break_below(
+    doc: &BaseDocument,
+    node_id: usize,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    depth: usize,
+) -> bool {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
+    for &child_id in &node.children {
+        if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
+            && (matches!(props.break_before, Some(crate::pageable::BreakBefore::Page))
+                || matches!(props.break_after, Some(crate::pageable::BreakAfter::Page)))
+        {
+            return true;
+        }
+        if has_forced_break_below(doc, child_id, column_styles, depth + 1) {
+            return true;
+        }
+    }
+    false
+}
+
 /// fulgur-g9e3.1: split a block element across pages by walking its DOM
 /// children and emitting per-page fragments for both the block itself
 /// and its children.
@@ -832,13 +880,15 @@ fn record_subtree_descendants(
 /// counter / string-set / bookmark ops attached to elements that fit
 /// on a single page span within the parent.
 ///
-/// Forced breaks (`break-before` / `break-after` / nested
-/// `has_forced_break_below`) are intentionally **not** handled here —
-/// that's `fulgur-a9qf` (Phase 3.1.5). Children flagged with break-*
-/// fall through the same overflow check the rest of the children take
-/// and may land slightly differently from Pageable in those cases; the
-/// `forced_break_skipped` gate in `render.rs` keeps parity assertions
-/// quiet on those tests until 3.1.5 lands.
+/// fulgur-a36m (Phase 3.1.5b): also honours `break-before: page` /
+/// `break-after: page` on direct children, and recurses into children
+/// whose subtrees declare a forced break (`has_forced_break_below`)
+/// so deeper nested breaks land on the right page.
+///
+/// In-place mid-element split (`cursor_y + child_h > page_h` with
+/// `child_h <= page_h` and a CSS-set parent height that diverges from
+/// children sum) still falls back to the pre-3.1 push-to-next-page
+/// behaviour — that's `fulgur-7hf5` (Phase 3.1.5c).
 ///
 /// Skips OOF / running / whitespace-text children, same convention as
 /// `fragment_pagination_root`. Bails at [`crate::MAX_DOM_DEPTH`] —
@@ -852,6 +902,7 @@ fn record_subtree_descendants(
 fn fragment_block_subtree(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
     parent_id: usize,
     parent_w: f32,
     parent_x_in_body: f32,
@@ -920,6 +971,43 @@ fn fragment_block_subtree(
         } else {
             parent_w
         };
+
+        // fulgur-a36m: read break-* props for this child once. Both
+        // the zero-height and non-zero paths honour them.
+        let break_props = column_styles
+            .and_then(|t| t.get(&child_id))
+            .copied()
+            .unwrap_or_default();
+        let break_before_page = matches!(
+            break_props.break_before,
+            Some(crate::pageable::BreakBefore::Page)
+        );
+        let break_after_page = matches!(
+            break_props.break_after,
+            Some(crate::pageable::BreakAfter::Page)
+        );
+
+        // Honour `break-before: page`. Leading collapse: only fires
+        // when some content has already been placed on this page —
+        // gated by `cursor_y > page_start_y` (mirrors body-level's
+        // `cursor_y > 0.0` since body's implicit page_start is 0).
+        if break_before_page && cursor_y > page_start_y {
+            geometry
+                .entry(parent_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: parent_x_in_body,
+                    y: page_start_y,
+                    width: parent_w,
+                    height: cursor_y - page_start_y,
+                });
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
+        }
+
         if child_h <= 0.0 {
             // Phase 2.3 fix: zero-height **element** nodes still
             // need to enter geometry so their counter / string-set
@@ -936,6 +1024,25 @@ fn fragment_block_subtree(
                         width: child_w,
                         height: 0.0,
                     });
+            }
+            // Honour `break-after: page` for zero-height elements
+            // too — same fulgur-p3uf (Phase 3.1.5a) fix as
+            // `fragment_pagination_root`'s zero-height branch.
+            if break_after_page {
+                geometry
+                    .entry(parent_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body,
+                        y: page_start_y,
+                        width: parent_w,
+                        height: cursor_y - page_start_y,
+                    });
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
             }
             continue;
         }
@@ -968,43 +1075,64 @@ fn fragment_block_subtree(
 
         let child_x_in_body = parent_x_in_body + layout.location.x;
 
-        // Child is itself oversized → recurse to split among its
-        // grandchildren (same overflow→split rule we used to enter
-        // this function).
-        if child_h > page_height_px {
-            let has_splittable_children = !child.children.is_empty();
-            if has_splittable_children {
-                let (np, nc) = fragment_block_subtree(
-                    geometry,
-                    doc,
-                    child_id,
-                    child_w,
-                    child_x_in_body,
-                    page_index,
-                    cursor_y,
-                    page_height_px,
-                    depth + 1,
-                );
-                page_index = np;
-                cursor_y = nc;
-                // The recursion may have moved us off `page_start_y`'s
-                // page; restart the parent fragment on whatever page
-                // we're on now.
-                if page_index != page_in || nc < page_start_y {
-                    page_start_y = 0.0;
-                }
-                prev_bottom_in_parent = this_top_in_parent + child_h;
-                continue;
+        // Child needs recursion when:
+        //   - itself oversized (Phase 3.1, mirrors
+        //     `find_split_point`'s overflow→split path), OR
+        //   - subtree contains a forced break (Phase 3.1.5b,
+        //     mirrors `find_split_point`'s `has_forced_break_below`
+        //     check at `pageable.rs:1196-1203`).
+        let needs_recursion = !child.children.is_empty()
+            && (child_h > page_height_px
+                || has_forced_break_below(doc, child_id, column_styles, 0));
+        if needs_recursion {
+            let pre_recursion_page = page_index;
+            let (np, nc) = fragment_block_subtree(
+                geometry,
+                doc,
+                column_styles,
+                child_id,
+                child_w,
+                child_x_in_body,
+                page_index,
+                cursor_y,
+                page_height_px,
+                depth + 1,
+            );
+            page_index = np;
+            cursor_y = nc;
+            // If the recursion crossed a boundary, the parent's
+            // current-page fragment must restart at y=0 on the new
+            // page. Defensive `nc < page_start_y` guards against
+            // backward cursor returns (impossible in normal flow).
+            if page_index != pre_recursion_page || nc < page_start_y {
+                page_start_y = 0.0;
             }
-            // Atomic oversized leaf — fall through to whole-emit; it
-            // will simply spill below the page strip on its starting
-            // page. Pageable's same-shaped fallback at
-            // `pageable.rs:1252` (`in_flow_count == 1` → NoSplit) lands
-            // here too.
+            prev_bottom_in_parent = this_top_in_parent + child_h;
+            // Honour `break-after: page` after recursion.
+            if break_after_page {
+                geometry
+                    .entry(parent_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body,
+                        y: page_start_y,
+                        width: parent_w,
+                        height: cursor_y - page_start_y,
+                    });
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+            }
+            continue;
         }
 
-        // Child fits (or is atomic-oversized-fallback). Emit its
-        // fragment and recurse into its descendants on the same page.
+        // Child fits the strip (or is an atomic oversized leaf that
+        // simply overflows below the page bottom — Pageable's same
+        // fallback at `pageable.rs:1252`, `in_flow_count == 1 →
+        // NoSplit`). Emit its fragment and recurse into descendants
+        // on the same page.
         geometry
             .entry(child_id)
             .or_default()
@@ -1027,6 +1155,25 @@ fn fragment_block_subtree(
         );
         cursor_y += child_h;
         prev_bottom_in_parent = this_top_in_parent + child_h;
+
+        // Honour `break-after: page` after the child fragment lands
+        // (and the descendant walk records same-page entries).
+        if break_after_page {
+            geometry
+                .entry(parent_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: parent_x_in_body,
+                    y: page_start_y,
+                    width: parent_w,
+                    height: cursor_y - page_start_y,
+                });
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
+        }
     }
 
     // Close the parent's fragment for the final page span. Always
