@@ -331,23 +331,17 @@ pub fn render_to_pdf_with_gcpm(
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
     // fulgur-cj6u Phase 1.2: cross-check the spike fragmenter agrees
-    // with Pageable on the page count. Skipped when:
+    // with Pageable on the page count. Skipped when `@page` rules
+    // changed `content_height` away from `config.content_height()` —
+    // the spike was driven with the unresolved config-level value,
+    // so a strict equality would produce a false positive (later
+    // Phase 2 work moves `@page` size resolution into the spike).
     //
-    // - `@page` rules changed `content_height` away from
-    //   `config.content_height()`. The spike was driven with the
-    //   unresolved config-level value, so a strict equality would
-    //   produce a false positive (Phase 2 moves `@page` size
-    //   resolution into the spike).
-    // - The document declares running elements (`position: running()`).
-    //   Stylo / Blitz do not natively understand the GCPM `running()`
-    //   value, so the spike's body walk still sees those nodes as
-    //   in-flow and counts their height; Pageable strips them into
-    //   `RunningElementWrapperPageable` before pagination. Phase 2.2
-    //   adds running-element awareness to the spike — until then the
-    //   two views diverge for these documents and the assertion is
-    //   uninformative.
-    if (content_height - config.content_height()).abs() < 0.001 && gcpm.running_mappings.is_empty()
-    {
+    // fulgur-s67g Phase 2.2 (running elements) ungated the
+    // `gcpm.running_mappings.is_empty()` skip: the spike now
+    // consults `RunningElementStore` and skips `position: running()`
+    // named children, matching Pageable's body view.
+    if (content_height - config.content_height()).abs() < 0.001 {
         assert_pageable_spike_parity(&pages, pagination_geometry);
     }
     let total_pages = pages.len();
@@ -358,12 +352,12 @@ pub fn render_to_pdf_with_gcpm(
     };
     // fulgur-cj6u Phase 1.3: parity-check the spike's geometry-table-
     // driven `collect_string_set_states` against Pageable's tree walk.
-    // Same activation gates as the page-count parity (Phase 1.2):
-    // skipped when @page rules differ or running elements are
-    // present, because both shift the body view between the two paths.
+    // Same activation gate as the page-count parity (Phase 1.2):
+    // skipped when @page rules shift `content_height` away from the
+    // config value. fulgur-s67g Phase 2.2 ungated the
+    // running-elements skip on this assertion too.
     if !gcpm.string_set_mappings.is_empty()
         && (content_height - config.content_height()).abs() < 0.001
-        && gcpm.running_mappings.is_empty()
     {
         assert_string_set_states_parity(
             &string_set_states,
