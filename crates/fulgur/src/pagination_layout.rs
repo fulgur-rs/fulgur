@@ -807,10 +807,37 @@ fn record_subtree_descendants(
 /// `forced_break_skipped` gate in `render.rs` keeps parity assertions
 /// quiet on those tests until 3.1.5 lands.
 ///
-/// Skips OOF / running / whitespace-text children, same convention as
+/// Skips OOF / whitespace-text children, same convention as
 /// `fragment_pagination_root`. Bails at [`crate::MAX_DOM_DEPTH`] —
 /// any nodes below that depth go unrecorded (matches
 /// `record_subtree_descendants`).
+///
+/// ## Known gaps deferred to `fulgur-a9qf` (Phase 3.1.5)
+///
+/// `fragment_block_subtree` does **not** mirror `fragment_pagination_root`
+/// in three respects. None of these surface in the current test corpus
+/// (`cargo test -p fulgur` 1111 / 0); each is tracked as a regression
+/// scope-add on `fulgur-a9qf` (notes §5a / §5b / §5c) so they close
+/// alongside in-place mid-element split:
+///
+/// - **Nested `position: running()` markers are not skipped here.** The
+///   helper has no access to `running_store`, so a running marker that
+///   sits inside an oversized subtree is treated as in-flow and
+///   over-advances `cursor_y`. Body-level filtering is intact; only the
+///   recursion path is affected.
+/// - **Nested inline roots are not split at line edges.** When a tall
+///   `<p>` (multi-line inline root) lives inside an oversized ancestor,
+///   the recursion falls back to DOM-child block split rather than
+///   calling `collect_inline_line_metrics` / `fragment_inline_root` like
+///   the body-level walker does.
+/// - **Multi-page recursive traversal does not emit per-page parent
+///   fragments for intermediate pages.** When the recursive call
+///   advances more than one page, only the first and last page get a
+///   parent-`parent_id` fragment via the pre-recursion overflow close
+///   and the trailing close at the end of this function. Counter /
+///   string-set / bookmark ops attached to `parent_id` itself would
+///   then miss the intermediate pages — the existing tests attach ops
+///   to leaf children, so this stays masked until 3.1.5.
 ///
 /// Returns `(final_page_index, final_cursor_y)`: the page and y where
 /// the parent's last child finished. The caller resumes its outer
