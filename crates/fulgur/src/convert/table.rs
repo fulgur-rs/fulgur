@@ -69,6 +69,7 @@ fn convert_table(
         opacity,
         visible,
         id: extract_block_id(node),
+        node_id: Some(node.id),
     };
     Box::new(table)
 }

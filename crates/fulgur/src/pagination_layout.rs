@@ -2781,6 +2781,120 @@ mod tests {
         );
     }
 
+    // ─── slice_for_page wrapper / special-split tests (fulgur-3vwx Phase 3.2.b) ───
+
+    use crate::gcpm::CounterOp;
+    use crate::pageable::{
+        BookmarkMarkerPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable,
+    };
+
+    /// CounterOpWrapper.slice_for_page keeps the marker on the first page
+    /// where the wrapped child appears, drops it on continuation pages
+    /// (returns the inner child unwrapped). Without this, counter
+    /// operations would be replayed on every page the child spans.
+    #[test]
+    fn counter_op_wrapper_keeps_marker_on_first_page_only() {
+        const ID: usize = 600;
+        let inner = SpacerPageable::new(100.0).with_node_id(Some(ID));
+        let wrapped = CounterOpWrapperPageable::new(
+            vec![CounterOp::Increment {
+                name: "section".into(),
+                value: 1,
+            }],
+            Box::new(inner),
+        );
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page0 = wrapped
+            .slice_for_page(0, &geom)
+            .expect("inner has fragment on page 0");
+        assert!(
+            page0
+                .as_any()
+                .downcast_ref::<CounterOpWrapperPageable>()
+                .is_some(),
+            "page 0 keeps the wrapper (counter op fires here)"
+        );
+
+        let page1 = wrapped
+            .slice_for_page(1, &geom)
+            .expect("inner has fragment on page 1");
+        assert!(
+            page1
+                .as_any()
+                .downcast_ref::<CounterOpWrapperPageable>()
+                .is_none(),
+            "page 1 strips the wrapper (counter op already fired)"
+        );
+        assert!(
+            page1.as_any().downcast_ref::<SpacerPageable>().is_some(),
+            "page 1 returns the unwrapped inner Spacer, got {:?}",
+            std::any::type_name_of_val(&*page1)
+        );
+    }
+
+    /// BookmarkMarkerWrapper.slice_for_page applies the same first-page-only
+    /// rule for outline anchors.
+    #[test]
+    fn bookmark_marker_wrapper_keeps_marker_on_first_page_only() {
+        const ID: usize = 601;
+        let inner = SpacerPageable::new(100.0).with_node_id(Some(ID));
+        let wrapped = BookmarkMarkerWrapperPageable::new(
+            BookmarkMarkerPageable::new(1, "Chapter 1".into()),
+            Box::new(inner),
+        );
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page0 = wrapped.slice_for_page(0, &geom).unwrap();
+        assert!(
+            page0
+                .as_any()
+                .downcast_ref::<BookmarkMarkerWrapperPageable>()
+                .is_some(),
+            "bookmark anchor lands on first page"
+        );
+        let page1 = wrapped.slice_for_page(1, &geom).unwrap();
+        assert!(
+            page1
+                .as_any()
+                .downcast_ref::<BookmarkMarkerWrapperPageable>()
+                .is_none(),
+            "continuation page has no bookmark anchor"
+        );
+    }
+
     /// fulgur-s67g Phase 2.1: a 3-line paragraph that overflows the
     /// page strip after line 2 cannot split between line 2 and the
     /// final line — the second fragment would have only 1 line, below
