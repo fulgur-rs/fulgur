@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// directly without going through `Engine::render_html`, so no
 /// `pagination_layout::PaginationGeometryTable` is available. The
 /// parity gate lives in [`render_to_pdf_with_gcpm`] which is the
-/// engine-internal entry threaded with the spike's geometry.
+/// engine-internal entry threaded with the fragmenter's geometry.
 pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>> {
     let content_width = config.content_width();
     let content_height = config.content_height();
@@ -115,15 +115,15 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
 /// (widow/orphan, running element / margin-box, counter, table-row
 /// break, …).
 ///
-/// Skipped when `geometry` is empty — the spike pass was either not
+/// Skipped when `geometry` is empty — the fragmenter pass was either not
 /// run or the document had no body / no in-flow children, in which
 /// case Pageable's "always at least one page" convention diverges
-/// from the spike's "no fragments" output and the assertion is
+/// from the fragmenter's "no fragments" output and the assertion is
 /// uninformative. Empty bodies still go through Pageable's single-
 /// empty-page fallback.
 ///
 /// Release builds compile this to a no-op via `cfg!(debug_assertions)`.
-fn assert_pageable_spike_parity(
+fn assert_pageable_fragmenter_parity(
     pages: &[Box<dyn Pageable>],
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) {
@@ -131,41 +131,41 @@ fn assert_pageable_spike_parity(
         return;
     }
     let pageable_count = pages.len() as u32;
-    let spike_count = crate::pagination_layout::implied_page_count(geometry);
+    let fragmenter_count = crate::pagination_layout::implied_page_count(geometry);
     // fulgur-s67g Phase 2.6: when Pageable splits an oversized element
     // across pages (mid-element split, e.g. `.huge { break-inside: avoid }`
-    // taller than `@page`), Pageable emits more pages than the spike's
-    // strip-based fragmenter currently models. That gap is Phase 3 work
+    // taller than `@page`), Pageable emits more pages than the fragmenter's
+    // strip-based pass currently models. That gap is Phase 3 work
     // (per-strip layout pass / `fulgur-g9e3`); until then, skip parity
-    // when Pageable > spike. The reverse direction is still a regression.
-    if pageable_count > spike_count {
+    // when Pageable > fragmenter. The reverse direction is still a regression.
+    if pageable_count > fragmenter_count {
         return;
     }
     debug_assert_eq!(
-        pageable_count, spike_count,
-        "page count parity drift: paginate={pageable_count} spike={spike_count}",
+        pageable_count, fragmenter_count,
+        "page count parity drift: paginate={pageable_count} fragmenter={fragmenter_count}",
     );
 }
 
-/// Detect mid-element split: Pageable produces more pages than spike's
-/// `implied_page_count`. See `assert_pageable_spike_parity` for the
+/// Detect mid-element split: Pageable produces more pages than fragmenter's
+/// `implied_page_count`. See `assert_pageable_fragmenter_parity` for the
 /// rationale — this is Phase 3 territory and the dependent parity
 /// assertions can't be meaningfully compared either.
 fn mid_element_split_skipped(
     pageable_pages: usize,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> bool {
-    let spike_count = crate::pagination_layout::implied_page_count(geometry) as usize;
-    pageable_pages > spike_count
+    let fragmenter_count = crate::pagination_layout::implied_page_count(geometry) as usize;
+    pageable_pages > fragmenter_count
 }
 
-/// fulgur-cj6u Phase 1.3: in debug builds, assert that the spike's
+/// fulgur-cj6u Phase 1.3: in debug builds, assert that the fragmenter's
 /// `pagination_layout::collect_string_set_states` produces the same
 /// per-page `(start, first, last)` shape Pageable's tree walk does.
-/// Same skip semantics as `assert_pageable_spike_parity`: empty
-/// geometry → spike pass not run; release builds compile to a no-op.
+/// Same skip semantics as `assert_pageable_fragmenter_parity`: empty
+/// geometry → fragmenter pass not run; release builds compile to a no-op.
 ///
-/// `string_set_by_node` is the engine-side `HashMap`; the spike
+/// `string_set_by_node` is the engine-side `HashMap`; the fragmenter
 /// wants a `BTreeMap` (deterministic iteration), so we materialise
 /// one once for the comparison. The conversion is debug-only via
 /// `cfg!(debug_assertions)`.
@@ -184,27 +184,31 @@ fn assert_string_set_states_parity(
         .iter()
         .map(|(k, v)| (*k, v.clone()))
         .collect();
-    let spike_states =
+    let fragmenter_states =
         crate::pagination_layout::collect_string_set_states(geometry, &by_node_btree);
     debug_assert_eq!(
         pageable_states.len(),
-        spike_states.len(),
-        "string-set state vec length drift: pageable={} spike={}",
+        fragmenter_states.len(),
+        "string-set state vec length drift: pageable={} fragmenter={}",
         pageable_states.len(),
-        spike_states.len(),
+        fragmenter_states.len(),
     );
-    for (idx, (pg, sp)) in pageable_states.iter().zip(spike_states.iter()).enumerate() {
+    for (idx, (pg, sp)) in pageable_states
+        .iter()
+        .zip(fragmenter_states.iter())
+        .enumerate()
+    {
         debug_assert_eq!(
             pg, sp,
-            "string-set state drift on page {idx}:\n  pageable = {pg:#?}\n  spike    = {sp:#?}",
+            "string-set state drift on page {idx}:\n  pageable   = {pg:#?}\n  fragmenter = {sp:#?}",
         );
     }
 }
 
-/// fulgur-s67g Phase 2.3: in debug builds, assert that the spike's
+/// fulgur-s67g Phase 2.3: in debug builds, assert that the fragmenter's
 /// `pagination_layout::collect_counter_states` produces the same
 /// per-page counter snapshot Pageable's tree walk does. Same skip
-/// semantics as the other parity helpers: empty geometry → spike pass
+/// semantics as the other parity helpers: empty geometry → fragmenter pass
 /// not run; release builds compile to a no-op.
 fn assert_counter_states_parity(
     pageable_states: &[BTreeMap<String, i32>],
@@ -218,7 +222,7 @@ fn assert_counter_states_parity(
     // (e.g. `<div class="reset"></div>` carrying `counter-set: ..`),
     // so a counter-op node can be absent from `geometry` while
     // Pageable still applies its op during the tree walk. Skip the
-    // assertion in that case — the spike's view is intentionally
+    // assertion in that case — the fragmenter's view is intentionally
     // incomplete here, same scope limitation as the function's
     // docstring already calls out for nested declarations.
     if counter_ops_by_node
@@ -230,24 +234,28 @@ fn assert_counter_states_parity(
     if mid_element_split_skipped(pageable_states.len(), geometry) {
         return;
     }
-    let spike_states =
+    let fragmenter_states =
         crate::pagination_layout::collect_counter_states(geometry, counter_ops_by_node);
     debug_assert_eq!(
         pageable_states.len(),
-        spike_states.len(),
-        "counter state vec length drift: pageable={} spike={}",
+        fragmenter_states.len(),
+        "counter state vec length drift: pageable={} fragmenter={}",
         pageable_states.len(),
-        spike_states.len(),
+        fragmenter_states.len(),
     );
-    for (idx, (pg, sp)) in pageable_states.iter().zip(spike_states.iter()).enumerate() {
+    for (idx, (pg, sp)) in pageable_states
+        .iter()
+        .zip(fragmenter_states.iter())
+        .enumerate()
+    {
         debug_assert_eq!(
             pg, sp,
-            "counter state drift on page {idx}:\n  pageable = {pg:#?}\n  spike    = {sp:#?}",
+            "counter state drift on page {idx}:\n  pageable   = {pg:#?}\n  fragmenter = {sp:#?}",
         );
     }
 }
 
-/// fulgur-s67g Phase 2.4: in debug builds, assert that the spike's
+/// fulgur-s67g Phase 2.4: in debug builds, assert that the fragmenter's
 /// `pagination_layout::collect_bookmark_entries` produces the same
 /// `(page_idx, level, label)` triples Pageable's collector emits at
 /// draw time. `y_pt` is intentionally not compared — see the
@@ -272,7 +280,7 @@ fn assert_bookmark_entries_parity(
             label: e.label.clone(),
         })
         .collect();
-    let mut spike_triples =
+    let mut fragmenter_triples =
         crate::pagination_layout::collect_bookmark_entries(geometry, bookmark_by_node);
     // Sort both by (page_idx, label) so iteration order from BTreeMap
     // (NodeId-ordered) matches Pageable's draw-order recording when
@@ -284,15 +292,15 @@ fn assert_bookmark_entries_parity(
             .then(a.level.cmp(&b.level))
             .then(a.label.cmp(&b.label))
     });
-    spike_triples.sort_by(|a, b| {
+    fragmenter_triples.sort_by(|a, b| {
         a.page_idx
             .cmp(&b.page_idx)
             .then(a.level.cmp(&b.level))
             .then(a.label.cmp(&b.label))
     });
     debug_assert_eq!(
-        sorted_pageable, spike_triples,
-        "bookmark entries drift:\n  pageable = {sorted_pageable:#?}\n  spike    = {spike_triples:#?}",
+        sorted_pageable, fragmenter_triples,
+        "bookmark entries drift:\n  pageable   = {sorted_pageable:#?}\n  fragmenter = {fragmenter_triples:#?}",
     );
 }
 
@@ -453,20 +461,20 @@ pub fn render_to_pdf_with_gcpm(
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
     // fulgur-cj6u Phase 1.2 / fulgur-s67g Phase 2.6: cross-check the
-    // spike fragmenter agrees with Pageable on the page count.
+    // fragmenter agrees with Pageable on the page count.
     // Phase 2.6 (`@page` size / margin resolution) makes the engine
-    // pre-resolve page-1 settings before driving the spike, so the
-    // strip height the spike sees matches `content_height` here by
+    // pre-resolve page-1 settings before driving the fragmenter, so the
+    // strip height the fragmenter sees matches `content_height` here by
     // construction — no skip needed for `@page`-modified docs.
     // (Phase 2.2 already ungated the running-elements skip.)
-    assert_pageable_spike_parity(&pages, pagination_geometry);
+    assert_pageable_fragmenter_parity(&pages, pagination_geometry);
     let total_pages = pages.len();
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
         vec![BTreeMap::new(); pages.len()]
     } else {
         crate::paginate::collect_string_set_states(&pages)
     };
-    // fulgur-cj6u Phase 1.3: parity-check the spike's geometry-table-
+    // fulgur-cj6u Phase 1.3: parity-check the fragmenter's geometry-table-
     // driven `collect_string_set_states` against Pageable's tree walk.
     // No activation gate beyond "string-set actually used" — Phase 2.2
     // / 2.6 ungated the running-elements and `@page` skips.
@@ -488,7 +496,7 @@ pub fn render_to_pdf_with_gcpm(
         } else {
             crate::paginate::collect_counter_states(&pages)
         };
-    // fulgur-s67g Phase 2.3: parity-check the spike's geometry-table-
+    // fulgur-s67g Phase 2.3: parity-check the fragmenter's geometry-table-
     // driven `collect_counter_states` against Pageable's tree walk.
     // No activation gate beyond "counter actually used".
     if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
@@ -809,10 +817,10 @@ pub fn render_to_pdf_with_gcpm(
 
     if let Some(c) = collector {
         let entries = c.into_entries();
-        // fulgur-s67g Phase 2.4: parity-check the spike's
+        // fulgur-s67g Phase 2.4: parity-check the fragmenter's
         // geometry-driven bookmark walk against Pageable's draw-time
         // collector output. Compares only `(page_idx, level, label)`
-        // — the spike does not work in PDF-pt frames so y_pt parity
+        // — the fragmenter does not work in PDF-pt frames so y_pt parity
         // is deferred to Phase 4 (convert / render rewrite).
         // Phase 2.6 ungated the `@page`-content-height skip.
         if !entries.is_empty() {

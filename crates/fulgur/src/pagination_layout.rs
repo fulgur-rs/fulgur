@@ -36,7 +36,7 @@
 //!
 //! The wrapper is currently exercised against the body subtree only.
 //! Anything nested inside body's direct children continues to use
-//! Blitz's normal layout dispatch, and the spike post-walks
+//! Blitz's normal layout dispatch, and the fragmenter post-walks
 //! `final_layout` rather than re-issuing per-strip
 //! `compute_child_layout` calls. The fulgur-ik6o probe established
 //! that constraining `available_space.height` does not change Taffy's
@@ -59,7 +59,7 @@
 //! and [`implied_page_count`] are gated `#[cfg(test)]` because they
 //! describe extension points (Pageable's string-set walk replacement,
 //! geometry-driven fixed repetition) that have no production consumer
-//! yet. They stay visible to the in-file test module so the spike's
+//! yet. They stay visible to the in-file test module so the fragmenter's
 //! comparison harness can exercise them; future PRs un-gate them when
 //! a real consumer lands.
 
@@ -87,7 +87,7 @@ pub struct Fragment {
 
 /// Per-source-node geometry: every page on which the node has a placement.
 ///
-/// For the block-only spike the vector is normally length 1 (the node
+/// For the block-only fragmenter the vector is normally length 1 (the node
 /// fits on one page). A node taller than the page produces multiple
 /// fragments — but in the current measurement-only implementation we
 /// emit it as a single oversized fragment on the page where its top
@@ -119,7 +119,7 @@ pub struct PaginationLayoutTree<'a> {
     pub(crate) page_height_px: f32,
     pub(crate) geometry: PaginationGeometryTable,
     /// Cached id of the `<body>` element, if any. Used as the
-    /// fragmentation root for the block-only spike. `None` means the
+    /// fragmentation root for the block-only fragmenter. `None` means the
     /// document had no body and the pass becomes a no-op.
     pub(crate) body_id: Option<usize>,
     /// fulgur-k0g0: `break-before` / `break-after` / `break-inside`
@@ -127,7 +127,7 @@ pub struct PaginationLayoutTree<'a> {
     /// [`crate::blitz_adapter::extract_column_style_table`]. The table
     /// is shared with `multicol_layout` (Pageable's
     /// `extract_pagination_from_column_css` reads the same fields), so
-    /// the pagination spike does not maintain its own break-style
+    /// the pagination fragmenter does not maintain its own break-style
     /// extraction. `None` means "no break properties set anywhere",
     /// which the fragmenter treats as all-`Auto`.
     pub(crate) column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
@@ -366,7 +366,7 @@ impl<'a> PaginationLayoutTree<'a> {
         // / string-set / bookmark ops fire only on page 0
         // (`pageable.rs:2829-2840` etc.).
         //
-        // Without this entry the spike's geometry table excludes body
+        // Without this entry the fragmenter's geometry table excludes body
         // entirely; `collect_counter_states` /
         // `collect_string_set_states` / `collect_bookmark_entries`
         // miss body's ops and the parity gates fire on documents like
@@ -403,7 +403,7 @@ impl<'a> PaginationLayoutTree<'a> {
         // child's `final_layout.location.y` but the cursor-only walk
         // would otherwise miss. Pageable accumulates `pc.y + child_h`
         // from `final_layout.location.y` during convert, so margin gaps
-        // are present in the Pageable side; the spike must match.
+        // are present in the Pageable side; the fragmenter must match.
         let mut prev_bottom_y_in_body: f32 = 0.0;
 
         for child_id in children {
@@ -421,7 +421,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // / `position: fixed`) do not contribute to their containing
             // block's normal-flow height. Pageable routes them through
             // `PositionedChild { out_of_flow: true }` and they never
-            // advance pagination cursors; the spike must match or the
+            // advance pagination cursors; the fragmenter must match or the
             // fulgur-cj6u Phase 1.2 parity assertion fires on documents
             // with abs/fixed body-direct children.
             {
@@ -606,7 +606,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // and record per-node fragments for every visible
             // descendant. Pageable's `paginate::collect_*` walks
             // recurse into `BlockPageable`, `ListItemPageable`,
-            // wrapper types, and table cells; the spike side needs
+            // wrapper types, and table cells; the fragmenter side needs
             // matching coverage so bookmark / counter / string-set
             // markers attached to nested DOM elements (e.g. an `h2`
             // inside a wrapper `<div>`) appear in geometry too.
@@ -634,7 +634,7 @@ impl<'a> PaginationLayoutTree<'a> {
 
             // `break-after: page` forces a page boundary after the
             // child. A trailing break on the last in-flow child does
-            // emit an empty trailing page in CSS, but the spike's
+            // emit an empty trailing page in CSS, but the fragmenter's
             // observable signal (page_count) treats this as "advance
             // cursor"; the next iteration's emit-or-skip handles
             // whether the page is materialised.
@@ -669,7 +669,7 @@ impl<'a> PaginationLayoutTree<'a> {
 /// Mid-element split inside a body child (a deeply nested element
 /// crossing the page boundary that the parent itself did not split
 /// at) is **not** modelled here — descendants land on the same page
-/// as their ancestor. This is the spike's "block-level only" gap;
+/// as their ancestor. This is the fragmenter's "block-level only" gap;
 /// closing it requires the full per-strip layout pass that Phase 3
 /// (paginate.rs replacement) introduces.
 fn record_subtree_descendants(
@@ -772,7 +772,7 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 ///
 /// Pageable hard-codes `orphans = widows = 2` via `Pagination::default()`
 /// (`pageable.rs:268-275`). CSS `orphans` / `widows` properties are
-/// not parsed today, so the spike uses the same constants.
+/// not parsed today, so the fragmenter uses the same constants.
 ///
 /// Output:
 ///
@@ -879,7 +879,7 @@ fn fragment_inline_root(
 /// `string-set` state across pages, mirroring
 /// [`crate::paginate::collect_string_set_states`].
 ///
-/// Used by fulgur-cj6u Phase 1.3 as the spike-side input to a
+/// Used by fulgur-cj6u Phase 1.3 as the fragmenter-side input to a
 /// per-page state parity assertion against `paginate`'s walk in
 /// `render_to_pdf_with_gcpm`. Drift between the two outputs is the
 /// regression signal that catches geometry-vs-Pageable divergence
@@ -905,7 +905,7 @@ fn fragment_inline_root(
 /// iteration is by ascending NodeId. For body's direct children that
 /// matches DOM source order, since Blitz allocates ids sequentially
 /// during parse. Nested string-set declarations (markers attached to
-/// a `<span>` inside a `<p>`) are not in the spike's geometry table
+/// a `<span>` inside a `<p>`) are not in the fragmenter's geometry table
 /// today and so are silently dropped — same scope limitation as
 /// `fragment_pagination_root` itself.
 pub fn collect_string_set_states(
@@ -970,12 +970,12 @@ pub fn collect_string_set_states(
 /// applied in the order they appear in the body's children list,
 /// approximated by `BTreeMap<NodeId, _>` iteration. Nested counter
 /// declarations on descendants of body's direct children are not in
-/// the spike's geometry today and are silently dropped — same scope
+/// the fragmenter's geometry today and are silently dropped — same scope
 /// limitation as `fragment_pagination_root` itself.
 ///
 /// Used by fulgur-cj6u Phase 1.x parity gates extension in
 /// `render_to_pdf_with_gcpm`. Drift between Pageable's counter walk
-/// and the spike's geometry-driven walk is the regression signal
+/// and the fragmenter's geometry-driven walk is the regression signal
 /// for counter-correctness on documents with `counter-increment` /
 /// `counter-reset` / `counter-set`.
 pub fn collect_counter_states(
@@ -1030,7 +1030,7 @@ pub fn collect_counter_states(
 /// `(page_idx, level, label)` triples for every body child whose
 /// `BookmarkInfo` is registered. Mirrors what
 /// `pageable::BookmarkMarkerPageable::record_if_collecting`
-/// records during draw, except the spike works off the
+/// records during draw, except the fragmenter works off the
 /// `PaginationGeometryTable` directly without traversing the
 /// Pageable tree.
 ///
@@ -1042,7 +1042,7 @@ pub fn collect_counter_states(
 /// `BookmarkMarkerWrapperPageable`'s "marker travels with the
 /// first split fragment" invariant).
 ///
-/// `y_pt` is intentionally **not** returned: the spike works in
+/// `y_pt` is intentionally **not** returned: the fragmenter works in
 /// CSS px / fragment frames while Pageable records absolute PDF
 /// pt at draw time (after applying `config.margin.top` and
 /// per-page running-element offsets). The Phase 2.4 parity
@@ -1074,7 +1074,7 @@ pub fn collect_bookmark_entries(
 }
 
 /// Reduced view of `pageable::BookmarkEntry` exposed by
-/// [`collect_bookmark_entries`]. Drops `y_pt` because the spike
+/// [`collect_bookmark_entries`]. Drops `y_pt` because the fragmenter
 /// does not work in PDF-pt frames; see the function's docstring
 /// for the parity rationale.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1095,7 +1095,7 @@ pub struct BookmarkPageEntry {
 /// path leaves fixed elements at their viewport-relative coordinates).
 /// The geometry-table approach this function provides is kept under
 /// `#[cfg(test)]` as scaffolding for a future architecture where
-/// convert / render consume the spike's geometry directly. Both paths
+/// convert / render consume the fragmenter's geometry directly. Both paths
 /// produce equivalent observable output today.
 #[cfg(test)]
 ///
@@ -1110,7 +1110,7 @@ pub struct BookmarkPageEntry {
 /// `blitz_adapter::relayout_position_fixed` (added in fulgur-tbxs,
 /// branch `feat/fixedpos-viewport-cb`) having run beforehand** so
 /// that `final_layout` reflects viewport-CB resolution rather than
-/// the inherited (often wrong) abs-position layout. The spike branch
+/// the inherited (often wrong) abs-position layout. The fragmenter branch
 /// does not yet include `relayout_position_fixed`; once both land on
 /// `main` this function picks up the corrected positions automatically.
 ///
@@ -1211,14 +1211,14 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
 
 /// fulgur-jkl5: total page count implied by a geometry table.
 ///
-/// Convention matches `compare_with_pageable::spike_page_count`:
+/// Convention matches `compare_with_pageable::fragmenter_page_count`:
 /// returns `max(page_index) + 1` if the table has any fragments, else
 /// `1` (Pageable's "always at least one page" guarantee).
 ///
-/// Used by fulgur-cj6u Phase 1.2 as the spike-side input to a
+/// Used by fulgur-cj6u Phase 1.2 as the fragmenter-side input to a
 /// `paginate(...).len() == implied_page_count(&geometry)` parity
 /// assertion in `render_to_pdf_with_gcpm`. Drift between Pageable's
-/// split decisions and the spike's fragmenter is the regression
+/// split decisions and the fragmenter is the regression
 /// signal Phase 2 work needs to chase.
 pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
     geometry
@@ -1359,7 +1359,7 @@ impl RoundTree for PaginationLayoutTree<'_> {
     }
 }
 
-/// Custom layout dispatch for the body (the spike's fragmentation root).
+/// Custom layout dispatch for the body (the fragmenter's fragmentation root).
 ///
 /// Mirrors the structure of [`crate::multicol_layout::compute_multicol_layout`]:
 /// the wrapper's `compute_child_layout` fires for body, delegates the
@@ -1369,7 +1369,7 @@ impl RoundTree for PaginationLayoutTree<'_> {
 ///
 /// In the next iteration this is where per-strip available_space
 /// constraint and child-by-child re-layout will live. For the current
-/// spike it's a thin shim that proves the dispatch path works.
+/// fragmenter it's a thin shim that proves the dispatch path works.
 fn compute_pagination_layout(
     tree: &mut PaginationLayoutTree<'_>,
     body_id: NodeId,
@@ -1397,10 +1397,10 @@ mod tests {
     use std::ops::DerefMut;
     use std::sync::Arc;
 
-    /// Parse helper for the spike's tests.
+    /// Parse helper for the fragmenter's tests.
     ///
     /// We deliberately don't accept a viewport height: `blitz_adapter::parse`
-    /// uses a hardcoded viewport_h internally, and the spike's strip slicing
+    /// uses a hardcoded viewport_h internally, and the fragmenter's strip slicing
     /// is driven by the `page_height_px` argument to `run_pass` rather than
     /// by the viewport. The fixtures pass viewport_w only.
     fn parse(html: &str, viewport_w: f32) -> blitz_html::HtmlDocument {
@@ -1867,7 +1867,7 @@ mod tests {
 
     #[test]
     fn taller_than_page_block_emits_single_oversize_fragment() {
-        // 1000px block on a 800px page. Block-only spike emits it whole
+        // 1000px block on a 800px page. Block-only fragmenter emits it whole
         // on the page where its top lands, with the full height — true
         // split is the next iteration's job.
         let html = r#"
@@ -1892,9 +1892,9 @@ mod tests {
 /// Comparison harness: drive the same HTML through `paginate::paginate(...)`
 /// and `pagination_layout::run_pass(...)` and tabulate the per-fixture
 /// page count agreement. The harness is observational — its purpose is to
-/// surface where the two paths agree (so the spike can claim it covers
+/// surface where the two paths agree (so the fragmenter can claim it covers
 /// the simple-block case) and where they diverge (so the next iteration
-/// of the spike has a concrete target list).
+/// of the fragmenter has a concrete target list).
 ///
 /// Lives in the same file as the unit tests so it can use `pub(crate)`
 /// helpers like `crate::convert::pt_to_px` and `crate::paginate::paginate`
@@ -1906,12 +1906,12 @@ mod compare_with_pageable {
     use crate::{Engine, PageSize};
     use std::ops::DerefMut;
 
-    /// Compute the spike's page count from a geometry table.
+    /// Compute the fragmenter's page count from a geometry table.
     ///
     /// Thin wrapper over [`super::implied_page_count`] so the comparison
     /// harness and the production-facing helper can never drift apart on
     /// the "empty → 1" convention.
-    fn spike_page_count(table: &super::PaginationGeometryTable) -> u32 {
+    fn fragmenter_page_count(table: &super::PaginationGeometryTable) -> u32 {
         super::implied_page_count(table)
     }
 
@@ -1927,7 +1927,7 @@ mod compare_with_pageable {
         pages.len()
     }
 
-    /// Run the spike against the same HTML the Pageable side rendered.
+    /// Run the fragmenter against the same HTML the Pageable side rendered.
     /// Re-parses (deterministic) so we get a fresh `BaseDocument` and
     /// can mutate it without unsafe shenanigans. Threads the column-
     /// style side-table so `break-*` properties are honoured.
@@ -1936,7 +1936,7 @@ mod compare_with_pageable {
     /// reachable from production; its result is preserved in
     /// `docs/plans/2026-04-28-pagination-layout-spike.md` follow-up
     /// #2.)
-    fn spike_page_count_for(html: &str) -> u32 {
+    fn fragmenter_page_count_for(html: &str) -> u32 {
         use crate::blitz_adapter;
         let engine = Engine::builder().page_size(PageSize::A4).build();
         let cfg = engine.config();
@@ -1955,13 +1955,13 @@ mod compare_with_pageable {
             pt_to_px(cfg.content_height()),
             &column_styles,
         );
-        spike_page_count(&table)
+        fragmenter_page_count(&table)
     }
 
     /// Each fixture: (label, html, agreement expected?).
     ///
     /// `agreement_expected = false` means we already know Pageable and
-    /// the block-only spike will diverge for this case (e.g. inline text
+    /// the block-only fragmenter will diverge for this case (e.g. inline text
     /// that wraps across pages). The harness still runs both sides and
     /// records the disagreement so the next iteration knows what to fix.
     fn fixtures() -> Vec<(&'static str, &'static str, bool)> {
@@ -2008,10 +2008,10 @@ mod compare_with_pageable {
             ),
             // ── vh / percentage observation fixtures ──────────────────
             //
-            // These probe the cases the block-only spike is *expected* to
+            // These probe the cases the block-only fragmenter is *expected* to
             // disagree with Pageable on. Marking them
             // `expected_agreement = false` documents the divergence; once
-            // the spike grows mid-element splitting, flip these to `true`
+            // the fragmenter grows mid-element splitting, flip these to `true`
             // and use the test as a regression gate.
             (
                 "single 100vh div (taller than content area)",
@@ -2022,7 +2022,7 @@ mod compare_with_pageable {
                 // `BlockPageable::split` returns `Err(unsplit)` for a
                 // body whose only child is a single oversized empty
                 // box (no break point inside, refusing to emit an empty
-                // page first), and the spike's `cursor_y > 0` guard does
+                // page first), and the fragmenter's `cursor_y > 0` guard does
                 // the same on its side. Convergent fallback rather than
                 // shared correctness — flagged here to remember.
                 r#"<html><body>
@@ -2063,7 +2063,7 @@ mod compare_with_pageable {
                 // CSS 2.1 §10.5: percentage height resolves to `auto`
                 // when the containing block has no explicit height. Both
                 // sides should produce a single empty page (the divs
-                // collapse). The spike's measurement walk reads
+                // collapse). The fragmenter's measurement walk reads
                 // final_layout, so it sees the same zero-height boxes
                 // Pageable converts. Expected: both report 1 page.
                 r#"<html><body>
@@ -2075,7 +2075,7 @@ mod compare_with_pageable {
             ),
             (
                 "long paragraph wraps into multiple pages",
-                // fulgur-p55h: the spike now probes Parley's line
+                // fulgur-p55h: the fragmenter now probes Parley's line
                 // metrics (`Layout::lines()` → `LineMetrics`) and
                 // splits inline roots at line boundaries via
                 // `fragment_inline_root`. This fixture flipped from
@@ -2086,7 +2086,7 @@ mod compare_with_pageable {
                 // Lorem ipsum block wraps into ~70 lines at A4 content
                 // width → ~5250 px total, comfortably overflowing 2+
                 // pages. Pageable's `ParagraphPageable::split` (line
-                // boundaries) should split it across pages. The spike's
+                // boundaries) should split it across pages. The fragmenter's
                 // `fragment_pagination_root` sees one block child with
                 // a 5000+ px height and emits it whole → 1 page.
                 r#"<html><body><p style="font-size: 50px; line-height: 1.5">
@@ -2146,16 +2146,16 @@ mod compare_with_pageable {
             ),
             (
                 "break-inside: avoid keeps tall paragraph whole",
-                // Intentional divergence: the spike's
+                // Intentional divergence: the fragmenter's
                 // `fragment_pagination_root` checks `break-inside:
                 // avoid` *before* entering the inline-split branch and
                 // emits the paragraph as a single oversized block →
                 // 1 page. Pageable's `ParagraphPageable::split`
                 // (paragraph.rs:945) does NOT check `break_inside`, so
                 // it splits at line boundaries regardless → 2 pages.
-                // The spike behaviour is correct per CSS Fragmentation
+                // The fragmenter behaviour is correct per CSS Fragmentation
                 // §3.3; Pageable has a latent bug here. Tracking the
-                // Pageable fix is out of scope for this spike — file
+                // Pageable fix is out of scope for this fragmenter — file
                 // separately if it matters.
                 r#"<html><body><p style="font-size: 50px; line-height: 1.5; break-inside: avoid">
                     Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
@@ -2179,24 +2179,24 @@ mod compare_with_pageable {
 
         for (label, html, expected_agreement) in &fixtures {
             let pageable_pages = pageable_page_count(html) as u32;
-            let spike_pages = spike_page_count_for(html);
-            let agree = pageable_pages == spike_pages;
+            let fragmenter_pages = fragmenter_page_count_for(html);
+            let agree = pageable_pages == fragmenter_pages;
 
             eprintln!(
-                "[{:>1}] {label:<55} pageable={pageable_pages} spike={spike_pages}",
+                "[{:>1}] {label:<55} pageable={pageable_pages} fragmenter={fragmenter_pages}",
                 if agree { "✓" } else { "✗" },
             );
 
             if agree != *expected_agreement {
                 disagreements.push(format!(
-                    "{label}: pageable={pageable_pages} spike={spike_pages} expected_agreement={expected_agreement}",
+                    "{label}: pageable={pageable_pages} fragmenter={fragmenter_pages} expected_agreement={expected_agreement}",
                 ));
             }
         }
 
         assert!(
             disagreements.is_empty(),
-            "Pageable vs spike disagreement (or unexpected agreement) for:\n  - {}",
+            "Pageable vs fragmenter disagreement (or unexpected agreement) for:\n  - {}",
             disagreements.join("\n  - "),
         );
     }
