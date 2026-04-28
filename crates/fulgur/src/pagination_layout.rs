@@ -603,7 +603,7 @@ fn fragment_inline_root(
 /// `fragment_pagination_root` itself.
 pub fn collect_string_set_states(
     geometry: &PaginationGeometryTable,
-    string_set_by_node: &std::collections::HashMap<usize, Vec<(String, String)>>,
+    string_set_by_node: &BTreeMap<usize, Vec<(String, String)>>,
 ) -> Vec<BTreeMap<String, crate::paginate::StringSetPageState>> {
     let max_page = geometry
         .values()
@@ -948,23 +948,22 @@ mod tests {
     use std::ops::DerefMut;
     use std::sync::Arc;
 
-    fn parse(html: &str, viewport_w: f32, viewport_h: u32) -> blitz_html::HtmlDocument {
+    /// Parse helper for the spike's tests.
+    ///
+    /// We deliberately don't accept a viewport height: `blitz_adapter::parse`
+    /// uses a hardcoded viewport_h internally, and the spike's strip slicing
+    /// is driven by the `page_height_px` argument to `run_pass` rather than
+    /// by the viewport. The fixtures pass viewport_w only.
+    fn parse(html: &str, viewport_w: f32) -> blitz_html::HtmlDocument {
         let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
         let mut doc = blitz_adapter::parse(html, viewport_w, &fonts);
-        // Mimic the engine pipeline: parse() leaves viewport_h hardcoded,
-        // so we re-parse via parse_inner equivalents only when we need a
-        // specific page height. For the spike we read final_layout that
-        // resolve() produces, so the value passed to parse_inner is
-        // mostly irrelevant — our `page_height_px` arg is what controls
-        // strip slicing.
-        let _ = viewport_h;
         blitz_adapter::resolve(&mut doc);
         doc
     }
 
     #[test]
     fn empty_document_emits_no_fragments() {
-        let mut doc = parse("<html><body></body></html>", 600.0, 800);
+        let mut doc = parse("<html><body></body></html>", 600.0);
         let table = run_pass(&mut doc, 800.0);
         assert!(
             table.is_empty(),
@@ -979,7 +978,7 @@ mod tests {
         // synthesized body contains no children, so the pass emits no
         // fragments — which is the behaviour Pageable produces for the
         // same input.
-        let mut doc = parse("<html></html>", 600.0, 800);
+        let mut doc = parse("<html></html>", 600.0);
         let tree = PaginationLayoutTree::new(&mut doc, 800.0);
         assert!(tree.body_id.is_some(), "html5ever should synthesize a body");
         let table = run_pass(&mut doc, 800.0);
@@ -997,7 +996,7 @@ mod tests {
               <div style="height: 200px"></div>
             </body></html>
         "#;
-        let mut doc = parse(html, 600.0, 1000);
+        let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         assert_eq!(table.len(), 3, "expected 3 entries, got {}", table.len());
         for (id, geom) in &table {
@@ -1021,7 +1020,7 @@ mod tests {
               <div style="height: 400px"></div>
             </body></html>
         "#;
-        let mut doc = parse(html, 600.0, 1000);
+        let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         assert_eq!(table.len(), 2);
         let pages: Vec<u32> = table.values().map(|g| g.fragments[0].page_index).collect();
@@ -1039,7 +1038,6 @@ mod tests {
     #[test]
     fn string_set_state_carries_across_pages() {
         use crate::paginate::StringSetPageState;
-        use std::collections::HashMap;
 
         // Three nodes: A on page 0, B on page 0, C on page 1.
         // A sets header="a", B sets header="b" (so first/last on page 0
@@ -1067,7 +1065,7 @@ mod tests {
             height: 50.0,
         });
 
-        let mut markers: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+        let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
         markers.insert(10, vec![("header".into(), "a".into())]);
         markers.insert(20, vec![("header".into(), "b".into())]);
 
@@ -1101,7 +1099,6 @@ mod tests {
         // A node spans two pages (inline-aware split). Markers fire
         // only on the first appearance.
         use crate::paginate::StringSetPageState;
-        use std::collections::HashMap;
 
         let mut geom = PaginationGeometryTable::new();
         geom.entry(42).or_default().fragments.push(Fragment {
@@ -1119,7 +1116,7 @@ mod tests {
             height: 200.0,
         });
 
-        let mut markers: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+        let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
         markers.insert(42, vec![("title".into(), "intro".into())]);
 
         let states = super::collect_string_set_states(&geom, &markers);
@@ -1146,7 +1143,7 @@ mod tests {
     fn string_set_states_empty_geometry_returns_one_empty_page() {
         // Mirrors Pageable's "always at least one page" convention.
         let geom = PaginationGeometryTable::new();
-        let markers = std::collections::HashMap::new();
+        let markers = BTreeMap::new();
         let states = super::collect_string_set_states(&geom, &markers);
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
@@ -1164,7 +1161,7 @@ mod tests {
                           width: 100px; height: 50px"></div>
             </body></html>
         "#;
-        let mut doc = parse(html, 600.0, 1000);
+        let mut doc = parse(html, 600.0);
 
         let mut geom = super::run_pass(doc.deref_mut(), 800.0);
         let pages_before = super::implied_page_count(&geom);
@@ -1214,7 +1211,7 @@ mod tests {
                           width: 50px; height: 30px"></div>
             </body></html>
         "#;
-        let mut doc = parse(html, 600.0, 1000);
+        let mut doc = parse(html, 600.0);
         let mut geom = PaginationGeometryTable::new();
         super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 0);
         assert_eq!(geom.len(), 1);
@@ -1252,7 +1249,7 @@ mod tests {
               <div style="height: 1000px"></div>
             </body></html>
         "#;
-        let mut doc = parse(html, 600.0, 1500);
+        let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         assert_eq!(table.len(), 1);
         let geom = table.values().next().unwrap();
@@ -1285,16 +1282,11 @@ mod compare_with_pageable {
 
     /// Compute the spike's page count from a geometry table.
     ///
-    /// Convention: empty table → 1 page (matches Pageable's "always at
-    /// least one page" guarantee for empty bodies).
+    /// Thin wrapper over [`super::implied_page_count`] so the comparison
+    /// harness and the production-facing helper can never drift apart on
+    /// the "empty → 1" convention.
     fn spike_page_count(table: &super::PaginationGeometryTable) -> u32 {
-        table
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .map(|f| f.page_index)
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(1)
+        super::implied_page_count(table)
     }
 
     /// Run the engine's testing helper to build a `Pageable` for `html`,
