@@ -468,6 +468,32 @@ impl<'a> PaginationLayoutTree<'a> {
                 // Whitespace-only text nodes are already filtered
                 // above; running and abs/fixed elements are filtered
                 // before this branch.
+                //
+                // fulgur-p3uf (Phase 3.1.5a): honour `break-before`
+                // / `break-after` on zero-height element nodes too.
+                // Bare `<img>` with no explicit dimensions and
+                // pseudo-only `<div>` (rendering only `::before`
+                // content) both arrive here with `child_h == 0` after
+                // Blitz's intrinsic-size collapse, and Pageable
+                // honours their `break-before: page` directive
+                // (`tests/pseudo_only_break_before.rs::bare_img_honours_break_before_page`
+                // and `pseudo_only_inline_root_honours_break_before_page`).
+                // The pre-3.1.5a fragmenter `continue`'d before
+                // reading break properties at all, so the gate
+                // `forced_break_skipped` masked the divergence.
+                let zero_break_props = self
+                    .column_styles
+                    .and_then(|t| t.get(&child_id))
+                    .copied()
+                    .unwrap_or_default();
+                if matches!(
+                    zero_break_props.break_before,
+                    Some(crate::pageable::BreakBefore::Page)
+                ) && cursor_y > 0.0
+                {
+                    page_index += 1;
+                    cursor_y = 0.0;
+                }
                 if child.element_data().is_some() {
                     self.geometry
                         .entry(child_id)
@@ -481,6 +507,13 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: 0.0,
                         });
                     emitted += 1;
+                }
+                if matches!(
+                    zero_break_props.break_after,
+                    Some(crate::pageable::BreakAfter::Page)
+                ) {
+                    page_index += 1;
+                    cursor_y = 0.0;
                 }
                 continue;
             }
@@ -2451,6 +2484,37 @@ mod compare_with_pageable {
                 </style></head><body>
                     <div style="height: 100px"></div>
                     <div class="b" style="height: 100px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                // fulgur-p3uf (Phase 3.1.5a): zero-height body-direct
+                // child with `break-before: page` must still force a
+                // page boundary. Pre-fix the fragmenter `continue`'d
+                // before reading break props for zero-height children,
+                // skipping the directive — same root cause as
+                // `tests/pseudo_only_break_before.rs::bare_img_honours_break_before_page`
+                // / `pseudo_only_inline_root_honours_break_before_page`
+                // but without an AssetBundle, so it fits in this
+                // doc-only fixture set.
+                "zero-height body-direct child honours break-before",
+                r#"<html><head><style>
+                    .first { height: 40px; }
+                    .zero { break-before: page; }
+                </style></head><body>
+                    <div class="first"></div>
+                    <div class="zero"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "zero-height body-direct child honours break-after",
+                r#"<html><head><style>
+                    .first { break-after: page; }
+                    .second { height: 40px; }
+                </style></head><body>
+                    <div class="first"></div>
+                    <div class="second"></div>
                 </body></html>"#,
                 true,
             ),
