@@ -8,24 +8,21 @@
 //!
 //! # Status: spike (no production wiring)
 //!
-//! The current implementation is **measurement-only**: it walks the body's
-//! direct block children using their existing `final_layout` (set by
-//! Blitz's first-pass `resolve()`) and records what fragments would be
-//! produced if the page were sliced at `page_height_px`. It does not
-//! re-run Taffy and it does not touch the existing `Pageable` pipeline.
-//! The geometry table it returns is captured purely for comparison
-//! against `paginate::paginate(...)` so we can measure agreement on
-//! simple block documents and surface the cases where the two diverge.
+//! `run_pass` invokes `taffy::compute_root_layout(&mut wrapper, body_id, ...)`
+//! and the wrapper's `compute_child_layout` intercepts the body to
+//! dispatch into [`compute_pagination_layout`]. That function walks the
+//! body's direct block children (using `final_layout` already populated
+//! by Blitz's first-pass `resolve()`) and records what fragments would
+//! be produced if the page were sliced at `page_height_px`.
 //!
-//! # Why "Taffy-hooked" matters even though we don't dispatch yet
-//!
-//! The wrapper still implements `LayoutPartialTree` / `RoundTree` /
-//! `CacheTree` / `TraversePartialTree` because the next iteration of the
-//! spike — running `taffy::compute_root_layout(self, body_id, ...)` with
-//! a true page-strip-sized `available_space` — needs that scaffolding in
-//! place. Establishing the trait shape now lets follow-up commits swap
-//! the measurement-only walk for an actual layout intercept without
-//! touching the public surface.
+//! Concretely it is still a **measurement walk wrapped in a real Taffy
+//! callback** — it does not yet re-issue per-strip layout requests with
+//! constrained `available_space`. The point of routing through
+//! `compute_root_layout` now is structural: it forces every trait method
+//! on the wrapper to be exercised at runtime so the next iteration —
+//! constraining `available_space.height = page_strip` and feeding each
+//! child a remaining-strip-height — can swap the body of
+//! `compute_pagination_layout` without changing the public surface.
 //!
 //! # Scope (block-only)
 //!
@@ -112,11 +109,22 @@ pub struct PaginationLayoutTree<'a> {
 /// Intended to be called **after** `blitz_adapter::resolve()` (and after
 /// `multicol_layout::run_pass` when multicol is in play) so that
 /// `final_layout` reflects the post-layout positions the spike walks.
+///
+/// Drives the wrapper through `taffy::compute_root_layout(&mut tree,
+/// body_id, ...)` so [`PaginationLayoutTree::compute_child_layout`]
+/// fires for body and dispatches into [`compute_pagination_layout`].
+/// The body's existing layout is restored after the call so we do not
+/// disturb downstream consumers of `final_layout` (`convert::dom_to_pageable`
+/// reads body's location to position children — `compute_root_layout`
+/// would otherwise rewrite it to (0, 0)).
+///
 /// Callers should treat the returned table as observational only — it is
 /// not wired into the existing `Pageable` / `paginate` path.
 pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeometryTable {
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
-    tree.fragment_pagination_root();
+    if tree.body_id.is_some() && page_height_px > 0.0 {
+        tree.drive_taffy_root_layout();
+    }
     tree.take_geometry()
 }
 
@@ -140,13 +148,58 @@ impl<'a> PaginationLayoutTree<'a> {
         std::mem::take(&mut self.geometry)
     }
 
+    /// Drive `taffy::compute_root_layout(&mut self, body_id, ...)` so the
+    /// wrapper's `compute_child_layout` fires on body and dispatches into
+    /// [`compute_pagination_layout`].
+    ///
+    /// The available space we hand Taffy is the body's *existing* layout
+    /// width and an unbounded height (`AvailableSpace::MaxContent`). We
+    /// pass MaxContent rather than `page_height_px` because the current
+    /// fragmenter still relies on the children's natural `final_layout`
+    /// heights — restricting `available_space.height` here would let
+    /// Taffy clip or shrink children, breaking the measurement walk.
+    /// Constraining the strip is the next iteration's job, alongside a
+    /// child-by-child `compute_child_layout` re-invocation pattern.
+    ///
+    /// `compute_root_layout` resets the layout's `location` to `(0, 0)`
+    /// because it treats the node as a Taffy root. Body is *not* a real
+    /// root in the document tree (html is its parent), so we save and
+    /// restore body's location across the call — same approach as
+    /// [`crate::multicol_layout::FulgurLayoutTree::layout_multicol_subtrees`].
+    fn drive_taffy_root_layout(&mut self) {
+        let Some(body_id) = self.body_id else {
+            return;
+        };
+        let nid = NodeId::from(body_id);
+        let prior_unrounded = self.doc.get_unrounded_layout(nid);
+        let prior_final = self
+            .doc
+            .get_node(body_id)
+            .map(|n| n.final_layout)
+            .unwrap_or_default();
+
+        let avail = Size {
+            width: AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
+            height: AvailableSpace::MaxContent,
+        };
+        taffy::compute_root_layout(self, nid, avail);
+
+        // Restore the body's location so downstream readers (convert,
+        // paginate) see the same coordinates Blitz's first pass set.
+        if let Some(node) = self.doc.get_node_mut(body_id) {
+            node.unrounded_layout.location = prior_unrounded.location;
+            node.final_layout.location = prior_final.location;
+        }
+    }
+
     /// Walk the body's direct block children and record fragments.
     ///
-    /// Returns the number of fragments emitted. `0` means either the
-    /// document has no body or the body has no children — both are
-    /// expected for empty documents and the convert-side comparison
-    /// should treat them as equivalent to `Pageable` producing a single
-    /// empty page.
+    /// Called from `compute_pagination_layout` after Taffy dispatches
+    /// body's layout through the wrapper. Returns the number of
+    /// fragments emitted. `0` means either the document has no body or
+    /// the body has no children — both are expected for empty documents
+    /// and the convert-side comparison should treat them as equivalent
+    /// to `Pageable` producing a single empty page.
     ///
     /// Algorithm (block-only, measurement-only):
     ///
@@ -350,10 +403,10 @@ impl LayoutPartialTree for PaginationLayoutTree<'_> {
         node_id: NodeId,
         inputs: taffy::tree::LayoutInput,
     ) -> taffy::LayoutOutput {
-        // Spike: every node delegates to BaseDocument. The next iteration
-        // will branch on `Some(usize::from(node_id)) == self.body_id`
-        // and route through a `compute_pagination_layout(...)` analog of
-        // `multicol_layout::compute_multicol_layout`.
+        if Some(usize::from(node_id)) == self.body_id {
+            return compute_pagination_layout(self, node_id, inputs);
+        }
+        // Everything else delegates to BaseDocument's normal dispatch.
         self.doc.compute_child_layout(node_id, inputs)
     }
 }
@@ -366,6 +419,37 @@ impl RoundTree for PaginationLayoutTree<'_> {
     fn set_final_layout(&mut self, node_id: NodeId, layout: &taffy::Layout) {
         self.doc.set_final_layout(node_id, layout);
     }
+}
+
+/// Custom layout dispatch for the body (the spike's fragmentation root).
+///
+/// Mirrors the structure of [`crate::multicol_layout::compute_multicol_layout`]:
+/// the wrapper's `compute_child_layout` fires for body, delegates the
+/// real layout to `BaseDocument` (so children's `final_layout` is
+/// populated correctly), then post-walks body's direct children and
+/// records fragments in the geometry side-table.
+///
+/// In the next iteration this is where per-strip available_space
+/// constraint and child-by-child re-layout will live. For the current
+/// spike it's a thin shim that proves the dispatch path works.
+fn compute_pagination_layout(
+    tree: &mut PaginationLayoutTree<'_>,
+    body_id: NodeId,
+    inputs: taffy::tree::LayoutInput,
+) -> taffy::LayoutOutput {
+    // Delegate the actual layout work to BaseDocument so children get
+    // their normal natural sizes. The output is body's full natural
+    // height — that height is what `convert::dom_to_pageable` already
+    // expects to read from `final_layout`.
+    let output = tree.doc.compute_child_layout(body_id, inputs);
+
+    // Now post-walk to populate the geometry side-table. We can't reuse
+    // `fragment_pagination_root` directly because it returns a fragment
+    // count; the dispatch path doesn't need that, so we inline the same
+    // walk and discard the count.
+    let _emitted = tree.fragment_pagination_root();
+
+    output
 }
 
 #[cfg(test)]
