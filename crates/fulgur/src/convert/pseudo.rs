@@ -255,6 +255,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             x: parent_cb.origin_x,
             y: parent_cb.origin_y,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
     out.extend(children);
@@ -264,6 +265,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             x: parent_cb.origin_x,
             y: parent_cb.origin_y + parent_cb.height,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
     out

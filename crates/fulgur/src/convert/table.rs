@@ -159,6 +159,7 @@ fn collect_table_cells(
             x: cx,
             y: cy,
             out_of_flow: false,
+            is_fixed: false,
         };
 
         if is_header {

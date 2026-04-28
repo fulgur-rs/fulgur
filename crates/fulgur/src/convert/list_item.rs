@@ -206,6 +206,7 @@ pub(super) fn try_convert(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
                     doc,
@@ -273,6 +274,7 @@ pub(super) fn try_convert(
                             x: 0.0,
                             y: 0.0,
                             out_of_flow: false,
+                            is_fixed: false,
                         },
                     );
                 }
@@ -389,6 +391,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
@@ -443,6 +446,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,

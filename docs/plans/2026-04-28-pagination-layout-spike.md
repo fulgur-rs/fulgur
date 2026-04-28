@@ -249,21 +249,47 @@ docstring) can plug a `Vec<Fragment>` per node into
    `crate::paginate`"). The spike's `PaginationGeometryTable` is the
    natural side-table for the per-page fragments.
 
-   **Filed as fulgur-jkl5. Resolved (2026-04-28, spike-side only)**:
-   added `pagination_layout::append_position_fixed_fragments(geometry,
+   **Filed as fulgur-jkl5. Resolved (2026-04-28, in two stages)**:
+
+   *Stage 1 — spike-side scaffolding*: added
+   `pagination_layout::append_position_fixed_fragments(geometry,
    doc, total_pages)` that walks the DOM (including `::before` /
    `::after` pseudo slots) for `position: fixed` nodes and emits
    one Fragment per page into the existing geometry table. Helper
-   `implied_page_count(geometry)` derives `max_page_index + 1` from
-   any `run_pass*` output. Four unit tests cover repetition across a
-   2-page block layout, the 0-pages-normalises-to-1 edge case, and
-   `implied_page_count` invariants. Production wiring (engine call
-   site + `convert/positioned.rs` consuming per-page fragments) is
-   intentionally deferred — `relayout_position_fixed` lives on
-   `feat/fixedpos-viewport-cb` (fulgur-tbxs branch) and has not yet
-   landed on `main`. Once both branches merge, a follow-up issue
-   wires the spike output into convert so a fixed element appears
-   on every page.
+   `implied_page_count(geometry)` derives `max_page_index + 1`. Four
+   unit tests cover 2-page repetition, 0-pages normalisation, and
+   `implied_page_count` invariants.
+
+   *Stage 2 — production wiring (after fulgur-tbxs merged into
+   `main` as PR #262)*: investigation revealed the
+   `pagination_layout` side-table was **not** required for the
+   user-visible fix. The existing `out_of_flow: true` mechanism in
+   `pageable.rs` already replicated fixed children to both halves of
+   `BlockPageable::split`, but the second-half y-shift (correct for
+   `position: absolute` anchored to the abs-CB which slides with
+   body) pushed `position: fixed` to negative y on every page after
+   the first (≈ -760pt for A4) so they were silently clipped
+   off-screen. A pdftotext smoke confirmed page 1 had the fixed
+   element, page 2+ did not.
+
+   Surgical fix: added `PositionedChild::is_fixed: bool` flag and
+   `PositionedChild::fixed(child, x, y)` constructor.
+   `clone_pc_with_offset` skips the y-shift entirely when
+   `is_fixed`, leaving the element at its viewport-relative
+   coordinates on every page. `convert::positioned` (both pseudo
+   and non-pseudo abs paths) sets
+   `is_fixed: is_position_fixed(node)`. All other call sites
+   default `is_fixed: false` so `position: absolute` keeps its
+   existing y-shift — strict improvement, no regression. 877 lib
+   tests pass; new
+   `tests/render_smoke.rs::position_fixed_repeats_on_every_page`
+   confirms end-to-end via pdftotext that "FXFXFX" appears on both
+   pages of a 2-page document.
+
+   The `pagination_layout::append_position_fixed_fragments`
+   side-table remains in place as scaffolding — not the path the
+   production fix took, but available for a future architecture
+   where convert consumes geometry directly.
 
 5. **fragmentation upstream proposal** — write an issue
    on DioxusLabs/blitz suggesting Taffy/Parley primitives the spike

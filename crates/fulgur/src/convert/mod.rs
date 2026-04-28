@@ -379,6 +379,7 @@ fn emit_orphan_string_set_markers(
                 x,
                 y,
                 out_of_flow: false,
+                is_fixed: false,
             });
         }
     }
@@ -401,6 +402,7 @@ fn emit_counter_op_markers(
             x,
             y,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
 }
@@ -436,6 +438,7 @@ fn emit_orphan_bookmark_marker(
             x,
             y,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
 }
