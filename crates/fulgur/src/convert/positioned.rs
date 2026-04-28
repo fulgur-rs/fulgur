@@ -1,5 +1,22 @@
 use super::*;
 
+/// Whether `node` has at least one direct DOM child that is a non-pseudo
+/// `position: absolute|fixed` element. Used by `collect_positioned_children`
+/// to refuse flattening for zero-size containers whose abs/fixed children
+/// would otherwise be silently dropped by the recursive flatten path
+/// (it skips abs children and the container itself never reaches the
+/// `build_absolute_non_pseudo_children` hoist point). Transitivity is handled
+/// naturally: deeper containers re-evaluate this guard on their own
+/// recursive call.
+fn node_has_absolute_non_pseudo_child(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    let lc_guard = node.layout_children.borrow();
+    let children = lc_guard.as_deref().unwrap_or(&node.children);
+    children.iter().any(|&id| {
+        doc.get_node(id)
+            .is_some_and(|n| is_absolutely_positioned(n) && !is_pseudo_node(doc, n))
+    })
+}
+
 /// Collect positioned children, flattening zero-size pass-through containers
 /// (like thead, tbody, tr) so their children appear directly in the parent.
 ///
@@ -30,6 +47,17 @@ pub(super) fn collect_positioned_children(
         if is_non_visual_element(child_node) {
             continue;
         }
+        // CSS 2.1 §10.6.4: absolutely-positioned descendants are
+        // out-of-flow. They are re-emitted by
+        // `build_absolute_non_pseudo_children` (called at the same hoist
+        // points as `build_absolute_pseudo_children`) with
+        // `out_of_flow: true` so they don't consume in-flow page space.
+        // Skipping here prevents double emission. Non-pseudo only —
+        // abs pseudos are stored in `node.before`/`node.after`, not in
+        // the layout child list, so they don't reach this loop.
+        if is_absolutely_positioned(child_node) {
+            continue;
+        }
 
         let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
 
@@ -56,6 +84,7 @@ pub(super) fn collect_positioned_children(
             && !pseudo::node_has_inline_pseudo_image(doc, child_node)
             && !ctx.column_styles.contains_key(&child_id)
             && !pseudo::node_has_absolute_pseudo(doc, child_node)
+            && !node_has_absolute_non_pseudo_child(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -79,6 +108,7 @@ pub(super) fn collect_positioned_children(
             && cw == 0.0
             && !child_effective_is_empty
             && !pseudo::node_has_absolute_pseudo(doc, child_node)
+            && !node_has_absolute_non_pseudo_child(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -123,6 +153,7 @@ pub(super) fn collect_positioned_children(
             child: child_pageable,
             x: cx,
             y: cy,
+            out_of_flow: false,
         });
     }
 
@@ -134,6 +165,7 @@ pub(super) fn collect_positioned_children(
             child: Box::new(marker),
             x: 0.0,
             y: 0.0,
+            out_of_flow: false,
         });
     }
 
@@ -305,11 +337,17 @@ fn resolve_inset_px(
 /// Runs ALONGSIDE `wrap_with_block_pseudo_images` at the call sites that
 /// construct a `BlockPageable` wrapping a node with pseudos; see
 /// fulgur-vlr3 for the full investigation.
+/// Caller selects which pseudo slots to consider via `slots` (typically
+/// `[node.before]`, `[node.after]`, or both). [`build_absolute_children`]
+/// uses single-slot calls to interleave `::before` / direct DOM abs /
+/// `::after` in generated (source) order so `::after` paints AFTER
+/// direct abs siblings.
 pub(super) fn build_absolute_pseudo_children(
     doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
+    slots: &[Option<usize>],
 ) -> Vec<PositionedChild> {
     let mut out = Vec::new();
     let parent_is_static = is_position_static(node);
@@ -318,7 +356,7 @@ pub(super) fn build_absolute_pseudo_children(
     // ancestor chain repeatedly when both `::before` and `::after` hit.
     let mut cb_absolute: Option<Option<AbsCb>> = None;
     let mut cb_fixed: Option<Option<AbsCb>> = None;
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+    for pseudo_id in slots.iter().copied().flatten() {
         let Some(pseudo) = doc.get_node(pseudo_id) else {
             continue;
         };
@@ -423,12 +461,162 @@ pub(super) fn build_absolute_pseudo_children(
             (x, y)
         };
         let child = build_absolute_pseudo_child(doc, node, pseudo, pseudo_id, cb, ctx, depth);
+        // CSS 2.1 §10.6.4: abs pseudos are out-of-flow — they don't add to
+        // the parent's flow height and replicate across pagination splits
+        // anchored to their CB.
         out.push(PositionedChild {
             child,
             x: x_pt,
             y: y_pt,
+            out_of_flow: true,
         });
     }
+    out
+}
+
+/// Build `PositionedChild` entries for any direct DOM child of `node` whose
+/// computed `position` is `absolute` or `fixed` and which is not a pseudo
+/// (`::before` / `::after`) — pseudos go through
+/// `build_absolute_pseudo_children`. Returned entries carry
+/// `out_of_flow: true` so they don't contribute to the parent's flow height
+/// and replicate across pagination splits anchored to their CB
+/// (CSS 2.1 §10.6.4 / fulgur-aijf).
+///
+/// CB resolution and inset handling mirror the pseudo path verbatim — the
+/// only differences are:
+///   - we iterate `node.children` (DOM children) instead of pseudo slots;
+///   - the child's effective size comes from Taffy's `final_layout.size`
+///     directly (real elements with real layout, no `content:url()` zero-size
+///     fallback);
+///   - the child Pageable is built via `convert_node` unconditionally — no
+///     `build_pseudo_image` shortcut.
+///
+/// Scope (matches the pseudo path's scope): emits at the **direct parent**,
+/// not at the deepest CB ancestor. Sufficient for the body-direct abs case
+/// (page-background-002/003 reftests). Deeply-nested abs whose CB is several
+/// ancestors above the direct parent and which then needs to participate in
+/// the CB ancestor's pagination is a future enhancement.
+pub(super) fn build_absolute_non_pseudo_children(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Vec<PositionedChild> {
+    if depth >= MAX_DOM_DEPTH {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let parent_is_static = is_position_static(node);
+    let mut cb_absolute: Option<Option<AbsCb>> = None;
+    let mut cb_fixed: Option<Option<AbsCb>> = None;
+
+    let lc_guard = node.layout_children.borrow();
+    let effective_children = lc_guard.as_deref().unwrap_or(&node.children);
+
+    for &child_id in effective_children {
+        let Some(child_node) = doc.get_node(child_id) else {
+            continue;
+        };
+        if !is_absolutely_positioned(child_node) {
+            continue;
+        }
+        // Pseudos are handled by `build_absolute_pseudo_children`.
+        if is_pseudo_node(doc, child_node) {
+            continue;
+        }
+
+        let cb = if is_position_fixed(child_node) {
+            *cb_fixed.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, true))
+        } else if parent_is_static {
+            *cb_absolute.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, false))
+        } else {
+            let (padding_box_size, border_top_left) = cb_padding_box(node);
+            Some(AbsCb {
+                padding_box_size,
+                border_top_left,
+                parent_offset_in_cb_bp: (0.0, 0.0),
+            })
+        };
+
+        let (x_pt, y_pt) = if let Some(cb) = cb {
+            if let Some(styles) = child_node.primary_styles() {
+                let pos = styles.get_position();
+                let (cb_w, cb_h) = cb.padding_box_size;
+                // Real elements (not zero-size content:url pseudos), so use
+                // Taffy's final_layout.size directly for over-constrained
+                // inset resolution.
+                let cw = child_node.final_layout.size.width;
+                let ch = child_node.final_layout.size.height;
+                let left = resolve_inset_px(&pos.left, cb_w);
+                let right = resolve_inset_px(&pos.right, cb_w);
+                let top = resolve_inset_px(&pos.top, cb_h);
+                let bottom = resolve_inset_px(&pos.bottom, cb_h);
+                // CSS 2.1 §10.3.7 / §10.6.4 over-constrained resolution:
+                // start-side inset wins (LTR-only). Both `auto` falls back
+                // to 0 — same simplification as the pseudo path.
+                let x_in_pp = if let Some(l) = left {
+                    l
+                } else if let Some(r) = right {
+                    cb_w - cw - r
+                } else {
+                    0.0
+                };
+                let y_in_pp = if let Some(t) = top {
+                    t
+                } else if let Some(b) = bottom {
+                    cb_h - ch - b
+                } else {
+                    0.0
+                };
+                let (bl, bt) = cb.border_top_left;
+                let (ox, oy) = cb.parent_offset_in_cb_bp;
+                (px_to_pt(x_in_pp + bl - ox), px_to_pt(y_in_pp + bt - oy))
+            } else {
+                let (x, y, _, _) = layout_in_pt(&child_node.final_layout);
+                (x, y)
+            }
+        } else {
+            // Parent IS positioned (or CB couldn't be resolved) — Taffy's
+            // final_layout.location is already correct.
+            let (x, y, _, _) = layout_in_pt(&child_node.final_layout);
+            (x, y)
+        };
+
+        let child = convert_node(doc, child_id, ctx, depth + 1);
+        out.push(PositionedChild {
+            child,
+            x: x_pt,
+            y: y_pt,
+            out_of_flow: true,
+        });
+    }
+    out
+}
+
+/// Combined entry point: returns ALL absolutely-positioned children that
+/// hoist to `node` — both pseudos (`::before`/`::after`) and direct DOM
+/// children. Call sites that previously used `build_absolute_pseudo_children`
+/// should switch to this so non-pseudo abs descendants are picked up too.
+///
+/// Output order matches **generated/source order**: `::before` first, then
+/// direct DOM abs/fixed children in DOM order, then `::after`. This matches
+/// CSS paint order so a `::after` overlay correctly paints on top of the
+/// direct abs siblings instead of beneath them.
+pub(super) fn build_absolute_children(
+    doc: &blitz_dom::BaseDocument,
+    node: &Node,
+    ctx: &mut ConvertContext<'_>,
+    depth: usize,
+) -> Vec<PositionedChild> {
+    let mut out = build_absolute_pseudo_children(doc, node, ctx, depth, &[node.before]);
+    out.extend(build_absolute_non_pseudo_children(doc, node, ctx, depth));
+    out.extend(build_absolute_pseudo_children(
+        doc,
+        node,
+        ctx,
+        depth,
+        &[node.after],
+    ));
     out
 }
 

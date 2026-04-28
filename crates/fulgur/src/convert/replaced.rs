@@ -71,6 +71,7 @@ where
             child: inner,
             x: cx,
             y: cy,
+            out_of_flow: false,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_pagination(pagination)
@@ -91,6 +92,7 @@ where
             child: inner,
             x: 0.0,
             y: 0.0,
+            out_of_flow: false,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_pagination(pagination)
