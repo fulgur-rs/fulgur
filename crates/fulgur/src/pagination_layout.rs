@@ -106,6 +106,15 @@ pub struct PaginationLayoutTree<'a> {
     /// [`run_pass`] keeps `MaxContent` so the post-walk reads natural
     /// child heights.
     pub(crate) strip_mode: StripMode,
+    /// fulgur-k0g0: `break-before` / `break-after` / `break-inside`
+    /// per node, harvested by
+    /// [`crate::blitz_adapter::extract_column_style_table`]. The table
+    /// is shared with `multicol_layout` (Pageable's
+    /// `extract_pagination_from_column_css` reads the same fields), so
+    /// the pagination spike does not maintain its own break-style
+    /// extraction. `None` means "no break properties set anywhere",
+    /// which the fragmenter treats as all-`Auto`.
+    pub(crate) column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
 }
 
 /// `available_space.height` mode passed to `taffy::compute_root_layout`
@@ -144,7 +153,7 @@ pub enum StripMode {
 /// Callers should treat the returned table as observational only — it is
 /// not wired into the existing `Pageable` / `paginate` path.
 pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeometryTable {
-    run_pass_with_mode(doc, page_height_px, StripMode::MaxContent)
+    run_pass_with_mode(doc, page_height_px, StripMode::MaxContent, None)
 }
 
 /// fulgur-ik6o variant: drive `compute_root_layout` with
@@ -157,16 +166,37 @@ pub fn run_pass_constrained(
     doc: &mut BaseDocument,
     page_height_px: f32,
 ) -> PaginationGeometryTable {
-    run_pass_with_mode(doc, page_height_px, StripMode::Definite)
+    run_pass_with_mode(doc, page_height_px, StripMode::Definite, None)
 }
 
-fn run_pass_with_mode(
-    doc: &mut BaseDocument,
+/// fulgur-k0g0 variant: thread the document's `break-before` /
+/// `break-after` / `break-inside` side-table (harvested by
+/// [`crate::blitz_adapter::extract_column_style_table`]) into the
+/// fragmenter. `break-before: page` and `break-after: page` force
+/// page boundaries; `break-inside: avoid` defers a child that does not
+/// fit the remaining strip rather than splitting it.
+pub fn run_pass_with_break_styles<'a>(
+    doc: &'a mut BaseDocument,
+    page_height_px: f32,
+    column_styles: &'a crate::column_css::ColumnStyleTable,
+) -> PaginationGeometryTable {
+    run_pass_with_mode(
+        doc,
+        page_height_px,
+        StripMode::MaxContent,
+        Some(column_styles),
+    )
+}
+
+fn run_pass_with_mode<'a>(
+    doc: &'a mut BaseDocument,
     page_height_px: f32,
     strip_mode: StripMode,
+    column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
 ) -> PaginationGeometryTable {
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
     tree.strip_mode = strip_mode;
+    tree.column_styles = column_styles;
     if tree.body_id.is_some() && page_height_px > 0.0 {
         tree.drive_taffy_root_layout();
     }
@@ -182,6 +212,7 @@ impl<'a> PaginationLayoutTree<'a> {
             geometry: BTreeMap::new(),
             body_id,
             strip_mode: StripMode::MaxContent,
+            column_styles: None,
         }
     }
 
@@ -319,11 +350,46 @@ impl<'a> PaginationLayoutTree<'a> {
                 continue;
             }
 
+            // fulgur-k0g0: read break-before / break-after / break-inside
+            // for this child from the column-style side-table (shared with
+            // multicol). Default `Auto` for nodes the table does not cover.
+            let break_props = self
+                .column_styles
+                .and_then(|t| t.get(&child_id))
+                .copied()
+                .unwrap_or_default();
+
+            // `break-before: page` forces a page boundary before the
+            // child whenever there is in-flow content already placed on
+            // the current page. A leading break-before on a fresh page
+            // is a no-op (CSS 3 Fragmentation §3 collapses it).
+            if matches!(
+                break_props.break_before,
+                Some(crate::pageable::BreakBefore::Page)
+            ) && cursor_y > 0.0
+            {
+                page_index += 1;
+                cursor_y = 0.0;
+            }
+
+            let avoid_inside = matches!(
+                break_props.break_inside,
+                Some(crate::pageable::BreakInside::Avoid)
+            );
+
             // fulgur-p55h: if the child carries a Parley inline layout,
             // probe its line metrics and split at line boundaries —
             // mirrors `paragraph::ParagraphPageable::split` (line 945)
             // but inside the Taffy hook rather than post-conversion.
-            let line_metrics = collect_inline_line_metrics(child);
+            //
+            // fulgur-k0g0: when `break-inside: avoid` is set, fall
+            // through to the block path below so the paragraph emits
+            // whole instead of splitting between lines.
+            let line_metrics = if avoid_inside {
+                Vec::new()
+            } else {
+                collect_inline_line_metrics(child)
+            };
             if line_metrics.len() > 1 {
                 let para_x = layout.location.x;
                 let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
@@ -339,14 +405,23 @@ impl<'a> PaginationLayoutTree<'a> {
                 page_index = new_page_index;
                 cursor_y = new_cursor_y;
                 emitted += frag_count;
+                if matches!(
+                    break_props.break_after,
+                    Some(crate::pageable::BreakAfter::Page)
+                ) {
+                    page_index += 1;
+                    cursor_y = 0.0;
+                }
                 continue;
             }
 
             // Block fallback: child overflows the current page strip →
             // advance to the next page first. A child taller than a
-            // full page is still emitted whole on its starting page;
-            // true mid-element block split needs break-inside support
-            // tracked separately (fulgur-k0g0).
+            // full page is still emitted whole on its starting page.
+            // (`break-inside: avoid` already collapses to this path
+            // via `avoid_inside` above — it just suppresses the inline
+            // split branch; the remaining-strip overflow handling is
+            // identical.)
             if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
                 page_index += 1;
                 cursor_y = 0.0;
@@ -367,6 +442,20 @@ impl<'a> PaginationLayoutTree<'a> {
 
             cursor_y += child_h;
             emitted += 1;
+
+            // `break-after: page` forces a page boundary after the
+            // child. A trailing break on the last in-flow child does
+            // emit an empty trailing page in CSS, but the spike's
+            // observable signal (page_count) treats this as "advance
+            // cursor"; the next iteration's emit-or-skip handles
+            // whether the page is materialised.
+            if matches!(
+                break_props.break_after,
+                Some(crate::pageable::BreakAfter::Page)
+            ) {
+                page_index += 1;
+                cursor_y = 0.0;
+            }
         }
 
         emitted
@@ -831,10 +920,18 @@ mod compare_with_pageable {
         blitz_adapter::resolve(&mut doc);
         let column_styles = blitz_adapter::extract_column_style_table(&doc);
         let _multicol = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        // fulgur-k0g0: thread the column-style side-table so the
+        // fragmenter sees break-before / break-after / break-inside
+        // for fixtures that set them. The constrained-mode probe
+        // (fulgur-ik6o) does not yet honour break rules — that's
+        // intentional, the probe exists to compare available_space
+        // modes only.
         let table = match mode {
-            super::StripMode::MaxContent => {
-                super::run_pass(doc.deref_mut(), pt_to_px(cfg.content_height()))
-            }
+            super::StripMode::MaxContent => super::run_pass_with_break_styles(
+                doc.deref_mut(),
+                pt_to_px(cfg.content_height()),
+                &column_styles,
+            ),
             super::StripMode::Definite => {
                 super::run_pass_constrained(doc.deref_mut(), pt_to_px(cfg.content_height()))
             }
@@ -998,6 +1095,60 @@ mod compare_with_pageable {
                     <div style="height: 1100px"></div>
                 </body></html>"#,
                 true,
+            ),
+            // ── fulgur-k0g0: break-before / break-after / break-inside ─
+            (
+                "break-before: page forces page boundary",
+                // Two 100px blocks, second has break-before: page. Spike:
+                // first block on page 0, second forced onto page 1 even
+                // though both could fit one page. Pageable does the same
+                // via paginate.rs split-on-break-before. Expected: 2.
+                r#"<html><head><style>
+                    .b { break-before: page; }
+                </style></head><body>
+                    <div style="height: 100px"></div>
+                    <div class="b" style="height: 100px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "break-after: page forces page boundary",
+                // First block has break-after: page → second pushed to
+                // page 1. Same observable effect as break-before on the
+                // second block; this fixture exercises the
+                // post-emission branch in fragment_pagination_root.
+                r#"<html><head><style>
+                    .a { break-after: page; }
+                </style></head><body>
+                    <div class="a" style="height: 100px"></div>
+                    <div style="height: 100px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "break-inside: avoid keeps tall paragraph whole",
+                // Intentional divergence: the spike's
+                // `fragment_pagination_root` checks `break-inside:
+                // avoid` *before* entering the inline-split branch and
+                // emits the paragraph as a single oversized block →
+                // 1 page. Pageable's `ParagraphPageable::split`
+                // (paragraph.rs:945) does NOT check `break_inside`, so
+                // it splits at line boundaries regardless → 2 pages.
+                // The spike behaviour is correct per CSS Fragmentation
+                // §3.3; Pageable has a latent bug here. Tracking the
+                // Pageable fix is out of scope for this spike — file
+                // separately if it matters.
+                r#"<html><body><p style="font-size: 50px; line-height: 1.5; break-inside: avoid">
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
+                    do eiusmod tempor incididunt ut labore et dolore magna
+                    aliqua. Ut enim ad minim veniam, quis nostrud exercitation
+                    ullamco laboris nisi ut aliquip ex ea commodo consequat.
+                    Duis aute irure dolor in reprehenderit in voluptate velit
+                    esse cillum dolore eu fugiat nulla pariatur. Excepteur sint
+                    occaecat cupidatat non proident, sunt in culpa qui officia
+                    deserunt mollit anim id est laborum.
+                </p></body></html>"#,
+                false,
             ),
         ]
     }
