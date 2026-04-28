@@ -132,12 +132,16 @@ fn assert_pageable_fragmenter_parity(
     }
     let pageable_count = pages.len() as u32;
     let fragmenter_count = crate::pagination_layout::implied_page_count(geometry);
-    // fulgur-g9e3.1 follow-up: Pageable still produces extra pages when
-    // a forced `break-before: page` lives on a body-direct child or a
-    // descendant the fragmenter does not recurse into for break detection
-    // (e.g. zero-height elements, nested `<li>` under `<ul>`). Skip
-    // parity in that direction until that gap is closed; the reverse
-    // (fragmenter > Pageable) is still a regression.
+    // fulgur-7hf5 follow-up: a small number of fixtures still produce
+    // `paginate > fragmenter` (Pageable splits where the fragmenter
+    // packs one more child per page). The known case lives in
+    // `fulgur-wpt::render_multi_page::renders_all_pages_from_overflow`
+    // (40 plain paragraphs in a 300×200pt page; paginate=6
+    // fragmenter=5). Investigation of the cursor / margin accounting
+    // gap between Pageable and the fragmenter is tracked in
+    // `fulgur-a9qf` follow-up — until then, skip parity in this
+    // direction. The reverse (`fragmenter > pageable`) is still a
+    // hard regression.
     if pageable_count > fragmenter_count {
         return;
     }
@@ -147,16 +151,20 @@ fn assert_pageable_fragmenter_parity(
     );
 }
 
-/// Detect the "Pageable saw a forced break the fragmenter missed" case:
-/// Pageable produces more pages than the fragmenter's
-/// `implied_page_count`. As of fulgur-g9e3.1 (mid-element split landed)
-/// this no longer fires for oversized-block-with-children — the
-/// remaining cause is forced-break recursion gaps in
-/// `fragment_pagination_root` (body-direct break-before on zero-height
-/// elements, nested break-before below a body-direct ancestor). The
-/// dependent parity assertions can't be meaningfully compared while
-/// the fragmenter under-counts pages, so skip them in that direction.
-fn forced_break_skipped(
+/// fulgur-g9e3.1 follow-up: detect "Pageable produced more pages
+/// than the fragmenter" — used to skip the dependent parity helpers
+/// (`assert_string_set_states_parity` / `assert_counter_states_parity`
+/// / `assert_bookmark_entries_parity`) when their per-page state
+/// vectors can't be meaningfully compared.
+///
+/// As of fulgur-7hf5 (in-place mid-element split + forced-break
+/// recursion landed) this no longer fires for any of the original
+/// three Phase 3.1.5 fixtures. The remaining trigger is the
+/// 40-paragraph WPT overflow fixture noted on
+/// `assert_pageable_fragmenter_parity`'s gate above; the gate exists
+/// to keep the rest of the suite unbroken while that investigation
+/// runs.
+fn parity_gate_pageable_excess(
     pageable_pages: usize,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> bool {
@@ -182,7 +190,7 @@ fn assert_string_set_states_parity(
     if !cfg!(debug_assertions) || geometry.is_empty() {
         return;
     }
-    if forced_break_skipped(pageable_states.len(), geometry) {
+    if parity_gate_pageable_excess(pageable_states.len(), geometry) {
         return;
     }
     let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
@@ -236,7 +244,7 @@ fn assert_counter_states_parity(
     {
         return;
     }
-    if forced_break_skipped(pageable_states.len(), geometry) {
+    if parity_gate_pageable_excess(pageable_states.len(), geometry) {
         return;
     }
     let fragmenter_states =
@@ -274,7 +282,7 @@ fn assert_bookmark_entries_parity(
     if !cfg!(debug_assertions) || geometry.is_empty() {
         return;
     }
-    if forced_break_skipped(total_pages, geometry) {
+    if parity_gate_pageable_excess(total_pages, geometry) {
         return;
     }
     let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
