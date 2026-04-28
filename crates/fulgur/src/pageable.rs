@@ -1089,6 +1089,23 @@ impl BlockPageable {
     /// available height.  Both `split()` and `split_boxed()` call this to
     /// avoid duplicating the scanning logic.
     fn find_split_point(&self, avail_height: Pt) -> SplitDecision {
+        // Pre-compute in-flow markers so index/length checks in the loops
+        // below stay OOF-aware (out-of-flow children may be interleaved or
+        // appended in `self.children`). Returning an `AtIndex` whose index
+        // points to an out-of-flow child would corrupt the split because
+        // `split_y = self.children[idx].y` reads a CB-relative coordinate
+        // (e.g. 0.0 for `top:0`) instead of the flow boundary.
+        let first_in_flow_index = self.children.iter().position(|pc| !pc.out_of_flow);
+        let last_in_flow_index = self.children.iter().rposition(|pc| !pc.out_of_flow);
+        let in_flow_count = self.children.iter().filter(|pc| !pc.out_of_flow).count();
+        let next_in_flow_at_or_after = |from: usize| -> Option<usize> {
+            (from..self.children.len()).find(|&i| !self.children[i].out_of_flow)
+        };
+        let i_is_first_in_flow = |i: usize| first_in_flow_index == Some(i);
+        let i_is_last_in_flow = |i: usize| last_in_flow_index == Some(i);
+        let has_in_flow_after = |i: usize| last_in_flow_index.is_some_and(|last| i < last);
+        let has_in_flow_before = |i: usize| first_in_flow_index.is_some_and(|first| i > first);
+
         if self.pagination.break_inside == BreakInside::Avoid {
             // Prefer layout_size (Taffy-computed, non-zero for empty blocks
             // with explicit CSS height) and fall back to cached_size — same
@@ -1109,9 +1126,10 @@ impl BlockPageable {
                     if pc.out_of_flow {
                         return false;
                     }
-                    (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
+                    (pc.child.pagination().break_before == BreakBefore::Page
+                        && has_in_flow_before(i))
                         || (pc.child.pagination().break_after == BreakAfter::Page
-                            && i < self.children.len() - 1)
+                            && has_in_flow_after(i))
                         || {
                             let child_avail = self.page_height - pc.y;
                             child_avail > 0.0 && pc.child.split(0.0, child_avail).is_some()
@@ -1134,9 +1152,8 @@ impl BlockPageable {
             if pc.out_of_flow {
                 return false;
             }
-            (pc.child.pagination().break_before == BreakBefore::Page && i > 0)
-                || (pc.child.pagination().break_after == BreakAfter::Page
-                    && i < self.children.len() - 1)
+            (pc.child.pagination().break_before == BreakBefore::Page && has_in_flow_before(i))
+                || (pc.child.pagination().break_after == BreakAfter::Page && has_in_flow_after(i))
                 || pc.child.has_forced_break_below()
         });
 
@@ -1170,7 +1187,10 @@ impl BlockPageable {
             if pc.out_of_flow {
                 continue;
             }
-            if pc.child.pagination().break_before == BreakBefore::Page && i > 0 && pc.y > 0.0 {
+            if pc.child.pagination().break_before == BreakBefore::Page
+                && !i_is_first_in_flow(i)
+                && pc.y > 0.0
+            {
                 return SplitDecision::AtIndex(i);
             }
 
@@ -1183,10 +1203,17 @@ impl BlockPageable {
                 {
                     let consumed = parts.0.height();
                     return SplitDecision::WithinChild(i, parts, consumed);
-                } else if i == 0 && self.children.len() == 1 {
+                } else if in_flow_count == 1 {
                     return SplitDecision::NoSplit;
                 } else {
-                    return SplitDecision::AtIndex(i.max(1));
+                    // Push the overflowing in-flow child onto its own page,
+                    // siblings to the next. Skip past trailing OOF children
+                    // when computing the AtIndex target so split_y reads
+                    // the next in-flow's y, not an OOF's CB-relative y.
+                    match next_in_flow_at_or_after(i.max(1)) {
+                        Some(idx) => return SplitDecision::AtIndex(idx),
+                        None => return SplitDecision::NoSplit,
+                    }
                 }
             } else {
                 // Child fits on this page, but may contain a descendant forced break.
@@ -1211,8 +1238,22 @@ impl BlockPageable {
                 }
             }
 
+            if pc.child.pagination().break_after == BreakAfter::Page && i_is_last_in_flow(i) {
+                // No in-flow child follows this break — nothing to push to
+                // the next page. Avoid returning AtIndex past the last
+                // in-flow (which would land on an OOF and corrupt split_y).
+                continue;
+            }
             if pc.child.pagination().break_after == BreakAfter::Page {
-                return SplitDecision::AtIndex(i + 1);
+                // Skip trailing OOF children so AtIndex points to the
+                // first in-flow successor; split_y must come from an
+                // in-flow position, not a CB-relative OOF y.
+                match next_in_flow_at_or_after(i + 1) {
+                    Some(idx) => return SplitDecision::AtIndex(idx),
+                    // unreachable in practice — has_in_flow_after(i) above
+                    // guards this branch — but stay defensive.
+                    None => return SplitDecision::NoSplit,
+                }
             }
         }
 
@@ -2283,7 +2324,14 @@ impl Pageable for BlockPageable {
     }
 
     fn has_forced_break_below(&self) -> bool {
+        // Out-of-flow children (CSS 2.1 §10.6.4) paginate independently
+        // of the parent's flow, so a forced break inside an abs/fixed
+        // descendant must NOT propagate up as the parent's "forced break
+        // below" — that would push ancestors into spurious split paths.
         self.children.iter().any(|pc| {
+            if pc.out_of_flow {
+                return false;
+            }
             pc.child.pagination().break_before == BreakBefore::Page
                 || pc.child.pagination().break_after == BreakAfter::Page
                 || pc.child.has_forced_break_below()

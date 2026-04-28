@@ -1,5 +1,22 @@
 use super::*;
 
+/// Whether `node` has at least one direct DOM child that is a non-pseudo
+/// `position: absolute|fixed` element. Used by `collect_positioned_children`
+/// to refuse flattening for zero-size containers whose abs/fixed children
+/// would otherwise be silently dropped by the recursive flatten path
+/// (it skips abs children and the container itself never reaches the
+/// `build_absolute_non_pseudo_children` hoist point). Transitivity is handled
+/// naturally: deeper containers re-evaluate this guard on their own
+/// recursive call.
+fn node_has_absolute_non_pseudo_child(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+    let lc_guard = node.layout_children.borrow();
+    let children = lc_guard.as_deref().unwrap_or(&node.children);
+    children.iter().any(|&id| {
+        doc.get_node(id)
+            .is_some_and(|n| is_absolutely_positioned(n) && !is_pseudo_node(doc, n))
+    })
+}
+
 /// Collect positioned children, flattening zero-size pass-through containers
 /// (like thead, tbody, tr) so their children appear directly in the parent.
 ///
@@ -67,6 +84,7 @@ pub(super) fn collect_positioned_children(
             && !pseudo::node_has_inline_pseudo_image(doc, child_node)
             && !ctx.column_styles.contains_key(&child_id)
             && !pseudo::node_has_absolute_pseudo(doc, child_node)
+            && !node_has_absolute_non_pseudo_child(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
@@ -90,6 +108,7 @@ pub(super) fn collect_positioned_children(
             && cw == 0.0
             && !child_effective_is_empty
             && !pseudo::node_has_absolute_pseudo(doc, child_node)
+            && !node_has_absolute_non_pseudo_child(doc, child_node)
         {
             emit_orphan_string_set_markers(child_id, cx, cy, ctx, &mut result);
             emit_counter_op_markers(child_id, cx, cy, ctx, &mut result);
