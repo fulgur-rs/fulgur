@@ -481,3 +481,152 @@ mod tests {
         );
     }
 }
+
+/// Comparison harness: drive the same HTML through `paginate::paginate(...)`
+/// and `pagination_layout::run_pass(...)` and tabulate the per-fixture
+/// page count agreement. The harness is observational — its purpose is to
+/// surface where the two paths agree (so the spike can claim it covers
+/// the simple-block case) and where they diverge (so the next iteration
+/// of the spike has a concrete target list).
+///
+/// Lives in the same file as the unit tests so it can use `pub(crate)`
+/// helpers like `crate::convert::pt_to_px` and `crate::paginate::paginate`
+/// directly without touching the public surface.
+#[cfg(test)]
+mod compare_with_pageable {
+    use super::run_pass;
+    use crate::convert::pt_to_px;
+    use crate::paginate::paginate;
+    use crate::{Engine, PageSize};
+    use std::ops::DerefMut;
+
+    /// Compute the spike's page count from a geometry table.
+    ///
+    /// Convention: empty table → 1 page (matches Pageable's "always at
+    /// least one page" guarantee for empty bodies).
+    fn spike_page_count(table: &super::PaginationGeometryTable) -> u32 {
+        table
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1)
+    }
+
+    /// Run the engine's testing helper to build a `Pageable` for `html`,
+    /// paginate it at the engine's content size, and return the page
+    /// count. Uses A4 portrait with default margins so the test is stable
+    /// across machines.
+    fn pageable_page_count(html: &str) -> usize {
+        let engine = Engine::builder().page_size(PageSize::A4).build();
+        let pageable = engine.build_pageable_for_testing_no_gcpm(html);
+        let cfg = engine.config();
+        let pages = paginate(pageable, cfg.content_width(), cfg.content_height());
+        pages.len()
+    }
+
+    /// Run the spike against the same HTML the Pageable side rendered.
+    /// Re-parses (deterministic) so we get a fresh `BaseDocument` and
+    /// can mutate it without unsafe shenanigans.
+    fn spike_page_count_for(html: &str) -> u32 {
+        use crate::blitz_adapter;
+        let engine = Engine::builder().page_size(PageSize::A4).build();
+        let cfg = engine.config();
+        // Same parse parameters as `build_pageable_for_testing_no_gcpm`.
+        let (mut doc, _gcpm) = blitz_adapter::parse_html_with_local_resources(
+            html,
+            pt_to_px(cfg.content_width()),
+            pt_to_px(cfg.page_height()) as u32,
+            &[],
+            None,
+        );
+        blitz_adapter::resolve(&mut doc);
+        // Match `build_pageable_for_testing_no_gcpm`'s pipeline so the
+        // doc state is identical when we read final_layout.
+        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+        let _multicol = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let table = run_pass(doc.deref_mut(), pt_to_px(cfg.content_height()));
+        spike_page_count(&table)
+    }
+
+    /// Each fixture: (label, html, agreement expected?).
+    ///
+    /// `agreement_expected = false` means we already know Pageable and
+    /// the block-only spike will diverge for this case (e.g. inline text
+    /// that wraps across pages). The harness still runs both sides and
+    /// records the disagreement so the next iteration knows what to fix.
+    fn fixtures() -> Vec<(&'static str, &'static str, bool)> {
+        vec![
+            (
+                "empty body → 1 page on both sides",
+                "<html><body></body></html>",
+                true,
+            ),
+            (
+                "three short blocks fit one page",
+                r#"<html><body>
+                    <div style="height: 100px"></div>
+                    <div style="height: 100px"></div>
+                    <div style="height: 100px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "two blocks split across two pages",
+                // Each block is 600px = 450pt, so two stack to 900pt
+                // which exceeds A4 portrait content height (~770pt).
+                r#"<html><body>
+                    <div style="height: 600px"></div>
+                    <div style="height: 600px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "five blocks span three pages",
+                // A4 portrait content height ≈ 1027 CSS px (770pt).
+                // 5 × 400px = 2000px stacks as: 400 → 800 → break (1200 >
+                // 1027), then 400 → 800 → break, then 400 — three pages
+                // on both sides. The harness only checks page-count
+                // agreement, not the predicted breakdown.
+                r#"<html><body>
+                    <div style="height: 400px"></div>
+                    <div style="height: 400px"></div>
+                    <div style="height: 400px"></div>
+                    <div style="height: 400px"></div>
+                    <div style="height: 400px"></div>
+                </body></html>"#,
+                true,
+            ),
+        ]
+    }
+
+    #[test]
+    fn page_count_agreement_table() {
+        let fixtures = fixtures();
+        let mut disagreements: Vec<String> = Vec::new();
+
+        for (label, html, expected_agreement) in &fixtures {
+            let pageable_pages = pageable_page_count(html) as u32;
+            let spike_pages = spike_page_count_for(html);
+            let agree = pageable_pages == spike_pages;
+
+            eprintln!(
+                "[{:>1}] {label:<55} pageable={pageable_pages} spike={spike_pages}",
+                if agree { "✓" } else { "✗" },
+            );
+
+            if agree != *expected_agreement {
+                disagreements.push(format!(
+                    "{label}: pageable={pageable_pages} spike={spike_pages} expected_agreement={expected_agreement}",
+                ));
+            }
+        }
+
+        assert!(
+            disagreements.is_empty(),
+            "Pageable vs spike disagreement (or unexpected agreement) for:\n  - {}",
+            disagreements.join("\n  - "),
+        );
+    }
+}
