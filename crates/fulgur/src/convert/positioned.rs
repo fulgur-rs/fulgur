@@ -341,11 +341,17 @@ fn resolve_inset_px(
 /// Runs ALONGSIDE `wrap_with_block_pseudo_images` at the call sites that
 /// construct a `BlockPageable` wrapping a node with pseudos; see
 /// fulgur-vlr3 for the full investigation.
+/// Caller selects which pseudo slots to consider via `slots` (typically
+/// `[node.before]`, `[node.after]`, or both). [`build_absolute_children`]
+/// uses single-slot calls to interleave `::before` / direct DOM abs /
+/// `::after` in generated (source) order so `::after` paints AFTER
+/// direct abs siblings.
 pub(super) fn build_absolute_pseudo_children(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
+    slots: &[Option<usize>],
 ) -> Vec<PositionedChild> {
     let mut out = Vec::new();
     let parent_is_static = is_position_static(node);
@@ -354,7 +360,7 @@ pub(super) fn build_absolute_pseudo_children(
     // ancestor chain repeatedly when both `::before` and `::after` hit.
     let mut cb_absolute: Option<Option<AbsCb>> = None;
     let mut cb_fixed: Option<Option<AbsCb>> = None;
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+    for pseudo_id in slots.iter().copied().flatten() {
         let Some(pseudo) = doc.get_node(pseudo_id) else {
             continue;
         };
@@ -595,14 +601,26 @@ pub(super) fn build_absolute_non_pseudo_children(
 /// hoist to `node` — both pseudos (`::before`/`::after`) and direct DOM
 /// children. Call sites that previously used `build_absolute_pseudo_children`
 /// should switch to this so non-pseudo abs descendants are picked up too.
+///
+/// Output order matches **generated/source order**: `::before` first, then
+/// direct DOM abs/fixed children in DOM order, then `::after`. This matches
+/// CSS paint order so a `::after` overlay correctly paints on top of the
+/// direct abs siblings instead of beneath them.
 pub(super) fn build_absolute_children(
     doc: &blitz_dom::BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
 ) -> Vec<PositionedChild> {
-    let mut out = build_absolute_pseudo_children(doc, node, ctx, depth);
+    let mut out = build_absolute_pseudo_children(doc, node, ctx, depth, &[node.before]);
     out.extend(build_absolute_non_pseudo_children(doc, node, ctx, depth));
+    out.extend(build_absolute_pseudo_children(
+        doc,
+        node,
+        ctx,
+        depth,
+        &[node.after],
+    ));
     out
 }
 

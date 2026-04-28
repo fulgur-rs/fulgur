@@ -1508,24 +1508,43 @@ fn split_children_at_index(
 }
 
 /// Split `children` for `SplitDecision::WithinChild`. The split-causing
-/// child at `within_idx` is excluded — the caller injects its first/second
-/// fragments. In-flow children before / after `within_idx` go to first /
+/// child at `within_idx` is replaced in-place by `first_part` (in the first
+/// half) and `second_part` (in the second half), preserving the original
+/// DOM-order slot. In-flow children before / after `within_idx` go to first /
 /// second halves; out-of-flow children replicate to both halves (with the
 /// second-half shift applied).
+///
+/// The in-place replacement is critical: appending the split fragments to
+/// the end of either half would move out-of-flow siblings that originally
+/// followed `within_idx` IN FRONT of the fragment on the first page,
+/// changing paint order across the page break (CodeRabbit on PR #260).
 fn split_children_for_within(
     children: &[PositionedChild],
     within_idx: usize,
+    first_part: PositionedChild,
+    second_part: PositionedChild,
     second_y_offset: f32,
 ) -> (Vec<PositionedChild>, Vec<PositionedChild>) {
     let mut first = Vec::with_capacity(children.len());
     let mut second = Vec::with_capacity(children.len());
+    let mut first_part_opt = Some(first_part);
+    let mut second_part_opt = Some(second_part);
     for (i, pc) in children.iter().enumerate() {
-        if pc.out_of_flow {
+        if i == within_idx {
+            // Inject the split fragments at the original DOM slot so paint
+            // order with sibling out-of-flow children is preserved.
+            if let Some(fp) = first_part_opt.take() {
+                first.push(fp);
+            }
+            if let Some(sp) = second_part_opt.take() {
+                second.push(sp);
+            }
+        } else if pc.out_of_flow {
             first.push(clone_pc_with_offset(pc, 0.0));
             second.push(clone_pc_with_offset(pc, second_y_offset));
         } else if i < within_idx {
             first.push(clone_pc_with_offset(pc, 0.0));
-        } else if i > within_idx {
+        } else {
             second.push(clone_pc_with_offset(pc, second_y_offset));
         }
     }
@@ -2008,22 +2027,24 @@ impl Pageable for BlockPageable {
                     .map(|s| s.width)
                     .unwrap_or(0.0);
 
-                let (mut first, mut second) =
-                    split_children_for_within(&self.children, idx, pc.y + consumed_height);
-                first.push(PositionedChild {
+                let first_pc = PositionedChild {
                     child: first_part,
                     x: pc.x,
                     y: pc.y,
                     out_of_flow: false,
-                });
-                second.insert(
-                    0,
-                    PositionedChild {
-                        child: second_part,
-                        x: pc.x,
-                        y: 0.0,
-                        out_of_flow: false,
-                    },
+                };
+                let second_pc = PositionedChild {
+                    child: second_part,
+                    x: pc.x,
+                    y: 0.0,
+                    out_of_flow: false,
+                };
+                let (first, second) = split_children_for_within(
+                    &self.children,
+                    idx,
+                    first_pc,
+                    second_pc,
+                    pc.y + consumed_height,
                 );
 
                 let mut first_block = BlockPageable::with_positioned_children(first)
@@ -2119,25 +2140,27 @@ impl Pageable for BlockPageable {
 
                 // Use the clone-based helper so out-of-flow children
                 // (CSS abs/fixed) are correctly replicated to both halves.
-                // The split-causing in-flow child at `idx` is excluded by
-                // the helper; we inject its first/second fragments below.
-                let (mut first, mut second) =
-                    split_children_for_within(&me.children, idx, split_child_y + consumed_height);
-
-                first.push(PositionedChild {
+                // The helper inserts the split fragments at the original
+                // DOM slot of `idx` so paint order with sibling
+                // out-of-flow children is preserved across the break.
+                let first_pc = PositionedChild {
                     child: first_part,
                     x: split_child_x,
                     y: split_child_y,
                     out_of_flow: false,
-                });
-                second.insert(
-                    0,
-                    PositionedChild {
-                        child: second_part,
-                        x: split_child_x,
-                        y: 0.0,
-                        out_of_flow: false,
-                    },
+                };
+                let second_pc = PositionedChild {
+                    child: second_part,
+                    x: split_child_x,
+                    y: 0.0,
+                    out_of_flow: false,
+                };
+                let (first, second) = split_children_for_within(
+                    &me.children,
+                    idx,
+                    first_pc,
+                    second_pc,
+                    split_child_y + consumed_height,
                 );
 
                 let mut first_block = BlockPageable::with_positioned_children(first)
@@ -4023,26 +4046,47 @@ mod tests {
     }
 
     #[test]
-    fn split_children_for_within_excludes_within_index() {
+    fn split_children_for_within_inserts_fragments_at_dom_slot() {
         // Layout: [in_flow@0, in_flow@50 (split-causing), in_flow@100, out_of_flow@0].
         // Within idx=1, second_y_offset=70 (split caused at y=50, consumed=20).
+        // The first/second fragments occupy idx=1's slot, preserving DOM
+        // order with the trailing in_flow@100 and OOF children
+        // (PR #260 CodeRabbit — "Within-child splits can reorder
+        // replicated out-of-flow siblings on page 1").
         // Expected:
-        //   first  = [in_flow@0, out_of_flow@0]                  (idx=1 excluded)
-        //   second = [in_flow@30 (100-70), out_of_flow@-70]      (idx=1 excluded)
+        //   first  = [in_flow@0, FIRST_PART@77, out_of_flow@0]
+        //   second = [SECOND_PART@88, in_flow@30 (100-70), out_of_flow@-70]
         let children = vec![
             PositionedChild::in_flow(make_spacer(50.0), 0.0, 0.0),
             PositionedChild::in_flow(make_spacer(50.0), 0.0, 50.0),
             PositionedChild::in_flow(make_spacer(10.0), 0.0, 100.0),
             PositionedChild::out_of_flow(make_spacer(99.0), 0.0, 0.0),
         ];
-        let (first, second) = split_children_for_within(&children, 1, 70.0);
-        // The split-causing child at idx=1 must NOT appear in either half;
-        // caller injects its fragments separately.
-        assert_eq!(first.len(), 2, "first: in_flow@0 + out_of_flow@0");
-        assert_eq!(second.len(), 2, "second: in_flow@30 + out_of_flow@-70");
-        // Verify no entry has y == 50 (the within_idx child's position).
+        let first_pc = PositionedChild::in_flow(make_spacer(20.0), 0.0, 77.0);
+        let second_pc = PositionedChild::in_flow(make_spacer(30.0), 0.0, 88.0);
+        let (first, second) = split_children_for_within(&children, 1, first_pc, second_pc, 70.0);
+        // The split-causing child at idx=1 (y=50) must NOT appear; instead
+        // the fragments should occupy that slot.
+        assert_eq!(
+            first.len(),
+            3,
+            "first: in_flow@0 + FIRST_PART@77 + out_of_flow@0"
+        );
+        assert_eq!(
+            second.len(),
+            3,
+            "second: SECOND_PART@88 + in_flow@30 + out_of_flow@-70"
+        );
         assert!(first.iter().all(|p| p.y != 50.0));
         assert!(second.iter().all(|p| p.y != 50.0));
+        // First-part fragment is at the original DOM-slot position
+        // (between in_flow@0 and out_of_flow@0): index 1.
+        assert_eq!(first[1].y, 77.0, "first_part should be at the within slot");
+        // Second-part fragment is at index 0 (before the in_flow@30 and OOF).
+        assert_eq!(
+            second[0].y, 88.0,
+            "second_part should be at the within slot"
+        );
         // Verify out-of-flow replicated with no clamp on negative.
         let second_oof = second.iter().find(|p| p.out_of_flow).unwrap();
         assert_eq!(second_oof.y, -70.0);

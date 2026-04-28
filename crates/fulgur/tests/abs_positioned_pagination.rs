@@ -5,6 +5,7 @@
 //! CSS 2.1 §10.6.4: the height of an absolutely-positioned element does not
 //! contribute to the height of its containing block's normal flow.
 
+use fulgur::pageable::{BlockPageable, Pageable, PositionedChild};
 use fulgur::{Engine, Margin, PageSize};
 
 fn page_count(pdf: &[u8]) -> usize {
@@ -57,26 +58,83 @@ fn abs_positioned_div_is_out_of_flow_in_pagination() {
     );
 }
 
+/// Walk the Pageable tree and count `BlockPageable` instances whose
+/// border-box (via `cached_size` or `layout_size`) approximately matches
+/// `(target_w, target_h)` and whose `out_of_flow` flag matches `is_oof`.
+/// Used by the flatten-zero-size-container regression test below to
+/// verify the abs child reached the Pageable tree (rather than being
+/// silently dropped by the flatten path).
+fn count_blocks_with_size_and_flow(
+    root: &dyn Pageable,
+    target_w: f32,
+    target_h: f32,
+    is_oof: bool,
+) -> usize {
+    let mut count = 0;
+    fn walk(
+        node: &dyn Pageable,
+        target_w: f32,
+        target_h: f32,
+        is_oof: bool,
+        count: &mut usize,
+        own_oof: bool,
+    ) {
+        if let Some(block) = node.as_any().downcast_ref::<BlockPageable>() {
+            let size = block.layout_size.or(block.cached_size);
+            if let Some(s) = size
+                && (s.width - target_w).abs() < 0.5
+                && (s.height - target_h).abs() < 0.5
+                && own_oof == is_oof
+            {
+                *count += 1;
+            }
+            for PositionedChild {
+                child, out_of_flow, ..
+            } in &block.children
+            {
+                walk(
+                    child.as_ref(),
+                    target_w,
+                    target_h,
+                    is_oof,
+                    count,
+                    *out_of_flow,
+                );
+            }
+        }
+    }
+    walk(root, target_w, target_h, is_oof, &mut count, false);
+    count
+}
+
 /// Regression for the coderabbit thread on fulgur-aijf: a zero-size
-/// container (`<table>` synthesizes `<tbody>`-like wrappers Blitz lays out
-/// at 0×0) with a non-pseudo abs/fixed direct child must NOT be flattened
-/// — flattening recurses into `collect_positioned_children`, which now
-/// skips abs descendants. Without the flatten guard, the abs would never
-/// reach a `build_absolute_children` hoist and would silently disappear.
+/// container with a non-pseudo abs/fixed direct child must NOT be
+/// flattened — flattening recurses into `collect_positioned_children`,
+/// which now skips abs descendants. Without the flatten guard, the abs
+/// would never reach a `build_absolute_children` hoist and would
+/// silently disappear from the Pageable tree.
+///
+/// `assert!(!pdf.is_empty())` and `page_count == 1` are *not* sufficient
+/// oracles here — both stay true even when the abs child is dropped,
+/// because krilla always serialises a complete PDF and the surrounding
+/// in-flow text alone fills one page. We instead inspect the Pageable
+/// tree directly and assert a 30×30 pt out-of-flow `BlockPageable`
+/// (the abs `<div>`) is present (PR #260, CodeRabbit).
 #[test]
 fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
-    // Use a `display:contents` wrapper to mimic a zero-size pass-through
-    // container that Blitz/Taffy collapses to 0×0. Its abs child must
-    // still render; we verify by asserting the document has its expected
-    // single page without panic and that the wrapper doesn't suppress the
-    // surrounding in-flow content.
+    // A `<div>` with explicit `height:0; width:0;` and `overflow:visible`
+    // is a real zero-size container that Blitz lays out at 0×0 and that
+    // `collect_positioned_children`'s flatten branch would otherwise
+    // collapse — recursing into its children with no parent to pick the
+    // abs back up. Without the flatten guard, the abs `<div>` is silently
+    // dropped from the Pageable tree.
     let html = r#"<!doctype html><html><head><style>
         @page { size: 200pt 200pt; margin: 0; }
         body { margin: 0; }
-        .wrap { display: contents; }
+        .zero { width: 0; height: 0; overflow: visible; }
     </style></head><body>
       <p>before</p>
-      <div class="wrap">
+      <div class="zero">
         <div style="position:absolute; top:10pt; left:10pt; width:30pt; height:30pt; background:red;"></div>
       </div>
       <p>after</p>
@@ -88,13 +146,13 @@ fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
-    assert_eq!(page_count(&pdf), 1, "expected one page");
-    // The body content has 'before' and 'after'. If the abs got dropped
-    // by flatten + collect_positioned_children skip, we'd at least still
-    // see the in-flow text. The crucial behavioural check is that the
-    // engine doesn't panic and the document is non-empty.
-    assert!(!pdf.is_empty(), "PDF must not be empty");
+    let tree = engine.build_pageable_for_testing_no_gcpm(html);
+    let abs_blocks = count_blocks_with_size_and_flow(tree.as_ref(), 30.0, 30.0, true);
+    assert!(
+        abs_blocks >= 1,
+        "expected at least one out-of-flow 30×30 pt BlockPageable for the abs <div>; \
+         the flatten guard must not drop it. Found {abs_blocks}."
+    );
 }
 
 /// Regression for the devin thread on fulgur-aijf: when in-flow children
