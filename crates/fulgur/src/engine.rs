@@ -199,6 +199,40 @@ impl Engine {
         // and docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
+        // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
+        // body's children's existing `final_layout` (populated by
+        // `resolve()` and `multicol_layout::run_pass`) and records
+        // per-node page fragments in a `PaginationGeometryTable`. The
+        // returned table is currently *observational only* — no convert
+        // / render path consumes it yet, but routing the call through
+        // the production code path:
+        //
+        // - replaces the previous `#![allow(dead_code)]` blanket
+        //   permission with a single drop-the-result call site so
+        //   `cargo build` / `cargo clippy` warn truthfully when an item
+        //   becomes orphaned,
+        // - gives follow-up work (counter / string-set replacement,
+        //   per-page fixed repetition redesign, etc.) a stable hand-off
+        //   point: capture the table on `ConvertContext` instead of
+        //   dropping it.
+        //
+        // Side-effect safety: `run_pass_with_break_styles` is a
+        // read-only walk of `final_layout` via
+        // `fragment_pagination_root` — it does not re-drive Taffy or
+        // mutate any node's layout. The wrapper's `LayoutPartialTree`
+        // / `RoundTree` / `CacheTree` / `TraversePartialTree` impls
+        // are kept compile-time live as scaffolding for a future
+        // per-strip-constrained variant and are exercised at runtime
+        // only by the test-gated `drive_taffy_root_layout` (see
+        // `pagination_layout.rs` module docs). VRT /
+        // examples_determinism / WPT all stay byte-identical with
+        // this call inserted.
+        let _pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
+
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {

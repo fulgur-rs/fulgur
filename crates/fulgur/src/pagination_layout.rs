@@ -1,47 +1,67 @@
-//! Spike: Taffy-hooked block-only paginator (fulgur-4cbc).
+//! Taffy-hooked block-level paginator (fulgur-4cbc).
 //!
 //! Sibling of [`crate::multicol_layout`]. The multicol module proves the
 //! `LayoutPartialTree` wrapper pattern works for routing one CSS feature
-//! through fulgur-owned layout while leaving the rest to `BaseDocument`.
-//! This module is a feasibility evaluation of the same idiom for page
-//! fragmentation.
+//! through fulgur-owned layout while leaving the rest to `BaseDocument`;
+//! this module applies the same idiom to page fragmentation.
 //!
-//! # Status: spike (no production wiring)
+//! # Status: production-wired, observational consumer
 //!
-//! `run_pass` invokes `taffy::compute_root_layout(&mut wrapper, body_id, ...)`
-//! and the wrapper's `compute_child_layout` intercepts the body to
-//! dispatch into [`compute_pagination_layout`]. That function walks the
-//! body's direct block children (using `final_layout` already populated
-//! by Blitz's first-pass `resolve()`) and records what fragments would
-//! be produced if the page were sliced at `page_height_px`.
+//! [`run_pass_with_break_styles`] is invoked once per render from
+//! `engine.rs` after `multicol_layout::run_pass`. The production path
+//! skips `taffy::compute_root_layout` and calls
+//! [`fragment_pagination_root`] directly: it walks the body's direct
+//! block children's existing `final_layout` — descending into Parley
+//! line metrics for inline roots — and records the would-be page
+//! geometry in a `PaginationGeometryTable`. Re-driving Taffy on body
+//! re-stores every descendant's layout fields and introduces sub-pixel
+//! floating-point drift that breaks `examples_determinism`'s byte-wise
+//! PDF comparison; see [`PaginationLayoutTree::drive_taffy_root_layout`]
+//! for the full root cause.
 //!
-//! Concretely it is still a **measurement walk wrapped in a real Taffy
-//! callback** — it does not yet re-issue per-strip layout requests with
-//! constrained `available_space`. The point of routing through
-//! `compute_root_layout` now is structural: it forces every trait method
-//! on the wrapper to be exercised at runtime so the next iteration —
-//! constraining `available_space.height = page_strip` and feeding each
-//! child a remaining-strip-height — can swap the body of
-//! `compute_pagination_layout` without changing the public surface.
+//! The wrapper's `LayoutPartialTree` / `RoundTree` / `CacheTree` /
+//! `TraversePartialTree` impls (which dispatch body's layout into
+//! [`compute_pagination_layout`] via `taffy::compute_root_layout`) are
+//! kept compile-time live as scaffolding for a future per-strip
+//! constrained variant; the `taffy_driven_dispatch_matches_direct_walk`
+//! test exercises them at runtime and asserts geometry parity with the
+//! production direct walk.
 //!
-//! # Scope (block-only)
+//! Today the engine drops the returned table (`let _pagination_geometry
+//! = …`). Follow-up work will capture the table on `ConvertContext`
+//! and wire downstream consumers (counter / string-set replacement,
+//! per-page repetition redesign, …).
 //!
-//! - `<body>`'s direct block children only. Anything nested inside those
-//!   children is reused as-is from `final_layout`.
-//! - No `break-before` / `break-after` / `break-inside`. No widow/orphan.
-//! - No out-of-flow handling (`position: fixed` is owned by
-//!   `blitz_adapter::relayout_position_fixed`; floats / abs are not
-//!   considered here).
-//! - No table-row / flex-item / multicol-internal break.
-//! - Inline (Parley) break is out of scope; a paragraph that overflows
-//!   the page is recorded as a single oversized fragment for now.
-
-// Spike scaffolding: every public item is exercised only by the
-// in-module `#[cfg(test)] mod tests` until follow-up work wires this
-// into the engine pipeline. `#[allow(dead_code)]` keeps the warning
-// surface clean during the spike — remove it once `engine.rs` calls
-// `run_pass` for production rendering or the comparison harness.
-#![allow(dead_code)]
+//! # Coverage
+//!
+//! The wrapper is currently exercised against the body subtree only.
+//! Anything nested inside body's direct children continues to use
+//! Blitz's normal layout dispatch, and the spike post-walks
+//! `final_layout` rather than re-issuing per-strip
+//! `compute_child_layout` calls. The fulgur-ik6o probe established
+//! that constraining `available_space.height` does not change Taffy's
+//! block-layout output — see
+//! `docs/plans/2026-04-28-pagination-layout-spike.md`.
+//!
+//! # Features wired today
+//!
+//! - Block-level fragmentation against `page_height_px`
+//!   ([`fragment_pagination_root`]).
+//! - Inline-aware split at Parley line boundaries
+//!   ([`fragment_inline_root`], reads `inline_layout_data` populated by
+//!   `resolve()`).
+//! - `break-before` / `break-after` / `break-inside: avoid` from the
+//!   shared [`crate::column_css::ColumnStyleTable`] side-table.
+//!
+//! # Test-gated experimental surface
+//!
+//! [`collect_string_set_states`], [`append_position_fixed_fragments`],
+//! and [`implied_page_count`] are gated `#[cfg(test)]` because they
+//! describe extension points (Pageable's string-set walk replacement,
+//! geometry-driven fixed repetition) that have no production consumer
+//! yet. They stay visible to the in-file test module so the spike's
+//! comparison harness can exercise them; future PRs un-gate them when
+//! a real consumer lands.
 
 use blitz_dom::BaseDocument;
 use std::collections::BTreeMap;
@@ -84,15 +104,16 @@ pub struct PaginationGeometry {
 /// downstream depends on iteration order.
 pub type PaginationGeometryTable = BTreeMap<usize, PaginationGeometry>;
 
-/// Taffy tree wrapper that — once the spike grows beyond measurement — will
-/// intercept the pagination root through `compute_child_layout` and route
-/// it through fulgur's own page-stripping layout.
+/// Taffy tree wrapper that intercepts the pagination root through
+/// `compute_child_layout` and routes it through fulgur's own
+/// page-stripping logic.
 ///
 /// `page_height_px` is the height of the page content area (after the
 /// engine has subtracted page-margin / `@page` margins). The wrapper
 /// borrows the `BaseDocument` for one pass and is discarded; the
-/// `geometry` it accumulates is drained via [`Self::take_geometry`] for
-/// downstream comparison or convert wiring.
+/// `geometry` it accumulates is drained via [`Self::take_geometry`] so
+/// callers can either thread it into `ConvertContext` or drop it for
+/// observational use.
 pub struct PaginationLayoutTree<'a> {
     pub(crate) doc: &'a mut BaseDocument,
     pub(crate) page_height_px: f32,
@@ -101,11 +122,6 @@ pub struct PaginationLayoutTree<'a> {
     /// fragmentation root for the block-only spike. `None` means the
     /// document had no body and the pass becomes a no-op.
     pub(crate) body_id: Option<usize>,
-    /// Available-space mode for `drive_taffy_root_layout`. Set via
-    /// [`run_pass_constrained`] (fulgur-ik6o spike); the default
-    /// [`run_pass`] keeps `MaxContent` so the post-walk reads natural
-    /// child heights.
-    pub(crate) strip_mode: StripMode,
     /// fulgur-k0g0: `break-before` / `break-after` / `break-inside`
     /// per node, harvested by
     /// [`crate::blitz_adapter::extract_column_style_table`]. The table
@@ -117,56 +133,30 @@ pub struct PaginationLayoutTree<'a> {
     pub(crate) column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
 }
 
-/// `available_space.height` mode passed to `taffy::compute_root_layout`
-/// when driving the body's layout.
-///
-/// The `MaxContent` variant matches the original spike: body is laid
-/// out at its natural height, and the spike post-walks `final_layout`
-/// to fragment children. `Definite` is the fulgur-ik6o experiment —
-/// constrain Taffy to one page strip and see what happens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StripMode {
-    /// Pass `AvailableSpace::MaxContent` so children retain natural
-    /// heights and the spike's post-walk does the fragmentation.
-    MaxContent,
-    /// Pass `AvailableSpace::Definite(page_height_px)` and observe
-    /// whether Taffy/Blitz produces a strip-constrained layout we
-    /// can fragment differently.
-    Definite,
-}
-
-/// One-shot entry: run the block-only fragmenter for `doc` against a
+/// One-shot entry: run the block-level fragmenter for `doc` against a
 /// `page_height_px` page strip and return the resulting geometry table.
 ///
 /// Intended to be called **after** `blitz_adapter::resolve()` (and after
 /// `multicol_layout::run_pass` when multicol is in play) so that
-/// `final_layout` reflects the post-layout positions the spike walks.
+/// `final_layout` reflects the post-layout positions the fragmenter
+/// walks.
 ///
-/// Drives the wrapper through `taffy::compute_root_layout(&mut tree,
-/// body_id, ...)` so [`PaginationLayoutTree::compute_child_layout`]
-/// fires for body and dispatches into [`compute_pagination_layout`].
-/// The body's existing layout is restored after the call so we do not
-/// disturb downstream consumers of `final_layout` (`convert::dom_to_pageable`
-/// reads body's location to position children — `compute_root_layout`
-/// would otherwise rewrite it to (0, 0)).
+/// Calls [`fragment_pagination_root`] directly to walk body's
+/// children's existing `final_layout` (populated by
+/// `blitz_adapter::resolve` and `multicol_layout::run_pass`) and
+/// record per-node fragments. Same direct-walk model as the production
+/// entry point — see the module docs for why we skip
+/// `taffy::compute_root_layout` here. The Taffy-dispatch path is
+/// preserved as test-only via
+/// [`PaginationLayoutTree::drive_taffy_root_layout`].
 ///
-/// Callers should treat the returned table as observational only — it is
-/// not wired into the existing `Pageable` / `paginate` path.
+/// Test-only convenience for fixtures that don't need break-style
+/// awareness. Production callers use [`run_pass_with_break_styles`]
+/// so `break-before` / `break-after` / `break-inside` from the shared
+/// `ColumnStyleTable` are honoured.
+#[cfg(test)]
 pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeometryTable {
-    run_pass_with_mode(doc, page_height_px, StripMode::MaxContent, None)
-}
-
-/// fulgur-ik6o variant: drive `compute_root_layout` with
-/// `AvailableSpace::Definite(page_height_px)` instead of `MaxContent`.
-///
-/// Observational entry — used by the comparison harness to record per-
-/// fixture differences between the two modes. Same caveat as
-/// [`run_pass`]: not wired into production.
-pub fn run_pass_constrained(
-    doc: &mut BaseDocument,
-    page_height_px: f32,
-) -> PaginationGeometryTable {
-    run_pass_with_mode(doc, page_height_px, StripMode::Definite, None)
+    run_pass_with_break_styles_inner(doc, page_height_px, None)
 }
 
 /// fulgur-k0g0 variant: thread the document's `break-before` /
@@ -180,25 +170,35 @@ pub fn run_pass_with_break_styles<'a>(
     page_height_px: f32,
     column_styles: &'a crate::column_css::ColumnStyleTable,
 ) -> PaginationGeometryTable {
-    run_pass_with_mode(
-        doc,
-        page_height_px,
-        StripMode::MaxContent,
-        Some(column_styles),
-    )
+    run_pass_with_break_styles_inner(doc, page_height_px, Some(column_styles))
 }
 
-fn run_pass_with_mode<'a>(
+fn run_pass_with_break_styles_inner<'a>(
     doc: &'a mut BaseDocument,
     page_height_px: f32,
-    strip_mode: StripMode,
     column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
 ) -> PaginationGeometryTable {
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
-    tree.strip_mode = strip_mode;
     tree.column_styles = column_styles;
     if tree.body_id.is_some() && page_height_px > 0.0 {
-        tree.drive_taffy_root_layout();
+        // Read body's children's existing `final_layout` (populated by
+        // Blitz's `resolve()` and `multicol_layout::run_pass`) and
+        // produce the page-fragment geometry without re-driving Taffy.
+        //
+        // We deliberately *skip* `drive_taffy_root_layout` (which runs
+        // `taffy::compute_root_layout` through the wrapper) on the
+        // production path: re-issuing layout for body forces every
+        // descendant's `compute_child_layout` to re-execute, and even
+        // with cache hits the round-trip introduces sub-pixel
+        // floating-point drift that breaks
+        // `examples_determinism`'s byte-wise comparison against
+        // committed PDFs. The wrapper's `LayoutPartialTree` /
+        // `RoundTree` / `CacheTree` / `TraversePartialTree` impls
+        // remain in place for tests that *do* exercise the full Taffy
+        // dispatch (`drive_taffy_root_layout`) and as scaffolding for
+        // a future per-strip-constrained variant where re-driving
+        // layout is what actually does the pagination work.
+        tree.fragment_pagination_root();
     }
     tree.take_geometry()
 }
@@ -211,7 +211,6 @@ impl<'a> PaginationLayoutTree<'a> {
             page_height_px,
             geometry: BTreeMap::new(),
             body_id,
-            strip_mode: StripMode::MaxContent,
             column_styles: None,
         }
     }
@@ -229,14 +228,28 @@ impl<'a> PaginationLayoutTree<'a> {
     /// wrapper's `compute_child_layout` fires on body and dispatches into
     /// [`compute_pagination_layout`].
     ///
+    /// **Test-only.** Production callers (`run_pass_with_break_styles`)
+    /// reach geometry via `fragment_pagination_root` directly because
+    /// re-driving Taffy on body re-stores every descendant's layout
+    /// fields (even on cache hits) and introduces sub-pixel
+    /// floating-point drift that breaks `examples_determinism`'s
+    /// byte-wise PDF comparison against committed goldens. This entry
+    /// is preserved so the wrapper's `LayoutPartialTree` / `RoundTree`
+    /// / `CacheTree` / `TraversePartialTree` impls keep one runtime
+    /// exerciser and a future per-strip-constrained variant has a
+    /// drop-in seam.
+    #[cfg(test)]
+    ///
     /// The available space we hand Taffy is the body's *existing* layout
     /// width and an unbounded height (`AvailableSpace::MaxContent`). We
-    /// pass MaxContent rather than `page_height_px` because the current
-    /// fragmenter still relies on the children's natural `final_layout`
+    /// pass MaxContent rather than `page_height_px` because the
+    /// fragmenter relies on the children's natural `final_layout`
     /// heights — restricting `available_space.height` here would let
     /// Taffy clip or shrink children, breaking the measurement walk.
-    /// Constraining the strip is the next iteration's job, alongside a
-    /// child-by-child `compute_child_layout` re-invocation pattern.
+    /// (The fulgur-ik6o spike experimented with `Definite` and
+    /// established that Taffy's block layout does not consult
+    /// `available_space.height` for mid-element splitting; see
+    /// `docs/plans/2026-04-28-pagination-layout-spike.md`.)
     ///
     /// `compute_root_layout` resets the layout's `location` to `(0, 0)`
     /// because it treats the node as a Taffy root. Body is *not* a real
@@ -255,28 +268,21 @@ impl<'a> PaginationLayoutTree<'a> {
             .map(|n| n.final_layout)
             .unwrap_or_default();
 
-        let avail_height = match self.strip_mode {
-            StripMode::MaxContent => AvailableSpace::MaxContent,
-            StripMode::Definite => AvailableSpace::Definite(self.page_height_px.max(1.0)),
-        };
-        // Constrained mode invalidates the cache so Taffy actually re-
-        // runs body's layout against the new available_space rather
-        // than returning the cached MaxContent result. Unconstrained
-        // mode is happy to read whatever Blitz already cached.
-        if matches!(self.strip_mode, StripMode::Definite) {
-            self.cache_clear(nid);
-        }
         let avail = Size {
             width: AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
-            height: avail_height,
+            height: AvailableSpace::MaxContent,
         };
         taffy::compute_root_layout(self, nid, avail);
 
-        // Restore the body's location so downstream readers (convert,
-        // paginate) see the same coordinates Blitz's first pass set.
+        // Restore body's full layout so downstream readers (convert,
+        // paginate) see byte-identical state to Blitz's first pass —
+        // examples_determinism would otherwise pick up sub-pixel
+        // float-rep differences when `compute_root_layout` re-stores
+        // the same logical values via `set_unrounded_layout` /
+        // `set_final_layout`.
         if let Some(node) = self.doc.get_node_mut(body_id) {
-            node.unrounded_layout.location = prior_unrounded.location;
-            node.final_layout.location = prior_final.location;
+            node.unrounded_layout = prior_unrounded;
+            node.final_layout = prior_final;
         }
     }
 
@@ -578,6 +584,12 @@ fn fragment_inline_root(
 /// `string-set` state across pages, mirroring
 /// [`crate::paginate::collect_string_set_states`].
 ///
+/// Currently exercised only by in-crate unit tests (no production
+/// consumer yet). The function is kept as the spike's documented
+/// extension point — when a future PR replaces Pageable's string-set
+/// walk, this gates off `#[cfg(test)]` and joins the public surface.
+#[cfg(test)]
+///
 /// For each page index 0..max_page:
 ///
 /// 1. Initialise per-name `start` from the previous page's `last`
@@ -657,6 +669,16 @@ pub fn collect_string_set_states(
 /// page (Chrome-compatible behaviour for paged media — see WPT
 /// fixedpos-* family).
 ///
+/// Production currently achieves per-page fixed-element repetition via
+/// `pageable::PositionedChild::is_fixed` (suppresses the y-shift in
+/// `clone_pc_with_offset` so the existing `out_of_flow` replication
+/// path leaves fixed elements at their viewport-relative coordinates).
+/// The geometry-table approach this function provides is kept under
+/// `#[cfg(test)]` as scaffolding for a future architecture where
+/// convert / render consume the spike's geometry directly. Both paths
+/// produce equivalent observable output today.
+#[cfg(test)]
+///
 /// `total_pages` is the document's resolved page count, typically
 /// computed from `PaginationGeometryTable`'s max `page_index + 1` after
 /// `run_pass*` has run. `0` is normalised to `1` so even an empty
@@ -730,11 +752,14 @@ pub fn append_position_fixed_fragments(
 
 /// Recursive walker that collects every node id whose computed
 /// `position` is `fixed`. Mirrors the helper of the same shape in
-/// `blitz_adapter::relayout_position_fixed` (branch
-/// `feat/fixedpos-viewport-cb`). Visits raw `node.children` rather
-/// than `layout_children` because the latter may be invalidated by
-/// the time this runs, and pseudo-elements (`::before` / `::after`)
+/// `blitz_adapter::relayout_position_fixed`. Visits raw `node.children`
+/// rather than `layout_children` because the latter may be invalidated
+/// by the time this runs, and pseudo-elements (`::before` / `::after`)
 /// live in `node.before` / `node.after` outside the children vec.
+///
+/// Test-only — only [`append_position_fixed_fragments`] uses it, and
+/// that function is `#[cfg(test)]`.
+#[cfg(test)]
 fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usize>, depth: usize) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
@@ -771,6 +796,9 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
 /// `1` (Pageable's "always at least one page" guarantee). Exposed as
 /// a helper so callers that need to thread `total_pages` into
 /// [`append_position_fixed_fragments`] can do so without re-computing.
+///
+/// Test-only today — paired with [`append_position_fixed_fragments`].
+#[cfg(test)]
 pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
     geometry
         .values()
@@ -1220,6 +1248,65 @@ mod tests {
         assert_eq!(g.fragments[0].page_index, 0);
     }
 
+    /// Exercises `PaginationLayoutTree`'s `LayoutPartialTree` /
+    /// `RoundTree` / `CacheTree` / `TraversePartialTree` impls
+    /// at runtime by routing body's layout through
+    /// `taffy::compute_root_layout`. Production reaches geometry via
+    /// `fragment_pagination_root` directly (see the docstring on
+    /// `drive_taffy_root_layout` for why), so this test is the only
+    /// runtime user of those trait impls — without it, `cargo build`
+    /// would still type-check the impls but no code path would actually
+    /// invoke them. Asserts the geometry the Taffy-driven path produces
+    /// matches the direct walk used in production.
+    ///
+    /// Both sides feed the same `ColumnStyleTable` so the parity check
+    /// covers the break-style-aware code path that production wires
+    /// through `run_pass_with_break_styles`. The fixture sets
+    /// `break-before: page` on the middle child so the geometry differs
+    /// from the style-unaware case (without the table all three blocks
+    /// pack onto page 0; with it, the middle block opens page 1).
+    #[test]
+    fn taffy_driven_dispatch_matches_direct_walk() {
+        let html = r#"
+            <html><body>
+              <div style="height: 200px"></div>
+              <div style="break-before: page; height: 200px"></div>
+              <div style="height: 200px"></div>
+            </body></html>
+        "#;
+
+        let direct_geom = {
+            let mut doc = parse(html, 600.0);
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table)
+        };
+
+        let taffy_geom = {
+            let mut doc = parse(html, 600.0);
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+            tree.column_styles = Some(&table);
+            tree.drive_taffy_root_layout();
+            tree.take_geometry()
+        };
+
+        // Sanity: the break-* branch actually fired — page_index 1
+        // appears at least once in the direct geometry.
+        assert!(
+            direct_geom
+                .values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "expected break-before: page to push a child onto page 1, got {direct_geom:?}"
+        );
+
+        assert_eq!(direct_geom.len(), taffy_geom.len());
+        for (id, direct) in &direct_geom {
+            let taffy = taffy_geom.get(id).expect("same node id in both passes");
+            assert_eq!(direct.fragments, taffy.fragments, "node {id}");
+        }
+    }
+
     #[test]
     fn implied_page_count_is_one_for_empty_geometry() {
         let geom = PaginationGeometryTable::new();
@@ -1303,20 +1390,14 @@ mod compare_with_pageable {
 
     /// Run the spike against the same HTML the Pageable side rendered.
     /// Re-parses (deterministic) so we get a fresh `BaseDocument` and
-    /// can mutate it without unsafe shenanigans.
+    /// can mutate it without unsafe shenanigans. Threads the column-
+    /// style side-table so `break-*` properties are honoured.
+    ///
+    /// (The fulgur-ik6o `StripMode::Definite` probe is no longer
+    /// reachable from production; its result is preserved in
+    /// `docs/plans/2026-04-28-pagination-layout-spike.md` follow-up
+    /// #2.)
     fn spike_page_count_for(html: &str) -> u32 {
-        spike_page_count_with_mode(html, super::StripMode::MaxContent)
-    }
-
-    /// fulgur-ik6o probe: re-run the spike with
-    /// `AvailableSpace::Definite(page_height_px)` instead of
-    /// `MaxContent`. Returns the spike's page count under that mode
-    /// for comparison.
-    fn spike_page_count_constrained(html: &str) -> u32 {
-        spike_page_count_with_mode(html, super::StripMode::Definite)
-    }
-
-    fn spike_page_count_with_mode(html: &str, mode: super::StripMode) -> u32 {
         use crate::blitz_adapter;
         let engine = Engine::builder().page_size(PageSize::A4).build();
         let cfg = engine.config();
@@ -1330,22 +1411,11 @@ mod compare_with_pageable {
         blitz_adapter::resolve(&mut doc);
         let column_styles = blitz_adapter::extract_column_style_table(&doc);
         let _multicol = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        // fulgur-k0g0: thread the column-style side-table so the
-        // fragmenter sees break-before / break-after / break-inside
-        // for fixtures that set them. The constrained-mode probe
-        // (fulgur-ik6o) does not yet honour break rules — that's
-        // intentional, the probe exists to compare available_space
-        // modes only.
-        let table = match mode {
-            super::StripMode::MaxContent => super::run_pass_with_break_styles(
-                doc.deref_mut(),
-                pt_to_px(cfg.content_height()),
-                &column_styles,
-            ),
-            super::StripMode::Definite => {
-                super::run_pass_constrained(doc.deref_mut(), pt_to_px(cfg.content_height()))
-            }
-        };
+        let table = super::run_pass_with_break_styles(
+            doc.deref_mut(),
+            pt_to_px(cfg.content_height()),
+            &column_styles,
+        );
         spike_page_count(&table)
     }
 
@@ -1589,30 +1659,6 @@ mod compare_with_pageable {
             disagreements.is_empty(),
             "Pageable vs spike disagreement (or unexpected agreement) for:\n  - {}",
             disagreements.join("\n  - "),
-        );
-    }
-
-    /// fulgur-ik6o probe: tabulate page counts under both
-    /// `StripMode::MaxContent` and `StripMode::Definite` for every
-    /// fixture, printed via `eprintln!` for human inspection. The test
-    /// itself only asserts that the constrained-mode pass does not
-    /// panic, so this serves as observation without locking in expected
-    /// outcomes — those go into the design doc once we know what
-    /// `AvailableSpace::Definite(page_height_px)` actually does.
-    #[test]
-    fn strip_mode_observation_table() {
-        let fixtures = fixtures();
-        eprintln!(
-            "┌ fixture ──────────────────────────────────────────── pageable max_content definite"
-        );
-        for (label, html, _) in &fixtures {
-            let pageable_pages = pageable_page_count(html) as u32;
-            let max_content = spike_page_count_for(html);
-            let definite = spike_page_count_constrained(html);
-            eprintln!("│ {label:<55} {pageable_pages:>9} {max_content:>11} {definite:>9}",);
-        }
-        eprintln!(
-            "└────────────────────────────────────────────────────────────────────────────────"
         );
     }
 }
