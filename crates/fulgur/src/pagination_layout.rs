@@ -602,6 +602,32 @@ impl<'a> PaginationLayoutTree<'a> {
                 .fragments
                 .push(frag);
 
+            // fulgur-s67g Phase 2.5: descend into the child's subtree
+            // and record per-node fragments for every visible
+            // descendant. Pageable's `paginate::collect_*` walks
+            // recurse into `BlockPageable`, `ListItemPageable`,
+            // wrapper types, and table cells; the spike side needs
+            // matching coverage so bookmark / counter / string-set
+            // markers attached to nested DOM elements (e.g. an `h2`
+            // inside a wrapper `<div>`) appear in geometry too.
+            //
+            // The descendant fragments live on the same page as
+            // their ancestor — exact mid-element split inside a
+            // body child is still future work (Phase 3 / Pageable
+            // replacement). Y / width / height come from the
+            // descendant's `final_layout` and are mainly
+            // informational; the parity gates that consume this
+            // geometry today read only `page_index`.
+            record_subtree_descendants(
+                &mut self.geometry,
+                self.doc,
+                child_id,
+                page_index,
+                cursor_y,
+                body_x + layout.location.x,
+                0,
+            );
+
             cursor_y += child_h;
             emitted += 1;
             prev_bottom_y_in_body = this_top_in_body + child_h;
@@ -622,6 +648,77 @@ impl<'a> PaginationLayoutTree<'a> {
         }
 
         emitted
+    }
+}
+
+/// fulgur-s67g Phase 2.5: recursively record fragments for every
+/// visible descendant of a body-direct child, attaching them to the
+/// same `page_index` as the ancestor.
+///
+/// `parent_page_y` is the parent's body-relative y position on the
+/// current page strip; `parent_x_in_body` is the parent's x position
+/// (already pre-resolved against `body_x`). For each descendant, the
+/// recorded fragment uses absolute body-relative coordinates
+/// computed by adding the descendant's `final_layout.location` to
+/// the parent's frame.
+///
+/// Skips zero-size descendants and bails at
+/// [`crate::MAX_DOM_DEPTH`] to keep recursion bounded against
+/// adversarial input.
+///
+/// Mid-element split inside a body child (a deeply nested element
+/// crossing the page boundary that the parent itself did not split
+/// at) is **not** modelled here — descendants land on the same page
+/// as their ancestor. This is the spike's "block-level only" gap;
+/// closing it requires the full per-strip layout pass that Phase 3
+/// (paginate.rs replacement) introduces.
+fn record_subtree_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    parent_id: usize,
+    page_index: u32,
+    parent_page_y: f32,
+    parent_x_in_body: f32,
+    depth: usize,
+) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(parent) = doc.get_node(parent_id) else {
+        return;
+    };
+    for &child_id in &parent.children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        let layout = child.final_layout;
+        let h = layout.size.height;
+        let w = layout.size.width;
+        if h <= 0.0 && w <= 0.0 {
+            continue;
+        }
+        let child_x = parent_x_in_body + layout.location.x;
+        let child_y = parent_page_y + layout.location.y;
+        geometry
+            .entry(child_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: child_x,
+                y: child_y,
+                width: w,
+                height: h,
+            });
+        record_subtree_descendants(
+            geometry,
+            doc,
+            child_id,
+            page_index,
+            child_y,
+            child_x,
+            depth + 1,
+        );
     }
 }
 
@@ -1335,6 +1432,46 @@ mod tests {
         assert!(tree.body_id.is_some(), "html5ever should synthesize a body");
         let table = run_pass(&mut doc, 800.0);
         assert_eq!(table.len(), 1, "expected only body fragment, got {table:?}");
+    }
+
+    /// fulgur-s67g Phase 2.5: nested descendants must be recorded
+    /// in the geometry table on the same page as their ancestor, so
+    /// bookmark / counter / string-set markers attached to deeply
+    /// nested DOM elements participate in parity assertions.
+    #[test]
+    fn nested_descendants_inherit_parent_page() {
+        let html = r#"
+            <html><body>
+              <div style="height: 600px">
+                <h2 style="height: 30px">Section 1</h2>
+              </div>
+              <div style="height: 600px">
+                <h2 style="height: 30px">Section 2</h2>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+
+        // Two outer divs split across two pages (600 + 600 > 800),
+        // each carrying a nested h2. Geometry should contain both
+        // outer divs AND both inner h2s — four entries total — with
+        // the h2 sharing its parent's page_index.
+        assert!(
+            table.len() >= 4,
+            "expected at least 4 entries (2 divs + 2 h2s), got {}",
+            table.len(),
+        );
+        let h2_pages: Vec<u32> = table
+            .values()
+            .filter(|g| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .map(|g| g.fragments[0].page_index)
+            .collect();
+        assert_eq!(h2_pages.len(), 2, "expected 2 h2 entries, got {h2_pages:?}");
+        // Pages of the h2s should match those of their containing divs:
+        // first div on page 0 → first h2 on page 0; second div on page
+        // 1 → second h2 on page 1.
+        assert_eq!(h2_pages, vec![0, 1]);
     }
 
     #[test]
