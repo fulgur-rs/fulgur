@@ -5,7 +5,7 @@ use super::*;
 /// pageable is produced; returns `None` otherwise so the caller falls
 /// through to the next dispatch stage.
 pub(super) fn try_convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
 ) -> Option<Box<dyn crate::pageable::Pageable>> {

@@ -1,5 +1,6 @@
 use super::inline_root;
 use super::*;
+use crate::blitz_adapter::{Marker, marker_skrifa_text, marker_to_string};
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
@@ -109,10 +110,7 @@ pub(super) fn resolve_inside_image_marker(
 
     let elem_data = node.element_data()?;
     let list_data = elem_data.list_item_data.as_ref()?;
-    if !matches!(
-        list_data.position,
-        blitz_dom::node::ListItemLayoutPosition::Inside
-    ) {
+    if !crate::blitz_adapter::is_list_position_inside(&list_data.position) {
         return None;
     }
     if first_line_height <= 0.0 {
@@ -143,7 +141,7 @@ pub(super) fn resolve_inside_image_marker(
 
 /// Extract shaped lines from a list marker's Parley layout.
 pub(super) fn extract_marker_lines(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
 ) -> (Vec<ShapedLine>, f32, f32) {
@@ -155,18 +153,13 @@ pub(super) fn extract_marker_lines(
         Some(d) => d,
         None => return (Vec::new(), 0.0, 0.0),
     };
-    let parley_layout = match &list_item_data.position {
-        blitz_dom::node::ListItemLayoutPosition::Outside(layout) => layout,
-        blitz_dom::node::ListItemLayoutPosition::Inside => return (Vec::new(), 0.0, 0.0),
+    let Some(parley_layout) =
+        crate::blitz_adapter::list_position_outside_layout(&list_item_data.position)
+    else {
+        return (Vec::new(), 0.0, 0.0);
     };
 
-    let marker_text = match &list_item_data.marker {
-        blitz_dom::node::Marker::Char(c) => {
-            let mut buf = [0u8; 4];
-            c.encode_utf8(&mut buf).to_string()
-        }
-        blitz_dom::node::Marker::String(s) => s.clone(),
-    };
+    let marker_text = marker_to_string(&list_item_data.marker);
 
     let mut shaped_lines = Vec::new();
     let mut max_width: f32 = 0.0;
@@ -246,18 +239,11 @@ pub(super) fn extract_marker_lines(
 /// Returns `None` only when no font source is available at all (empty `<li>`
 /// without asset fonts).
 pub(super) fn find_marker_font(
-    marker: &blitz_dom::node::Marker,
+    marker: &Marker,
     assets: Option<&AssetBundle>,
     children: &[PositionedChild],
 ) -> Option<(Arc<Vec<u8>>, u32)> {
-    let marker_text = match marker {
-        blitz_dom::node::Marker::Char(c) => {
-            let mut s = String::new();
-            s.push(*c);
-            s
-        }
-        blitz_dom::node::Marker::String(s) => s.clone(),
-    };
+    let marker_text = marker_to_string(marker);
     let check_chars: Vec<char> = marker_text.chars().filter(|c| !c.is_whitespace()).collect();
 
     // Try AssetBundle fonts first — check charmap coverage.
@@ -327,16 +313,13 @@ pub(super) fn find_marker_font(
 /// `x_advance` values are normalized by `font_size` following fulgur convention
 /// (see `extract_marker_lines`).
 pub(super) fn shape_marker_with_skrifa(
-    marker: &blitz_dom::node::Marker,
+    marker: &Marker,
     font_data: &Arc<Vec<u8>>,
     font_index: u32,
     font_size: f32,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
-    let text = match marker {
-        blitz_dom::node::Marker::Char(c) => format!("{c} "),
-        blitz_dom::node::Marker::String(s) => s.clone(),
-    };
+    let text = marker_skrifa_text(marker);
 
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
     let charmap = font_ref.charmap();

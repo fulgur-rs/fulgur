@@ -9,7 +9,7 @@ use super::{list_marker, positioned, pseudo};
 /// (when the node is not an inline root, or when the inline root has no text and
 /// no inline pseudo images and the caller's container path should run instead).
 pub(super) fn try_convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,
@@ -291,7 +291,7 @@ pub(super) fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
 /// descended from the same `<a>` share one `Arc<LinkSpan>` (pointer identity,
 /// required for later rect-dedup in PDF emission).
 pub(super) fn resolve_enclosing_anchor(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     start_id: usize,
 ) -> Option<(usize, LinkSpan)> {
     let mut cur = Some(start_id);
@@ -337,7 +337,7 @@ pub(super) fn resolve_enclosing_anchor(
 /// returning a `SpacerPageable` flows through as a zero-height content
 /// rather than dropping the inline-box.
 fn convert_inline_box_node(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -367,7 +367,7 @@ fn convert_inline_box_node(
 
 /// Extract a ParagraphPageable from an inline root node.
 pub(super) fn extract_paragraph(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,

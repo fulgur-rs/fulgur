@@ -15,7 +15,7 @@ use super::{inline_root, list_marker, positioned, pseudo};
 ///
 /// MUST run before table/replaced/inline_root/block dispatch (see plan).
 pub(super) fn try_convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,
@@ -38,10 +38,7 @@ pub(super) fn try_convert(
     // inline-root elements.
     if let Some(elem_data) = node.element_data()
         && elem_data.list_item_data.as_ref().is_some_and(|d| {
-            matches!(
-                d.position,
-                blitz_dom::node::ListItemLayoutPosition::Outside(_)
-            )
+            crate::blitz_adapter::list_position_outside_layout(&d.position).is_some()
         })
     {
         let (marker_lines, marker_width, marker_line_height) =
@@ -150,10 +147,7 @@ pub(super) fn try_convert(
     // skrifa and inject it into the first child ParagraphPageable.
     if let Some(elem_data) = node.element_data()
         && let Some(list_data) = &elem_data.list_item_data
-        && matches!(
-            list_data.position,
-            blitz_dom::node::ListItemLayoutPosition::Inside
-        )
+        && crate::blitz_adapter::is_list_position_inside(&list_data.position)
         && !node.flags.is_inline_root()
     {
         let marker = &list_data.marker;
@@ -317,7 +311,7 @@ pub(super) fn try_convert(
 /// pseudo-only items, and non-inline-root block child collection.
 #[allow(clippy::too_many_arguments)]
 fn build_list_item_body(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     style: BlockStyle,
     visible: bool,

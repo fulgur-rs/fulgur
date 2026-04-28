@@ -12,7 +12,7 @@ use super::{positioned, pseudo};
 /// Always reachable — the dispatcher invokes this last after every `try_convert` returns
 /// `None`. Consequently this fn does NOT return `Option`.
 pub(super) fn convert(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,

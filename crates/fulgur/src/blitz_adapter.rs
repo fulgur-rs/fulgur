@@ -23,6 +23,67 @@
 use blitz_dom::DocumentConfig;
 use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
+
+// Type re-exports for adapter isolation (fulgur-x92a)
+//
+// `blitz_dom` 型は alias として再公開する。call site が `use crate::blitz_adapter::Node`
+// と書けば、Blitz 内部での move/rename を adapter 内 1 箇所で吸収できる。
+// 同じ alias を adapter 自身の public API（例: `extract_content_image_url(node: &blitz_dom::Node)`）
+// が引数で受けるかは無関係——alias なので呼び出し元には透過。
+pub use blitz_dom::node::{ListItemLayoutPosition, Marker};
+pub use blitz_dom::{BaseDocument, Node, NodeData};
+
+/// `Marker` を空白追加なしの `String` に変換する。
+///
+/// `Marker::Char(c)` → `c.to_string()`、`Marker::String(s)` → `s.clone()`。
+/// `extract_marker_lines` と `find_marker_font` で使う。
+///
+/// Blitz 0.3 系で variant が増えた場合は adapter 内でハンドリングを追加すれば
+/// 呼び出し側 (convert/list_marker.rs) は無変更。
+pub fn marker_to_string(marker: &Marker) -> String {
+    match marker {
+        Marker::Char(c) => c.to_string(),
+        Marker::String(s) => s.clone(),
+    }
+}
+
+/// `Marker` を skrifa shape 入力用テキストに変換する（**非対称な空白付与**）。
+///
+/// - `Marker::Char(c)` → `format!("{c} ")`（**末尾空白あり**: Blitz の
+///   `build_inline_layout` が `format!("{char} ")` で生成するのと整合）
+/// - `Marker::String(s)` → `s.clone()`（空白なし: 通常 `"1. "` のように
+///   既に trailing space を含む形式が来る前提）
+///
+/// `shape_marker_with_skrifa` でのみ使用する。
+pub fn marker_skrifa_text(marker: &Marker) -> String {
+    match marker {
+        Marker::Char(c) => format!("{c} "),
+        Marker::String(s) => s.clone(),
+    }
+}
+
+/// `ListItemLayoutPosition::Outside(layout)` の場合に `Some(&layout)`、
+/// `Inside` の場合に `None` を返す。
+///
+/// `Outside` variant は `Box<parley::Layout<TextBrush>>` を持つが、call site が
+/// `.lines()` で auto-deref することを前提に `&parley::Layout<TextBrush>` を返す。
+///
+/// Blitz 0.3 系で variant 追加・rename された場合は adapter 内で吸収する。
+/// 呼び出し側 (convert/list_marker.rs / convert/list_item.rs) は本 helper 経由にすることで
+/// pattern match に直接さらされない。
+pub fn list_position_outside_layout(
+    pos: &ListItemLayoutPosition,
+) -> Option<&parley::Layout<blitz_dom::node::TextBrush>> {
+    match pos {
+        ListItemLayoutPosition::Outside(layout) => Some(layout.as_ref()),
+        ListItemLayoutPosition::Inside => None,
+    }
+}
+
+/// `ListItemLayoutPosition::Inside` であるかを返す boolean accessor。
+pub fn is_list_position_inside(pos: &ListItemLayoutPosition) -> bool {
+    matches!(pos, ListItemLayoutPosition::Inside)
+}
 use blitz_traits::net::NetProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use blitz_traits::net::Url;
@@ -3232,5 +3293,54 @@ li::marker { content: url("star.png"); }
             results.is_empty(),
             "empty text-content fallback must skip the outline entry, got: {results:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod marker_helper_tests {
+    use super::*;
+
+    #[test]
+    fn marker_to_string_char_returns_single_char_string() {
+        let m = Marker::Char('•');
+        assert_eq!(marker_to_string(&m), "•");
+    }
+
+    #[test]
+    fn marker_to_string_string_returns_owned_clone() {
+        let m = Marker::String("1.".to_string());
+        assert_eq!(marker_to_string(&m), "1.");
+    }
+
+    #[test]
+    fn marker_skrifa_text_char_appends_trailing_space() {
+        let m = Marker::Char('•');
+        assert_eq!(marker_skrifa_text(&m), "• ");
+    }
+
+    #[test]
+    fn marker_skrifa_text_string_keeps_as_is_no_trailing_space() {
+        // Marker::String は既に "1. " のように trailing space を含むケースを想定するため、
+        // helper では追加のスペースを付けない（list_marker.rs:336-339 と同等）。
+        let m = Marker::String("1.".to_string());
+        assert_eq!(marker_skrifa_text(&m), "1.");
+    }
+}
+
+#[cfg(test)]
+mod list_position_helper_tests {
+    use super::*;
+
+    #[test]
+    fn list_position_outside_layout_returns_none_for_inside() {
+        // ListItemLayoutPosition::Outside の生成は parley::Layout<TextBrush> を Box で持つため
+        // ユニットテストで構築するのが煩雑（parley::Layout は private な builder 経由）。
+        // ここでは "Inside の場合 None を返す" 性質だけ確認し、Outside の挙動は VRT に任せる。
+        assert!(list_position_outside_layout(&ListItemLayoutPosition::Inside).is_none());
+    }
+
+    #[test]
+    fn is_list_position_inside_returns_true_for_inside() {
+        assert!(is_list_position_inside(&ListItemLayoutPosition::Inside));
     }
 }

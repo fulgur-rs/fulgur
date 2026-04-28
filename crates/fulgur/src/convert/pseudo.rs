@@ -101,7 +101,7 @@ pub(super) fn effective_pseudo_size_px(
 /// so the absolute-pseudo path is picked up uniformly without duplicating
 /// boilerplate at every construction site.
 pub(super) fn wrap_with_pseudo_content(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
@@ -127,7 +127,7 @@ pub(super) fn wrap_with_pseudo_content(
 /// the asset is missing, `build_block_pseudo_images` later silently skips,
 /// which is harmless but slightly wasteful; that trade-off is fine because
 /// zero-size elements with `content: url()` are rare.
-pub(super) fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+pub(super) fn node_has_block_pseudo_image(doc: &BaseDocument, node: &Node) -> bool {
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_block_pseudo(pseudo)
@@ -146,7 +146,7 @@ pub(super) fn node_has_block_pseudo_image(doc: &blitz_dom::BaseDocument, node: &
 /// `<span class="icon"></span>` with `::before { content: url(...) }` through
 /// to `convert_node_inner` where the inline pseudo path can synthesize a
 /// `ParagraphPageable`.
-pub(super) fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+pub(super) fn node_has_inline_pseudo_image(doc: &BaseDocument, node: &Node) -> bool {
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
@@ -179,7 +179,7 @@ pub(super) fn node_has_inline_pseudo_image(doc: &blitz_dom::BaseDocument, node: 
 ///
 /// would be skipped by the zero-size-leaf branch of
 /// `collect_positioned_children` and the pseudo would never paint.
-pub(super) fn node_has_absolute_pseudo(doc: &blitz_dom::BaseDocument, node: &Node) -> bool {
+pub(super) fn node_has_absolute_pseudo(doc: &BaseDocument, node: &Node) -> bool {
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_absolutely_positioned(pseudo)
@@ -210,7 +210,7 @@ pub(super) fn node_has_absolute_pseudo(doc: &blitz_dom::BaseDocument, node: &Nod
 /// reserve space. Properly pushing content will be handled in a follow-up
 /// issue that round-trips the synthetic pseudo size through Taffy.
 pub(super) fn build_block_pseudo_images(
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     parent: &Node,
     parent_cb: ContentBox,
     assets: Option<&AssetBundle>,
@@ -320,7 +320,7 @@ pub(super) fn build_inline_pseudo_image(
 /// most one pseudo image.
 pub(super) fn attach_link_to_inline_image(
     img: &mut InlineImage,
-    doc: &blitz_dom::BaseDocument,
+    doc: &BaseDocument,
     origin_node_id: usize,
 ) {
     if let Some((_, span)) = inline_root::resolve_enclosing_anchor(doc, origin_node_id) {
