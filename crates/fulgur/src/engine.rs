@@ -246,6 +246,17 @@ impl Engine {
             map
         };
 
+        // fulgur-cj6u Phase 1.3: keep a copy of the string-set map for
+        // post-convert parity comparison. `convert::dom_to_pageable`
+        // drains the map via `.remove(&node_id)` as it wraps content
+        // with `StringSetWrapperPageable`, so by render time the
+        // version on `ConvertContext` is empty. The clone is small
+        // (one `Vec<(String, String)>` per node that declares
+        // `string-set`) and only used by the debug parity assertion
+        // — `cfg!(debug_assertions)` short-circuits the comparison
+        // in release.
+        let string_set_by_node_for_parity = string_set_by_node.clone();
+
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
             assets: self.assets.as_ref(),
@@ -274,6 +285,7 @@ impl Engine {
                 &running_store,
                 fonts,
                 &convert_ctx.pagination_geometry,
+                &string_set_by_node_for_parity,
             )
         }
     }
