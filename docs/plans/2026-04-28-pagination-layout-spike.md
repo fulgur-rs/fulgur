@@ -255,6 +255,26 @@ docstring) can plug a `Vec<Fragment>` per node into
    Parley). The spike's commit history is the concrete evidence that
    this design works in practice.
 
+### Resolved follow-ups (post-merge of follow-up #1)
+
+**Counter / string-set accumulation (fulgur-6tco)**: added
+`pagination_layout::collect_string_set_states` that walks
+`PaginationGeometryTable` page-by-page and threads per-name
+`StringSetPageState` (`start` / `first` / `last`) across fragments,
+mirroring `paginate::collect_string_set_states` — markers fire only
+on a node's first appearance (subsequent split fragments do not
+re-emit), and `last` carries forward as the next page's `start`.
+`StringSetPageState` gained `PartialEq` / `Eq` derives so the
+spike's tests can compare structs directly. Three unit tests cover
+carry across pages with first/last divergence, split-paragraph
+markers fire once not per-fragment, and empty geometry returns one
+empty page (Pageable's "always at least one page" convention). Full
+end-to-end parity vs `paginate::collect_string_set_states` is
+implicit: both functions implement the same algorithm against
+isomorphic input. A direct Pageable-vs-spike comparison test is
+deferred until the spike has a path to consume the engine's real
+GCPM `string_set_by_node` map (today's tests use synthetic input).
+
 **Do not merge** the spike branch as-is. Either:
 
 - Land it behind a feature flag for follow-up issues to extend, or

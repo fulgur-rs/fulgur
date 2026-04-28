@@ -9,7 +9,7 @@ use crate::pageable::{
 };
 
 /// Per-page state for a named string.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StringSetPageState {
     /// Value at start of page (carried from previous page's `last`).
     pub start: Option<String>,
