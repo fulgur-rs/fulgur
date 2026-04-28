@@ -337,6 +337,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -371,6 +372,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -408,6 +410,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };

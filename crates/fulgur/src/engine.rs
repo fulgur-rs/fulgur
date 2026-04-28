@@ -201,20 +201,12 @@ impl Engine {
 
         // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
         // body's children's existing `final_layout` (populated by
-        // `resolve()` and `multicol_layout::run_pass`) and records
-        // per-node page fragments in a `PaginationGeometryTable`. The
-        // returned table is currently *observational only* — no convert
-        // / render path consumes it yet, but routing the call through
-        // the production code path:
-        //
-        // - replaces the previous `#![allow(dead_code)]` blanket
-        //   permission with a single drop-the-result call site so
-        //   `cargo build` / `cargo clippy` warn truthfully when an item
-        //   becomes orphaned,
-        // - gives follow-up work (counter / string-set replacement,
-        //   per-page fixed repetition redesign, etc.) a stable hand-off
-        //   point: capture the table on `ConvertContext` instead of
-        //   dropping it.
+        // `resolve()` and `multicol_layout::run_pass`) and produces a
+        // per-node `PaginationGeometryTable`. fulgur-cj6u Phase 1.1
+        // captures the result on `ConvertContext` so future consumers
+        // — parity assertion, counter / string-set replacement,
+        // per-page fixed repetition redesign — can read it without
+        // re-walking layout.
         //
         // Side-effect safety: `run_pass_with_break_styles` is a
         // read-only walk of `final_layout` via
@@ -227,7 +219,7 @@ impl Engine {
         // `pagination_layout.rs` module docs). VRT /
         // examples_determinism / WPT all stay byte-identical with
         // this call inserted.
-        let _pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
             crate::convert::pt_to_px(self.config.content_height()),
             &column_styles,
@@ -263,6 +255,7 @@ impl Engine {
             bookmark_by_node,
             column_styles,
             multicol_geometry,
+            pagination_geometry,
             link_cache: Default::default(),
             viewport_size_px: Some((
                 crate::convert::pt_to_px(self.config.content_width()),
@@ -354,6 +347,13 @@ impl Engine {
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        // fulgur-cj6u Phase 1.1: capture pagination geometry on
+        // ConvertContext for parity with the production path.
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
@@ -365,6 +365,7 @@ impl Engine {
             bookmark_by_node: HashMap::new(),
             column_styles,
             multicol_geometry,
+            pagination_geometry,
             link_cache: Default::default(),
             viewport_size_px: Some((
                 crate::convert::pt_to_px(self.config.content_width()),

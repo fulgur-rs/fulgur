@@ -114,6 +114,16 @@ pub struct ConvertContext<'a> {
     /// Keyed by container `usize` NodeId — same convention as
     /// `column_styles`.
     pub multicol_geometry: crate::multicol_layout::MulticolGeometryTable,
+    /// fulgur-cj6u Phase 1.1: per-body-child page-fragment geometry
+    /// recorded by [`crate::pagination_layout::run_pass_with_break_styles`].
+    /// Currently captured but not yet consumed — the next phase
+    /// (parity assertion) reads `implied_page_count` from this table
+    /// and compares it to `paginate(...).len()` to catch divergence
+    /// between the spike fragmenter and Pageable's split decisions.
+    /// Empty when the document had no body or no in-flow children.
+    /// Keyed by source `usize` NodeId — same convention as
+    /// `column_styles` and `multicol_geometry`.
+    pub pagination_geometry: crate::pagination_layout::PaginationGeometryTable,
     /// Anchor (`<a href>`) resolution cache shared across the entire
     /// conversion. Lifted out of `extract_paragraph` because inline-box
     /// extraction recurses through `convert_node → extract_paragraph`, and a
@@ -823,6 +833,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -872,6 +883,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -937,6 +949,7 @@ mod tests {
             bookmark_by_node,
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -1005,6 +1018,7 @@ mod tests {
                 bookmark_by_node: ::std::collections::HashMap::new(),
                 column_styles: $crate::column_css::ColumnStyleTable::new(),
                 multicol_geometry: $crate::multicol_layout::MulticolGeometryTable::new(),
+                pagination_geometry: ::std::collections::BTreeMap::new(),
                 link_cache: Default::default(),
                 viewport_size_px: None,
             }
