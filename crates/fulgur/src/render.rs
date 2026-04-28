@@ -138,6 +138,45 @@ fn assert_pageable_spike_parity(
     );
 }
 
+/// fulgur-cj6u Phase 1.3: in debug builds, assert that the spike's
+/// `pagination_layout::collect_string_set_states` produces the same
+/// per-page `(start, first, last)` shape Pageable's tree walk does.
+/// Same skip semantics as `assert_pageable_spike_parity`: empty
+/// geometry → spike pass not run; release builds compile to a no-op.
+///
+/// `string_set_by_node` is the engine-side `HashMap`; the spike
+/// wants a `BTreeMap` (deterministic iteration), so we materialise
+/// one once for the comparison. The conversion is debug-only via
+/// `cfg!(debug_assertions)`.
+fn assert_string_set_states_parity(
+    pageable_states: &[BTreeMap<String, crate::paginate::StringSetPageState>],
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
+) {
+    if !cfg!(debug_assertions) || geometry.is_empty() {
+        return;
+    }
+    let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    let spike_states =
+        crate::pagination_layout::collect_string_set_states(geometry, &by_node_btree);
+    debug_assert_eq!(
+        pageable_states.len(),
+        spike_states.len(),
+        "string-set state vec length drift: pageable={} spike={}",
+        pageable_states.len(),
+        spike_states.len(),
+    );
+    for (idx, (pg, sp)) in pageable_states.iter().zip(spike_states.iter()).enumerate() {
+        debug_assert_eq!(
+            pg, sp,
+            "string-set state drift on page {idx}:\n  pageable = {pg:#?}\n  spike    = {sp:#?}",
+        );
+    }
+}
+
 /// Build krilla Metadata from Config.
 fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
     let mut metadata = krilla::metadata::Metadata::new();
@@ -269,6 +308,7 @@ pub fn render_to_pdf_with_gcpm(
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
     pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
+    string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
 ) -> Result<Vec<u8>> {
     // Resolve the default (no-selector) CSS @page margin for initial pagination.
     // :first/:left/:right overrides are applied per-page during rendering below.
@@ -316,6 +356,21 @@ pub fn render_to_pdf_with_gcpm(
     } else {
         crate::paginate::collect_string_set_states(&pages)
     };
+    // fulgur-cj6u Phase 1.3: parity-check the spike's geometry-table-
+    // driven `collect_string_set_states` against Pageable's tree walk.
+    // Same activation gates as the page-count parity (Phase 1.2):
+    // skipped when @page rules differ or running elements are
+    // present, because both shift the body view between the two paths.
+    if !gcpm.string_set_mappings.is_empty()
+        && (content_height - config.content_height()).abs() < 0.001
+        && gcpm.running_mappings.is_empty()
+    {
+        assert_string_set_states_parity(
+            &string_set_states,
+            pagination_geometry,
+            string_set_by_node,
+        );
+    }
     let running_states = if gcpm.running_mappings.is_empty() {
         vec![BTreeMap::new(); pages.len()]
     } else {
@@ -985,6 +1040,7 @@ mod tests {
             &RunningElementStore::new(),
             &[],
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1002,6 +1058,7 @@ mod tests {
             &RunningElementStore::new(),
             &[],
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1018,6 +1075,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -1042,6 +1100,7 @@ mod tests {
             &gcpm,
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -1077,6 +1136,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
