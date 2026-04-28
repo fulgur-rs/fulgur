@@ -356,6 +356,38 @@ impl<'a> PaginationLayoutTree<'a> {
         let body_w = body_layout.size.width;
         let body_x = body_layout.location.x;
 
+        // fulgur-s67g Phase 2.3 (counter parity follow-up): record
+        // body itself as a fragment on page 0. Pageable wraps `body`
+        // with `CounterOpWrapperPageable` /
+        // `StringSetWrapperPageable` /
+        // `BookmarkMarkerWrapperPageable` whenever those features are
+        // declared on `body`, and the wrapper's `split` keeps the
+        // marker on the **first** half — so body's own counter-reset
+        // / string-set / bookmark ops fire only on page 0
+        // (`pageable.rs:2829-2840` etc.).
+        //
+        // Without this entry the spike's geometry table excludes body
+        // entirely; `collect_counter_states` /
+        // `collect_string_set_states` / `collect_bookmark_entries`
+        // miss body's ops and the parity gates fire on documents like
+        // `tests/gcpm_integration::test_counter_set` (body has
+        // `counter-reset: chapter` declared on it). The body fragment
+        // sits ahead of every body-direct-child entry in NodeId order
+        // (Blitz allocates ids depth-first during parse, so `body` is
+        // smaller than its descendants), so per-page walks pick up
+        // body's ops first, matching Pageable's tree-walk order.
+        self.geometry
+            .entry(body_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: 0,
+                x: body_x,
+                y: 0.0,
+                width: body_w,
+                height: body_layout.size.height,
+            });
+
         let children = self
             .doc
             .get_node(body_id)
@@ -422,6 +454,34 @@ impl<'a> PaginationLayoutTree<'a> {
                 body_w
             };
             if child_h <= 0.0 {
+                // Phase 2.3 fix: zero-height **element** nodes still
+                // need to enter geometry so their counter /
+                // string-set / bookmark markers participate in the
+                // parity walks. Pageable emits these via
+                // `convert::collect_positioned_children`'s dedicated
+                // `emit_*_markers` helpers when a 0×0 child is
+                // encountered (e.g.
+                // `<div class="reset" style="..."></div>` carrying a
+                // `counter-set` declaration). The fragment carries
+                // height 0 so it does not advance the cursor — only
+                // the NodeId matters for the per-page metadata walks.
+                // Whitespace-only text nodes are already filtered
+                // above; running and abs/fixed elements are filtered
+                // before this branch.
+                if child.element_data().is_some() {
+                    self.geometry
+                        .entry(child_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: body_x + layout.location.x,
+                            y: cursor_y,
+                            width: child_w,
+                            height: 0.0,
+                        });
+                    emitted += 1;
+                }
                 continue;
             }
 
@@ -802,6 +862,73 @@ pub fn collect_string_set_states(
     result
 }
 
+/// fulgur-s67g Phase 2.3: walk the geometry table page-by-page and
+/// replay counter operations in document order, returning the
+/// cumulative counter snapshot at the end of each page. Mirrors
+/// [`crate::paginate::collect_counter_states`] which walks the
+/// Pageable tree to collect the same data.
+///
+/// Same source-order assumption as
+/// [`collect_string_set_states`]: the per-node counter ops are
+/// applied in the order they appear in the body's children list,
+/// approximated by `BTreeMap<NodeId, _>` iteration. Nested counter
+/// declarations on descendants of body's direct children are not in
+/// the spike's geometry today and are silently dropped — same scope
+/// limitation as `fragment_pagination_root` itself.
+///
+/// Used by fulgur-cj6u Phase 1.x parity gates extension in
+/// `render_to_pdf_with_gcpm`. Drift between Pageable's counter walk
+/// and the spike's geometry-driven walk is the regression signal
+/// for counter-correctness on documents with `counter-increment` /
+/// `counter-reset` / `counter-set`.
+pub fn collect_counter_states(
+    geometry: &PaginationGeometryTable,
+    counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+) -> Vec<BTreeMap<String, i32>> {
+    use crate::gcpm::CounterOp;
+    use crate::gcpm::counter::CounterState;
+
+    let max_page = geometry
+        .values()
+        .flat_map(|g| g.fragments.iter())
+        .map(|f| f.page_index)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
+
+    // For each page, the list of nodes whose first fragment lands
+    // there, in NodeId (≈ source) order.
+    let mut nodes_per_page: Vec<Vec<usize>> = vec![Vec::new(); max_page as usize];
+    for (&node_id, geom) in geometry {
+        if let Some(first_frag) = geom.fragments.first()
+            && (first_frag.page_index as usize) < nodes_per_page.len()
+        {
+            nodes_per_page[first_frag.page_index as usize].push(node_id);
+        }
+    }
+
+    let mut state = CounterState::new();
+    let mut result: Vec<BTreeMap<String, i32>> = Vec::with_capacity(nodes_per_page.len());
+
+    for nodes in &nodes_per_page {
+        for node_id in nodes {
+            let Some(ops) = counter_ops_by_node.get(node_id) else {
+                continue;
+            };
+            for op in ops {
+                match op {
+                    CounterOp::Reset { name, value } => state.reset(name, *value),
+                    CounterOp::Increment { name, value } => state.increment(name, *value),
+                    CounterOp::Set { name, value } => state.set(name, *value),
+                }
+            }
+        }
+        result.push(state.snapshot());
+    }
+
+    result
+}
+
 /// fulgur-jkl5: enumerate `position: fixed` elements and emit one
 /// fragment per page so downstream rendering can repeat them on every
 /// page (Chrome-compatible behaviour for paged media — see WPT
@@ -1129,27 +1256,27 @@ mod tests {
     }
 
     #[test]
-    fn empty_document_emits_no_fragments() {
+    fn empty_document_emits_only_body_fragment() {
         let mut doc = parse("<html><body></body></html>", 600.0);
         let table = run_pass(&mut doc, 800.0);
-        assert!(
-            table.is_empty(),
-            "no children → no fragments, got {table:?}"
-        );
+        // Phase 2.3 fix: body itself is now recorded so its own
+        // counter / string-set / bookmark ops are visible to the
+        // parity walks. Empty body → just the body fragment.
+        assert_eq!(table.len(), 1, "expected only body fragment, got {table:?}");
     }
 
     #[test]
     fn html_only_input_still_paginates_synthesized_body() {
         // html5ever synthesizes `<body>` for any HTML input, so
         // `find_body_id` always succeeds in the parse pipeline. The
-        // synthesized body contains no children, so the pass emits no
-        // fragments — which is the behaviour Pageable produces for the
-        // same input.
+        // synthesized body has no children — the geometry table
+        // still contains the body fragment itself (Phase 2.3 fix)
+        // but no child entries.
         let mut doc = parse("<html></html>", 600.0);
         let tree = PaginationLayoutTree::new(&mut doc, 800.0);
         assert!(tree.body_id.is_some(), "html5ever should synthesize a body");
         let table = run_pass(&mut doc, 800.0);
-        assert!(table.is_empty(), "empty body → no fragments, got {table:?}");
+        assert_eq!(table.len(), 1, "expected only body fragment, got {table:?}");
     }
 
     #[test]
@@ -1165,7 +1292,9 @@ mod tests {
         "#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
-        assert_eq!(table.len(), 3, "expected 3 entries, got {}", table.len());
+        // Phase 2.3 fix: body itself is recorded too, so total = 4
+        // (body + 3 child divs). All on page 0.
+        assert_eq!(table.len(), 4, "expected 4 entries, got {}", table.len());
         for (id, geom) in &table {
             assert_eq!(
                 geom.fragments.len(),
@@ -1189,12 +1318,14 @@ mod tests {
         "#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
-        assert_eq!(table.len(), 2);
+        // Phase 2.3 fix: body + 2 children = 3 entries.
+        // Body fragment is page 0; children are 0, 1.
+        assert_eq!(table.len(), 3);
         let pages: Vec<u32> = table.values().map(|g| g.fragments[0].page_index).collect();
         assert_eq!(
             pages,
-            vec![0, 1],
-            "first child page 0, second child page 1, got {pages:?}"
+            vec![0, 0, 1],
+            "body page 0, first child page 0, second child page 1, got {pages:?}"
         );
     }
 
@@ -1551,15 +1682,15 @@ mod tests {
         "#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
-        assert_eq!(table.len(), 1);
-        let geom = table.values().next().unwrap();
-        assert_eq!(geom.fragments.len(), 1);
-        assert_eq!(geom.fragments[0].page_index, 0);
-        assert!(
-            (geom.fragments[0].height - 1000.0).abs() < 1.0,
-            "expected ~1000, got {}",
-            geom.fragments[0].height
-        );
+        // Phase 2.3 fix: body + 1 oversized child = 2 entries.
+        assert_eq!(table.len(), 2);
+        // The oversized child is the entry whose height ≈ 1000.
+        let oversize = table
+            .values()
+            .find(|g| (g.fragments[0].height - 1000.0).abs() < 1.0)
+            .expect("oversized child fragment");
+        assert_eq!(oversize.fragments.len(), 1);
+        assert_eq!(oversize.fragments[0].page_index, 0);
     }
 }
 
