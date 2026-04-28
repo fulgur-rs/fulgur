@@ -494,3 +494,27 @@ fn repeating_linear_gradient_with_hint_renders_via_engine() {
     let pdf = Engine::builder().build().render_html(html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn position_fixed_inside_absolute_relayouts_against_viewport() {
+    // Regression for fulgur-tbxs (WPT fixedpos-002): when `position: fixed` is
+    // nested inside a shrink-to-fit `position: absolute` ancestor, the first
+    // Taffy pass collapses Fixed → Absolute and sizes the fixed element
+    // against the abs's narrow box. Without `relayout_position_fixed`, the
+    // text "Hello" wraps to multiple lines because the fixed box inherits
+    // ~30px from `width:30px`. The second-pass relayout rebuilds the fixed
+    // subtree against the page area, so the fixed element ends up wide
+    // enough to fit "Hello" on a single line. We assert via PDF byte length
+    // because the smoke crate doesn't pull in pdftocairo for raster diff —
+    // a relayouted PDF reliably comes out a few hundred bytes lighter than
+    // the wrapped-multiline alternative when content is identical.
+    let html = r#"<html><body style="margin:0">
+<div style="position:absolute; width:30px; height:300vh">
+  outer
+  <div style="position:fixed; bottom:0">Hello</div>
+</div>
+</body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}

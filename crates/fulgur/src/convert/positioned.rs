@@ -260,10 +260,21 @@ fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
 /// parent chains, matching the defensive bounds applied elsewhere in
 /// `convert.rs` (`debug_print_tree`, `collect_positioned_children`,
 /// `resolve_enclosing_anchor`).
-fn resolve_cb_for_absolute(doc: &BaseDocument, parent: &Node, is_fixed: bool) -> Option<AbsCb> {
-    let mut offset_x = parent.final_layout.location.x;
-    let mut offset_y = parent.final_layout.location.y;
-    let mut cur_id = parent.parent;
+fn resolve_cb_for_absolute(
+    doc: &BaseDocument,
+    parent: &Node,
+    is_fixed: bool,
+    viewport_size_px: Option<(f32, f32)>,
+) -> Option<AbsCb> {
+    // Walk starts at `parent` itself (offset = 0, 0) so that abs/fixed
+    // children of `<body>` resolve against body. Without this seed, the
+    // loop began at `parent.parent` and never visited body when the abs
+    // descendant's direct parent IS body — leaving body_fallback unset
+    // and falling through to Taffy's `final_layout.location`, which is
+    // (0, 0) for a body whose Taffy height collapsed to zero.
+    let mut offset_x = 0.0_f32;
+    let mut offset_y = 0.0_f32;
+    let mut cur_id = Some(parent.id);
     let mut body_fallback: Option<AbsCb> = None;
     let mut depth: usize = 0;
 
@@ -286,7 +297,23 @@ fn resolve_cb_for_absolute(doc: &BaseDocument, parent: &Node, is_fixed: bool) ->
         }
         if let Some(elem) = cur.element_data() {
             if elem.name.local.as_ref() == "body" {
-                let (padding_box_size, border_top_left) = cb_padding_box(cur);
+                let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
+                // Initial CB approximation: when body's Taffy size collapses
+                // to zero (no in-flow children, e.g. fixedpos-* family) but
+                // the engine knows the page area, swap in the viewport
+                // dimensions per CSS 2.1 §10.1.5 / §10.6.4 — the CB for
+                // `position: fixed` is the viewport, and a body-anchored
+                // `position: absolute` with no positioned ancestor uses the
+                // initial CB. We keep the body's actual padding box when it
+                // is non-zero so explicit `body { height: ... }` still wins.
+                if let Some((vw, vh)) = viewport_size_px {
+                    if padding_box_size.0 <= 0.0 {
+                        padding_box_size.0 = vw;
+                    }
+                    if padding_box_size.1 <= 0.0 {
+                        padding_box_size.1 = vh;
+                    }
+                }
                 body_fallback = Some(AbsCb {
                     padding_box_size,
                     border_top_left,
@@ -375,9 +402,13 @@ pub(super) fn build_absolute_pseudo_children(
         //     pseudos whose `final_layout.size` is `(0, 0)` (Taffy gives
         //     a wrong location for `right` / `bottom` in that case).
         let cb = if is_position_fixed(pseudo) {
-            *cb_fixed.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, true))
+            *cb_fixed.get_or_insert_with(|| {
+                resolve_cb_for_absolute(doc, node, true, ctx.viewport_size_px)
+            })
         } else if parent_is_static {
-            *cb_absolute.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, false))
+            *cb_absolute.get_or_insert_with(|| {
+                resolve_cb_for_absolute(doc, node, false, ctx.viewport_size_px)
+            })
         } else {
             let (padding_box_size, border_top_left) = cb_padding_box(node);
             Some(AbsCb {
@@ -526,9 +557,13 @@ pub(super) fn build_absolute_non_pseudo_children(
         }
 
         let cb = if is_position_fixed(child_node) {
-            *cb_fixed.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, true))
+            *cb_fixed.get_or_insert_with(|| {
+                resolve_cb_for_absolute(doc, node, true, ctx.viewport_size_px)
+            })
         } else if parent_is_static {
-            *cb_absolute.get_or_insert_with(|| resolve_cb_for_absolute(doc, node, false))
+            *cb_absolute.get_or_insert_with(|| {
+                resolve_cb_for_absolute(doc, node, false, ctx.viewport_size_px)
+            })
         } else {
             let (padding_box_size, border_top_left) = cb_padding_box(node);
             Some(AbsCb {

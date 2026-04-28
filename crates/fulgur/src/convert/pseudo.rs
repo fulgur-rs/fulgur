@@ -673,6 +673,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
 
@@ -722,6 +723,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
 
@@ -796,6 +798,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -854,6 +857,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();
@@ -903,6 +907,7 @@ mod tests {
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
             link_cache: Default::default(),
+            viewport_size_px: None,
         };
         let tree = dom_to_pageable(&doc, &mut ctx);
         let mut images = Vec::new();

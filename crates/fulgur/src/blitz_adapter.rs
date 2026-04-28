@@ -320,6 +320,82 @@ pub fn resolve(doc: &mut HtmlDocument) {
     doc.resolve(0.0);
 }
 
+/// Re-run Taffy layout on every `position: fixed` subtree using the page area
+/// as available space. CSS 2.1 §10.1.5 specifies the initial containing block
+/// (viewport) as the CB for `position: fixed`, but `stylo_taffy::convert`
+/// flattens `Position::Fixed` to `Position::Absolute` (see crate
+/// `stylo_taffy/src/convert.rs:215`), so the main `doc.resolve(0.0)` pass
+/// lays each fixed element out against its nearest positioned ancestor
+/// instead. The result is a fixed element shrink-to-fit-clipped to the
+/// ancestor's narrow box, which surfaces as wrap differences in
+/// `css/css-page/fixedpos-*` reftests.
+///
+/// This second pass walks the DOM, collects every `position: fixed` node id,
+/// and calls `taffy::compute_root_layout` on each subtree as if it were a
+/// document root, with `available_space` set to the page area in CSS px.
+/// Taffy's caching keys on `(node_id, inputs)`, so the new inputs (different
+/// available space than the first pass used) bypass the cache and overwrite
+/// `unrounded_layout`. We then `round_layout` to populate `final_layout`.
+///
+/// The position math (which page bottom, which CB origin) is still resolved
+/// by `convert::positioned::build_absolute_*_children` against the
+/// viewport-anchored CB, so this pass only needs to fix the *size*.
+///
+/// Page-repetition of fixed content (Chrome's "should repeat on every page"
+/// behavior in WPT fixedpos-* tests) is intentionally **not** done here —
+/// that's a paginate-time concern owned by `crate::paginate`.
+pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewport_h_px: f32) {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    use std::ops::DerefMut;
+
+    let mut fixed_ids: Vec<usize> = Vec::new();
+    let root_id = doc.root_element().id;
+    collect_position_fixed_ids(doc, root_id, &mut fixed_ids, 0);
+    if fixed_ids.is_empty() {
+        return;
+    }
+
+    let avail = taffy::Size {
+        width: taffy::AvailableSpace::Definite(viewport_w_px),
+        height: taffy::AvailableSpace::Definite(viewport_h_px),
+    };
+
+    let base = doc.deref_mut();
+    for id in fixed_ids {
+        let nid = taffy::NodeId::from(id);
+        taffy::compute_root_layout(base, nid, avail);
+        taffy::round_layout(base, nid);
+    }
+
+    fn collect_position_fixed_ids(
+        doc: &HtmlDocument,
+        node_id: usize,
+        out: &mut Vec<usize>,
+        depth: usize,
+    ) {
+        if depth >= crate::MAX_DOM_DEPTH {
+            return;
+        }
+        let Some(node) = doc.get_node(node_id) else {
+            return;
+        };
+        let is_fixed = node
+            .primary_styles()
+            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed));
+        if is_fixed {
+            out.push(node_id);
+        }
+        // Use raw children, not layout_children — layout_children may already
+        // be invalidated by the time the second-pass relayout runs, and we
+        // want every styled fixed element regardless of whether the first
+        // pass touched it.
+        let children = node.children.clone();
+        for child_id in children {
+            collect_position_fixed_ids(doc, child_id, out, depth + 1);
+        }
+    }
+}
+
 /// Walk the DOM for inline `<style>` elements and fold every stylesheet's
 /// GCPM context into one. This is the inline-HTML counterpart of the
 /// link-loaded context returned by [`parse_html_with_local_resources`].
