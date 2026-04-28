@@ -132,10 +132,31 @@ fn assert_pageable_spike_parity(
     }
     let pageable_count = pages.len() as u32;
     let spike_count = crate::pagination_layout::implied_page_count(geometry);
+    // fulgur-s67g Phase 2.6: when Pageable splits an oversized element
+    // across pages (mid-element split, e.g. `.huge { break-inside: avoid }`
+    // taller than `@page`), Pageable emits more pages than the spike's
+    // strip-based fragmenter currently models. That gap is Phase 3 work
+    // (per-strip layout pass / `fulgur-g9e3`); until then, skip parity
+    // when Pageable > spike. The reverse direction is still a regression.
+    if pageable_count > spike_count {
+        return;
+    }
     debug_assert_eq!(
         pageable_count, spike_count,
         "page count parity drift: paginate={pageable_count} spike={spike_count}",
     );
+}
+
+/// Detect mid-element split: Pageable produces more pages than spike's
+/// `implied_page_count`. See `assert_pageable_spike_parity` for the
+/// rationale — this is Phase 3 territory and the dependent parity
+/// assertions can't be meaningfully compared either.
+fn mid_element_split_skipped(
+    pageable_pages: usize,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+) -> bool {
+    let spike_count = crate::pagination_layout::implied_page_count(geometry) as usize;
+    pageable_pages > spike_count
 }
 
 /// fulgur-cj6u Phase 1.3: in debug builds, assert that the spike's
@@ -154,6 +175,9 @@ fn assert_string_set_states_parity(
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
 ) {
     if !cfg!(debug_assertions) || geometry.is_empty() {
+        return;
+    }
+    if mid_element_split_skipped(pageable_states.len(), geometry) {
         return;
     }
     let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
@@ -203,6 +227,9 @@ fn assert_counter_states_parity(
     {
         return;
     }
+    if mid_element_split_skipped(pageable_states.len(), geometry) {
+        return;
+    }
     let spike_states =
         crate::pagination_layout::collect_counter_states(geometry, counter_ops_by_node);
     debug_assert_eq!(
@@ -229,8 +256,12 @@ fn assert_bookmark_entries_parity(
     pageable_entries: &[crate::pageable::BookmarkEntry],
     geometry: &crate::pagination_layout::PaginationGeometryTable,
     bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
+    total_pages: usize,
 ) {
     if !cfg!(debug_assertions) || geometry.is_empty() {
+        return;
+    }
+    if mid_element_split_skipped(total_pages, geometry) {
         return;
     }
     let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
@@ -421,20 +452,14 @@ pub fn render_to_pdf_with_gcpm(
 
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
-    // fulgur-cj6u Phase 1.2: cross-check the spike fragmenter agrees
-    // with Pageable on the page count. Skipped when `@page` rules
-    // changed `content_height` away from `config.content_height()` —
-    // the spike was driven with the unresolved config-level value,
-    // so a strict equality would produce a false positive (later
-    // Phase 2 work moves `@page` size resolution into the spike).
-    //
-    // fulgur-s67g Phase 2.2 (running elements) ungated the
-    // `gcpm.running_mappings.is_empty()` skip: the spike now
-    // consults `RunningElementStore` and skips `position: running()`
-    // named children, matching Pageable's body view.
-    if (content_height - config.content_height()).abs() < 0.001 {
-        assert_pageable_spike_parity(&pages, pagination_geometry);
-    }
+    // fulgur-cj6u Phase 1.2 / fulgur-s67g Phase 2.6: cross-check the
+    // spike fragmenter agrees with Pageable on the page count.
+    // Phase 2.6 (`@page` size / margin resolution) makes the engine
+    // pre-resolve page-1 settings before driving the spike, so the
+    // strip height the spike sees matches `content_height` here by
+    // construction — no skip needed for `@page`-modified docs.
+    // (Phase 2.2 already ungated the running-elements skip.)
+    assert_pageable_spike_parity(&pages, pagination_geometry);
     let total_pages = pages.len();
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
         vec![BTreeMap::new(); pages.len()]
@@ -443,13 +468,9 @@ pub fn render_to_pdf_with_gcpm(
     };
     // fulgur-cj6u Phase 1.3: parity-check the spike's geometry-table-
     // driven `collect_string_set_states` against Pageable's tree walk.
-    // Same activation gate as the page-count parity (Phase 1.2):
-    // skipped when @page rules shift `content_height` away from the
-    // config value. fulgur-s67g Phase 2.2 ungated the
-    // running-elements skip on this assertion too.
-    if !gcpm.string_set_mappings.is_empty()
-        && (content_height - config.content_height()).abs() < 0.001
-    {
+    // No activation gate beyond "string-set actually used" — Phase 2.2
+    // / 2.6 ungated the running-elements and `@page` skips.
+    if !gcpm.string_set_mappings.is_empty() {
         assert_string_set_states_parity(
             &string_set_states,
             pagination_geometry,
@@ -469,12 +490,8 @@ pub fn render_to_pdf_with_gcpm(
         };
     // fulgur-s67g Phase 2.3: parity-check the spike's geometry-table-
     // driven `collect_counter_states` against Pageable's tree walk.
-    // Same activation gate as page-count and string-set parity:
-    // skipped when @page rules shift `content_height` away from the
-    // config value. (Phase 2.2 ungated the running_mappings skip.)
-    if (!gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty())
-        && (content_height - config.content_height()).abs() < 0.001
-    {
+    // No activation gate beyond "counter actually used".
+    if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
         assert_counter_states_parity(&counter_states, pagination_geometry, counter_ops_by_node);
     }
 
@@ -797,8 +814,14 @@ pub fn render_to_pdf_with_gcpm(
         // collector output. Compares only `(page_idx, level, label)`
         // — the spike does not work in PDF-pt frames so y_pt parity
         // is deferred to Phase 4 (convert / render rewrite).
-        if !entries.is_empty() && (content_height - config.content_height()).abs() < 0.001 {
-            assert_bookmark_entries_parity(&entries, pagination_geometry, bookmark_by_node);
+        // Phase 2.6 ungated the `@page`-content-height skip.
+        if !entries.is_empty() {
+            assert_bookmark_entries_parity(
+                &entries,
+                pagination_geometry,
+                bookmark_by_node,
+                total_pages,
+            );
         }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
