@@ -333,6 +333,14 @@ impl<'a> PaginationLayoutTree<'a> {
         let mut page_index: u32 = 0;
         let mut cursor_y: f32 = 0.0;
         let mut emitted = 0usize;
+        // Tracks the bottom edge of the previously emitted in-flow child
+        // in body-content-box coordinates. Used to pick up inter-child
+        // gaps (collapsed margins, padding) that Blitz baked into each
+        // child's `final_layout.location.y` but the cursor-only walk
+        // would otherwise miss. Pageable accumulates `pc.y + child_h`
+        // from `final_layout.location.y` during convert, so margin gaps
+        // are present in the Pageable side; the spike must match.
+        let mut prev_bottom_y_in_body: f32 = 0.0;
 
         for child_id in children {
             let Some(child) = self.doc.get_node(child_id) else {
@@ -345,6 +353,22 @@ impl<'a> PaginationLayoutTree<'a> {
             {
                 continue;
             }
+            // CSS 2.1 §10.6.4: out-of-flow elements (`position: absolute`
+            // / `position: fixed`) do not contribute to their containing
+            // block's normal-flow height. Pageable routes them through
+            // `PositionedChild { out_of_flow: true }` and they never
+            // advance pagination cursors; the spike must match or the
+            // fulgur-cj6u Phase 1.2 parity assertion fires on documents
+            // with abs/fixed body-direct children.
+            {
+                use ::style::properties::longhands::position::computed_value::T as Pos;
+                let is_out_of_flow = child.primary_styles().is_some_and(|s| {
+                    matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                });
+                if is_out_of_flow {
+                    continue;
+                }
+            }
             let layout = child.final_layout;
             let child_h = layout.size.height;
             let child_w = if layout.size.width > 0.0 {
@@ -355,6 +379,15 @@ impl<'a> PaginationLayoutTree<'a> {
             if child_h <= 0.0 {
                 continue;
             }
+
+            // Pick up the inter-child gap in body coordinates (collapsed
+            // top/bottom margins, body padding before the first child)
+            // before any break / overflow logic so the cursor reflects
+            // Blitz's flow positions. `max(0.0)` guards against negative
+            // gaps from sibling overlap (rare with default UA styles).
+            let this_top_in_body = layout.location.y;
+            let gap = (this_top_in_body - prev_bottom_y_in_body).max(0.0);
+            cursor_y += gap;
 
             // fulgur-k0g0: read break-before / break-after / break-inside
             // for this child from the column-style side-table (shared with
@@ -411,6 +444,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 page_index = new_page_index;
                 cursor_y = new_cursor_y;
                 emitted += frag_count;
+                prev_bottom_y_in_body = this_top_in_body + child_h;
                 if matches!(
                     break_props.break_after,
                     Some(crate::pageable::BreakAfter::Page)
@@ -448,6 +482,7 @@ impl<'a> PaginationLayoutTree<'a> {
 
             cursor_y += child_h;
             emitted += 1;
+            prev_bottom_y_in_body = this_top_in_body + child_h;
 
             // `break-after: page` forces a page boundary after the
             // child. A trailing break on the last in-flow child does
