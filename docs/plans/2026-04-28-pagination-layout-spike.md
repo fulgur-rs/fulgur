@@ -172,7 +172,29 @@ docstring) can plug a `Vec<Fragment>` per node into
    `break-before: page`. Cheap, expands the agreement to a few
    `break-*` fixtures.
 
-   **Filed as fulgur-k0g0.**
+   **Filed as fulgur-k0g0. Resolved (2026-04-28)**: reused the
+   existing `column_css::ColumnStyleTable` (already harvested by
+   `extract_column_style_table` and consumed by Pageable via
+   `extract_pagination_from_column_css`) instead of building a
+   separate `BreakStyleTable`. New `run_pass_with_break_styles`
+   entry threads it into `PaginationLayoutTree` as an optional
+   borrow. `fragment_pagination_root` checks
+   `props.break_before == Some(Page)` before each child and
+   advances the page when there is in-flow content above; checks
+   `props.break_after == Some(Page)` after; checks `break_inside ==
+   Some(Avoid)` to suppress inline line splitting and fall back to
+   the block path. Two new harness fixtures (`break-before`,
+   `break-after`) flipped to agreement; a third (`break-inside:
+   avoid` on a tall paragraph) intentionally diverges — see below.
+
+   **Side-finding**: the spike honours `break-inside: avoid` on
+   inline roots (paragraphs); Pageable does not. `paragraph.rs:945`
+   `ParagraphPageable::split` never checks `self.pagination.
+   break_inside`, so a tall paragraph with `avoid` still splits at
+   line boundaries on the Pageable side. The spike behaviour is
+   correct per CSS Fragmentation §3.3. Recorded as `expected_
+   agreement = false` for the relevant fixture; fixing Pageable is
+   out of spike scope.
 
 2. **per-strip `available_space` constraint experiment**
    — change `drive_taffy_root_layout` to call
