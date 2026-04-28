@@ -598,6 +598,117 @@ mod compare_with_pageable {
                 </body></html>"#,
                 true,
             ),
+            // ── vh / percentage observation fixtures ──────────────────
+            //
+            // These probe the cases the block-only spike is *expected* to
+            // disagree with Pageable on. Marking them
+            // `expected_agreement = false` documents the divergence; once
+            // the spike grows mid-element splitting, flip these to `true`
+            // and use the test as a regression gate.
+            (
+                "single 100vh div (taller than content area)",
+                // A4: viewport height = page height (842pt = 1122 CSS
+                // px), but content height = 770pt = 1027 CSS px. A 100vh
+                // box is 1122px, ~95px taller than one page strip.
+                // Surprise: both report 1 page. Pageable's
+                // `BlockPageable::split` returns `Err(unsplit)` for a
+                // body whose only child is a single oversized empty
+                // box (no break point inside, refusing to emit an empty
+                // page first), and the spike's `cursor_y > 0` guard does
+                // the same on its side. Convergent fallback rather than
+                // shared correctness — flagged here to remember.
+                r#"<html><body>
+                    <div style="height: 100vh"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "two 50vh divs sum to 100vh (overflows content area)",
+                // 2 × 50vh = 1122 CSS px (same total as 100vh). Spike:
+                // first 50vh = 561 px (cursor 0 → 561, no break since
+                // cursor was 0). Second 50vh would push cursor to 1122
+                // > 1027 → break, second block on page 1. Total 2 pages.
+                // Pageable should produce 2 pages too because the second
+                // block doesn't fit. Expected: agreement at 2 pages.
+                r#"<html><body>
+                    <div style="height: 50vh"></div>
+                    <div style="height: 50vh"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "one 1028px div (just over content area)",
+                // 1px taller than A4 content (~1027 CSS px). Same
+                // convergent fallback as the 100vh case — both sides
+                // report 1 page because neither will split a single
+                // oversized empty first child (no inner break point on
+                // an empty `<div>`, no useful split). Recorded to
+                // confirm the 1px-over case behaves the same as the
+                // 95px-over `100vh` case.
+                r#"<html><body>
+                    <div style="height: 1028px"></div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "nested 100% height with no parent height resolves to zero",
+                // CSS 2.1 §10.5: percentage height resolves to `auto`
+                // when the containing block has no explicit height. Both
+                // sides should produce a single empty page (the divs
+                // collapse). The spike's measurement walk reads
+                // final_layout, so it sees the same zero-height boxes
+                // Pageable converts. Expected: both report 1 page.
+                r#"<html><body>
+                    <div style="height: 100%">
+                        <div style="height: 100%"></div>
+                    </div>
+                </body></html>"#,
+                true,
+            ),
+            (
+                "long paragraph wraps into multiple pages",
+                // The block-only spike's known weak case: inline content.
+                // Pageable wraps a tall paragraph into `ParagraphPageable`
+                // which knows about Parley line boxes and splits at line
+                // boundaries → multi-page. The spike sees the paragraph
+                // as a single block child and emits it as one oversized
+                // fragment on page 0 → 1 page. Surface the divergence
+                // explicitly so a future inline-aware fragmenter can
+                // flip this fixture to `expected_agreement = true` as
+                // its acceptance test.
+                // 50px font-size + line-height 1.5 → ~75 px per line.
+                // Lorem ipsum block wraps into ~70 lines at A4 content
+                // width → ~5250 px total, comfortably overflowing 2+
+                // pages. Pageable's `ParagraphPageable::split` (line
+                // boundaries) should split it across pages. The spike's
+                // `fragment_pagination_root` sees one block child with
+                // a 5000+ px height and emits it whole → 1 page.
+                r#"<html><body><p style="font-size: 50px; line-height: 1.5">
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
+                    do eiusmod tempor incididunt ut labore et dolore magna
+                    aliqua. Ut enim ad minim veniam, quis nostrud exercitation
+                    ullamco laboris nisi ut aliquip ex ea commodo consequat.
+                    Duis aute irure dolor in reprehenderit in voluptate velit
+                    esse cillum dolore eu fugiat nulla pariatur. Excepteur sint
+                    occaecat cupidatat non proident, sunt in culpa qui officia
+                    deserunt mollit anim id est laborum.
+                </p></body></html>"#,
+                false,
+            ),
+            (
+                "small lead block then oversized block forces page break",
+                // 100px small + 1100px tall block. Spike: cursor 0 → 100,
+                // then 100+1100=1200 > 1027 → break, oversized block
+                // emits whole on page 1. Total 2 pages. Pageable behaves
+                // similarly: small fits page 0, oversized doesn't fit
+                // remaining 927px so it pushes to page 1. Expected
+                // agreement at 2 pages.
+                r#"<html><body>
+                    <div style="height: 100px"></div>
+                    <div style="height: 1100px"></div>
+                </body></html>"#,
+                true,
+            ),
         ]
     }
 
