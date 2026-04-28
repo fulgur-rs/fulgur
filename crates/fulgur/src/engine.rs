@@ -199,6 +199,40 @@ impl Engine {
         // and docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
+        // Run the pagination_layout Taffy hook (fulgur-4cbc). Drives
+        // `compute_root_layout` against the body to populate a per-node
+        // `PaginationGeometryTable`. The returned table is currently
+        // *observational only* — no convert / render path consumes it
+        // yet, but routing the call through production code path:
+        //
+        // - keeps the spike's `LayoutPartialTree` wrapper exercised by
+        //   every `Engine::render_html` invocation rather than only by
+        //   in-crate unit tests, so a regression in the wrapper surfaces
+        //   in real workloads instead of waiting for someone to flip a
+        //   feature flag,
+        // - replaces the previous `#![allow(dead_code)]` blanket
+        //   permission with a single drop-the-result call site so
+        //   `cargo build` / `cargo clippy` warn truthfully when an item
+        //   becomes orphaned,
+        // - gives follow-up work (counter / string-set replacement,
+        //   per-page fixed repetition redesign, etc.) a stable hand-off
+        //   point: capture the table on `ConvertContext` instead of
+        //   dropping it.
+        //
+        // Side-effect safety: `run_pass_with_break_styles` invokes
+        // `taffy::compute_root_layout(&mut tree, body_id, MaxContent)`
+        // which hits Blitz's existing cache (the original
+        // `resolve()` already laid body out at the same available
+        // space), and the wrapper restores body's `location` after
+        // the call so downstream `convert::dom_to_pageable` sees the
+        // same coordinates Blitz produced. VRT / examples_determinism
+        // / WPT all stay byte-identical with this call inserted.
+        let _pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
+
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {
