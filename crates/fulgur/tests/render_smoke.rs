@@ -569,3 +569,60 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
          meaning it kept the 37.5pt parent-abs width and Parley wrapped"
     );
 }
+
+/// fulgur-jkl5: position:fixed elements must repeat on every page in
+/// multi-page output. Renders a 2-page document with a fixed div
+/// containing visible text, then runs `pdftotext` per page to verify
+/// the text appears on **both** pages — the previous behaviour
+/// (out_of_flow with abs-CB y-shift) caused fixed elements to be
+/// rendered off-screen on every page after the first.
+#[test]
+fn position_fixed_repeats_on_every_page() {
+    use fulgur::{Engine, PageSize};
+
+    let html = r#"<html><body>
+          <div style="height: 600px"></div>
+          <div style="height: 600px"></div>
+          <div style="position: fixed; top: 10px; left: 20px;
+                      width: 200px; height: 50px">FXFXFX</div>
+        </body></html>"#;
+    let engine = Engine::builder().page_size(PageSize::A4).build();
+    let pdf = engine.render_html(html).expect("render");
+
+    // We do not have an inline PDF text extractor; pdftotext is the
+    // canonical "did this glyph render on this page" probe used in
+    // examples_determinism. Skip the assertion gracefully when not
+    // available so the test is informative on dev machines without
+    // poppler installed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pdf_path = dir.path().join("out.pdf");
+    std::fs::write(&pdf_path, &pdf).unwrap();
+    if std::process::Command::new("pdftotext")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
+        eprintln!("pdftotext not available; skipping per-page text assertion");
+        return;
+    }
+
+    let extract = |page: u32| {
+        std::process::Command::new("pdftotext")
+            .args(["-f", &page.to_string(), "-l", &page.to_string(), "-layout"])
+            .arg(&pdf_path)
+            .arg("-")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default()
+    };
+
+    assert!(
+        extract(1).contains("FXFXFX"),
+        "page 1 should contain FXFXFX"
+    );
+    assert!(
+        extract(2).contains("FXFXFX"),
+        "page 2 should also contain FXFXFX (per-page repetition for position:fixed)"
+    );
+}

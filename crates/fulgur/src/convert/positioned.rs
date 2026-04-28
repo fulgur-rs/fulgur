@@ -154,6 +154,7 @@ pub(super) fn collect_positioned_children(
             x: cx,
             y: cy,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
 
@@ -166,6 +167,7 @@ pub(super) fn collect_positioned_children(
             x: 0.0,
             y: 0.0,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
 
@@ -494,12 +496,15 @@ pub(super) fn build_absolute_pseudo_children(
         let child = build_absolute_pseudo_child(doc, node, pseudo, pseudo_id, cb, ctx, depth);
         // CSS 2.1 §10.6.4: abs pseudos are out-of-flow — they don't add to
         // the parent's flow height and replicate across pagination splits
-        // anchored to their CB.
+        // anchored to their CB. fulgur-jkl5: a `::before { position: fixed }`
+        // pseudo needs the same is_fixed flag so its y stays viewport-
+        // anchored on every page.
         out.push(PositionedChild {
             child,
             x: x_pt,
             y: y_pt,
             out_of_flow: true,
+            is_fixed: is_position_fixed(pseudo),
         });
     }
     out
@@ -618,11 +623,15 @@ pub(super) fn build_absolute_non_pseudo_children(
         };
 
         let child = convert_node(doc, child_id, ctx, depth + 1);
+        // fulgur-jkl5: position: fixed children must repeat on every
+        // page at the same viewport coordinates, so we suppress the
+        // y-shift applied to position: absolute on page splits.
         out.push(PositionedChild {
             child,
             x: x_pt,
             y: y_pt,
             out_of_flow: true,
+            is_fixed: is_position_fixed(child_node),
         });
     }
     out

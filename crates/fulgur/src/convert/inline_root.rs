@@ -121,6 +121,7 @@ pub(super) fn try_convert(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
@@ -179,6 +180,7 @@ pub(super) fn try_convert(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,

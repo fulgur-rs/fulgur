@@ -323,6 +323,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             out_of_flow: false,
+            is_fixed: false,
         }
     }
 
@@ -434,6 +435,7 @@ mod tests {
                 x: 0.0,
                 y: 80.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ]);
         block.wrap(100.0, 1000.0);
@@ -492,24 +494,28 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: make_spacer(80.0),
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: marker_b,
                 x: 0.0,
                 y: 120.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: make_spacer(80.0),
                 x: 0.0,
                 y: 120.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ]);
         let pages = paginate(Box::new(block), 200.0, 100.0);
@@ -622,18 +628,21 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: Box::new(m2),
                 x: 0.0,
                 y: 120.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
             PositionedChild {
                 child: make_spacer(80.0),
                 x: 0.0,
                 y: 120.0,
                 out_of_flow: false,
+                is_fixed: false,
             },
         ]);
         let pages = paginate(Box::new(block), 200.0, 100.0);
