@@ -170,6 +170,19 @@ impl Engine {
         }
 
         crate::blitz_adapter::resolve(&mut doc);
+        // Second layout pass: re-run Taffy on every `position: fixed` subtree
+        // with the page area as available space. Without this, stylo_taffy
+        // collapses Fixed → Absolute and lays each fixed element out against
+        // its nearest positioned ancestor, producing wrong sizes whenever the
+        // fixed element is nested inside a shrink-to-fit abs (fixedpos-002 et
+        // al.). The position math itself is corrected later inside
+        // `convert::positioned::build_absolute_*_children` via the body cb_h
+        // viewport fallback in `resolve_cb_for_absolute`.
+        crate::blitz_adapter::relayout_position_fixed(
+            &mut doc,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
 
         // Harvest Phase A `column-*` properties (column-fill, column-rule-*)
         // that stylo 0.8.0 gates behind its gecko engine. The side-table is
@@ -217,6 +230,10 @@ impl Engine {
             column_styles,
             multicol_geometry,
             link_cache: Default::default(),
+            viewport_size_px: Some((
+                crate::convert::pt_to_px(self.config.content_width()),
+                crate::convert::pt_to_px(self.config.content_height()),
+            )),
         };
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
@@ -291,6 +308,16 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         crate::blitz_adapter::resolve(&mut doc);
+        // Mirror the production pipeline so structural tests of the
+        // Pageable tree see the same layout as `render_html` produces.
+        // Without this, position:fixed subtrees keep their first-pass
+        // (Absolute-flattened) sizes and any test asserting fixed
+        // geometry would diverge from what the renderer outputs.
+        crate::blitz_adapter::relayout_position_fixed(
+            &mut doc,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
@@ -305,6 +332,10 @@ impl Engine {
             column_styles,
             multicol_geometry,
             link_cache: Default::default(),
+            viewport_size_px: Some((
+                crate::convert::pt_to_px(self.config.content_width()),
+                crate::convert::pt_to_px(self.config.content_height()),
+            )),
         };
         crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
     }
