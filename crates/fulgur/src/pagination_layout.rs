@@ -539,6 +539,22 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// paragraph-local coords would push the bottom past
 /// `page_height_px - paragraph_top_in_body`.
 ///
+/// fulgur-s67g Phase 2.1 (widow / orphan): each candidate split point
+/// must leave the **first** fragment with `>= ORPHANS_MIN` lines and
+/// the **remainder** of the paragraph with `>= WIDOWS_MIN` lines.
+/// When neither holds at the natural overflow point, the split is
+/// skipped — subsequent lines accumulate into the current fragment
+/// (overflow-tolerant) until a valid split is found or the paragraph
+/// ends. This matches the Pageable side: `ParagraphPageable::split`
+/// (paragraph.rs:973-983) returns `None` when widows/orphans cannot
+/// be honoured, which the outer `BlockPageable::split` resolves by
+/// emitting the whole paragraph at the current position (oversized
+/// or pushed to a fresh page by sibling-driven flow).
+///
+/// Pageable hard-codes `orphans = widows = 2` via `Pagination::default()`
+/// (`pageable.rs:268-275`). CSS `orphans` / `widows` properties are
+/// not parsed today, so the spike uses the same constants.
+///
 /// Output:
 ///
 /// - On a single-page paragraph (no overflow), one Fragment is appended
@@ -547,6 +563,10 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// - On a multi-page paragraph, one Fragment per page is appended. The
 ///   final `cursor_y` is the height consumed on the last page (lines
 ///   ending on a partial page leave room for a following sibling).
+/// - On a paragraph with too few lines to honour orphans+widows
+///   simultaneously (`< ORPHANS_MIN + WIDOWS_MIN` lines total), no
+///   split is taken — the paragraph emits as one fragment, possibly
+///   oversized.
 ///
 /// Edge case: if the very first line on a fresh page is taller than
 /// the page strip, the line is emitted as an oversized fragment (no
@@ -562,6 +582,12 @@ fn fragment_inline_root(
     page_height_px: f32,
     line_metrics: &[(f32, f32)],
 ) -> (u32, f32, usize) {
+    /// CSS 3 Fragmentation default for `orphans`. Matches Pageable's
+    /// `Pagination::default()`.
+    const ORPHANS_MIN: usize = 2;
+    /// CSS 3 Fragmentation default for `widows`.
+    const WIDOWS_MIN: usize = 2;
+
     if line_metrics.is_empty() {
         return (initial_page_index, initial_cursor_y, 0);
     }
@@ -570,12 +596,27 @@ fn fragment_inline_root(
     let mut paragraph_top_in_body = initial_cursor_y;
     let mut fragment_start_idx: usize = 0;
     let mut emitted = 0usize;
+    let total_lines = line_metrics.len();
 
     for (i, &(_line_top_local, line_bottom_local)) in line_metrics.iter().enumerate() {
         let frag_top_local = line_metrics[fragment_start_idx].0;
         let projected_bottom_in_body = paragraph_top_in_body + (line_bottom_local - frag_top_local);
 
         if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
+            // fulgur-s67g Phase 2.1: honour widow / orphan minimums.
+            let first_size = i - fragment_start_idx;
+            let remaining_size = total_lines - i;
+            if first_size < ORPHANS_MIN || remaining_size < WIDOWS_MIN {
+                // Cannot split here without violating widow/orphan.
+                // Skip — keep accumulating into the current fragment.
+                // If no future split point honours both constraints,
+                // the loop falls through to "emit final fragment"
+                // below and the paragraph emits as a single oversized
+                // fragment — matching Pageable's `split → None` →
+                // outer-emits-whole fallback.
+                continue;
+            }
+
             // Lines [fragment_start_idx, i) fit on the current page.
             // Emit them as one fragment, advance to the next page, and
             // start the next fragment at line i.
@@ -1360,6 +1401,80 @@ mod tests {
             height: 1.0,
         });
         assert_eq!(super::implied_page_count(&geom), 3);
+    }
+
+    /// fulgur-s67g Phase 2.1: a 3-line paragraph that overflows the
+    /// page strip after line 2 cannot split between line 2 and the
+    /// final line — the second fragment would have only 1 line, below
+    /// the widows = 2 minimum. Spike emits the paragraph whole.
+    #[test]
+    fn widow_minimum_blocks_single_line_tail_fragment() {
+        let mut geom = PaginationGeometryTable::new();
+        // Each line 75px; cumulative bottoms at 75, 150, 225.
+        // Page strip = 200, so naturally we'd split at line 2 (bottom
+        // 225 > 200), leaving 1 line in the tail — widow violated.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
+        let (new_page, new_cursor, emitted) = super::fragment_inline_root(
+            &mut geom, /*child_id=*/ 1, /*paragraph_x=*/ 0.0, /*width=*/ 100.0,
+            /*initial_cursor_y=*/ 0.0, /*initial_page_index=*/ 0,
+            /*page_height_px=*/ 200.0, &lines,
+        );
+        assert_eq!(emitted, 1, "widow violation → single oversized fragment");
+        assert_eq!(new_page, 0);
+        assert!(
+            (new_cursor - 225.0).abs() < 0.01,
+            "cursor advances by full paragraph height, got {new_cursor}",
+        );
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert_eq!(frags.len(), 1);
+        assert_eq!(frags[0].page_index, 0);
+    }
+
+    /// fulgur-s67g Phase 2.1: a 4-line paragraph splittable at line 2
+    /// (first 2 lines on page 0, last 2 on page 1) honours both
+    /// orphans = 2 and widows = 2.
+    #[test]
+    fn widow_orphan_minimum_allows_balanced_split() {
+        let mut geom = PaginationGeometryTable::new();
+        // Each line 75px; bottoms at 75, 150, 225, 300.
+        // Page strip = 200 → natural split at line 2 (bottom 225 > 200).
+        // first_size = 2 ≥ orphans, remaining_size = 2 ≥ widows. Split OK.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0), (225.0, 300.0)];
+        let (new_page, new_cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines);
+        assert_eq!(emitted, 2, "valid split → 2 fragments");
+        assert_eq!(new_page, 1);
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].page_index, 0);
+        assert_eq!(frags[1].page_index, 1);
+        // First fragment: lines 0-1 (height = 150).
+        assert!((frags[0].height - 150.0).abs() < 0.01);
+        // Second fragment: lines 2-3 (height = 150 in para-local).
+        assert!((frags[1].height - 150.0).abs() < 0.01);
+        // cursor_y on page 1 = paragraph_top_in_body (0.0) + 150 = 150.
+        assert!((new_cursor - 150.0).abs() < 0.01);
+    }
+
+    /// fulgur-s67g Phase 2.1: orphan violation. A 3-line paragraph
+    /// with overflow at line 1 (only line 0 fits) would put just 1
+    /// line in the first fragment — below orphans = 2. No split; emit
+    /// whole.
+    #[test]
+    fn orphan_minimum_blocks_single_line_head_fragment() {
+        let mut geom = PaginationGeometryTable::new();
+        // Lines 75px; bottoms at 75, 150, 225.
+        // Page strip = 100 → natural split at line 1 (bottom 150 > 100).
+        // first_size = 1 < orphans=2. Don't split.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
+        let (new_page, _new_cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 100.0, &lines);
+        assert_eq!(emitted, 1, "orphan violation → single oversized fragment");
+        assert_eq!(new_page, 0);
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert_eq!(frags.len(), 1);
+        assert_eq!(frags[0].page_index, 0);
+        assert!((frags[0].height - 225.0).abs() < 0.01);
     }
 
     #[test]
