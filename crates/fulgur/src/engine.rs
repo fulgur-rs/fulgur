@@ -270,6 +270,14 @@ impl Engine {
                 .iter()
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
+        // fulgur-s67g Phase 2.4: same pattern for bookmark_by_node —
+        // ConvertContext drains it via `.remove()` while wrapping
+        // content with `BookmarkMarkerWrapperPageable`.
+        let bookmark_by_node_for_parity: BTreeMap<usize, crate::blitz_adapter::BookmarkInfo> =
+            bookmark_by_node
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
 
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
@@ -301,6 +309,7 @@ impl Engine {
                 &convert_ctx.pagination_geometry,
                 &string_set_by_node_for_parity,
                 &counter_ops_by_node_for_parity,
+                &bookmark_by_node_for_parity,
             )
         }
     }
