@@ -224,9 +224,42 @@ impl Engine {
         // fragmenter skips `position: running()` named children. They
         // belong in `@page` margin boxes, not body flow, so including
         // their height would over-count and diverge from Pageable.
+        //
+        // fulgur-s67g Phase 2.6 (`@page` size / margin resolution):
+        // resolve the page-1 size + margin from `gcpm.page_settings`
+        // before driving the spike, so its strip height matches
+        // `render_to_pdf_with_gcpm`'s `content_height` exactly. Both
+        // sides use the page-1 result for *all* pages — Pageable
+        // does the same in `render.rs:283-291` and does not re-resolve
+        // per-page size for `:left` / `:right` / named selectors.
+        // This lets the parity gates drop the
+        // `(content_height - config.content_height()).abs() < 0.001`
+        // skip: documents that override page size / margin via
+        // `@page { size: ...; margin: ...; }` now feed the spike a
+        // matching strip height by construction.
+        let default_page_rules: Vec<_> = gcpm
+            .page_settings
+            .iter()
+            .filter(|r| r.page_selector.is_none())
+            .cloned()
+            .collect();
+        let (resolved_page_size, resolved_page_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &default_page_rules,
+                1,
+                0,
+                &self.config,
+            );
+        let resolved_page_size = if resolved_landscape {
+            resolved_page_size.landscape()
+        } else {
+            resolved_page_size
+        };
+        let resolved_content_height_pt =
+            resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
         let pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
             doc.deref_mut(),
-            crate::convert::pt_to_px(self.config.content_height()),
+            crate::convert::pt_to_px(resolved_content_height_pt),
             &column_styles,
             &running_store,
         );
