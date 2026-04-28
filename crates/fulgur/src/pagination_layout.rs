@@ -574,6 +574,84 @@ fn fragment_inline_root(
     (page_index, cursor_y, emitted)
 }
 
+/// fulgur-6tco: walk the geometry table page-by-page to thread
+/// `string-set` state across pages, mirroring
+/// [`crate::paginate::collect_string_set_states`].
+///
+/// For each page index 0..max_page:
+///
+/// 1. Initialise per-name `start` from the previous page's `last`
+///    (the carry).
+/// 2. For each node id whose **first** fragment lands on this page,
+///    apply its `(name, value)` markers in NodeId order — records
+///    `first` (only set once per page per name) and updates `last`
+///    plus the carry for subsequent pages.
+///
+/// Markers fire only on a node's first appearance: when an inline
+/// root spans two pages, its second-page fragment does **not** re-
+/// emit the marker. This matches Pageable's invariant that
+/// `StringSetWrapperPageable.markers` "always travel with the content
+/// they describe" (`paginate.rs:91-96`) — markers attach to the
+/// first split fragment.
+///
+/// Source-order assumption: `geometry` is a `BTreeMap<usize, ..>` so
+/// iteration is by ascending NodeId. For body's direct children that
+/// matches DOM source order, since Blitz allocates ids sequentially
+/// during parse. Nested string-set declarations (markers attached to
+/// a `<span>` inside a `<p>`) are not in the spike's geometry table
+/// today and so are silently dropped — same scope limitation as
+/// `fragment_pagination_root` itself.
+pub fn collect_string_set_states(
+    geometry: &PaginationGeometryTable,
+    string_set_by_node: &std::collections::HashMap<usize, Vec<(String, String)>>,
+) -> Vec<BTreeMap<String, crate::paginate::StringSetPageState>> {
+    let max_page = geometry
+        .values()
+        .flat_map(|g| g.fragments.iter())
+        .map(|f| f.page_index)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
+
+    // For each page, the list of nodes whose first fragment lands
+    // there, in NodeId (≈ source) order.
+    let mut nodes_per_page: Vec<Vec<usize>> = vec![Vec::new(); max_page as usize];
+    for (&node_id, geom) in geometry {
+        if let Some(first_frag) = geom.fragments.first()
+            && (first_frag.page_index as usize) < nodes_per_page.len()
+        {
+            nodes_per_page[first_frag.page_index as usize].push(node_id);
+        }
+    }
+
+    let mut result: Vec<BTreeMap<String, crate::paginate::StringSetPageState>> =
+        Vec::with_capacity(nodes_per_page.len());
+    let mut carry: BTreeMap<String, String> = BTreeMap::new();
+
+    for nodes in &nodes_per_page {
+        let mut page_state: BTreeMap<String, crate::paginate::StringSetPageState> = BTreeMap::new();
+        for (name, value) in &carry {
+            page_state.entry(name.clone()).or_default().start = Some(value.clone());
+        }
+        for node_id in nodes {
+            let Some(entries) = string_set_by_node.get(node_id) else {
+                continue;
+            };
+            for (name, value) in entries {
+                let state = page_state.entry(name.clone()).or_default();
+                if state.first.is_none() {
+                    state.first = Some(value.clone());
+                }
+                state.last = Some(value.clone());
+                carry.insert(name.clone(), value.clone());
+            }
+        }
+        result.push(page_state);
+    }
+
+    result
+}
+
 /// Locate the `<body>` element id by walking the html root's children.
 ///
 /// Prefers the first child whose tag name is `body`. Falls back to
@@ -822,6 +900,126 @@ mod tests {
             vec![0, 1],
             "first child page 0, second child page 1, got {pages:?}"
         );
+    }
+
+    /// fulgur-6tco: synthesize a geometry table + string_set_by_node
+    /// map and verify `collect_string_set_states` produces the same
+    /// per-page state shape Pageable's `paginate::collect_string_set_states`
+    /// produces for an equivalent Pageable tree.
+    #[test]
+    fn string_set_state_carries_across_pages() {
+        use crate::paginate::StringSetPageState;
+        use std::collections::HashMap;
+
+        // Three nodes: A on page 0, B on page 0, C on page 1.
+        // A sets header="a", B sets header="b" (so first/last on page 0
+        // differ), C sets nothing — page 1 inherits "b" via carry.
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        });
+        geom.entry(20).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 50.0,
+            width: 100.0,
+            height: 50.0,
+        });
+        geom.entry(30).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        });
+
+        let mut markers: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+        markers.insert(10, vec![("header".into(), "a".into())]);
+        markers.insert(20, vec![("header".into(), "b".into())]);
+
+        let states = super::collect_string_set_states(&geom, &markers);
+        assert_eq!(states.len(), 2);
+
+        // Page 0: no carry (first page), first set by A, last updated by B.
+        let p0 = &states[0]["header"];
+        assert_eq!(
+            *p0,
+            StringSetPageState {
+                start: None,
+                first: Some("a".into()),
+                last: Some("b".into()),
+            }
+        );
+        // Page 1: carry from p0.last ("b"). C sets nothing → first/last stay None.
+        let p1 = &states[1]["header"];
+        assert_eq!(
+            *p1,
+            StringSetPageState {
+                start: Some("b".into()),
+                first: None,
+                last: None,
+            }
+        );
+    }
+
+    #[test]
+    fn string_set_first_appearance_only_for_split_paragraph() {
+        // A node spans two pages (inline-aware split). Markers fire
+        // only on the first appearance.
+        use crate::paginate::StringSetPageState;
+        use std::collections::HashMap;
+
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(42).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 800.0,
+        });
+        geom.entry(42).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 200.0,
+        });
+
+        let mut markers: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+        markers.insert(42, vec![("title".into(), "intro".into())]);
+
+        let states = super::collect_string_set_states(&geom, &markers);
+        assert_eq!(states.len(), 2);
+        assert_eq!(
+            states[0]["title"],
+            StringSetPageState {
+                start: None,
+                first: Some("intro".into()),
+                last: Some("intro".into()),
+            }
+        );
+        assert_eq!(
+            states[1]["title"],
+            StringSetPageState {
+                start: Some("intro".into()),
+                first: None,
+                last: None,
+            }
+        );
+    }
+
+    #[test]
+    fn string_set_states_empty_geometry_returns_one_empty_page() {
+        // Mirrors Pageable's "always at least one page" convention.
+        let geom = PaginationGeometryTable::new();
+        let markers = std::collections::HashMap::new();
+        let states = super::collect_string_set_states(&geom, &markers);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
     }
 
     #[test]
