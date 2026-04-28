@@ -4,7 +4,7 @@ use crate::convert::ConvertContext;
 use crate::error::Result;
 use crate::pageable::Pageable;
 use crate::render::render_to_pdf;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 
@@ -252,16 +252,24 @@ impl Engine {
             map
         };
 
-        // fulgur-cj6u Phase 1.3: keep a copy of the string-set map for
-        // post-convert parity comparison. `convert::dom_to_pageable`
-        // drains the map via `.remove(&node_id)` as it wraps content
-        // with `StringSetWrapperPageable`, so by render time the
-        // version on `ConvertContext` is empty. The clone is small
-        // (one `Vec<(String, String)>` per node that declares
-        // `string-set`) and only used by the debug parity assertion
-        // — `cfg!(debug_assertions)` short-circuits the comparison
-        // in release.
+        // fulgur-cj6u Phase 1.3 / fulgur-s67g Phase 2.3: keep copies of
+        // the string-set and counter-op maps for post-convert parity
+        // comparison. `convert::dom_to_pageable` drains both via
+        // `.remove(&node_id)` as it wraps content with the
+        // corresponding marker types, so by render time the versions
+        // on `ConvertContext` are empty. Each clone is small (one
+        // `Vec` per node that declares the property) and only used
+        // by the debug parity assertion —
+        // `cfg!(debug_assertions)` short-circuits the comparisons in
+        // release.
         let string_set_by_node_for_parity = string_set_by_node.clone();
+        // Counter ops use a `BTreeMap` for the parity assertion to
+        // match the spike's deterministic-iteration signature.
+        let counter_ops_by_node_for_parity: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> =
+            counter_ops_map
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
 
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
@@ -292,6 +300,7 @@ impl Engine {
                 fonts,
                 &convert_ctx.pagination_geometry,
                 &string_set_by_node_for_parity,
+                &counter_ops_by_node_for_parity,
             )
         }
     }
