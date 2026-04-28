@@ -8,21 +8,29 @@
 //! # Status: production-wired, observational consumer
 //!
 //! [`run_pass_with_break_styles`] is invoked once per render from
-//! `engine.rs` after `multicol_layout::run_pass`. It drives
-//! `taffy::compute_root_layout(&mut wrapper, body_id, MaxContent)`,
-//! which fires the wrapper's `compute_child_layout` for body and
-//! dispatches into [`compute_pagination_layout`]. That function walks
-//! the body's direct block children — descending into Parley line
-//! metrics for inline roots — and records the would-be page geometry
-//! in a `PaginationGeometryTable`.
+//! `engine.rs` after `multicol_layout::run_pass`. The production path
+//! skips `taffy::compute_root_layout` and calls
+//! [`fragment_pagination_root`] directly: it walks the body's direct
+//! block children's existing `final_layout` — descending into Parley
+//! line metrics for inline roots — and records the would-be page
+//! geometry in a `PaginationGeometryTable`. Re-driving Taffy on body
+//! re-stores every descendant's layout fields and introduces sub-pixel
+//! floating-point drift that breaks `examples_determinism`'s byte-wise
+//! PDF comparison; see [`PaginationLayoutTree::drive_taffy_root_layout`]
+//! for the full root cause.
+//!
+//! The wrapper's `LayoutPartialTree` / `RoundTree` / `CacheTree` /
+//! `TraversePartialTree` impls (which dispatch body's layout into
+//! [`compute_pagination_layout`] via `taffy::compute_root_layout`) are
+//! kept compile-time live as scaffolding for a future per-strip
+//! constrained variant; the `taffy_driven_dispatch_matches_direct_walk`
+//! test exercises them at runtime and asserts geometry parity with the
+//! production direct walk.
 //!
 //! Today the engine drops the returned table (`let _pagination_geometry
-//! = …`). The call exists so the wrapper is exercised by every
-//! `Engine::render_html` invocation rather than only by in-crate unit
-//! tests, and so `cargo build` / `cargo clippy` warn truthfully when an
-//! item becomes orphaned. Follow-up work will capture the table on
-//! `ConvertContext` and wire downstream consumers (counter / string-set
-//! replacement, per-page repetition redesign, …).
+//! = …`). Follow-up work will capture the table on `ConvertContext`
+//! and wire downstream consumers (counter / string-set replacement,
+//! per-page repetition redesign, …).
 //!
 //! # Coverage
 //!
@@ -133,13 +141,14 @@ pub struct PaginationLayoutTree<'a> {
 /// `final_layout` reflects the post-layout positions the fragmenter
 /// walks.
 ///
-/// Drives the wrapper through `taffy::compute_root_layout(&mut tree,
-/// body_id, ...)` so [`PaginationLayoutTree::compute_child_layout`]
-/// fires for body and dispatches into [`compute_pagination_layout`].
-/// The body's existing layout is restored after the call so we do not
-/// disturb downstream consumers of `final_layout` (`convert::dom_to_pageable`
-/// reads body's location to position children — `compute_root_layout`
-/// would otherwise rewrite it to (0, 0)).
+/// Calls [`fragment_pagination_root`] directly to walk body's
+/// children's existing `final_layout` (populated by
+/// `blitz_adapter::resolve` and `multicol_layout::run_pass`) and
+/// record per-node fragments. Same direct-walk model as the production
+/// entry point — see the module docs for why we skip
+/// `taffy::compute_root_layout` here. The Taffy-dispatch path is
+/// preserved as test-only via
+/// [`PaginationLayoutTree::drive_taffy_root_layout`].
 ///
 /// Test-only convenience for fixtures that don't need break-style
 /// awareness. Production callers use [`run_pass_with_break_styles`]
@@ -1249,27 +1258,47 @@ mod tests {
     /// would still type-check the impls but no code path would actually
     /// invoke them. Asserts the geometry the Taffy-driven path produces
     /// matches the direct walk used in production.
+    ///
+    /// Both sides feed the same `ColumnStyleTable` so the parity check
+    /// covers the break-style-aware code path that production wires
+    /// through `run_pass_with_break_styles`. The fixture sets
+    /// `break-before: page` on the middle child so the geometry differs
+    /// from the style-unaware case (without the table all three blocks
+    /// pack onto page 0; with it, the middle block opens page 1).
     #[test]
     fn taffy_driven_dispatch_matches_direct_walk() {
         let html = r#"
             <html><body>
               <div style="height: 200px"></div>
-              <div style="height: 200px"></div>
+              <div style="break-before: page; height: 200px"></div>
               <div style="height: 200px"></div>
             </body></html>
         "#;
 
         let direct_geom = {
-            let mut doc = parse(html, 600.0, 1000);
-            super::run_pass(doc.deref_mut(), 800.0)
+            let mut doc = parse(html, 600.0);
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table)
         };
 
         let taffy_geom = {
-            let mut doc = parse(html, 600.0, 1000);
+            let mut doc = parse(html, 600.0);
+            let table = blitz_adapter::extract_column_style_table(&doc);
             let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+            tree.column_styles = Some(&table);
             tree.drive_taffy_root_layout();
             tree.take_geometry()
         };
+
+        // Sanity: the break-* branch actually fired — page_index 1
+        // appears at least once in the direct geometry.
+        assert!(
+            direct_geom
+                .values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "expected break-before: page to push a child onto page 1, got {direct_geom:?}"
+        );
 
         assert_eq!(direct_geom.len(), taffy_geom.len());
         for (id, direct) in &direct_geom {
