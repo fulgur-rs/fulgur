@@ -50,9 +50,13 @@ and `pagination_layout::run_pass` (spike side). Page counts:
 | two 50vh divs sum to 100vh | 2 | 2 | ✓ |
 | one 1028px div (just over content) | 1 | 1 | ✓ |
 | nested 100% height with no parent height | 1 | 1 | ✓ |
-| long paragraph wraps into multiple pages (initial) | 2 | **1** | ✗ |
 | long paragraph wraps into multiple pages (after p55h) | 2 | **2** | ✓ |
 | small lead block + oversized block | 2 | 2 | ✓ |
+
+(Historical baseline, pre-p55h: the long-paragraph fixture used to
+disagree as `Pageable=2 / spike=1` because the block-only spike treated
+a tall paragraph as a single oversized fragment. Listed here for
+posterity but not counted in the table above.)
 
 10/10 agree after fulgur-p55h landed the Parley line-box probe in
 `fragment_inline_root`. The original disagreement (block-only spike
