@@ -726,3 +726,144 @@ pub(super) fn try_build_absolute_pseudo_image(
     };
     pseudo::build_pseudo_image(pseudo, basis_w_pt, basis_h_pt, assets)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body_node_id(doc: &BaseDocument) -> usize {
+        let root = doc.root_element();
+        for &child_id in &root.children {
+            if let Some(node) = doc.get_node(child_id)
+                && let Some(elem) = node.element_data()
+                && elem.name.local.as_ref() == "body"
+            {
+                return child_id;
+            }
+        }
+        panic!("body not found");
+    }
+
+    /// Body has no in-flow content — its Taffy size collapses to zero.
+    /// With `viewport_size_px = Some`, both axes should fall back to the
+    /// supplied dimensions (CSS 2.1 §10.1.5 initial CB approximation).
+    #[test]
+    fn body_zero_size_with_viewport_uses_viewport_dimensions() {
+        let html = r#"<html><body style="margin:0">
+            <div style="position:absolute; bottom:0">x</div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 600.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let body_id = body_node_id(&doc);
+        let body = doc.get_node(body_id).unwrap();
+
+        let cb = resolve_cb_for_absolute(&doc, body, false, Some((600.0, 800.0)))
+            .expect("body fallback");
+        assert!(
+            cb.padding_box_size.0 > 0.0,
+            "width should be non-zero (body width is content width or viewport)",
+        );
+        assert!(
+            cb.padding_box_size.1 >= 800.0 - 0.01,
+            "height should fall back to viewport ({}); got {}",
+            800.0,
+            cb.padding_box_size.1
+        );
+    }
+
+    /// Body has no in-flow content but `viewport_size_px = None` — the
+    /// viewport branch is skipped, padding box stays at the (zero) Taffy
+    /// size. Confirms the `None` arm is wired and doesn't NaN/panic.
+    #[test]
+    fn body_zero_size_without_viewport_keeps_zero() {
+        let html = r#"<html><body style="margin:0">
+            <div style="position:absolute; bottom:0">x</div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 600.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let body_id = body_node_id(&doc);
+        let body = doc.get_node(body_id).unwrap();
+
+        let cb = resolve_cb_for_absolute(&doc, body, false, None).expect("body fallback");
+        assert!(
+            cb.padding_box_size.1 < 1.0,
+            "height stays at body's Taffy size when viewport_size_px is None; got {}",
+            cb.padding_box_size.1
+        );
+    }
+
+    /// Body has explicit non-zero height via in-flow content. Even when a
+    /// viewport size is supplied, the live padding box should win — the
+    /// fallback only fires when the live value is zero.
+    #[test]
+    fn body_non_zero_size_keeps_taffy_height() {
+        let html = r#"<html><body style="margin:0">
+            <p style="height:200px">filler</p>
+            <div style="position:absolute; bottom:0">x</div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 600.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let body_id = body_node_id(&doc);
+        let body = doc.get_node(body_id).unwrap();
+
+        let cb = resolve_cb_for_absolute(&doc, body, false, Some((600.0, 800.0)))
+            .expect("body fallback");
+        assert!(
+            cb.padding_box_size.1 < 800.0,
+            "live body height (~200) must win over viewport (800); got {}",
+            cb.padding_box_size.1
+        );
+        assert!(
+            cb.padding_box_size.1 >= 199.0,
+            "live body height should be at least the in-flow content height; got {}",
+            cb.padding_box_size.1
+        );
+    }
+
+    /// `is_fixed = true` walks past intermediate positioned ancestors and
+    /// resolves to body (initial CB approximation), regardless of how
+    /// deeply the fixed element is nested. Verifies the loop seed change
+    /// still finds body when `parent` itself is positioned.
+    #[test]
+    fn fixed_walks_past_positioned_ancestor_to_body() {
+        let html = r#"<html><body style="margin:0">
+            <div id="abs" style="position:absolute">
+                <div style="position:fixed; bottom:0">x</div>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 600.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        // Find the abs container — its `parent` arg simulates the fixed
+        // child's CB resolution starting from the abs ancestor.
+        let abs_id = {
+            let mut found = None;
+            fn walk(doc: &BaseDocument, id: usize, out: &mut Option<usize>) {
+                if let Some(n) = doc.get_node(id) {
+                    if let Some(elem) = n.element_data()
+                        && elem.attr(blitz_dom::LocalName::from("id")) == Some("abs")
+                    {
+                        *out = Some(id);
+                        return;
+                    }
+                    for &c in &n.children {
+                        walk(doc, c, out);
+                        if out.is_some() {
+                            return;
+                        }
+                    }
+                }
+            }
+            walk(&doc, doc.root_element().id, &mut found);
+            found.expect("abs node")
+        };
+        let abs = doc.get_node(abs_id).unwrap();
+
+        let cb =
+            resolve_cb_for_absolute(&doc, abs, true, Some((600.0, 800.0))).expect("body fallback");
+        // With viewport fallback active the height is the viewport's;
+        // without it the body's (zero) Taffy size would persist. Either
+        // way the function must not return None — that's the regression
+        // we're guarding.
+        assert!(cb.padding_box_size.1 > 0.0);
+    }
+}

@@ -388,10 +388,19 @@ pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewp
         // Use raw children, not layout_children — layout_children may already
         // be invalidated by the time the second-pass relayout runs, and we
         // want every styled fixed element regardless of whether the first
-        // pass touched it.
+        // pass touched it. `::before` / `::after` pseudo-elements live in
+        // `node.before` / `node.after`, *not* in `node.children`, so we
+        // must visit them explicitly or a `::before { position: fixed; ... }`
+        // would keep the stale first-pass layout.
+        if let Some(before_id) = node.before {
+            collect_position_fixed_ids(doc, before_id, out, depth + 1);
+        }
         let children = node.children.clone();
         for child_id in children {
             collect_position_fixed_ids(doc, child_id, out, depth + 1);
+        }
+        if let Some(after_id) = node.after {
+            collect_position_fixed_ids(doc, after_id, out, depth + 1);
         }
     }
 }

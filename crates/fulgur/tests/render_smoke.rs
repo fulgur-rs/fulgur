@@ -496,25 +496,76 @@ fn repeating_linear_gradient_with_hint_renders_via_engine() {
 }
 
 #[test]
-fn position_fixed_inside_absolute_relayouts_against_viewport() {
-    // Regression for fulgur-tbxs (WPT fixedpos-002): when `position: fixed` is
-    // nested inside a shrink-to-fit `position: absolute` ancestor, the first
-    // Taffy pass collapses Fixed → Absolute and sizes the fixed element
-    // against the abs's narrow box. Without `relayout_position_fixed`, the
-    // text "Hello" wraps to multiple lines because the fixed box inherits
-    // ~30px from `width:30px`. The second-pass relayout rebuilds the fixed
-    // subtree against the page area, so the fixed element ends up wide
-    // enough to fit "Hello" on a single line. We assert via PDF byte length
-    // because the smoke crate doesn't pull in pdftocairo for raster diff —
-    // a relayouted PDF reliably comes out a few hundred bytes lighter than
-    // the wrapped-multiline alternative when content is identical.
+fn position_absolute_pseudo_at_body_resolves_initial_cb() {
+    // Exercises `build_absolute_pseudo_children`'s body-anchored path —
+    // ::before is `position: absolute` with no positioned ancestor, so
+    // CB resolution walks to body and (with the fulgur-tbxs viewport
+    // fallback) takes the page area as the padding box. Verifies the
+    // pseudo path's `cb_absolute.get_or_insert_with(...)` arm is
+    // exercised by an end-to-end render and not just by unit tests.
     let html = r#"<html><body style="margin:0">
-<div style="position:absolute; width:30px; height:300vh">
-  outer
-  <div style="position:fixed; bottom:0">Hello</div>
-</div>
+<style>body::before { content: "x"; position: absolute; bottom: 0; }</style>
+<p>filler</p>
 </body></html>"#;
     let pdf = Engine::builder().build().render_html(html).expect("render");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn position_fixed_inside_absolute_relayouts_against_viewport() {
+    // Regression for fulgur-tbxs (WPT fixedpos-002): when `position: fixed`
+    // is nested inside a shrink-to-fit `position: absolute` ancestor, the
+    // first Taffy pass collapses Fixed → Absolute and sizes the fixed
+    // element against the abs's narrow box. The %PDF byte check only
+    // proves engine completion; the structural assertion is the real
+    // regression guard — we walk the Pageable tree, find every
+    // out-of-flow `ParagraphPageable`, and assert the fixed text laid
+    // itself out as a single line. Without `relayout_position_fixed`,
+    // Parley shapes the long sentence at the abs's ~37.5pt width and
+    // produces multiple wrapped lines; with the relayout, the fixed
+    // subtree is reshaped against the page area and the sentence fits
+    // on one line.
+    use fulgur::pageable::{BlockPageable, Pageable, PositionedChild};
+    use fulgur::paragraph::ParagraphPageable;
+
+    let html = r#"<html><body style="margin:0">
+<div style="position:absolute; width:50px; height:300vh">
+  outer
+  <div style="position:fixed; bottom:0">This text is much wider than fifty pixels</div>
+</div>
+</body></html>"#;
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(pdf.starts_with(b"%PDF"));
+
+    fn max_oof_paragraph_lines(node: &dyn Pageable, own_oof: bool) -> usize {
+        let any = node.as_any();
+        if own_oof && let Some(p) = any.downcast_ref::<ParagraphPageable>() {
+            return p.lines.len();
+        }
+        if let Some(block) = any.downcast_ref::<BlockPageable>() {
+            let mut max = 0;
+            for PositionedChild {
+                child, out_of_flow, ..
+            } in &block.children
+            {
+                let n = max_oof_paragraph_lines(child.as_ref(), *out_of_flow);
+                if n > max {
+                    max = n;
+                }
+            }
+            return max;
+        }
+        0
+    }
+
+    let tree = engine.build_pageable_for_testing_no_gcpm(html);
+    let lines = max_oof_paragraph_lines(tree.as_ref(), false);
+    assert_eq!(
+        lines, 1,
+        "expected the inner position:fixed paragraph to be relayouted \
+         wide enough to hold the sentence on a single line; got {lines} lines, \
+         meaning it kept the 37.5pt parent-abs width and Parley wrapped"
+    );
 }

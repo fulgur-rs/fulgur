@@ -308,6 +308,16 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         crate::blitz_adapter::resolve(&mut doc);
+        // Mirror the production pipeline so structural tests of the
+        // Pageable tree see the same layout as `render_html` produces.
+        // Without this, position:fixed subtrees keep their first-pass
+        // (Absolute-flattened) sizes and any test asserting fixed
+        // geometry would diverge from what the renderer outputs.
+        crate::blitz_adapter::relayout_position_fixed(
+            &mut doc,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
