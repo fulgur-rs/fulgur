@@ -10,6 +10,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Render a Pageable tree to PDF bytes.
+///
+/// Public entry that does not run the fulgur-cj6u Phase 1.2
+/// page-count parity assertion: the caller built the Pageable
+/// directly without going through `Engine::render_html`, so no
+/// `pagination_layout::PaginationGeometryTable` is available. The
+/// parity gate lives in [`render_to_pdf_with_gcpm`] which is the
+/// engine-internal entry threaded with the spike's geometry.
 pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>> {
     let content_width = config.content_width();
     let content_height = config.content_height();
@@ -99,6 +106,36 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
         .finish()
         .map_err(|e| Error::PdfGeneration(format!("{e:?}")))?;
     Ok(pdf_bytes)
+}
+
+/// fulgur-cj6u Phase 1.2: in debug builds, assert that
+/// `pagination_layout::implied_page_count(geometry)` matches the
+/// Pageable-driven page count from `paginate(...)`. Drift between
+/// the two is the regression signal Phase 2 work needs to chase
+/// (widow/orphan, running element / margin-box, counter, table-row
+/// break, …).
+///
+/// Skipped when `geometry` is empty — the spike pass was either not
+/// run or the document had no body / no in-flow children, in which
+/// case Pageable's "always at least one page" convention diverges
+/// from the spike's "no fragments" output and the assertion is
+/// uninformative. Empty bodies still go through Pageable's single-
+/// empty-page fallback.
+///
+/// Release builds compile this to a no-op via `cfg!(debug_assertions)`.
+fn assert_pageable_spike_parity(
+    pages: &[Box<dyn Pageable>],
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+) {
+    if !cfg!(debug_assertions) || geometry.is_empty() {
+        return;
+    }
+    let pageable_count = pages.len() as u32;
+    let spike_count = crate::pagination_layout::implied_page_count(geometry);
+    debug_assert_eq!(
+        pageable_count, spike_count,
+        "page count parity drift: paginate={pageable_count} spike={spike_count}",
+    );
 }
 
 /// Build krilla Metadata from Config.
@@ -231,6 +268,7 @@ pub fn render_to_pdf_with_gcpm(
     gcpm: &GcpmContext,
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
+    pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> Result<Vec<u8>> {
     // Resolve the default (no-selector) CSS @page margin for initial pagination.
     // :first/:left/:right overrides are applied per-page during rendering below.
@@ -252,6 +290,26 @@ pub fn render_to_pdf_with_gcpm(
 
     // Pass 1: paginate body content
     let pages = paginate(root, content_width, content_height);
+    // fulgur-cj6u Phase 1.2: cross-check the spike fragmenter agrees
+    // with Pageable on the page count. Skipped when:
+    //
+    // - `@page` rules changed `content_height` away from
+    //   `config.content_height()`. The spike was driven with the
+    //   unresolved config-level value, so a strict equality would
+    //   produce a false positive (Phase 2 moves `@page` size
+    //   resolution into the spike).
+    // - The document declares running elements (`position: running()`).
+    //   Stylo / Blitz do not natively understand the GCPM `running()`
+    //   value, so the spike's body walk still sees those nodes as
+    //   in-flow and counts their height; Pageable strips them into
+    //   `RunningElementWrapperPageable` before pagination. Phase 2.2
+    //   adds running-element awareness to the spike — until then the
+    //   two views diverge for these documents and the assertion is
+    //   uninformative.
+    if (content_height - config.content_height()).abs() < 0.001 && gcpm.running_mappings.is_empty()
+    {
+        assert_pageable_spike_parity(&pages, pagination_geometry);
+    }
     let total_pages = pages.len();
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
         vec![BTreeMap::new(); pages.len()]
@@ -926,6 +984,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -942,6 +1001,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -958,6 +1018,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -981,6 +1042,7 @@ mod tests {
             &gcpm,
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1015,6 +1077,7 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);

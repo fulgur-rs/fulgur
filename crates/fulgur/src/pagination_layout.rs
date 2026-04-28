@@ -793,12 +793,13 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
 ///
 /// Convention matches `compare_with_pageable::spike_page_count`:
 /// returns `max(page_index) + 1` if the table has any fragments, else
-/// `1` (Pageable's "always at least one page" guarantee). Exposed as
-/// a helper so callers that need to thread `total_pages` into
-/// [`append_position_fixed_fragments`] can do so without re-computing.
+/// `1` (Pageable's "always at least one page" guarantee).
 ///
-/// Test-only today — paired with [`append_position_fixed_fragments`].
-#[cfg(test)]
+/// Used by fulgur-cj6u Phase 1.2 as the spike-side input to a
+/// `paginate(...).len() == implied_page_count(&geometry)` parity
+/// assertion in `render_to_pdf_with_gcpm`. Drift between Pageable's
+/// split decisions and the spike's fragmenter is the regression
+/// signal Phase 2 work needs to chase.
 pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
     geometry
         .values()
