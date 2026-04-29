@@ -402,6 +402,17 @@ fn inline_byte_equality_cases() {
         ),
     ];
 
+    // Bookmark-inside-transform regression (PR #305 Devin): a heading
+    // nested under a `transform`-wrapped ancestor must still record a
+    // bookmark anchor in the PDF outline. v1 invokes
+    // `BookmarkMarkerWrapperPageable::draw` recursively from inside
+    // `TransformWrapperPageable::draw`; v2 records the anchor BEFORE
+    // the `transformed_descendants` skip in the dispatcher.
+    let bookmark_in_transform = (
+        "bookmark anchor inside transformed ancestor",
+        r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##,
+    );
+
     let cases = pr3_cases
         .iter()
         .chain(pr4_cases.iter())
@@ -409,6 +420,27 @@ fn inline_byte_equality_cases() {
         .chain(pr6_cases.iter());
     for (label, html) in cases {
         let engine = Engine::builder().build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+
+    // Bookmark anchors require `bookmarks(true)` on the engine —
+    // separate render so the assertion can target the
+    // bookmark-inside-transform case explicitly.
+    {
+        let (label, html) = bookmark_in_transform;
+        let engine = Engine::builder().bookmarks(true).build();
         let v1 = engine
             .render_html(html)
             .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));

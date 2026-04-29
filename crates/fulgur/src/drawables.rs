@@ -161,12 +161,14 @@ pub struct MulticolRuleEntry {
 pub struct TransformEntry {
     pub matrix: crate::pageable::Affine2D,
     pub origin: crate::pageable::Point2,
-    /// Every `NodeId` whose fragment must paint inside this transform's
-    /// `push_transform`/`pop` group. Includes the wrapper's own
-    /// `node_id` (shared with the inner Pageable) and every descendant
-    /// recursively. Stored as a `Vec` for deterministic iteration —
-    /// order matches the depth-first walk produced by
-    /// `extract_drawables_from_pageable`.
+    /// Every strict descendant `NodeId` whose fragment must paint
+    /// inside this transform's `push_transform`/`pop` group. Does NOT
+    /// include the wrapper's own `node_id` (the entry's key) — the
+    /// render loop dispatches the wrapper node separately before
+    /// iterating descendants (see
+    /// `render::draw_under_transform`). Stored as a `Vec` for
+    /// deterministic iteration — order matches the depth-first walk
+    /// produced by `extract_drawables_from_pageable`.
     pub descendants: Vec<NodeId>,
 }
 

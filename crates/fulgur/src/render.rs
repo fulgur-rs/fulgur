@@ -181,15 +181,19 @@ fn draw_v2_page(
     }
 
     for (&node_id, geom) in geometry {
-        if transformed_descendants.contains(&node_id) {
-            // Drawn inside an ancestor transform group elsewhere in
-            // this loop. Skipping prevents double-painting.
-            continue;
-        }
-
         // Bookmark anchor: emit on the page where the node's *first*
         // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
-        // `is_first_page_for` slice semantics.
+        // `is_first_page_for` slice semantics. Run BEFORE the
+        // `transformed_descendants` skip so headings nested inside a
+        // transformed ancestor (e.g. `<div style="transform:..."><h1>`)
+        // still register in the PDF outline. v1 invokes
+        // `BookmarkMarkerWrapperPageable::draw` recursively from inside
+        // `TransformWrapperPageable::draw`, so the bookmark is recorded
+        // regardless of transform membership; we mirror that by
+        // unconditionally calling `record` here using the untransformed
+        // y position. (v1 emits at the same untransformed y for the
+        // outline destination — `collect_ids` does push the transform
+        // for `/Link` rects but the bookmark itself is keyed by raw y.)
         if let Some(first_frag) = geom.fragments.first()
             && first_frag.page_index == page_index
             && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
@@ -197,6 +201,13 @@ fn draw_v2_page(
         {
             let y_pt = margin_top_pt + px_to_pt(first_frag.y);
             c.record(anchor.level, anchor.label.clone(), y_pt);
+        }
+
+        if transformed_descendants.contains(&node_id) {
+            // Drawn inside an ancestor transform group elsewhere in
+            // this loop. Skipping prevents double-painting. Bookmark
+            // anchor recording above already ran unconditionally.
+            continue;
         }
 
         // Per-fragment leaf draws.
@@ -458,13 +469,21 @@ fn paint_multicol_rule_for_page(
         }
         let visible_top = group_top.max(0.0);
         let y_top = y_base + visible_top;
+        // Mirror `MulticolRulePageable::slice_for_page`
+        // (`pageable.rs:3221-3223`): subtract the portion of each
+        // column already painted on prior pages BEFORE clamping to
+        // the visible strip on this page. Without this, a column rule
+        // segment whose group straddles a page boundary extends past
+        // the actual visible column content.
+        let consumed_above = (visible_top - group_top).max(0.0);
+        let visible_h = (group_bottom.min(cutoff) - visible_top).max(0.0);
         for i in 0..(group.n as usize - 1) {
-            let h_left = group.col_heights[i]
-                .min(cutoff - group_top.max(0.0))
-                .max(0.0);
-            let h_right = group.col_heights[i + 1]
-                .min(cutoff - group_top.max(0.0))
-                .max(0.0);
+            let h_left = (group.col_heights[i] - consumed_above)
+                .max(0.0)
+                .min(visible_h);
+            let h_right = (group.col_heights[i + 1] - consumed_above)
+                .max(0.0)
+                .min(visible_h);
             if h_left <= 0.0 || h_right <= 0.0 {
                 continue;
             }
