@@ -39,8 +39,20 @@ pub fn render_to_pdf_with_partition(
     config: &Config,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> Result<Vec<u8>> {
-    let pages = crate::pagination_layout::partition_pageable_by_geometry(root.as_ref(), geometry);
-    drop(root);
+    // fulgur-frmj (coderabbit on PR #294): blank `<body>` and bodies
+    // containing only fragmenter-skipped descendants (e.g.
+    // `position: fixed`/`absolute`-only trees) leave `geometry` empty,
+    // and `partition_pageable_by_geometry` returns `vec![]`. The legacy
+    // `paginate()` path always emits one page for an empty body, so
+    // fall back to rendering `root` as a single page in that case.
+    let pages = if geometry.is_empty() {
+        vec![root]
+    } else {
+        let pages =
+            crate::pagination_layout::partition_pageable_by_geometry(root.as_ref(), geometry);
+        drop(root);
+        pages
+    };
     render_pages_to_pdf(pages, config)
 }
 

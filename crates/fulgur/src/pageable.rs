@@ -2556,24 +2556,69 @@ impl Pageable for BlockPageable {
         let self_has_any_fragment_outer = self
             .node_id
             .is_some_and(|id| geometry.get(&id).is_some_and(|g| !g.fragments.is_empty()));
+        // fulgur-frmj: how much of `self`'s height has been consumed by
+        // pages strictly before `page_index`. Used to rebase
+        // `position: absolute` descendants on continuation pages so
+        // they slide with their containing block (mirrors
+        // `split_children_at_index`'s `pc.y - y_offset` for
+        // `out_of_flow && !is_fixed`).
+        let consumed_above_pt: f32 = self
+            .node_id
+            .and_then(|id| geometry.get(&id))
+            .map(|g| {
+                g.fragments
+                    .iter()
+                    .filter(|f| f.page_index < page_index)
+                    .map(|f| crate::convert::px_to_pt(f.height))
+                    .sum()
+            })
+            .unwrap_or(0.0);
         let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
         for pc in &self.children {
             // fulgur-frmj: out-of-flow children (`position: absolute` /
             // `position: fixed`) are skipped by the fragmenter
             // (`fragment_block_subtree` / `fragment_pagination_root`
             // continue past them), so `slice_for_page` would drop them
-            // without geometry. Replicate them verbatim on every page
-            // — fixed children must repeat per page, absolute children
-            // pin to their CSS-resolved coordinates which are
-            // page-independent in fulgur's flow.
-            if pc.is_fixed || pc.out_of_flow {
+            // without geometry. Replicate them verbatim on every page —
+            // mirrors `split_children_at_index` (pageable.rs:1619-1635):
+            // - `position: fixed` keeps `pc.y` (anchored to page /
+            //   viewport, not to the sliding containing block).
+            // - `position: absolute` rebases against the consumed
+            //   parent height so it slides with its containing block on
+            //   continuation pages (page 2+ of a multi-page CB sees
+            //   `pc.y - consumed_above`).
+            if pc.is_fixed {
                 sliced_children.push(PositionedChild {
                     child: pc.child.clone_box(),
                     x: pc.x,
                     y: pc.y,
                     out_of_flow: pc.out_of_flow,
-                    is_fixed: pc.is_fixed,
+                    is_fixed: true,
                 });
+                continue;
+            }
+            if pc.out_of_flow {
+                // fulgur-frmj (Devin Review on PR #294): only replicate
+                // `position: absolute` on pages where this block is
+                // actually present. Without this gate, a relative CB
+                // that fits on page 0 alone would still emit its abs
+                // children on page 1+ — the `self_frag.is_none() &&
+                // sliced_children.is_empty()` guard below cannot fire
+                // because the cloned abs child keeps the vec
+                // non-empty, so the parent renders an empty CB on the
+                // wrong page. Allow replication when self IS on this
+                // page (`self_frag.is_some()`) or when self is a
+                // transparent ancestor (no geometry coverage at all,
+                // e.g. the synthesized `<html>` block).
+                if self_frag.is_some() || !self_has_any_fragment_outer {
+                    sliced_children.push(PositionedChild {
+                        child: pc.child.clone_box(),
+                        x: pc.x,
+                        y: pc.y - consumed_above_pt,
+                        out_of_flow: true,
+                        is_fixed: false,
+                    });
+                }
                 continue;
             }
             let sliced = match pc.child.slice_for_page(page_index, geometry) {
@@ -4718,7 +4763,7 @@ impl Pageable for TablePageable {
         // the repeated header (mirrors `split()`'s `header_height +
         // (pc.y - split_y)` formula).
         let node_id = self.node_id?;
-        let _self_frag = fragment_on_page(geometry, node_id, page_index)?;
+        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
 
         // First pass: recursively slice each body cell and pair the
         // result with the original `pc.y` (needed for rebase
@@ -4766,20 +4811,42 @@ impl Pageable for TablePageable {
             })
             .collect();
 
-        // fulgur-frmj: preserve `layout_size` / `cached_height` so
-        // `draw()` can size `compute_overflow_clip_path` and the
-        // background / border. Without this, `total_height` falls back
-        // to 0 and `overflow: hidden` produces no clip path
-        // (`tests/style_test::test_overflow_hidden_on_table_clips`
-        // exercises this).
+        // fulgur-frmj: derive `layout_size` / `cached_height` from
+        // this page's fragment so multi-page tables draw background,
+        // border, box-shadow, and overflow clips at the correct slice
+        // height (Devin Review / coderabbit on PR #294). Mirrors the
+        // single- vs multi-fragment split in `BlockPageable::slice_for_page`:
+        // a one-fragment table prefers `self.layout_size` (Taffy's
+        // authoritative border-box size) for fields the fragmenter
+        // cannot recompute (`overflow: hidden` clip path —
+        // `tests/style_test::test_overflow_hidden_on_table_clips`);
+        // multi-fragment tables fall back to the per-page fragment
+        // height in pt so page 2+ does not redraw the entire table's
+        // decoration.
+        let single_fragment = geometry
+            .get(&node_id)
+            .is_some_and(|g| g.fragments.len() == 1);
+        let slice_height_pt = crate::convert::px_to_pt(self_frag.height);
+        let (slice_layout_size, slice_cached_height) = if single_fragment {
+            (self.layout_size, self.cached_height)
+        } else {
+            let width = self.layout_size.map(|s| s.width).unwrap_or(self.width);
+            (
+                Some(Size {
+                    width,
+                    height: slice_height_pt,
+                }),
+                slice_height_pt,
+            )
+        };
         Some(Box::new(TablePageable {
             header_cells: clone_children(&self.header_cells, 0.0),
             body_cells,
             header_height: self.header_height,
             style: self.style.clone(),
-            layout_size: self.layout_size,
+            layout_size: slice_layout_size,
             width: self.width,
-            cached_height: self.cached_height,
+            cached_height: slice_cached_height,
             opacity: self.opacity,
             visible: self.visible,
             id: self.id.clone(),
