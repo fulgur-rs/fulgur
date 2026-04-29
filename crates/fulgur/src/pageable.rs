@@ -2679,6 +2679,24 @@ impl Pageable for BlockPageable {
                 width: crate::convert::px_to_pt(frag.width),
                 height: crate::convert::px_to_pt(frag.height),
             });
+            // fulgur-frmj: when the block has a single fragment (fits
+            // on one page), prefer `self.layout_size` (Taffy's
+            // authoritative border-box size including padding /
+            // border) over `cached_size` derived from the fragment.
+            // For inline-root blocks, `fragment_inline_root` records
+            // `Fragment.height` from accumulated *line* metrics — not
+            // the block's Taffy size — so on `.box { padding: 10px }`
+            // the cached_size loses the padding band and `bg fill` /
+            // `border` shrink. Multi-fragment blocks deliberately
+            // leave `layout_size` unset so per-page `cached_size`
+            // drives clipping / shadows on each page slice.
+            let single_fragment = self
+                .node_id
+                .and_then(|id| geometry.get(&id))
+                .is_some_and(|g| g.fragments.len() == 1);
+            if single_fragment {
+                block.layout_size = self.layout_size;
+            }
         } else {
             // fulgur-frmj: transparent ancestor (e.g. the synthesized
             // `<html>` BlockPageable wrapping body — fragmenter-side
