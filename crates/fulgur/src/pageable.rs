@@ -1611,7 +1611,7 @@ fn draw_border_line(
     }
 }
 
-fn draw_block_border(
+pub(crate) fn draw_block_border(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
     x: f32,

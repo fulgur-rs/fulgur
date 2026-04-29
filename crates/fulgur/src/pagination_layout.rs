@@ -735,9 +735,18 @@ impl<'a> PaginationLayoutTree<'a> {
                 cursor_y = 0.0;
             }
 
+            // Phase 4 PR 5 fix: include `layout.location.x` so the
+            // child's left margin / padding offset within body is
+            // captured. Pre-Phase-4 the fragmenter only fed
+            // `slice_for_page` which doesn't read `frag.x`, so
+            // `body_x` alone happened to be enough; the new
+            // geometry-driven render path now consults `frag.x` for
+            // every Block / Image / Paragraph and reverts to v2
+            // drawing at x=0 without this. Matches the descendant
+            // fragment shape on the line below.
             let frag = Fragment {
                 page_index,
-                x: body_x,
+                x: body_x + layout.location.x,
                 y: cursor_y,
                 width: child_w,
                 height: child_h,
@@ -838,7 +847,23 @@ fn record_subtree_descendants(
         let layout = child.final_layout;
         let h = layout.size.height;
         let w = layout.size.width;
+        // Phase 4 PR 5: zero-size containers (`<tbody>`, `<tr>`,
+        // anonymous boxes) carry no paint payload but DO host visible
+        // descendants (e.g. table cells) that v2 needs in geometry.
+        // Skipping them entirely leaves cells out of `geometry`; the
+        // dispatcher then never finds the cell node_ids and v2 emits
+        // a blank table. Recurse without recording when h/w are
+        // both zero so the descendant cells still register.
         if h <= 0.0 && w <= 0.0 {
+            record_subtree_descendants(
+                geometry,
+                doc,
+                child_id,
+                page_index,
+                parent_page_y + layout.location.y,
+                parent_x_in_body + layout.location.x,
+                depth + 1,
+            );
             continue;
         }
         let child_x = parent_x_in_body + layout.location.x;
