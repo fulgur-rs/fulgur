@@ -2956,6 +2956,86 @@ mod tests {
         );
     }
 
+    /// Devin Review on PR #288 (second comment):
+    /// `MulticolRulePageable::slice_for_page` was clamping
+    /// per-column heights to `visible_h` for groups straddling from a
+    /// prior page (`group_top < 0`), without subtracting the
+    /// `consumed_above` portion that was already painted on earlier
+    /// pages. Result: a column whose entire content ended on a prior
+    /// page got `visible_h` (non-zero) instead of 0 on this page,
+    /// causing a stranded rule painted from y=0 to y=visible_h with
+    /// no actual content underneath.
+    ///
+    /// Setup: child has fragments on page 0 (height=20) and page 1
+    /// (height=50). Group at y_offset=0 with col_heights=[10, 30].
+    /// On page 1, group_top = 0 - 20 = -20. Column 0 (h=10) ends at
+    /// -10 (entirely above page) → expect 0. Column 1 (h=30) ends at
+    /// 10 (10pt visible on page 1) → expect 10.
+    #[test]
+    fn multicol_rule_slice_for_page_subtracts_consumed_above_when_straddling() {
+        use crate::multicol_layout::ColumnGroupGeometry;
+        use crate::pageable::MulticolRulePageable;
+
+        const CHILD_ID: usize = 800;
+
+        let child = SpacerPageable::new(70.0).with_node_id(Some(CHILD_ID));
+        let group = ColumnGroupGeometry {
+            y_offset: 0.0,
+            x_offset: 0.0,
+            n: 2,
+            col_w: 100.0,
+            gap: 10.0,
+            col_heights: vec![10.0, 30.0],
+        };
+        let wrapper = MulticolRulePageable {
+            child: Box::new(child),
+            rule: crate::column_css::ColumnRuleSpec {
+                width: 1.0,
+                style: crate::column_css::ColumnRuleStyle::Solid,
+                color: [0, 0, 0, 255],
+            },
+            groups: vec![group],
+        };
+
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(CHILD_ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 20.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page1 = wrapper
+            .slice_for_page(1, &geom)
+            .expect("child has page 1 fragment")
+            .as_any()
+            .downcast_ref::<MulticolRulePageable>()
+            .cloned()
+            .expect("page 1 slice is a MulticolRulePageable");
+        assert_eq!(page1.groups.len(), 1, "straddling group survives on page 1");
+        let g = &page1.groups[0];
+        assert!(
+            (g.col_heights[0] - 0.0).abs() < 0.01,
+            "column 0 (h=10) was entirely above page 1, expected 0, got {}",
+            g.col_heights[0],
+        );
+        assert!(
+            (g.col_heights[1] - 10.0).abs() < 0.01,
+            "column 1 (h=30) has 10pt remaining on page 1, expected 10, got {}",
+            g.col_heights[1],
+        );
+    }
+
     /// BookmarkMarkerWrapper.slice_for_page applies the same first-page-only
     /// rule for outline anchors.
     #[test]

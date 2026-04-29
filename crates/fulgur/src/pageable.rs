@@ -3860,8 +3860,22 @@ impl Pageable for MulticolRulePageable {
                                     let visible_top = group_top.max(0.0);
                                     let visible_bot = group_bottom.min(cutoff);
                                     let visible_h = (visible_bot - visible_top).max(0.0);
+                                    // Subtract the portion of each
+                                    // column already painted on
+                                    // earlier pages before clamping
+                                    // to `visible_h`. Without this
+                                    // step, a column whose content
+                                    // ended above this page (col_top +
+                                    // col_h ≤ 0) would be clamped to
+                                    // `visible_h` instead of 0, and a
+                                    // partially-visible column would
+                                    // be reported at `visible_h`
+                                    // even when its remainder is
+                                    // shorter (Devin Review on PR
+                                    // #288).
+                                    let consumed_above = (visible_top - group_top).max(0.0);
                                     for h in &mut shifted_g.col_heights {
-                                        *h = h.min(visible_h);
+                                        *h = (*h - consumed_above).max(0.0).min(visible_h);
                                     }
                                     Some(shifted_g)
                                 }
