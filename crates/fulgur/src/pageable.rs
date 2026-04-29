@@ -596,6 +596,68 @@ pub trait Pageable: Send + Sync {
     fn has_forced_break_below(&self) -> bool {
         false
     }
+
+    /// fulgur-r6we (Phase 3.2.a): the DOM `usize` NodeId this
+    /// Pageable represents, if any. Used by `slice_for_page` to look
+    /// up the matching `Fragment` in `PaginationGeometryTable` (which
+    /// is keyed by NodeId). Wrappers delegate to their inner
+    /// Pageable's `node_id` (markers do not have their own NodeId —
+    /// they piggyback on the host element's geometry entry).
+    ///
+    /// Default `None` for impls that have no DOM correspondence
+    /// (synthetic Pageables built by tests, etc.). Plain types
+    /// (`BlockPageable`, `ParagraphPageable`, `SpacerPageable`,
+    /// `ImagePageable`) override to return their stored `node_id`.
+    fn node_id(&self) -> Option<usize> {
+        None
+    }
+
+    /// fulgur-r6we (Phase 3.2.a): extract the slice of `self` that
+    /// falls on `page_index` according to `geometry`. Returns `None`
+    /// when no fragment of `self` (or its descendants) is on that
+    /// page.
+    ///
+    /// `geometry.y` is page-local in fragmenter output (see
+    /// `fragment_pagination_root` and `fragment_block_subtree` —
+    /// `cursor_y` resets at each page break, and
+    /// `record_subtree_descendants` propagates that page-local cursor
+    /// through the subtree). Implementations therefore read
+    /// `fragment.y` directly without a body→page rebase.
+    ///
+    /// Default: `unimplemented!()` — every concrete impl that
+    /// participates in `partition_pageable_by_geometry` must override.
+    /// Phase 3.2.a covers the plain types (`BlockPageable`,
+    /// `ParagraphPageable`, `SpacerPageable`, `ImagePageable`); Phase
+    /// 3.2.b covers wrappers and special split impls.
+    fn slice_for_page(
+        &self,
+        _page_index: u32,
+        _geometry: &crate::pagination_layout::PaginationGeometryTable,
+    ) -> Option<Box<dyn Pageable>> {
+        unimplemented!(
+            "slice_for_page not implemented for {} — Phase 3.2.b will fill this in",
+            std::any::type_name::<Self>(),
+        )
+    }
+}
+
+/// fulgur-r6we (Phase 3.2.a): helper for `slice_for_page` impls. Look
+/// up the fragment of `node_id` on `page_index`, returning `None`
+/// when the node is absent from geometry or has no fragment on that
+/// page. Geometry can record multiple fragments for one node when the
+/// node spans pages — we pick the first match (mid-element split is
+/// not yet exposed via `slice_for_page`; that's part of Phase 3.2.b /
+/// 3.2.c).
+pub(crate) fn fragment_on_page(
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    node_id: usize,
+    page_index: u32,
+) -> Option<&crate::pagination_layout::Fragment> {
+    geometry
+        .get(&node_id)?
+        .fragments
+        .iter()
+        .find(|f| f.page_index == page_index)
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -1053,6 +1115,14 @@ pub struct BlockPageable {
     /// for internal `href="#..."` links. `Arc<String>` so split fragments
     /// can share without cloning the string.
     pub id: Option<Arc<String>>,
+    /// fulgur-r6we (Phase 3.2.a): DOM `usize` NodeId. Lets
+    /// `slice_for_page` look up the matching `Fragment` in
+    /// `PaginationGeometryTable`, which is keyed by NodeId. Default
+    /// `None` for legacy / test-only constructions; convert.rs sets it
+    /// for production-built BlockPageables. Split fragments share the
+    /// originating node's id (both halves represent the same DOM
+    /// element on different pages).
+    pub node_id: Option<usize>,
     /// Last `avail_height` received by `wrap()`. `find_split_point` uses this
     /// to detect "content taller than any possible page" and fall back to a
     /// normal split rather than honour `break-inside: avoid` to the point of
@@ -1087,6 +1157,7 @@ impl BlockPageable {
             opacity: 1.0,
             visible: true,
             id: None,
+            node_id: None,
             page_height: 0.0,
         }
     }
@@ -1101,6 +1172,7 @@ impl BlockPageable {
             opacity: 1.0,
             visible: true,
             id: None,
+            node_id: None,
             page_height: 0.0,
         }
     }
@@ -1127,6 +1199,15 @@ impl BlockPageable {
 
     pub fn with_id(mut self, id: Option<Arc<String>>) -> Self {
         self.id = id;
+        self
+    }
+
+    /// fulgur-r6we (Phase 3.2.a): set the DOM NodeId. Used by
+    /// `slice_for_page` to look up the block's `Fragment` in
+    /// `PaginationGeometryTable`. Plumbed from `convert::convert_node`
+    /// — see `crates/fulgur/src/convert/`.
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
         self
     }
 
@@ -2092,7 +2173,8 @@ impl Pageable for BlockPageable {
                     .with_style(self.style.clone())
                     .with_opacity(self.opacity)
                     .with_visible(self.visible)
-                    .with_id(self.id.clone());
+                    .with_id(self.id.clone())
+                    .with_node_id(self.node_id);
                 first_block.cached_size = Some(Size {
                     width: total_width,
                     height: first_height,
@@ -2103,7 +2185,8 @@ impl Pageable for BlockPageable {
                     .with_style(self.style.clone())
                     .with_opacity(self.opacity)
                     .with_visible(self.visible)
-                    .with_id(self.id.clone());
+                    .with_id(self.id.clone())
+                    .with_node_id(self.node_id);
                 second_block.cached_size = Some(Size {
                     width: total_width,
                     height: (total_height - first_height).max(0.0),
@@ -2136,7 +2219,8 @@ impl Pageable for BlockPageable {
                     .with_style(self.style.clone())
                     .with_opacity(self.opacity)
                     .with_visible(self.visible)
-                    .with_id(self.id.clone());
+                    .with_id(self.id.clone())
+                    .with_node_id(self.node_id);
                 first_block.cached_size = Some(Size {
                     width: total_width,
                     height: split_y,
@@ -2147,7 +2231,8 @@ impl Pageable for BlockPageable {
                     .with_style(self.style.clone())
                     .with_opacity(self.opacity)
                     .with_visible(self.visible)
-                    .with_id(self.id.clone());
+                    .with_id(self.id.clone())
+                    .with_node_id(self.node_id);
                 second_block.cached_size = Some(Size {
                     width: total_width,
                     height: (total_height - split_y).max(0.0),
@@ -2210,7 +2295,8 @@ impl Pageable for BlockPageable {
                     .with_style(me.style.clone())
                     .with_opacity(me.opacity)
                     .with_visible(me.visible)
-                    .with_id(me.id.clone());
+                    .with_id(me.id.clone())
+                    .with_node_id(me.node_id);
                 first_block.cached_size = Some(Size {
                     width: total_width,
                     height: first_height,
@@ -2221,7 +2307,8 @@ impl Pageable for BlockPageable {
                     .with_style(me.style)
                     .with_opacity(me.opacity)
                     .with_visible(me.visible)
-                    .with_id(me.id);
+                    .with_id(me.id)
+                    .with_node_id(me.node_id);
                 second_block.cached_size = Some(Size {
                     width: total_width,
                     height: (total_height - first_height).max(0.0),
@@ -2259,7 +2346,8 @@ impl Pageable for BlockPageable {
                     .with_style(me.style.clone())
                     .with_opacity(me.opacity)
                     .with_visible(me.visible)
-                    .with_id(me.id.clone());
+                    .with_id(me.id.clone())
+                    .with_node_id(me.node_id);
                 first_block.cached_size = Some(Size {
                     width: total_width,
                     height: split_y,
@@ -2270,7 +2358,8 @@ impl Pageable for BlockPageable {
                     .with_style(me.style)
                     .with_opacity(me.opacity)
                     .with_visible(me.visible)
-                    .with_id(me.id);
+                    .with_id(me.id)
+                    .with_node_id(me.node_id);
                 second_block.cached_size = Some(Size {
                     width: total_width,
                     height: (total_height - split_y).max(0.0),
@@ -2402,6 +2491,73 @@ impl Pageable for BlockPageable {
                 || pc.child.has_forced_break_below()
         })
     }
+
+    fn node_id(&self) -> Option<usize> {
+        self.node_id
+    }
+
+    fn slice_for_page(
+        &self,
+        page_index: u32,
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+    ) -> Option<Box<dyn Pageable>> {
+        // No NodeId → no geometry lookup possible. Synthetic Pageables
+        // built by tests fall in this branch; production-built blocks
+        // always have node_id set by `convert::*`.
+        let node_id = self.node_id?;
+        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
+        let self_page_y = self_frag.y;
+        let frag_w = self_frag.width;
+        let frag_h = self_frag.height;
+
+        // Recursively slice each child. `child.fragment.y - self.fragment.y`
+        // gives the child's parent-relative y on this page, which equals the
+        // original `pc.y` when the child stays on the same page as the parent
+        // (Taffy's `layout.location.y` is parent-relative, and
+        // `record_subtree_descendants` propagates `parent_page_y +
+        // layout.location.y`). On a forced break, `cursor_y` resets and the
+        // gap is discarded — so the rebased y differs from `pc.y` and is the
+        // value we want.
+        let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
+        for pc in &self.children {
+            let Some(sliced) = pc.child.slice_for_page(page_index, geometry) else {
+                continue;
+            };
+            let new_y = match pc.child.node_id() {
+                Some(child_node_id) => {
+                    match fragment_on_page(geometry, child_node_id, page_index) {
+                        Some(child_frag) => child_frag.y - self_page_y,
+                        None => pc.y,
+                    }
+                }
+                None => pc.y,
+            };
+            sliced_children.push(PositionedChild {
+                child: sliced,
+                x: pc.x,
+                y: new_y,
+                out_of_flow: pc.out_of_flow,
+                is_fixed: pc.is_fixed,
+            });
+        }
+
+        let mut block = BlockPageable::with_positioned_children(sliced_children)
+            .with_pagination(self.pagination)
+            .with_style(self.style.clone())
+            .with_opacity(self.opacity)
+            .with_visible(self.visible)
+            .with_id(self.id.clone())
+            .with_node_id(self.node_id);
+        block.cached_size = Some(Size {
+            width: frag_w,
+            height: frag_h,
+        });
+        block.layout_size = Some(Size {
+            width: frag_w,
+            height: frag_h,
+        });
+        Some(Box::new(block))
+    }
 }
 
 // ─── SpacerPageable ──────────────────────────────────────
@@ -2410,11 +2566,22 @@ impl Pageable for BlockPageable {
 #[derive(Clone)]
 pub struct SpacerPageable {
     pub height: Pt,
+    /// fulgur-r6we (Phase 3.2.a): DOM NodeId for `slice_for_page`
+    /// geometry lookup. See `BlockPageable::node_id`.
+    pub node_id: Option<usize>,
 }
 
 impl SpacerPageable {
     pub fn new(height: Pt) -> Self {
-        Self { height }
+        Self {
+            height,
+            node_id: None,
+        }
+    }
+
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
+        self
     }
 }
 
@@ -2448,6 +2615,27 @@ impl Pageable for SpacerPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn node_id(&self) -> Option<usize> {
+        self.node_id
+    }
+
+    fn slice_for_page(
+        &self,
+        page_index: u32,
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+    ) -> Option<Box<dyn Pageable>> {
+        let node_id = self.node_id?;
+        let frag = fragment_on_page(geometry, node_id, page_index)?;
+        // Spacer adopts the fragment's height — when fragmenter spans
+        // a Spacer across pages it would split the height, but the
+        // current fragmenter emits a single fragment per Spacer (no
+        // mid-element split for atomic Pageables).
+        Some(Box::new(SpacerPageable {
+            height: frag.height,
+            node_id: self.node_id,
+        }))
     }
 }
 

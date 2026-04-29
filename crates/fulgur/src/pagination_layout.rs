@@ -1860,6 +1860,49 @@ pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
         .unwrap_or(1)
 }
 
+/// fulgur-r6we (Phase 3.2.a): build the per-page Pageable list from a
+/// root Pageable + fragmenter geometry. Phase 3.2 replaces
+/// [`crate::paginate::paginate`]'s split-driven page decomposition
+/// with this geometry-driven pass: the fragmenter has already decided
+/// where the page breaks fall, this helper just slices the Pageable
+/// tree to match.
+///
+/// Returns one `Box<dyn Pageable>` per page (`implied_page_count(geometry)`
+/// total). Pages whose subtree slice is empty (every node returned
+/// `None` from `slice_for_page`) get an empty `BlockPageable` placeholder
+/// so page count is preserved — this matches `paginate()`'s output for
+/// rendered pages with no in-flow content.
+///
+/// Phase 3.2.a only supports plain Pageable types (`BlockPageable` /
+/// `ParagraphPageable` / `SpacerPageable` / `ImagePageable`). Wrapper
+/// types (`CounterOpWrapperPageable`, `BookmarkMarkerWrapperPageable`,
+/// etc.) and special-split impls (`TablePageable`, `ListItemPageable`)
+/// will reach `unimplemented!()` in their `slice_for_page` until Phase
+/// 3.2.b implements them.
+///
+/// `#[allow(dead_code)]` is temporary: this function's only callers in
+/// PR 1 are unit tests under `mod tests`. Phase 3.2.c (`fulgur-4ltp`)
+/// wires it into `render.rs::render_to_pdf` / `render_to_pdf_with_gcpm`
+/// in place of `paginate()`, at which point the attribute is removed.
+#[allow(dead_code)]
+pub fn partition_pageable_by_geometry(
+    root: &dyn crate::pageable::Pageable,
+    geometry: &PaginationGeometryTable,
+) -> Vec<Box<dyn crate::pageable::Pageable>> {
+    let page_count = implied_page_count(geometry);
+    (0..page_count)
+        .map(|p| {
+            root.slice_for_page(p, geometry)
+                .unwrap_or_else(empty_page_placeholder)
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn empty_page_placeholder() -> Box<dyn crate::pageable::Pageable> {
+    Box::new(crate::pageable::BlockPageable::new(Vec::new()))
+}
+
 /// Locate the `<body>` element id by walking the html root's children.
 ///
 /// Prefers the first child whose tag name is `body`. Falls back to
@@ -2471,6 +2514,271 @@ mod tests {
             height: 1.0,
         });
         assert_eq!(super::implied_page_count(&geom), 3);
+    }
+
+    // ─── partition_pageable_by_geometry (fulgur-r6we Phase 3.2.a) ───
+    //
+    // Tests for the new geometry-driven Pageable slicing helper. PR 1
+    // covers plain Pageable types; manual fixture construction lets us
+    // unit-test slicing semantics without depending on convert.rs +
+    // fragmenter integration (Phase 3.2.c will exercise that via
+    // examples_determinism / VRT byte-equality gates).
+
+    use crate::pageable::{BlockPageable, Pageable, PositionedChild, SpacerPageable};
+
+    /// Build a 2-child block that spans two pages: a (h=100) on page 0,
+    /// b (h=100) on page 1 after a forced break (gap discarded).
+    /// Mirrors the geometry that `fragment_block_subtree` records for
+    /// the parent + children.
+    fn two_page_block_fixture() -> (Box<dyn Pageable>, PaginationGeometryTable) {
+        const ROOT_ID: usize = 100;
+        const A_ID: usize = 101;
+        const B_ID: usize = 102;
+
+        let a = Box::new(SpacerPageable::new(100.0).with_node_id(Some(A_ID)));
+        let b = Box::new(SpacerPageable::new(100.0).with_node_id(Some(B_ID)));
+        let root = BlockPageable::with_positioned_children(vec![
+            PositionedChild::in_flow(a, 0.0, 0.0),
+            PositionedChild::in_flow(b, 0.0, 120.0),
+        ])
+        .with_node_id(Some(ROOT_ID));
+
+        let mut geom = PaginationGeometryTable::new();
+        // root: spans page 0 (covers a + 20px gap = 120) and page 1
+        // (covers b alone = 100, gap discarded by forced break).
+        geom.entry(ROOT_ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 120.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            },
+        ]);
+        // a: page 0 only, at root's top.
+        geom.entry(A_ID).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+        // b: page 1 only, at page-local y=0 (forced break discarded gap).
+        geom.entry(B_ID).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+
+        (Box::new(root), geom)
+    }
+
+    #[test]
+    fn partition_emits_one_pageable_per_page() {
+        let (root, geom) = two_page_block_fixture();
+        let pages = super::partition_pageable_by_geometry(root.as_ref(), &geom);
+        assert_eq!(pages.len(), 2, "two-page geometry → two Pageable slices");
+    }
+
+    #[test]
+    fn block_slice_for_page_keeps_only_page_local_children() {
+        let (root, geom) = two_page_block_fixture();
+        let pages = super::partition_pageable_by_geometry(root.as_ref(), &geom);
+
+        let page0 = pages[0]
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("page 0 is a BlockPageable");
+        assert_eq!(page0.children.len(), 1, "page 0 keeps only A");
+        assert!(
+            (page0.children[0].y - 0.0).abs() < 0.01,
+            "A's pc.y on page 0 is 0 (root top), got {}",
+            page0.children[0].y,
+        );
+
+        let page1 = pages[1]
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("page 1 is a BlockPageable");
+        assert_eq!(page1.children.len(), 1, "page 1 keeps only B");
+        assert!(
+            (page1.children[0].y - 0.0).abs() < 0.01,
+            "B's pc.y on page 1 is 0 (root top after forced break, gap discarded), got {}",
+            page1.children[0].y,
+        );
+    }
+
+    #[test]
+    fn block_slice_for_page_returns_none_when_no_fragment_on_page() {
+        const ROOT_ID: usize = 200;
+        let root = BlockPageable::new(Vec::new()).with_node_id(Some(ROOT_ID));
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ROOT_ID).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        });
+        // page 1 absent from geometry → slice returns None.
+        assert!(root.slice_for_page(1, &geom).is_none());
+        // page 0 → Some.
+        assert!(root.slice_for_page(0, &geom).is_some());
+    }
+
+    #[test]
+    fn partition_returns_empty_block_placeholder_for_pages_without_fragments() {
+        // Geometry has 3 pages but root only on pages 0 and 2 → page 1
+        // gets an empty block placeholder so page count is preserved.
+        const ROOT_ID: usize = 300;
+        let root = BlockPageable::new(Vec::new()).with_node_id(Some(ROOT_ID));
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ROOT_ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            Fragment {
+                page_index: 2,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        ]);
+        let pages = super::partition_pageable_by_geometry(&root, &geom);
+        assert_eq!(pages.len(), 3, "page_count = max_page_index + 1 = 3");
+        // Page 1 is the placeholder — empty BlockPageable.
+        let page1 = pages[1]
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("placeholder is BlockPageable");
+        assert!(page1.children.is_empty(), "placeholder has no children");
+    }
+
+    #[test]
+    fn spacer_slice_adopts_fragment_height() {
+        // Verify that SpacerPageable picks up the fragmenter-decided
+        // height from geometry (relevant when the fragmenter shrinks
+        // an oversized spacer to fit a strip — Phase 3.2.b will start
+        // exercising this path; PR 1 just records the contract).
+        const SPACER_ID: usize = 400;
+        let spacer = SpacerPageable::new(100.0).with_node_id(Some(SPACER_ID));
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(SPACER_ID).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        });
+        let sliced = spacer
+            .slice_for_page(0, &geom)
+            .expect("page 0 has fragment");
+        let sliced_spacer = sliced
+            .as_any()
+            .downcast_ref::<SpacerPageable>()
+            .expect("sliced is a SpacerPageable");
+        assert!(
+            (sliced_spacer.height - 60.0).abs() < 0.01,
+            "sliced spacer adopts fragment height (60), got {}",
+            sliced_spacer.height,
+        );
+    }
+
+    #[test]
+    fn slice_for_page_returns_none_when_node_id_absent() {
+        // Pageable without node_id (synthetic / test-only construction)
+        // returns None — there's no way to look up its geometry entry.
+        let spacer = SpacerPageable::new(50.0); // node_id = None
+        let geom = PaginationGeometryTable::new();
+        assert!(spacer.slice_for_page(0, &geom).is_none());
+    }
+
+    /// fulgur-r6we (Phase 3.2.a): a 4-line paragraph split across two
+    /// pages — first 2 lines on page 0, last 2 on page 1. The
+    /// fragmenter records two `Fragment`s on the paragraph's NodeId
+    /// with heights summing to total paragraph height; `slice_for_page`
+    /// must recover each line range from those heights and rebase the
+    /// second fragment's `line.baseline` (paragraph-absolute) by
+    /// subtracting `consumed` (sum of earlier fragment heights).
+    #[test]
+    fn paragraph_slice_for_page_recovers_line_range_and_rebases_baseline() {
+        use crate::paragraph::{ParagraphPageable, ShapedLine};
+
+        const PARA_ID: usize = 500;
+
+        // 4 lines, 75pt each. baseline at 60pt of each line (paragraph-absolute).
+        let line = |idx: usize| ShapedLine {
+            height: 75.0,
+            baseline: 60.0 + idx as f32 * 75.0,
+            items: Vec::new(),
+        };
+        let para = ParagraphPageable::new(vec![line(0), line(1), line(2), line(3)])
+            .with_node_id(Some(PARA_ID));
+
+        // Two-page geometry: 150pt + 150pt (2 lines per page).
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(PARA_ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 150.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 150.0,
+            },
+        ]);
+
+        let page0 = para
+            .slice_for_page(0, &geom)
+            .expect("page 0 fragment present")
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .cloned()
+            .expect("page 0 slice is a ParagraphPageable");
+        assert_eq!(page0.lines.len(), 2, "page 0 keeps lines 0-1");
+        // Baselines unchanged on page 0 (consumed = 0).
+        assert!((page0.lines[0].baseline - 60.0).abs() < 0.01);
+        assert!((page0.lines[1].baseline - 135.0).abs() < 0.01);
+
+        let page1 = para
+            .slice_for_page(1, &geom)
+            .expect("page 1 fragment present")
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .cloned()
+            .expect("page 1 slice is a ParagraphPageable");
+        assert_eq!(page1.lines.len(), 2, "page 1 keeps lines 2-3");
+        // Baselines on page 1 rebased by consumed=150: line 2 was at 210, now 60.
+        assert!(
+            (page1.lines[0].baseline - 60.0).abs() < 0.01,
+            "line 2 baseline rebased: 210 - 150 = 60, got {}",
+            page1.lines[0].baseline,
+        );
+        assert!(
+            (page1.lines[1].baseline - 135.0).abs() < 0.01,
+            "line 3 baseline rebased: 285 - 150 = 135, got {}",
+            page1.lines[1].baseline,
+        );
     }
 
     /// fulgur-s67g Phase 2.1: a 3-line paragraph that overflows the
