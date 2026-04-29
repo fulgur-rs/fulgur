@@ -434,16 +434,37 @@ impl<'a> PaginationLayoutTree<'a> {
                 }
             }
             // fulgur-s67g Phase 2.2: skip `position: running()` named
-            // children. They are removed from body flow and placed
-            // into `@page` margin boxes per page; including them in
-            // the body cursor would over-count height and diverge
-            // from Pageable's view (which sees them as
-            // `RunningElementWrapperPageable` markers with zero
-            // contribution to body height).
+            // children from the body cursor. They are removed from
+            // body flow and placed into `@page` margin boxes per page;
+            // including them in the cursor would over-count height.
+            //
+            // Phase 3.4 follow-up (PR #296 Devin): record a zero-height
+            // fragment at the cursor position before skipping so the
+            // running node enters `geometry` keyed by its NodeId. The
+            // fragment carries `height = 0` (cursor does not advance)
+            // but `page_index` is the page on which the running
+            // element's source position lands — exactly what
+            // `collect_running_element_states` needs to map running
+            // instances to their per-page state.
             if self
                 .running_store
                 .is_some_and(|s| s.instance_for_node(child_id).is_some())
             {
+                if child.element_data().is_some() {
+                    let layout = child.final_layout;
+                    self.geometry
+                        .entry(child_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: body_x + layout.location.x,
+                            y: cursor_y,
+                            width: 0.0,
+                            height: 0.0,
+                        });
+                    emitted += 1;
+                }
                 continue;
             }
             let layout = child.final_layout;
@@ -2248,6 +2269,77 @@ mod tests {
             pages,
             vec![0, 0, 1],
             "body page 0, first child page 0, second child page 1, got {pages:?}"
+        );
+    }
+
+    /// Phase 3.4 follow-up (PR #296 Devin): regression for the
+    /// fragmenter's running-element handling. `fragment_pagination_root`
+    /// must record a zero-height fragment for every
+    /// `position: running()` element so the running NodeId appears in
+    /// geometry; without this, the downstream collect walk returns
+    /// all-empty maps and `content: element(name)` in margin boxes
+    /// silently produces nothing. Drive the engine pipeline through
+    /// `Engine::render_html` and inspect the geometry table built by
+    /// the same fragmenter pass.
+    #[test]
+    fn running_element_node_lands_in_geometry_with_zero_height() {
+        use crate::blitz_adapter;
+        use crate::convert::pt_to_px;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        let css = ".header { position: running(pageHeader); }";
+        let html = r#"<!DOCTYPE html>
+<html><head><style>.header { position: running(pageHeader); }</style></head>
+<body>
+<div class="header">Doc Header</div>
+<p>Body.</p>
+</body></html>"#;
+
+        let gcpm = parse_gcpm(css);
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+        blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
+        let store = pass.into_running_store();
+        blitz_adapter::resolve(&mut doc);
+        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+
+        let geometry = run_pass_with_break_and_running(
+            doc.deref_mut(),
+            pt_to_px(800.0),
+            &column_styles,
+            &store,
+        );
+
+        // The running element's NodeId must exist in geometry on page 0
+        // with a zero-height fragment.
+        let mut found_running_node = None;
+        for (&node_id, geom) in &geometry {
+            if store.instance_for_node(node_id).is_some() {
+                found_running_node = Some((node_id, geom.fragments.clone()));
+                break;
+            }
+        }
+        let (node_id, fragments) =
+            found_running_node.expect("running element NodeId must appear in geometry table");
+        assert_eq!(fragments.len(), 1, "single zero-height fragment");
+        assert_eq!(fragments[0].page_index, 0);
+        assert_eq!(
+            fragments[0].height, 0.0,
+            "running fragment must not advance the cursor"
+        );
+
+        // collect_running_element_states must surface the instance.
+        let states = collect_running_element_states(&geometry, &store);
+        let entry = states[0]
+            .get("pageHeader")
+            .expect("pageHeader entry must appear in page 0 state");
+        assert_eq!(
+            entry.instance_ids,
+            vec![store.instance_for_node(node_id).unwrap()]
         );
     }
 
