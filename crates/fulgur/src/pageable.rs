@@ -2533,18 +2533,17 @@ impl Pageable for BlockPageable {
         let self_page_y = self_frag.map(|f| f.y).unwrap_or(0.0);
 
         // Recursively slice each child. `child.fragment.y - self.fragment.y`
-        // gives the child's parent-relative y on this page, which equals the
-        // original `pc.y` when the child stays on the same page as the parent
-        // (Taffy's `layout.location.y` is parent-relative, and
-        // `record_subtree_descendants` propagates `parent_page_y +
-        // layout.location.y`). On a forced break, `cursor_y` resets and the
-        // gap is discarded — so the rebased y differs from `pc.y` and is the
-        // value we want.
+        // gives the child's parent-relative y on this page (page-local
+        // arithmetic). For body-direct children with `Fragment.y` in
+        // CSS px and `PositionedChild.y` in PDF pt, convert before
+        // storing.
         //
-        // `Fragment.y` is in CSS px (Taffy's native unit) while
-        // `PositionedChild.y` is in PDF pt. Convert the rebased y
-        // before storing — without this, children end up 4/3× lower
-        // on the page than intended.
+        // Known limitation: `fragment_block_subtree` advances a
+        // sequential cursor through DOM children, which is wrong for
+        // grid / flex layouts where parallel siblings share `y`. The
+        // partition output therefore stacks grid cells that were
+        // side-by-side in `paginate()`'s output. Tracked separately —
+        // the fix is in the fragmenter, not partition.
         let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
         for pc in &self.children {
             let Some(sliced) = pc.child.slice_for_page(page_index, geometry) else {
