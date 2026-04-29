@@ -169,7 +169,24 @@ fn draw_v2_page(
 ) {
     use crate::convert::px_to_pt;
 
+    // Pre-compute the set of node_ids that fall under any transform's
+    // `descendants` list. They are skipped in the main iteration and
+    // drawn instead inside the transform's `push_transform / pop` group
+    // below — mirroring v1's `TransformWrapperPageable::draw` which
+    // calls `inner.draw(...)` while the surface transform is active.
+    let mut transformed_descendants: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    for tx in drawables.transforms.values() {
+        transformed_descendants.extend(tx.descendants.iter().copied());
+    }
+
     for (&node_id, geom) in geometry {
+        if transformed_descendants.contains(&node_id) {
+            // Drawn inside an ancestor transform group elsewhere in
+            // this loop. Skipping prevents double-painting.
+            continue;
+        }
+
         // Bookmark anchor: emit on the page where the node's *first*
         // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
         // `is_first_page_for` slice semantics.
@@ -190,94 +207,314 @@ fn draw_v2_page(
             let x_pt = margin_left_pt + px_to_pt(frag.x);
             let y_pt = margin_top_pt + px_to_pt(frag.y);
 
-            if let Some(table) = drawables.tables.get(&node_id) {
-                draw_table_v2(canvas, table, x_pt, y_pt, frag);
-                continue;
-            }
-            // ListItem case: marker + body block + inline-root
-            // paragraph (when present) all share one opacity group,
-            // mirroring v1's `ListItemPageable::draw` which wraps
-            // `marker` and `self.body.draw(...)` in a single
-            // `draw_with_opacity(self.opacity, ...)` (`pageable.rs:3336`).
-            //
-            // The body BlockPageable is intentionally built with
-            // `opacity: 1.0` (`convert/list_item.rs:56-58`) so v1
-            // produces ONE compositing group. The inline-root paragraph
-            // (when the body holds text content) lands at the same
-            // node_id via `convert::inline_root`. v2 must compose all
-            // three inside one group — separate `draw_with_opacity`
-            // calls would emit multiple `q .. Q` pairs and break byte-eq.
-            //
-            // `continue;` after this arm so the standalone block /
-            // image / svg / paragraph dispatch below does NOT fire for
-            // the same node_id (everything that v1 paints under the
-            // list item already painted inside the group above).
-            if let Some(li) = drawables.list_items.get(&node_id) {
-                let block_for_li = drawables.block_styles.get(&node_id);
-                let para_for_li = drawables.paragraphs.get(&node_id);
-                draw_list_item_with_block(
+            if let Some(tx) = drawables.transforms.get(&node_id) {
+                draw_under_transform(
                     canvas,
-                    li,
-                    block_for_li,
-                    para_for_li,
+                    tx,
+                    node_id,
+                    geom,
+                    frag,
                     x_pt,
                     y_pt,
-                    frag,
-                    &geom.fragments,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
                     page_index,
                 );
-                continue;
+            } else {
+                dispatch_fragment(
+                    canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+                );
             }
-            // Block + inner content (paragraph / image / svg) sharing
-            // the same node_id: v1's `BlockPageable::draw`
-            // (`pageable.rs:1771`) wraps bg/border AND the children
-            // draw inside ONE `draw_with_opacity(self.opacity, ...)`
-            // group. The inline-root paragraph + replaced-image /
-            // replaced-svg patterns from `convert::inline_root` /
-            // `convert::replaced` deliberately leave the inner draw
-            // payload at `opacity: 1.0` because the wrapping block
-            // carries the real opacity.
-            //
-            // Mirror v1 by combining all four paints into one group at
-            // dispatch time and `continue;`-ing past the standalone
-            // arms. Same pattern as `draw_list_item_with_block`.
-            if let Some(block) = drawables.block_styles.get(&node_id) {
-                let para_for_block = drawables.paragraphs.get(&node_id);
-                let img_for_block = drawables.images.get(&node_id);
-                let svg_for_block = drawables.svgs.get(&node_id);
-                if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
-                    draw_block_with_inner_content(
-                        canvas,
-                        block,
-                        para_for_block,
-                        img_for_block,
-                        svg_for_block,
-                        x_pt,
-                        y_pt,
-                        frag,
-                        &geom.fragments,
-                        page_index,
-                    );
-                    continue;
-                }
-                draw_block_v2(canvas, block, x_pt, y_pt, frag);
-            }
-            if let Some(img) = drawables.images.get(&node_id) {
-                draw_image_v2(canvas, img, x_pt, y_pt);
-                continue;
-            }
-            if let Some(svg) = drawables.svgs.get(&node_id) {
-                draw_svg_v2(canvas, svg, x_pt, y_pt);
-                continue;
-            }
-            if let Some(para) = drawables.paragraphs.get(&node_id) {
-                draw_paragraph_v2(canvas, para, x_pt, y_pt, &geom.fragments, page_index);
-                continue;
-            }
-            // Other types (tables / list_items / ...) land in
-            // subsequent PRs.
         }
     }
+
+    // Post-pass: paint multicol column rules between columns. v1's
+    // `MulticolRulePageable::draw` runs this AFTER `child.draw(...)`
+    // so the rule lines paint on top of the column contents. The
+    // post-pass placement mirrors that ordering — every per-NodeId
+    // payload is already drawn by the main loop above.
+    for (&container_id, entry) in &drawables.multicol_rules {
+        let Some(container_geom) = geometry.get(&container_id) else {
+            continue;
+        };
+        paint_multicol_rule_for_page(
+            canvas,
+            entry,
+            container_geom,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
+    }
+}
+
+/// Per-fragment leaf-draw dispatch shared by the main loop and the
+/// transform special-case. Walks `node_id`'s payload maps and emits
+/// the appropriate per-type draw — exactly the same logic as before
+/// the transform refactor, just hoisted into a function so
+/// `draw_under_transform` can re-use it for descendants.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_fragment(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    drawables: &Drawables,
+    page_index: u32,
+) {
+    if let Some(table) = drawables.tables.get(&node_id) {
+        draw_table_v2(canvas, table, x_pt, y_pt, frag);
+        return;
+    }
+    // ListItem case: marker + body block + inline-root paragraph
+    // share a single opacity group. See `draw_list_item_with_block`
+    // for the v1 mirror.
+    if let Some(li) = drawables.list_items.get(&node_id) {
+        let block_for_li = drawables.block_styles.get(&node_id);
+        let para_for_li = drawables.paragraphs.get(&node_id);
+        draw_list_item_with_block(
+            canvas,
+            li,
+            block_for_li,
+            para_for_li,
+            x_pt,
+            y_pt,
+            frag,
+            &geom.fragments,
+            page_index,
+        );
+        return;
+    }
+    // Block + inner content (paragraph / image / svg) sharing the
+    // same node_id: combine into one `draw_with_opacity` group. See
+    // `draw_block_with_inner_content` for the v1 mirror.
+    if let Some(block) = drawables.block_styles.get(&node_id) {
+        let para_for_block = drawables.paragraphs.get(&node_id);
+        let img_for_block = drawables.images.get(&node_id);
+        let svg_for_block = drawables.svgs.get(&node_id);
+        if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
+            draw_block_with_inner_content(
+                canvas,
+                block,
+                para_for_block,
+                img_for_block,
+                svg_for_block,
+                x_pt,
+                y_pt,
+                frag,
+                &geom.fragments,
+                page_index,
+            );
+            return;
+        }
+        draw_block_v2(canvas, block, x_pt, y_pt, frag);
+    }
+    if let Some(img) = drawables.images.get(&node_id) {
+        draw_image_v2(canvas, img, x_pt, y_pt);
+        return;
+    }
+    if let Some(svg) = drawables.svgs.get(&node_id) {
+        draw_svg_v2(canvas, svg, x_pt, y_pt);
+        return;
+    }
+    if let Some(para) = drawables.paragraphs.get(&node_id) {
+        draw_paragraph_v2(canvas, para, x_pt, y_pt, &geom.fragments, page_index);
+    }
+}
+
+/// Push the transform onto the surface + link collector, dispatch the
+/// wrapper node's own payload and every descendant fragment that lands
+/// on `page_index`, then pop. Mirrors v1's
+/// `TransformWrapperPageable::draw`:
+///
+/// ```text
+/// canvas.surface.push_transform(matrix);
+/// inner.draw(canvas, x, y, ...);
+/// canvas.surface.pop();
+/// ```
+///
+/// The link collector also receives the transform so `/Link`
+/// annotation rects are mapped into device space — same call sequence
+/// v1 uses (`pageable.rs:2716-2724`).
+#[allow(clippy::too_many_arguments)]
+fn draw_under_transform(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    tx: &crate::drawables::TransformEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+
+    // `effective_matrix` mirrors `TransformWrapperPageable::effective_matrix`:
+    //   T(x + ox, y + oy) · M · T(-(x + ox), -(y + oy))
+    let ox = x_pt + tx.origin.x;
+    let oy = y_pt + tx.origin.y;
+    use crate::pageable::Affine2D;
+    let full = Affine2D::translation(ox, oy) * tx.matrix * Affine2D::translation(-ox, -oy);
+
+    if let Some(lc) = canvas.link_collector.as_deref_mut() {
+        lc.push_transform(full);
+    }
+    canvas.surface.push_transform(&full.to_krilla());
+
+    // Dispatch the wrapper's own payload first (the `inner` Pageable
+    // shares this `node_id`) — matches v1's `inner.draw(canvas, x, y, ...)`.
+    dispatch_fragment(
+        canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+    );
+
+    // Then dispatch every strict descendant on this page. Each
+    // descendant's fragment has its own (x, y) in untransformed local
+    // coordinates — the surface transform applies on top, mirroring v1
+    // where `inner.draw(...)` recurses through children with their
+    // pre-transform layout.
+    for &desc_id in &tx.descendants {
+        let Some(desc_geom) = geometry.get(&desc_id) else {
+            continue;
+        };
+        for desc_frag in &desc_geom.fragments {
+            if desc_frag.page_index != page_index {
+                continue;
+            }
+            let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+            let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+            dispatch_fragment(
+                canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+            );
+        }
+    }
+
+    canvas.surface.pop();
+    if let Some(lc) = canvas.link_collector.as_deref_mut() {
+        lc.pop_transform();
+    }
+}
+
+/// Paint multicol column-rule lines on `page_index` for one
+/// `MulticolRuleEntry`. Partitions `entry.groups` by accumulating the
+/// container's per-page heights — mirrors
+/// `MulticolRulePageable::slice_for_page` + `draw` so each page only
+/// emits the rule segments that fit on it.
+fn paint_multicol_rule_for_page(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::MulticolRuleEntry,
+    container_geom: &crate::pagination_layout::PaginationGeometry,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::stroke_line;
+
+    let Some(stroke) = build_multicol_stroke(&entry.rule) else {
+        return;
+    };
+
+    let target_pos = container_geom
+        .fragments
+        .iter()
+        .position(|f| f.page_index == page_index);
+    let Some(target_pos) = target_pos else {
+        return;
+    };
+    let target_frag = &container_geom.fragments[target_pos];
+
+    let consumed: f32 = px_to_pt(
+        container_geom.fragments[..target_pos]
+            .iter()
+            .map(|f| f.height)
+            .sum::<f32>(),
+    );
+    let cutoff = px_to_pt(target_frag.height);
+
+    let x_base = margin_left_pt + px_to_pt(target_frag.x);
+    let y_base = margin_top_pt + px_to_pt(target_frag.y);
+
+    for group in &entry.groups {
+        if group.n < 2 || group.col_heights.len() != group.n as usize {
+            continue;
+        }
+        let group_top = group.y_offset - consumed;
+        let max_h = group
+            .col_heights
+            .iter()
+            .copied()
+            .fold(0.0_f32, |acc, h| acc.max(h));
+        let group_bottom = group_top + max_h;
+        if group_bottom <= 0.0 || group_top >= cutoff {
+            continue;
+        }
+        let visible_top = group_top.max(0.0);
+        let y_top = y_base + visible_top;
+        for i in 0..(group.n as usize - 1) {
+            let h_left = group.col_heights[i]
+                .min(cutoff - group_top.max(0.0))
+                .max(0.0);
+            let h_right = group.col_heights[i + 1]
+                .min(cutoff - group_top.max(0.0))
+                .max(0.0);
+            if h_left <= 0.0 || h_right <= 0.0 {
+                continue;
+            }
+            let rule_x = x_base
+                + group.x_offset
+                + (i as f32 + 1.0) * group.col_w
+                + i as f32 * group.gap
+                + group.gap / 2.0;
+            let y_bot = y_top + h_left.min(h_right);
+            stroke_line(canvas, rule_x, y_top, rule_x, y_bot, stroke.clone());
+        }
+    }
+    canvas.surface.set_stroke(None);
+}
+
+/// Build the krilla stroke for the configured rule spec, mirroring
+/// `MulticolRulePageable::build_stroke`. Returns `None` when the rule
+/// is invisible (style `None` or non-positive width).
+fn build_multicol_stroke(
+    rule: &crate::column_css::ColumnRuleSpec,
+) -> Option<krilla::paint::Stroke> {
+    use crate::column_css::ColumnRuleStyle;
+    use crate::pageable::{alpha_to_opacity, colored_stroke};
+
+    if rule.width <= 0.0 || rule.style == ColumnRuleStyle::None {
+        return None;
+    }
+    let opacity = alpha_to_opacity(rule.color[3]);
+    let base = colored_stroke(&rule.color, rule.width, opacity);
+    let w = rule.width;
+    let stroke = match rule.style {
+        ColumnRuleStyle::None => return None,
+        ColumnRuleStyle::Solid => base,
+        ColumnRuleStyle::Dashed => krilla::paint::Stroke {
+            dash: Some(krilla::paint::StrokeDash {
+                array: vec![w * 3.0, w * 2.0],
+                offset: 0.0,
+            }),
+            ..base
+        },
+        ColumnRuleStyle::Dotted => krilla::paint::Stroke {
+            line_cap: krilla::paint::LineCap::Round,
+            dash: Some(krilla::paint::StrokeDash {
+                array: vec![0.0, w * 2.0],
+                offset: 0.0,
+            }),
+            ..base
+        },
+    };
+    Some(stroke)
 }
 
 /// v2 image draw. Mirrors `image::ImagePageable::draw` but operates on

@@ -362,10 +362,29 @@ fn inline_byte_equality_cases() {
         ),
     ];
 
+    // PR 6 (Transform + MulticolRule + marker wrappers verification)
+    // exercises the new `Drawables.transforms` and
+    // `Drawables.multicol_rules` maps. Transform tests cover the
+    // shared-node_id case (block + transform same id) and the strict
+    // descendant case (block wraps a child with its own id). Multicol
+    // rule painting requires a `column-rule` style, which the example
+    // fixtures don't currently use, so we add minimal cases here.
+    let pr6_cases: &[(&str, &str)] = &[
+        (
+            "block with transform translate (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+        (
+            "block with transform rotate around center",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#fce;transform:rotate(15deg);transform-origin:center}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+    ];
+
     let cases = pr3_cases
         .iter()
         .chain(pr4_cases.iter())
-        .chain(pr5_cases.iter());
+        .chain(pr5_cases.iter())
+        .chain(pr6_cases.iter());
     for (label, html) in cases {
         let engine = Engine::builder().build();
         let v1 = engine
