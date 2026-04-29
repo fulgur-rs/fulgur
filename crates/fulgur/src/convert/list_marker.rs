@@ -424,3 +424,183 @@ pub(super) fn inject_inside_marker_item_into_children(
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::ImageFormat;
+
+    fn img_marker(width: f32) -> LineItem {
+        LineItem::Image(InlineImage {
+            data: Arc::new(vec![]),
+            format: ImageFormat::Png,
+            width,
+            height: 10.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        })
+    }
+
+    fn pc(child: Box<dyn Pageable>) -> PositionedChild {
+        PositionedChild::in_flow(child, 0.0, 0.0)
+    }
+
+    // ── inject_inside_marker_item_into_children ───────────────────────────────
+
+    #[test]
+    fn inject_empty_children_returns_false() {
+        let mut children: Vec<PositionedChild> = vec![];
+        assert!(!inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(10.0)
+        ));
+    }
+
+    #[test]
+    fn inject_no_paragraph_descendant_returns_false() {
+        let spacer = Box::new(SpacerPageable::new(20.0));
+        let mut children = vec![pc(spacer)];
+        assert!(!inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(10.0)
+        ));
+    }
+
+    #[test]
+    fn inject_into_empty_paragraph_creates_single_line_with_marker() {
+        let mut children = vec![pc(Box::new(ParagraphPageable::new(vec![])))];
+        assert!(inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(8.0)
+        ));
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(para.lines.len(), 1, "should create one line");
+        assert_eq!(para.lines[0].items.len(), 1, "line should hold the marker");
+        // height comes from img.height (10.0)
+        assert!(
+            (para.lines[0].height - 10.0).abs() < 0.01,
+            "line height = img height"
+        );
+    }
+
+    #[test]
+    fn inject_into_paragraph_with_existing_items_prepends_and_shifts() {
+        let existing = InlineImage {
+            data: Arc::new(vec![]),
+            format: ImageFormat::Png,
+            width: 20.0,
+            height: 10.0,
+            x_offset: 5.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 10.0,
+            baseline: 8.0,
+            items: vec![LineItem::Image(existing)],
+        };
+        let mut children = vec![pc(Box::new(ParagraphPageable::new(vec![line])))];
+
+        // Marker width = 12.0. Existing item's x_offset (5.0) must grow by 12.
+        assert!(inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(12.0)
+        ));
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(para.lines[0].items.len(), 2, "marker prepended");
+        if let LineItem::Image(m) = &para.lines[0].items[0] {
+            assert!((m.width - 12.0).abs() < 0.01, "first item is the marker");
+        } else {
+            panic!("first item should be the injected marker image");
+        }
+        if let LineItem::Image(orig) = &para.lines[0].items[1] {
+            assert!(
+                (orig.x_offset - (5.0 + 12.0)).abs() < 0.01,
+                "existing item x_offset shifted by marker width"
+            );
+        } else {
+            panic!("second item should be the original image");
+        }
+    }
+
+    #[test]
+    fn inject_into_paragraph_nested_in_block_recurses() {
+        // BlockPageable whose only child is a ParagraphPageable.
+        let line = ShapedLine {
+            height: 12.0,
+            baseline: 9.0,
+            items: vec![],
+        };
+        let para = Box::new(ParagraphPageable::new(vec![line]));
+        let block = Box::new(BlockPageable::with_positioned_children(vec![pc(para)]));
+        let mut children = vec![pc(block)];
+
+        assert!(inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(6.0)
+        ));
+        let block = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .unwrap();
+        let para = block.children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(
+            para.lines[0].items.len(),
+            1,
+            "marker injected into nested paragraph"
+        );
+    }
+
+    #[test]
+    fn inject_block_without_paragraph_returns_false() {
+        let spacer = Box::new(SpacerPageable::new(10.0));
+        let block = Box::new(BlockPageable::with_positioned_children(vec![pc(spacer)]));
+        let mut children = vec![pc(block)];
+        assert!(!inject_inside_marker_item_into_children(
+            &mut children,
+            img_marker(5.0)
+        ));
+    }
+
+    // ── find_marker_font ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_marker_font_no_assets_empty_children_returns_none() {
+        let marker = crate::blitz_adapter::Marker::Char('\u{2022}');
+        let children: Vec<PositionedChild> = vec![];
+        assert!(find_marker_font(&marker, None, &children).is_none());
+    }
+
+    #[test]
+    fn find_marker_font_paragraph_with_image_items_only_returns_none() {
+        // Image items contain no font data → fallback search finds nothing.
+        let line = ShapedLine {
+            height: 10.0,
+            baseline: 8.0,
+            items: vec![img_marker(5.0)],
+        };
+        let children = vec![pc(Box::new(ParagraphPageable::new(vec![line])))];
+        let marker = crate::blitz_adapter::Marker::Char('\u{2022}');
+        assert!(find_marker_font(&marker, None, &children).is_none());
+    }
+}
