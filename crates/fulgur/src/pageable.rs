@@ -2544,12 +2544,137 @@ impl Pageable for BlockPageable {
         // partition output therefore stacks grid cells that were
         // side-by-side in `paginate()`'s output. Tracked separately —
         // the fix is in the fragmenter, not partition.
+        // fulgur-frmj: a node has "no geometry coverage" when it has a
+        // `node_id` but no fragments in the table (e.g. the synthesized
+        // `<html>` BlockPageable, or an `inline-block` span the
+        // body-walker did not visit as a body-direct child). In this
+        // case, child slicing drives the result — children that fall
+        // back to `pc.y` produce a transparent passthrough, and we
+        // preserve clones for any leaf children whose own
+        // `slice_for_page` would return `None` (e.g. a single-page
+        // paragraph whose `node_id` is missing from geometry).
+        let self_has_any_fragment_outer = self
+            .node_id
+            .is_some_and(|id| geometry.get(&id).is_some_and(|g| !g.fragments.is_empty()));
+        // fulgur-frmj: how much of `self`'s height has been consumed by
+        // pages strictly before `page_index`. Used to rebase
+        // `position: absolute` descendants on continuation pages so
+        // they slide with their containing block (mirrors
+        // `split_children_at_index`'s `pc.y - y_offset` for
+        // `out_of_flow && !is_fixed`).
+        let consumed_above_pt: f32 = self
+            .node_id
+            .and_then(|id| geometry.get(&id))
+            .map(|g| {
+                g.fragments
+                    .iter()
+                    .filter(|f| f.page_index < page_index)
+                    .map(|f| crate::convert::px_to_pt(f.height))
+                    .sum()
+            })
+            .unwrap_or(0.0);
         let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
         for pc in &self.children {
-            let Some(sliced) = pc.child.slice_for_page(page_index, geometry) else {
+            // fulgur-frmj: out-of-flow children (`position: absolute` /
+            // `position: fixed`) are skipped by the fragmenter
+            // (`fragment_block_subtree` / `fragment_pagination_root`
+            // continue past them), so `slice_for_page` would drop them
+            // without geometry. Replicate them verbatim on every page —
+            // mirrors `split_children_at_index` (pageable.rs:1619-1635):
+            // - `position: fixed` keeps `pc.y` (anchored to page /
+            //   viewport, not to the sliding containing block).
+            // - `position: absolute` rebases against the consumed
+            //   parent height so it slides with its containing block on
+            //   continuation pages (page 2+ of a multi-page CB sees
+            //   `pc.y - consumed_above`).
+            if pc.is_fixed {
+                sliced_children.push(PositionedChild {
+                    child: pc.child.clone_box(),
+                    x: pc.x,
+                    y: pc.y,
+                    out_of_flow: pc.out_of_flow,
+                    is_fixed: true,
+                });
                 continue;
+            }
+            if pc.out_of_flow {
+                // fulgur-frmj (Devin Review on PR #294): only replicate
+                // `position: absolute` on pages where this block is
+                // actually present. Without this gate, a relative CB
+                // that fits on page 0 alone would still emit its abs
+                // children on page 1+ — the `self_frag.is_none() &&
+                // sliced_children.is_empty()` guard below cannot fire
+                // because the cloned abs child keeps the vec
+                // non-empty, so the parent renders an empty CB on the
+                // wrong page. Allow replication when self IS on this
+                // page (`self_frag.is_some()`) or when self is a
+                // transparent ancestor (no geometry coverage at all,
+                // e.g. the synthesized `<html>` block).
+                if self_frag.is_some() || !self_has_any_fragment_outer {
+                    sliced_children.push(PositionedChild {
+                        child: pc.child.clone_box(),
+                        x: pc.x,
+                        y: pc.y - consumed_above_pt,
+                        out_of_flow: true,
+                        is_fixed: false,
+                    });
+                }
+                continue;
+            }
+            let sliced = match pc.child.slice_for_page(page_index, geometry) {
+                Some(s) => s,
+                None => {
+                    // fulgur-frmj: keep the child if (a) self has no
+                    // geometry coverage (transparent ancestor —
+                    // synthesized html block) or (b) the child has no
+                    // fragments at all (fragmenter-skipped inline
+                    // descendants like an `inline-block` span — the
+                    // body-direct walk only emits one fragment per
+                    // body child, and `record_subtree_descendants`
+                    // skips elements with `h <= 0 && w <= 0`).
+                    // Single-page reviews with styled inline-block
+                    // pills require this
+                    // (`fulgur-vrt::layout::review_card_inline_block`).
+                    let child_has_any_fragment = pc.child.node_id().is_some_and(|id| {
+                        geometry.get(&id).is_some_and(|g| !g.fragments.is_empty())
+                    });
+                    if !self_has_any_fragment_outer || !child_has_any_fragment {
+                        sliced_children.push(PositionedChild {
+                            child: pc.child.clone_box(),
+                            x: pc.x,
+                            y: pc.y,
+                            out_of_flow: pc.out_of_flow,
+                            is_fixed: pc.is_fixed,
+                        });
+                    }
+                    continue;
+                }
             };
+            // fulgur-frmj: when the child shares this block's `node_id`
+            // (e.g. an inline root wrapped in a styled `BlockPageable`,
+            // or a replaced element wrapped because of border / padding /
+            // background), both lookups resolve to the same `Fragment`
+            // and `child_frag.y - self_frag.y == 0` would collapse the
+            // content inset (padding + border). Use `pc.y` so the inner
+            // child stays at the layout-time inset.
+            //
+            // When `self` has no entry in `geometry` at all (the
+            // synthesized `<html>` BlockPageable wrapping body — the
+            // fragmenter only walks body downward, so html is absent),
+            // children's fragment.y is recorded in body-relative space
+            // and subtracting `self_page_y == 0` would silently discard
+            // body's offset from html (e.g. `body { margin: 32px }`
+            // collapsed into `body.final_layout.location.y`). Fall back
+            // to the layout-time `pc.y`. This differs from
+            // "self has fragments but not on this page" — for body on
+            // pages 2+ the original `child_frag.y - 0` arithmetic still
+            // works because body-relative coords reset per page.
+            let self_has_any_fragment = self
+                .node_id
+                .is_some_and(|id| geometry.get(&id).is_some_and(|g| !g.fragments.is_empty()));
             let new_y = match pc.child.node_id() {
+                Some(child_node_id) if Some(child_node_id) == self.node_id => pc.y,
+                _ if !self_has_any_fragment => pc.y,
                 Some(child_node_id) => {
                     match fragment_on_page(geometry, child_node_id, page_index) {
                         Some(child_frag) => crate::convert::px_to_pt(child_frag.y - self_page_y),
@@ -2567,12 +2692,26 @@ impl Pageable for BlockPageable {
             });
         }
 
-        // No own fragment AND no descendant slices → not on this
-        // page. Without this, the transparent-ancestor branch would
-        // emit an empty Block placeholder for every page, which both
-        // wastes geometry and breaks `collect_*_states` page
+        // No own fragment AND no in-flow descendant slices → not on
+        // this page. Without this, the transparent-ancestor branch
+        // would emit an empty Block placeholder for every page, which
+        // both wastes geometry and breaks `collect_*_states` page
         // alignment.
-        if self_frag.is_none() && sliced_children.is_empty() {
+        //
+        // fulgur-frmj (Devin Review on PR #294): only count in-flow
+        // children when deciding whether the block should be emitted.
+        // A `position: fixed` child gets unconditionally cloned across
+        // pages (CSS paged media spec) but it should not drag its DOM
+        // parent's `layout_size` / background / border onto pages
+        // where the parent itself is absent. For body specifically —
+        // which has a single geometry entry on page 0 but spans every
+        // page — its in-flow children (h1, p, …) keep
+        // `sliced_children` non-empty on each page, so this guard
+        // does not fire spuriously.
+        let has_in_flow_descendant = sliced_children
+            .iter()
+            .any(|pc| !pc.out_of_flow && !pc.is_fixed);
+        if self_frag.is_none() && !has_in_flow_descendant {
             return None;
         }
 
@@ -2599,6 +2738,34 @@ impl Pageable for BlockPageable {
                 width: crate::convert::px_to_pt(frag.width),
                 height: crate::convert::px_to_pt(frag.height),
             });
+            // fulgur-frmj: when the block has a single fragment (fits
+            // on one page), prefer `self.layout_size` (Taffy's
+            // authoritative border-box size including padding /
+            // border) over `cached_size` derived from the fragment.
+            // For inline-root blocks, `fragment_inline_root` records
+            // `Fragment.height` from accumulated *line* metrics — not
+            // the block's Taffy size — so on `.box { padding: 10px }`
+            // the cached_size loses the padding band and `bg fill` /
+            // `border` shrink. Multi-fragment blocks deliberately
+            // leave `layout_size` unset so per-page `cached_size`
+            // drives clipping / shadows on each page slice.
+            let single_fragment = self
+                .node_id
+                .and_then(|id| geometry.get(&id))
+                .is_some_and(|g| g.fragments.len() == 1);
+            if single_fragment {
+                block.layout_size = self.layout_size;
+            }
+        } else {
+            // fulgur-frmj: transparent ancestor (e.g. the synthesized
+            // `<html>` BlockPageable wrapping body — fragmenter-side
+            // walk only covers body downward). Without preserving the
+            // original Taffy size, `BlockPageable::draw` falls back to
+            // `avail_width` / `avail_height` (= the full page content
+            // area), so a `body { background: white }` rule renders
+            // page-wide instead of body-wide.
+            block.layout_size = self.layout_size;
+            block.cached_size = self.cached_size;
         }
         Some(Box::new(block))
     }
@@ -4610,7 +4777,7 @@ impl Pageable for TablePageable {
         // the repeated header (mirrors `split()`'s `header_height +
         // (pc.y - split_y)` formula).
         let node_id = self.node_id?;
-        let _self_frag = fragment_on_page(geometry, node_id, page_index)?;
+        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
 
         // First pass: recursively slice each body cell and pair the
         // result with the original `pc.y` (needed for rebase
@@ -4658,14 +4825,42 @@ impl Pageable for TablePageable {
             })
             .collect();
 
+        // fulgur-frmj: derive `layout_size` / `cached_height` from
+        // this page's fragment so multi-page tables draw background,
+        // border, box-shadow, and overflow clips at the correct slice
+        // height (Devin Review / coderabbit on PR #294). Mirrors the
+        // single- vs multi-fragment split in `BlockPageable::slice_for_page`:
+        // a one-fragment table prefers `self.layout_size` (Taffy's
+        // authoritative border-box size) for fields the fragmenter
+        // cannot recompute (`overflow: hidden` clip path —
+        // `tests/style_test::test_overflow_hidden_on_table_clips`);
+        // multi-fragment tables fall back to the per-page fragment
+        // height in pt so page 2+ does not redraw the entire table's
+        // decoration.
+        let single_fragment = geometry
+            .get(&node_id)
+            .is_some_and(|g| g.fragments.len() == 1);
+        let slice_height_pt = crate::convert::px_to_pt(self_frag.height);
+        let (slice_layout_size, slice_cached_height) = if single_fragment {
+            (self.layout_size, self.cached_height)
+        } else {
+            let width = self.layout_size.map(|s| s.width).unwrap_or(self.width);
+            (
+                Some(Size {
+                    width,
+                    height: slice_height_pt,
+                }),
+                slice_height_pt,
+            )
+        };
         Some(Box::new(TablePageable {
             header_cells: clone_children(&self.header_cells, 0.0),
             body_cells,
             header_height: self.header_height,
             style: self.style.clone(),
-            layout_size: None,
+            layout_size: slice_layout_size,
             width: self.width,
-            cached_height: 0.0,
+            cached_height: slice_cached_height,
             opacity: self.opacity,
             visible: self.visible,
             id: self.id.clone(),
