@@ -135,7 +135,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, height);
                 // Use Taffy's computed height (includes padding + border) instead of children-only height
                 block.layout_size = Some(Size { width, height });
@@ -144,6 +145,7 @@ pub(super) fn try_convert(
             let mut p = paragraph;
             p.opacity = opacity;
             p.visible = visible;
+            p.node_id = Some(node_id);
             return Some(Box::new(p));
         } else if before_inline.is_some() || after_inline.is_some() {
             // Synthesize a minimal paragraph for pseudo-only elements (e.g.
@@ -162,6 +164,10 @@ pub(super) fn try_convert(
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             let mut paragraph = ParagraphPageable::new(vec![line]);
             paragraph.visible = visible;
+            // `node_id` is set below only on the unwrapped return path —
+            // when wrapped in a `BlockPageable`, the block gets `node_id`
+            // and the inner paragraph leaves it `None` to avoid the
+            // shared-node_id collapse bug (Devin Review on PR #291).
 
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
@@ -194,12 +200,14 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }
             paragraph.opacity = opacity;
+            paragraph.node_id = Some(node_id);
             return Some(Box::new(paragraph));
         }
         // Fall through: inline root with no text and no inline pseudo images
@@ -524,6 +532,14 @@ pub(super) fn extract_paragraph(
     // end up as plain `ParagraphPageable` (no block wrapper triggered by the
     // default style) still register with `DestinationRegistry` for
     // `href="#top"` resolution.
+    //
+    // `node_id` is intentionally NOT set here. Callers either return this
+    // paragraph as the outermost Pageable (and set `node_id` on it then) or
+    // wrap it in a `BlockPageable` (and set `node_id` on the block instead).
+    // Setting `node_id` on both block and inner paragraph would collapse
+    // the inner `pc.y` (content inset = padding + border) to 0 in
+    // `BlockPageable::slice_for_page` because both lookups resolve to the
+    // same `Fragment` (Devin Review on PR #291).
     Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
 }
 

@@ -469,18 +469,35 @@ pub fn render_to_pdf_with_gcpm(
         init_size
     };
     let content_width = init_size.width - init_margin.left - init_margin.right;
-    let content_height = init_size.height - init_margin.top - init_margin.bottom;
+    let _content_height = init_size.height - init_margin.top - init_margin.bottom;
 
-    // Pass 1: paginate body content
-    let pages = paginate(root, content_width, content_height);
-    // fulgur-cj6u Phase 1.2 / fulgur-s67g Phase 2.6: cross-check the
-    // fragmenter agrees with Pageable on the page count.
-    // Phase 2.6 (`@page` size / margin resolution) makes the engine
-    // pre-resolve page-1 settings before driving the fragmenter, so the
-    // strip height the fragmenter sees matches `content_height` here by
-    // construction — no skip needed for `@page`-modified docs.
-    // (Phase 2.2 already ungated the running-elements skip.)
+    // fulgur-4ltp (Phase 3.2.c): body-content page split is now
+    // geometry-driven. The fragmenter populated
+    // `pagination_geometry` upstream; this helper slices the Pageable
+    // tree per page using that geometry, replacing the previous
+    // `paginate(root, content_width, content_height)` Pageable-driven
+    // split. The collect_*_states / parity gates downstream still
+    // walk the resulting per-page Pageable trees — they keep working
+    // because PR 1 (`fulgur-r6we`) / PR 2 (`fulgur-3vwx`) implemented
+    // `slice_for_page` for every Pageable impl with the same
+    // first-page-only marker semantics that `split()` had.
+    let pages = crate::pagination_layout::partition_pageable_by_geometry(
+        root.as_ref(),
+        pagination_geometry,
+    );
+    drop(root);
+    // fulgur-cj6u Phase 1.2 / fulgur-s67g Phase 2.6: page-count
+    // cross-check. After Phase 3.2.c both sides come from the same
+    // `pagination_geometry`, so this is a structural invariant
+    // (partition.len() == implied_page_count). Phase 3.4 will delete
+    // the helper once `paginate.rs` is gone.
     assert_pageable_fragmenter_parity(&pages, pagination_geometry);
+    // Suppress unused-variable warnings for the parity inputs that
+    // are now redundant. Phase 3.3 / 3.4 will delete the parity
+    // helpers entirely; until then we keep the parameters in the
+    // function signature so Engine::render_html callers don't need
+    // to change.
+    let _ = (string_set_by_node, counter_ops_by_node, bookmark_by_node);
     let total_pages = pages.len();
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
         vec![BTreeMap::new(); pages.len()]

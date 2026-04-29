@@ -1120,8 +1120,35 @@ impl Pageable for ParagraphPageable {
         let node_id = self.node_id?;
         let frags = &geometry.get(&node_id)?.fragments;
         let target_pos = frags.iter().position(|f| f.page_index == page_index)?;
-        let target_h = frags[target_pos].height;
-        let consumed: f32 = frags[..target_pos].iter().map(|f| f.height).sum();
+
+        // Single-fragment fast path: paragraph fits on one page
+        // (`frags.len() == 1`), no splitting needed — clone every
+        // line verbatim. Skipping the height-based line filter here
+        // matters for paragraphs whose `Fragment.height`
+        // (`final_layout.size.height` from Taffy) and accumulated
+        // `line.height` (Parley line metrics) differ by more than
+        // the `eps` tolerance the multi-fragment loop below uses
+        // (`<h2>` with `::before` content was returning `None` here
+        // because the measured h2 height was 0.5pt under the line
+        // height, dropping the wrapping `CounterOpWrapper` and
+        // breaking `assert_counter_states_parity`).
+        if frags.len() == 1 && target_pos == 0 {
+            let mut sliced = ParagraphPageable::new(self.lines.clone());
+            sliced.opacity = self.opacity;
+            sliced.visible = self.visible;
+            sliced.pagination = self.pagination;
+            sliced.id = self.id.clone();
+            sliced.node_id = self.node_id;
+            return Some(Box::new(sliced));
+        }
+
+        // Multi-fragment case: paragraph spans multiple pages, so
+        // recover each page's line range from cumulative fragment
+        // heights. `Fragment.height` is CSS px; line metrics in
+        // `self.lines` are PDF pt — convert before comparing.
+        let target_h = crate::convert::px_to_pt(frags[target_pos].height);
+        let consumed: f32 =
+            crate::convert::px_to_pt(frags[..target_pos].iter().map(|f| f.height).sum::<f32>());
 
         let eps = 0.01_f32;
         let mut line_top: f32 = 0.0;

@@ -2671,9 +2671,10 @@ mod tests {
     #[test]
     fn spacer_slice_adopts_fragment_height() {
         // Verify that SpacerPageable picks up the fragmenter-decided
-        // height from geometry (relevant when the fragmenter shrinks
-        // an oversized spacer to fit a strip — Phase 3.2.b will start
-        // exercising this path; PR 1 just records the contract).
+        // height from geometry. `Fragment.height` is CSS px;
+        // `SpacerPageable.height` is PDF pt — slice_for_page converts
+        // via `px_to_pt`. The 80px fragment height becomes 60pt
+        // (80 * 0.75) after conversion.
         const SPACER_ID: usize = 400;
         let spacer = SpacerPageable::new(100.0).with_node_id(Some(SPACER_ID));
         let mut geom = PaginationGeometryTable::new();
@@ -2682,7 +2683,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             width: 200.0,
-            height: 60.0,
+            height: 80.0,
         });
         let sliced = spacer
             .slice_for_page(0, &geom)
@@ -2693,7 +2694,7 @@ mod tests {
             .expect("sliced is a SpacerPageable");
         assert!(
             (sliced_spacer.height - 60.0).abs() < 0.01,
-            "sliced spacer adopts fragment height (60), got {}",
+            "sliced spacer adopts fragment height (80px → 60pt), got {}",
             sliced_spacer.height,
         );
     }
@@ -2729,7 +2730,9 @@ mod tests {
         let para = ParagraphPageable::new(vec![line(0), line(1), line(2), line(3)])
             .with_node_id(Some(PARA_ID));
 
-        // Two-page geometry: 150pt + 150pt (2 lines per page).
+        // Two-page geometry: 200px + 200px (= 150pt + 150pt at 0.75
+        // px-to-pt — `Fragment.height` is CSS px, paragraph line.height
+        // is PDF pt, so slice_for_page converts via `px_to_pt`).
         let mut geom = PaginationGeometryTable::new();
         geom.entry(PARA_ID).or_default().fragments.extend([
             Fragment {
@@ -2737,14 +2740,14 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 width: 200.0,
-                height: 150.0,
+                height: 200.0,
             },
             Fragment {
                 page_index: 1,
                 x: 0.0,
                 y: 0.0,
                 width: 200.0,
-                height: 150.0,
+                height: 200.0,
             },
         ]);
 
@@ -2997,6 +3000,9 @@ mod tests {
             groups: vec![group],
         };
 
+        // `Fragment.height` is CSS px; group y_offset / col_heights
+        // are PDF pt. slice_for_page converts via `px_to_pt`. Use
+        // 80 / 200 / 4/3 of 50 = 66.67 to land on 20pt / 50pt cutoffs.
         let mut geom = PaginationGeometryTable::new();
         geom.entry(CHILD_ID).or_default().fragments.extend([
             Fragment {
@@ -3004,14 +3010,14 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 width: 200.0,
-                height: 20.0,
+                height: 20.0 / 0.75, // 20pt → 26.67px
             },
             Fragment {
                 page_index: 1,
                 x: 0.0,
                 y: 0.0,
                 width: 200.0,
-                height: 50.0,
+                height: 50.0 / 0.75, // 50pt → 66.67px
             },
         ]);
 

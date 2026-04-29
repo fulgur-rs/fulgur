@@ -224,7 +224,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, 10000.0);
                 if needs_wrapper {
                     block.layout_size = Some(Size { width, height });
@@ -296,7 +297,8 @@ pub(super) fn try_convert(
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node_id));
             block.wrap(width, 10000.0);
             if has_style {
                 block.layout_size = Some(Size { width, height });
@@ -406,13 +408,19 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
+                // Unwrapped: paragraph is the outermost Pageable for
+                // this DOM node — set `node_id` here. (extract_paragraph
+                // intentionally leaves it unset so the wrapped branch
+                // above can put node_id on the BlockPageable instead.)
                 let mut p = paragraph;
                 p.visible = visible;
+                p.node_id = Some(node.id);
                 Box::new(p)
             }
         } else if before_inline.is_some() || after_inline.is_some() {
@@ -461,12 +469,17 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                Box::new(paragraph)
+                // Unwrapped synthetic paragraph: outermost Pageable
+                // for this DOM node — set `node_id` here.
+                let mut p = paragraph;
+                p.node_id = Some(node.id);
+                Box::new(p)
             }
         } else {
             // Inline root with no text and no inline pseudo images —
@@ -487,7 +500,8 @@ fn build_list_item_body(
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node.id));
             block.wrap(width, 10000.0);
             Box::new(block)
         }
@@ -508,7 +522,8 @@ fn build_list_item_body(
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, 10000.0);
         Box::new(block)
     }

@@ -48,7 +48,14 @@ fn wrap_replaced_in_block_style<F>(
     build_inner: F,
 ) -> Box<dyn Pageable>
 where
-    F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
+    // `outermost: bool` — the closure must set `node_id` on the inner
+    // Pageable iff `outermost == true` (i.e. the inner IS the
+    // returned Pageable for this DOM node). When wrapped in a styled
+    // BlockPageable, `outermost == false`: the block carries `node_id`
+    // and the inner stays `node_id = None` so
+    // `BlockPageable::slice_for_page` does not collapse the inner's
+    // `pc.y` (content inset) to 0 (Devin Review on PR #291).
+    F: FnOnce(f32, f32, f32, bool, bool) -> Box<dyn Pageable>,
 {
     let (width, height) = size_in_pt(node.final_layout.size);
 
@@ -66,7 +73,8 @@ where
         // Inner element receives visibility (it IS the node's own content) but
         // NOT opacity — the wrapping block handles opacity once for the whole
         // border-box, otherwise the border would also be faded.
-        let inner = build_inner(content_width, content_height, 1.0, visible);
+        // `outermost = false`: the block below owns `node_id`.
+        let inner = build_inner(content_width, content_height, 1.0, visible, false);
         let child = PositionedChild {
             child: inner,
             x: cx,
@@ -79,7 +87,8 @@ where
             .with_style(style)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
@@ -88,7 +97,8 @@ where
         // (e.g. `<img style="break-before: page">`): wrap in a thin
         // BlockPageable so paginate() honours the break.
         // Match the styled branch: the wrapper owns opacity, the inner keeps visibility.
-        let inner = build_inner(width, height, 1.0, visible);
+        // `outermost = false`: the block below owns `node_id`.
+        let inner = build_inner(width, height, 1.0, visible, false);
         let child = PositionedChild {
             child: inner,
             x: 0.0,
@@ -100,12 +110,15 @@ where
             .with_pagination(pagination)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
     } else {
-        build_inner(width, height, opacity, visible)
+        // No wrapping block — inner IS the outermost Pageable for
+        // this DOM node, so the closure sets `node_id` on it.
+        build_inner(width, height, opacity, visible, true)
     }
 }
 
@@ -175,13 +188,18 @@ fn convert_content_url(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
         node,
         assets,
-        move |w, h, opacity, visible| {
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+        move |w, h, opacity, visible, outermost| {
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            if outermost {
+                img.node_id = Some(node_id);
+            }
             Box::new(img)
         },
     ))
@@ -198,18 +216,23 @@ fn convert_image(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(src)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
         node,
         assets,
-        move |w, h, opacity, visible| {
+        move |w, h, opacity, visible, outermost| {
             // `wrap_replaced_in_block_style` has already resolved (w, h) from
             // Taffy's final layout, so we pass them as explicit css_w/css_h.
             // The shared helper then applies the same `ImagePageable::new`
             // construction path as the pseudo-content url() case, keeping
             // sizing behavior byte-identical to the previous <img> path.
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            if outermost {
+                img.node_id = Some(node_id);
+            }
             Box::new(img)
         },
     ))
@@ -227,15 +250,19 @@ fn convert_svg(
 ) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
     let tree = extract_inline_svg_tree(elem)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
         node,
         assets,
-        move |w, h, opacity, visible| {
+        move |w, h, opacity, visible, outermost| {
             let mut svg = SvgPageable::new(tree, w, h);
             svg.opacity = opacity;
             svg.visible = visible;
+            if outermost {
+                svg.node_id = Some(node_id);
+            }
             Box::new(svg)
         },
     ))
