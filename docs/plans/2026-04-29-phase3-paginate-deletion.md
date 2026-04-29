@@ -131,23 +131,38 @@ let pages = partition_pageable_by_geometry(root, pagination_geometry);
 
 #### 仕様
 
-- `Pageable` trait から `split` / `split_boxed` メソッド削除
-- `BlockPageable::find_split_point` / `split_children_at_index` / `split_children_for_within` / `clone_pc_with_offset` を削除 (clone_pc_with_offset は draw 用に残るかは要確認)
-- 全 `impl Pageable for X` から `split` / `split_boxed` の実装を削除
-- 既存の `tests/` / `#[cfg(test)] mod tests` 内で split を直接呼んでいる test を整理:
-  - `partition_pageable_by_geometry` 経由に書き換え
-  - もしくは fragmenter の挙動をテストする形に移植
-  - test fixture が old API に強く依存しているものは削除
+- `Pageable` trait から `split` / `split_boxed` / `has_forced_break_below` / `propagate_page_height` メソッド削除
+- `BlockPageable::find_split_point` / `split_children_at_index` / `split_children_for_within` / `clone_pc_with_offset` を削除
+- 全 `impl Pageable for X` から `split` / `split_boxed` / `has_forced_break_below` / `propagate_page_height` の実装を削除
+- `paginate::paginate()` 関数 + `pagination_layout::cmp_test` parity harness を削除 (`paginate()` は `split_boxed` に依存するため)。`collect_*_states` / `StringSetPageState` 型は 3.4 で fragmenter 側に移すまで残す
+- `render::render_to_pdf` (paginate 駆動の旧 API) を削除し、`render_to_pdf_with_partition` を `render_to_pdf` にリネーム (新 API 名として確定)
+- `Engine::render_pageable` / `render_pageable_to_file` を削除 (caller が geometry を持たないため partition 経由にできない)
+- 既存の test で split / paginate / `Engine::render_pageable` を直接呼んでいるものは fragmenter / VRT golden カバレッジに任せて削除
 
 #### 受け入れ条件
 
-- `pageable.rs` から split 関連コードが消えている
+- `pageable.rs` から split / has_forced_break_below / propagate_page_height / split helpers が消えている
+- `cargo build -p fulgur` 0 warning
 - `cargo test -p fulgur` 全 pass
-- `cargo doc --no-deps` warnings 0
+- VRT / examples_determinism 全 pass
 
 #### リスク
 
-- 削除する split impl の test カバレッジを失わないよう、移植/再書きが必要 (元 test の意図を fragmenter 側に再現)
+- 削除する split impl の test カバレッジを失わないよう、fragmenter unit test / VRT golden で十分にカバーされていることを確認
+
+#### 3.4 との境界調整 (実装時メモ)
+
+当初 plan は 3.3 を「split メソッドの削除のみ」、3.4 を「paginate.rs 削除」としていたが、`paginate()` は内部で `split_boxed` を呼ぶため artificial な分割だった。本 PR では 3.3 で:
+
+- `paginate()` 関数本体 + 内部テスト (`paginate.rs` の `mod tests`) を削除
+- `cmp_test` parity harness (`pagination_layout.rs` 末尾) を削除
+- `render_to_pdf` の rename / 旧 API 削除も同時に実施
+
+を **すべて** 畳み込んだ。残る 3.4 (`fulgur-g9e3-4`) のスコープは:
+
+- `paginate.rs` ファイル自体の削除
+- `collect_string_set_states` / `collect_counter_states` / `collect_running_element_states` / `StringSetPageState` 型を `pagination_layout` 配下 (or 専用モジュール) へ移動
+- `lib.rs` / GCPM render path / counter modules の import 整理
 
 ### 3.4 paginate.rs 削除 (fulgur-g9e3-4)
 
