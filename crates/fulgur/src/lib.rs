@@ -8,6 +8,7 @@ pub mod blitz_adapter;
 pub(crate) mod column_css;
 pub mod config;
 pub mod convert;
+pub(crate) mod drawables;
 pub mod engine;
 pub mod error;
 pub mod gcpm;

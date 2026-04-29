@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::drawables::Drawables;
 use crate::error::{Error, Result};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
@@ -7,6 +8,62 @@ use crate::gcpm::running::RunningElementStore;
 use crate::pageable::{Canvas, Pageable};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+/// Phase 4 PR 1 (fulgur-9t3z): geometry-driven render skeleton.
+///
+/// Walks `geometry` per page, dispatches each (node_id, fragment) to
+/// per-type draw functions sourced from `drawables`. PR 1 emits blank
+/// pages because every map in `Drawables` is empty; subsequent PRs
+/// migrate one Pageable type at a time and the dispatcher grows
+/// match arms.
+///
+/// Page settings (size, margins, landscape, GCPM `@page` overrides)
+/// resolve identically to the v1 path so byte equality is achievable
+/// once the draw migration completes.
+pub fn render_v2(
+    config: &Config,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    gcpm: &GcpmContext,
+) -> Result<Vec<u8>> {
+    let _ = drawables; // PR 1: every draw map is empty
+
+    let mut document = krilla::Document::new();
+
+    let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
+    for page_idx in 0..page_count {
+        let page_num = page_idx + 1;
+        // Pass the full `gcpm.page_settings` (including selector
+        // rules: `:first`, `:left`, `:right`) so per-page overrides
+        // fire identically to the v1 GCPM path. Filtering to
+        // `page_selector.is_none()` here would silently drop those
+        // overrides and bake the wrong `MediaBox` dimensions even on
+        // PR 1's blank pages (Devin review on PR #300).
+        let (resolved_size, _resolved_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &gcpm.page_settings,
+                page_num,
+                page_count,
+                config,
+            );
+        let page_size = if resolved_landscape {
+            resolved_size.landscape()
+        } else {
+            resolved_size
+        };
+        let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
+            .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        let _page = document.start_page_with(settings);
+        // PR 2+: walk geometry.fragments_on_page(page_idx) and dispatch
+        // (node_id, fragment) → draw_node(canvas, ..) here. PR 1 emits
+        // an empty page.
+    }
+
+    document.set_metadata(build_metadata(config));
+    document
+        .finish()
+        .map_err(|e| Error::PdfGeneration(format!("{e:?}")))
+}
 
 /// Render a Pageable tree to PDF bytes using fragmenter geometry to
 /// split pages.
