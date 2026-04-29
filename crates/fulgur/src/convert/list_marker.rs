@@ -523,19 +523,14 @@ mod tests {
             .downcast_ref::<ParagraphPageable>()
             .unwrap();
         assert_eq!(para.lines[0].items.len(), 2, "marker prepended");
-        if let LineItem::Image(m) = &para.lines[0].items[0] {
-            assert!((m.width - 12.0).abs() < 0.01, "first item is the marker");
-        } else {
-            panic!("first item should be the injected marker image");
-        }
-        if let LineItem::Image(orig) = &para.lines[0].items[1] {
-            assert!(
-                (orig.x_offset - (5.0 + 12.0)).abs() < 0.01,
-                "existing item x_offset shifted by marker width"
-            );
-        } else {
-            panic!("second item should be the original image");
-        }
+        assert!(
+            matches!(&para.lines[0].items[0], LineItem::Image(m) if (m.width - 12.0).abs() < 0.01),
+            "first item should be the injected marker image of width 12"
+        );
+        assert!(
+            matches!(&para.lines[0].items[1], LineItem::Image(orig) if (orig.x_offset - (5.0 + 12.0)).abs() < 0.01),
+            "existing item x_offset should be shifted by marker width"
+        );
     }
 
     #[test]
