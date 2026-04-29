@@ -54,4 +54,17 @@ allowlist = [
     "examples://border-radius",
     "examples://table-header",
     "examples://transform",
+    # PR 6 follow-up (root `<html>` bg pre-pass, fulgur-9y1a) — html
+    # element's own `background` was silently dropped because the
+    # fragmenter's `geometry` only carries body + descendants. v2 now
+    # paints html's bg explicitly at `(margin.left, margin.top)` with
+    # `block_styles[root_id].layout_size` before the main loop runs.
+    # Six paint fixtures with `html, body { background: white }` lit up
+    # at once.
+    "vrt://paint/linear-gradient-hint-30pct.html",
+    "vrt://paint/linear-gradient-hint-70pct.html",
+    "vrt://paint/radial-gradient-hint.html",
+    "vrt://paint/repeating-linear-gradient.html",
+    "vrt://paint/repeating-linear-gradient-hint.html",
+    "vrt://paint/repeating-radial-gradient.html",
 ]

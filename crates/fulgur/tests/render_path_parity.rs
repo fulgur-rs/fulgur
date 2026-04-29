@@ -400,6 +400,18 @@ fn inline_byte_equality_cases() {
             "bordered paragraph with background (shared node_id)",
             r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;border:3px solid #444;background:#fce}</style></head><body><p>hello</p></body></html>"##,
         ),
+        // PR 6 follow-up (fulgur-9y1a) — html root element's
+        // background was silently dropped because the fragmenter's
+        // `geometry` only records body + descendants, never html. v2
+        // now paints html's bg as a pre-pass at `(margin.left,
+        // margin.top)` with `block_styles[root_id].layout_size`.
+        // Without that pre-pass v2 lost 13 bytes per gradient-hint
+        // fixture (six fixtures regressed simultaneously, all sharing
+        // `html, body { background: white }`).
+        (
+            "html background distinct from body background",
+            r##"<!DOCTYPE html><html><head><style>html, body { margin:0; padding:0; background:white; } .g { width:120px; height:80px; margin:24px; background:red; }</style></head><body><div class="g"></div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

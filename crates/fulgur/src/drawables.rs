@@ -205,6 +205,17 @@ pub struct Drawables {
     /// in geometry but absolute on Drawables avoids touching the
     /// fragmenter contract.
     pub body_offset_pt: (f32, f32),
+    /// NodeId of the `<html>` root element when present.
+    ///
+    /// v1 paints html's own `background` BEFORE recursing into body
+    /// via `BlockPageable::draw`'s recursive children walk. v2's flat
+    /// dispatch never visits html — the fragmenter only records body
+    /// and its descendants in `geometry` — so `render_v2` paints html
+    /// as a pre-pass at the page's top-left margin using
+    /// `block_styles[root_id].layout_size` as the rect dimensions.
+    /// That mirrors v1's `total_width / total_height` derivation in
+    /// `BlockPageable::draw` (`pageable.rs:1771-1778`).
+    pub root_id: Option<NodeId>,
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,

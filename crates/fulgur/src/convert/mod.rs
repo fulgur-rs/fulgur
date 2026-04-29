@@ -201,6 +201,7 @@ pub fn dom_to_drawables(
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
     drawables.body_offset_pt = extract_body_offset_pt(doc);
+    drawables.root_id = Some(doc.root_element().id);
     drawables
 }
 
