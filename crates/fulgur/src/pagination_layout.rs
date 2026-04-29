@@ -648,10 +648,26 @@ impl<'a> PaginationLayoutTree<'a> {
             // recursion for them — Pageable's `ColumnGroupPageable`
             // handles their split internally and emits whole when the
             // multicol box itself fits the strip.
+            //
+            // fulgur-916y: multicol containers with a `column-span:
+            // all` direct child get an exception — the span subtree
+            // is laid out by Taffy as a full-width block flowing
+            // between the column groups, so block-flow recursion via
+            // `fragment_block_subtree` can split it across pages
+            // when it overflows. Containers without span:all stay
+            // atomic.
             let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
+            let multicol_has_span_all = is_multicol
+                && child_node.is_some_and(|n| {
+                    n.children.iter().any(|&id| {
+                        self.doc
+                            .get_node(id)
+                            .is_some_and(crate::blitz_adapter::has_column_span_all)
+                    })
+                });
             let available_strip = (self.page_height_px - cursor_y).max(0.0);
             let needs_recursion = has_splittable_children
-                && !is_multicol
+                && (!is_multicol || multicol_has_span_all)
                 && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
                     || would_split_block_subtree(
                         self.doc,
@@ -2568,6 +2584,56 @@ mod tests {
                  to cursor-advance)",
             );
         }
+    }
+
+    /// fulgur-916y: a multicol container with a `column-span: all`
+    /// child whose subtree exceeds one page must split across pages
+    /// in the partition path. Pre-fix, the multicol gate
+    /// (`!is_multicol`) blocked recursion, so the whole multicol
+    /// container ended up as a single fragment regardless of
+    /// overflow — fragmenter reported 1 page. Post-fix, the gate
+    /// admits multicol containers that have a span:all child, so
+    /// `fragment_block_subtree` recurses into the span subtree and
+    /// splits it across pages via the regular block-flow logic.
+    ///
+    /// Pins `implied_page_count(geometry) >= 2` for the
+    /// `multicol_span_all` integration fixture's HTML rendered with
+    /// the fragmenter's strip height set small enough that the
+    /// span:all section overflows page 0.
+    #[test]
+    fn fragment_pagination_root_recurses_into_multicol_with_span_all() {
+        let mut long = String::new();
+        for _ in 0..40 {
+            long.push_str(
+                "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+                 Sed do eiusmod tempor incididunt ut labore et dolore magna \
+                 aliqua. Ut enim ad minim veniam, quis nostrud exercitation.</p>",
+            );
+        }
+        let html = format!(
+            r#"<!doctype html><html><head><style>
+                body {{ margin: 10pt; font-size: 10pt; }}
+                .mc {{ column-count: 2; column-gap: 10pt; }}
+                .span {{ column-span: all; }}
+            </style></head><body>
+              <div class="mc">
+                <p>before column content.</p>
+                <section class="span">{long}</section>
+                <p>after column content.</p>
+              </div>
+            </body></html>"#,
+            long = long
+        );
+
+        // 600 viewport, 400 page strip (small enough to overflow).
+        let mut doc = parse(&html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0, &table);
+        let pages = super::implied_page_count(&geom);
+        assert!(
+            pages >= 2,
+            "expected multicol with span:all overflow to split into >=2 pages, got {pages}",
+        );
     }
 
     /// Devin Review on PR #285 (fulgur-a36m Phase 3.1.5b):
