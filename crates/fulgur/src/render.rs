@@ -55,10 +55,7 @@ pub fn render_v2(
             .block_styles
             .get(&node_id)
             .and_then(|b| b.id.as_ref());
-        let table_id = drawables
-            .tables
-            .get(&node_id)
-            .and_then(|t| t.id.as_ref());
+        let table_id = drawables.tables.get(&node_id).and_then(|t| t.id.as_ref());
         let id = para_id.or(block_id).or(table_id);
         if let Some(id) = id
             && !id.is_empty()
