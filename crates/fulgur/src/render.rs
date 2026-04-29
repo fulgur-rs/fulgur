@@ -30,20 +30,20 @@ pub fn render_v2(
 
     let mut document = krilla::Document::new();
 
-    let default_page_rules: Vec<_> = gcpm
-        .page_settings
-        .iter()
-        .filter(|r| r.page_selector.is_none())
-        .cloned()
-        .collect();
-    let page_count = crate::pagination_layout::implied_page_count(geometry).max(1);
-    for page_idx in 0..page_count as usize {
+    let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
+    for page_idx in 0..page_count {
         let page_num = page_idx + 1;
+        // Pass the full `gcpm.page_settings` (including selector
+        // rules: `:first`, `:left`, `:right`) so per-page overrides
+        // fire identically to the v1 GCPM path. Filtering to
+        // `page_selector.is_none()` here would silently drop those
+        // overrides and bake the wrong `MediaBox` dimensions even on
+        // PR 1's blank pages (Devin review on PR #300).
         let (resolved_size, _resolved_margin, resolved_landscape) =
             crate::gcpm::page_settings::resolve_page_settings(
-                &default_page_rules,
+                &gcpm.page_settings,
                 page_num,
-                page_count as usize,
+                page_count,
                 config,
             );
         let page_size = if resolved_landscape {
