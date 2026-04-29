@@ -335,10 +335,21 @@ fn inline_byte_equality_cases() {
     // and `block_styles[id]` co-exist. The marker dispatch must NOT
     // `continue;` past the block check or `<li style="background:...">`
     // silently drops the body block paint in v2.
-    let pr5_cases: &[(&str, &str)] = &[(
-        "list item with body block background (shared node_id)",
-        r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#fdf;height:40px}</style></head><body><ul><li></li></ul></body></html>"##,
-    )];
+    let pr5_cases: &[(&str, &str)] = &[
+        (
+            "list item with body block background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#fdf;height:40px}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+        // Regression for PR #304 follow-up Devin (list-item opacity
+        // grouping): v1's `ListItemPageable::draw` wraps marker + body
+        // block in a SINGLE `draw_with_opacity` group. v2 must produce
+        // the same single q/Q wrapper or the PDF stream diverges when
+        // `<li style="opacity:0.5">`.
+        (
+            "list item with opacity and body block background",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#cef;height:40px;opacity:0.5}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+    ];
 
     let cases = pr3_cases
         .iter()
