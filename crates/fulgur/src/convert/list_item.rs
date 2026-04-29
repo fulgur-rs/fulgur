@@ -414,8 +414,13 @@ fn build_list_item_body(
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
+                // Unwrapped: paragraph is the outermost Pageable for
+                // this DOM node — set `node_id` here. (extract_paragraph
+                // intentionally leaves it unset so the wrapped branch
+                // above can put node_id on the BlockPageable instead.)
                 let mut p = paragraph;
                 p.visible = visible;
+                p.node_id = Some(node.id);
                 Box::new(p)
             }
         } else if before_inline.is_some() || after_inline.is_some() {
@@ -470,7 +475,11 @@ fn build_list_item_body(
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                Box::new(paragraph)
+                // Unwrapped synthetic paragraph: outermost Pageable
+                // for this DOM node — set `node_id` here.
+                let mut p = paragraph;
+                p.node_id = Some(node.id);
+                Box::new(p)
             }
         } else {
             // Inline root with no text and no inline pseudo images —
