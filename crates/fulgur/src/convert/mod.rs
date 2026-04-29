@@ -173,17 +173,285 @@ pub fn dom_to_pageable(doc: &HtmlDocument, ctx: &mut ConvertContext<'_>) -> Box<
     convert_node(doc.deref(), root.id, ctx, 0)
 }
 
-/// Phase 4 PR 1 skeleton (fulgur-9t3z): convert a resolved Blitz document
-/// into a `Drawables` struct holding per-NodeId draw payload.
+/// Phase 4 (fulgur-9t3z): convert a resolved Blitz document into a
+/// `Drawables` struct holding per-NodeId draw payload.
 ///
-/// Returns an empty `Drawables` until subsequent PRs migrate each
-/// Pageable type's data extraction. The `_doc` / `_ctx` arguments are
-/// kept on the signature so PR 2+ does not need to re-thread them.
+/// **Migration scaffolding (PRs 2-6)**: this implementation runs
+/// `dom_to_pageable` internally and walks the resulting tree to
+/// extract each per-type payload into its `Drawables` map. The
+/// Pageable tree is dropped before return — wasteful but lets each
+/// subsequent PR migrate one Pageable type at a time without
+/// duplicating convert logic. PR 8 (after Pageable deletion) will
+/// replace this body with a native DOM walk that doesn't allocate
+/// the intermediate Pageable tree.
 pub fn dom_to_drawables(
-    _doc: &HtmlDocument,
-    _ctx: &mut ConvertContext<'_>,
+    doc: &HtmlDocument,
+    ctx: &mut ConvertContext<'_>,
 ) -> crate::drawables::Drawables {
-    crate::drawables::Drawables::new()
+    // Snapshot bookmark map *before* `dom_to_pageable` runs:
+    // `convert_node` drains `ctx.bookmark_by_node` via `.remove(&node_id)`
+    // for every node it visits, so by the time we'd read back from
+    // `ctx.bookmark_by_node` below it would be empty (PR #301 Devin
+    // review). The clone is small (one `BookmarkInfo` per heading);
+    // the v1 path already accepts the same allocation cost via
+    // `bookmark_by_node_for_parity` in `engine.rs`.
+    let bookmark_snapshot = ctx.bookmark_by_node.clone();
+    let root_pageable = dom_to_pageable(doc, ctx);
+    let mut drawables = crate::drawables::Drawables::new();
+    extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
+    drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
+    drawables
+}
+
+/// Walk a Pageable tree and populate each `Drawables` map by
+/// downcasting concrete types. PR 2 covers `ImagePageable` and
+/// `SvgPageable`; subsequent PRs add the rest.
+fn extract_drawables_from_pageable(
+    pageable: &dyn crate::pageable::Pageable,
+    out: &mut crate::drawables::Drawables,
+) {
+    use crate::drawables::{ImageEntry, SvgEntry};
+    use crate::image::ImagePageable;
+    use crate::pageable::{
+        BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
+        MulticolRulePageable, RunningElementWrapperPageable, StringSetWrapperPageable,
+        TablePageable, TransformWrapperPageable,
+    };
+    use crate::svg::SvgPageable;
+
+    let any = pageable.as_any();
+
+    // Image leaf — record per-NodeId payload.
+    if let Some(img) = any.downcast_ref::<ImagePageable>() {
+        if let Some(node_id) = img.node_id {
+            out.images.insert(
+                node_id,
+                ImageEntry {
+                    image_data: img.image_data.clone(),
+                    format: img.format,
+                    width: img.width,
+                    height: img.height,
+                    opacity: img.opacity,
+                    visible: img.visible,
+                },
+            );
+        }
+        return;
+    }
+    // SVG leaf — record per-NodeId payload.
+    if let Some(svg) = any.downcast_ref::<SvgPageable>() {
+        if let Some(node_id) = svg.node_id {
+            out.svgs.insert(
+                node_id,
+                SvgEntry {
+                    tree: svg.tree.clone(),
+                    width: svg.width,
+                    height: svg.height,
+                    opacity: svg.opacity,
+                    visible: svg.visible,
+                },
+            );
+        }
+        return;
+    }
+    // Block / List / Table / wrappers — recurse into children. PR 4+
+    // will record their own draw payload (BlockEntry, etc.); for PR 2
+    // we only walk past them to reach the leaves.
+    if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        for pc in &block.children {
+            extract_drawables_from_pageable(pc.child.as_ref(), out);
+        }
+        return;
+    }
+    if let Some(table) = any.downcast_ref::<TablePageable>() {
+        for pc in &table.header_cells {
+            extract_drawables_from_pageable(pc.child.as_ref(), out);
+        }
+        for pc in &table.body_cells {
+            extract_drawables_from_pageable(pc.child.as_ref(), out);
+        }
+        return;
+    }
+    if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        extract_drawables_from_pageable(list_item.body.as_ref(), out);
+        return;
+    }
+    // Wrappers delegate.
+    if let Some(w) = any.downcast_ref::<TransformWrapperPageable>() {
+        extract_drawables_from_pageable(w.inner.as_ref(), out);
+        return;
+    }
+    if let Some(w) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
+    }
+    if let Some(w) = any.downcast_ref::<StringSetWrapperPageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
+    }
+    if let Some(w) = any.downcast_ref::<RunningElementWrapperPageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
+    }
+    if let Some(w) = any.downcast_ref::<CounterOpWrapperPageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
+    }
+    // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
+    // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
+    // around any multicol container. Without this arm, images / SVGs
+    // nested inside a multicol container fall through to "Other" and
+    // never enter `Drawables.images` / `.svgs`. Multicol's own
+    // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
+    if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+    }
+    // Other types (Spacer, ParagraphPageable, marker-only Pageables)
+    // have no PR 2 payload — markers and Spacers stay no-op in v2;
+    // Paragraph / Multicol-rule paint land in PR 3 / 6.
+}
+
+#[cfg(test)]
+mod extract_drawables_tests {
+    use super::*;
+    use crate::drawables::Drawables;
+    use crate::image::{ImageFormat, ImagePageable};
+    use crate::pageable::{
+        BlockPageable, BookmarkMarkerPageable, BookmarkMarkerWrapperPageable, PositionedChild,
+    };
+    use crate::svg::SvgPageable;
+    use std::sync::Arc;
+    use usvg::{Options, Tree};
+
+    /// Build a Pageable tree containing one block-level `ImagePageable`,
+    /// run the extractor, and verify the image lands in
+    /// `drawables.images` keyed by its `node_id`.
+    #[test]
+    fn extracts_block_level_image_into_drawables() {
+        let img = ImagePageable::new(Arc::new(vec![0u8; 4]), ImageFormat::Png, 50.0, 30.0)
+            .with_node_id(Some(42));
+        let block = BlockPageable::with_positioned_children(vec![PositionedChild::in_flow(
+            Box::new(img),
+            0.0,
+            0.0,
+        )]);
+        let mut out = Drawables::new();
+        extract_drawables_from_pageable(&block, &mut out);
+
+        let entry = out.images.get(&42).expect("image entry recorded");
+        assert_eq!(entry.width, 50.0);
+        assert_eq!(entry.height, 30.0);
+        assert!(entry.visible);
+    }
+
+    /// Same shape for SVG.
+    #[test]
+    fn extracts_block_level_svg_into_drawables() {
+        let tree = Arc::new(
+            Tree::from_str(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'></svg>",
+                &Options::default(),
+            )
+            .expect("parse svg"),
+        );
+        let svg = SvgPageable::new(tree, 80.0, 60.0).with_node_id(Some(7));
+        let block = BlockPageable::with_positioned_children(vec![PositionedChild::in_flow(
+            Box::new(svg),
+            0.0,
+            0.0,
+        )]);
+        let mut out = Drawables::new();
+        extract_drawables_from_pageable(&block, &mut out);
+
+        let entry = out.svgs.get(&7).expect("svg entry recorded");
+        assert_eq!(entry.width, 80.0);
+        assert_eq!(entry.height, 60.0);
+    }
+
+    /// Marker wrappers must be transparent — the extractor descends
+    /// into `child` and finds the image inside.
+    #[test]
+    fn descends_into_bookmark_wrapper_to_reach_image() {
+        let img = ImagePageable::new(Arc::new(vec![0u8; 4]), ImageFormat::Png, 10.0, 10.0)
+            .with_node_id(Some(99));
+        let wrapped = BookmarkMarkerWrapperPageable::new(
+            BookmarkMarkerPageable::new(1, "X".into()),
+            Box::new(img),
+        );
+        let mut out = Drawables::new();
+        extract_drawables_from_pageable(&wrapped, &mut out);
+        assert!(out.images.contains_key(&99));
+    }
+
+    /// Regression: `MulticolRulePageable` is a wrapper too. Images
+    /// nested inside a multicol container reach `drawables.images`
+    /// only if the extractor descends into its `child` (PR #301
+    /// Devin). Without the dedicated arm the wrapper falls through
+    /// to "Other" and the image is silently dropped.
+    #[test]
+    fn descends_into_multicol_rule_wrapper_to_reach_image() {
+        use crate::column_css::ColumnRuleSpec;
+        use crate::pageable::MulticolRulePageable;
+
+        let img = ImagePageable::new(Arc::new(vec![0u8; 4]), ImageFormat::Png, 10.0, 10.0)
+            .with_node_id(Some(123));
+        let wrapped =
+            MulticolRulePageable::new(Box::new(img), ColumnRuleSpec::default(), Vec::new());
+        let mut out = Drawables::new();
+        extract_drawables_from_pageable(&wrapped, &mut out);
+        assert!(
+            out.images.contains_key(&123),
+            "MulticolRulePageable's child must be visited by the extractor"
+        );
+    }
+
+    /// Regression: `dom_to_drawables` must snapshot `ctx.bookmark_by_node`
+    /// **before** calling `dom_to_pageable`. `convert_node` drains the
+    /// map via `.remove(&node_id)` for every visited node, so a naive
+    /// post-call read sees an empty map (PR #301 Devin). End-to-end
+    /// test through `Engine::render_html_v2` with `bookmarks(true)`:
+    /// the rendered PDF must contain `/Outlines` even though the v2
+    /// path is the one that builds the outline.
+    #[test]
+    fn dom_to_drawables_preserves_bookmark_anchors_for_outline() {
+        use crate::config::PageSize;
+        use crate::engine::Engine;
+
+        let html = "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}</style></head><body><h1>Heading</h1></body></html>";
+        let engine = Engine::builder()
+            .page_size(PageSize::A4)
+            .bookmarks(true)
+            .build();
+        let pdf = engine.render_html_v2(html).expect("render v2");
+        let pdf_str = String::from_utf8_lossy(&pdf);
+        assert!(
+            pdf_str.contains("/Outlines"),
+            "bookmark anchors must reach the v2 outline pipeline; PDF missing /Outlines"
+        );
+    }
+}
+
+/// Build the bookmark anchor map. The `bookmark_by_node` map on
+/// `ConvertContext` is populated upstream (`engine.rs` runs
+/// `BookmarkPass` before `dom_to_pageable`); we only project it into
+/// the `Drawables` shape. The `_doc` / `_assets` arguments are
+/// reserved for future enrichment (PR 6+).
+fn extract_bookmark_anchors(
+    _doc: &HtmlDocument,
+    bookmark_by_node: &std::collections::HashMap<usize, crate::blitz_adapter::BookmarkInfo>,
+    _assets: Option<&crate::asset::AssetBundle>,
+) -> std::collections::BTreeMap<usize, crate::drawables::BookmarkAnchorEntry> {
+    let mut out = std::collections::BTreeMap::new();
+    for (&node_id, info) in bookmark_by_node {
+        out.insert(
+            node_id,
+            crate::drawables::BookmarkAnchorEntry {
+                level: info.level,
+                label: info.label.clone(),
+            },
+        );
+    }
+    out
 }
 
 fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {

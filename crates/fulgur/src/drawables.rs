@@ -45,13 +45,26 @@ pub struct BlockEntry;
 #[derive(Debug, Clone, Default)]
 pub struct ParagraphEntry;
 
-/// PR 2 target: image bytes + format + intrinsic size.
-#[derive(Debug, Clone, Default)]
-pub struct ImageEntry;
+/// Image draw payload for v2. Mirrors the fields `ImagePageable` holds.
+#[derive(Debug, Clone)]
+pub struct ImageEntry {
+    pub image_data: std::sync::Arc<Vec<u8>>,
+    pub format: crate::image::ImageFormat,
+    pub width: f32,
+    pub height: f32,
+    pub opacity: f32,
+    pub visible: bool,
+}
 
-/// PR 2 target: parsed SVG tree.
-#[derive(Debug, Clone, Default)]
-pub struct SvgEntry;
+/// SVG draw payload for v2. Mirrors the fields `SvgPageable` holds.
+#[derive(Debug, Clone)]
+pub struct SvgEntry {
+    pub tree: std::sync::Arc<usvg::Tree>,
+    pub width: f32,
+    pub height: f32,
+    pub opacity: f32,
+    pub visible: bool,
+}
 
 /// PR 5 target: table layout state — header cell ids, body cell offsets,
 /// header height. Per-page slicing happens at render time.
@@ -70,11 +83,13 @@ pub struct MulticolRuleEntry;
 #[derive(Debug, Clone, Default)]
 pub struct TransformEntry;
 
-/// PR 2 target: bookmark anchor (level + label) keyed by source node.
-/// First-fragment-only emission is enforced at render time via
-/// `geometry`.
-#[derive(Debug, Clone, Default)]
-pub struct BookmarkAnchorEntry;
+/// Bookmark anchor (level + label) keyed by source node. First-fragment-only
+/// emission is enforced at render time by reading `geometry.fragments[0]`.
+#[derive(Debug, Clone)]
+pub struct BookmarkAnchorEntry {
+    pub level: u8,
+    pub label: String,
+}
 
 /// PR 3 target: link span (target + alt text) covering one or more
 /// glyph runs in a paragraph. `Vec<(NodeId, LinkSpan)>` lets a single

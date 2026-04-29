@@ -26,20 +26,21 @@ pub fn render_v2(
     drawables: &Drawables,
     gcpm: &GcpmContext,
 ) -> Result<Vec<u8>> {
-    let _ = drawables; // PR 1: every draw map is empty
-
     let mut document = krilla::Document::new();
+
+    let mut bookmark_collector = if config.bookmarks {
+        Some(crate::pageable::BookmarkCollector::new())
+    } else {
+        None
+    };
 
     let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
     for page_idx in 0..page_count {
         let page_num = page_idx + 1;
         // Pass the full `gcpm.page_settings` (including selector
         // rules: `:first`, `:left`, `:right`) so per-page overrides
-        // fire identically to the v1 GCPM path. Filtering to
-        // `page_selector.is_none()` here would silently drop those
-        // overrides and bake the wrong `MediaBox` dimensions even on
-        // PR 1's blank pages (Devin review on PR #300).
-        let (resolved_size, _resolved_margin, resolved_landscape) =
+        // fire identically to the v1 GCPM path.
+        let (resolved_size, resolved_margin, resolved_landscape) =
             crate::gcpm::page_settings::resolve_page_settings(
                 &gcpm.page_settings,
                 page_num,
@@ -53,16 +54,163 @@ pub fn render_v2(
         };
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
-        let _page = document.start_page_with(settings);
-        // PR 2+: walk geometry.fragments_on_page(page_idx) and dispatch
-        // (node_id, fragment) → draw_node(canvas, ..) here. PR 1 emits
-        // an empty page.
+        let mut page = document.start_page_with(settings);
+        if let Some(c) = bookmark_collector.as_mut() {
+            c.set_current_page(page_idx);
+        }
+        {
+            let mut surface = page.surface();
+            let mut canvas = crate::pageable::Canvas {
+                surface: &mut surface,
+                bookmark_collector: bookmark_collector.as_mut(),
+                link_collector: None,
+            };
+            draw_v2_page(
+                &mut canvas,
+                page_idx as u32,
+                resolved_margin.left,
+                resolved_margin.top,
+                geometry,
+                drawables,
+            );
+        }
+    }
+
+    if let Some(c) = bookmark_collector {
+        let entries = c.into_entries();
+        if !entries.is_empty() {
+            document.set_outline(crate::outline::build_outline(&entries));
+        }
     }
 
     document.set_metadata(build_metadata(config));
     document
         .finish()
         .map_err(|e| Error::PdfGeneration(format!("{e:?}")))
+}
+
+/// Phase 4 v2 per-page draw dispatcher. Walks every `(node_id,
+/// fragment)` pair whose fragment is on `page_index` and routes each
+/// to a per-type draw function sourced from `drawables`.
+///
+/// Iteration is by `BTreeMap<NodeId, _>` order which is approximately
+/// document order (Blitz allocates NodeIds during parse). That keeps
+/// stacking order — backgrounds before foregrounds, parents before
+/// children — consistent with the v1 traversal.
+///
+/// PR 2 covers `Drawables.images`, `.svgs`, and `.bookmark_anchors`
+/// (first-fragment-only). Subsequent PRs add match arms for the
+/// other maps.
+fn draw_v2_page(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    page_index: u32,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+) {
+    use crate::convert::px_to_pt;
+
+    for (&node_id, geom) in geometry {
+        // Bookmark anchor: emit on the page where the node's *first*
+        // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
+        // `is_first_page_for` slice semantics.
+        if let Some(first_frag) = geom.fragments.first()
+            && first_frag.page_index == page_index
+            && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
+            && let Some(c) = canvas.bookmark_collector.as_deref_mut()
+        {
+            let y_pt = margin_top_pt + px_to_pt(first_frag.y);
+            c.record(anchor.level, anchor.label.clone(), y_pt);
+        }
+
+        // Per-fragment leaf draws.
+        for frag in &geom.fragments {
+            if frag.page_index != page_index {
+                continue;
+            }
+            let x_pt = margin_left_pt + px_to_pt(frag.x);
+            let y_pt = margin_top_pt + px_to_pt(frag.y);
+
+            if let Some(img) = drawables.images.get(&node_id) {
+                draw_image_v2(canvas, img, x_pt, y_pt);
+                continue;
+            }
+            if let Some(svg) = drawables.svgs.get(&node_id) {
+                draw_svg_v2(canvas, svg, x_pt, y_pt);
+                continue;
+            }
+            // Other types (block_styles / paragraphs / tables / ...)
+            // land in subsequent PRs.
+        }
+    }
+}
+
+/// v2 image draw. Mirrors `image::ImagePageable::draw` but operates on
+/// the side-channel `ImageEntry` data; the `width`/`height` are the
+/// CSS-resolved size in pt that fulgur stores on the original
+/// `ImagePageable`.
+fn draw_image_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::ImageEntry,
+    x: f32,
+    y: f32,
+) {
+    use crate::pageable::draw_with_opacity;
+
+    if !entry.visible {
+        return;
+    }
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        let Some(image) = decode_image_for_v2(entry) else {
+            return;
+        };
+        let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+            return;
+        };
+        let transform = krilla::geom::Transform::from_translate(x, y);
+        canvas.surface.push_transform(&transform);
+        canvas.surface.draw_image(image, size);
+        canvas.surface.pop();
+    });
+}
+
+fn decode_image_for_v2(entry: &crate::drawables::ImageEntry) -> Option<krilla::image::Image> {
+    use crate::image::ImageFormat;
+    use krilla::image::Image;
+    let data: krilla::Data = entry.image_data.clone().into();
+    let image_result = match entry.format {
+        ImageFormat::Png => Image::from_png(data, true),
+        ImageFormat::Jpeg => Image::from_jpeg(data, true),
+        ImageFormat::Gif => Image::from_gif(data, true),
+    };
+    image_result.ok()
+}
+
+/// v2 SVG draw. Mirrors `svg::SvgPageable::draw`.
+fn draw_svg_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::SvgEntry,
+    x: f32,
+    y: f32,
+) {
+    use crate::pageable::draw_with_opacity;
+    use krilla_svg::{SurfaceExt, SvgSettings};
+
+    if !entry.visible {
+        return;
+    }
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+            return;
+        };
+        let transform = krilla::geom::Transform::from_translate(x, y);
+        canvas.surface.push_transform(&transform);
+        let _ = canvas
+            .surface
+            .draw_svg(&entry.tree, size, SvgSettings::default());
+        canvas.surface.pop();
+    });
 }
 
 /// Render a Pageable tree to PDF bytes using fragmenter geometry to
