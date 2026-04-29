@@ -181,6 +181,7 @@ fn linear_gradient_horizontal_matches_strip_reference() {
         page_size: "A4",
         margin_pt: Some(0.0),
         dpi: 150,
+        bookmarks: false,
     };
 
     let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
@@ -260,6 +261,7 @@ fn run_gradient_px_stop_reftest(
         page_size: "A4",
         margin_pt: Some(0.0),
         dpi: 150,
+        bookmarks: false,
     };
 
     let test_pdf = render_html_to_pdf(test_html, spec).expect("render test pdf");

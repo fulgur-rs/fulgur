@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page { size: A4; margin: 60pt; }
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; }
+h1, h2, h3 { margin-top: 18pt; }
+p { margin: 8pt 0; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<h1>Top-Level Heading</h1>
+<p>This fixture verifies that <code>h1</code>/<code>h2</code>/<code>h3</code> headings register as PDF outline entries via the bookmark UA CSS. The PDF byte stream contains the <code>/Outlines</code> dictionary; if outline emission regresses, the byte-eq comparison catches it.</p>
+<h2>Subsection One</h2>
+<p>A subsection under the top heading. Should appear as a child of "Top-Level Heading" in the PDF outline tree.</p>
+<h3>Sub-subsection 1.1</h3>
+<p>A nested heading at level 3.</p>
+<h3>Sub-subsection 1.2</h3>
+<p>Another nested heading.</p>
+<h2>Subsection Two</h2>
+<p>Sibling of Subsection One.</p>
+<h1 style="page-break-before: always">Second Top-Level Heading</h1>
+<p>This page-2 heading should also appear in the outline at the top level.</p>
+<h2>Page 2 Subsection</h2>
+<p>Final entry. Outline must include all 7 headings: 2× h1, 3× h2, 2× h3.</p>
+</body>
+</html>

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page {
+  size: A4;
+  margin: 60pt;
+  @bottom-center {
+    content: "Page " counter(page) " of " counter(pages);
+    font-size: 9pt;
+    color: #555;
+  }
+  @top-right {
+    content: "Ch. " counter(chapter);
+    font-size: 8pt;
+    color: #888;
+  }
+}
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; counter-reset: chapter; }
+h2 { counter-increment: chapter; margin-top: 18pt; }
+p { margin: 8pt 0; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<h2>Chapter Alpha</h2>
+<p>This fixture exercises <code>counter(page)</code> / <code>counter(pages)</code> in <code>@bottom-center</code> and <code>counter(chapter)</code> in <code>@top-right</code>. The chapter counter increments per <code>h2</code>.</p>
+<div class="box"><p>Page 1 should read "Ch. 1" in the top-right and "Page 1 of N" in the bottom.</p></div>
+<div class="box"><p>Filler 1 to push content past page 1.</p></div>
+<div class="box"><p>Filler 2 — multi-line content<br>extends the height further<br>across more lines<br>so the page boundary lands<br>well inside the body content.</p></div>
+<div class="box"><p>Filler 3 — additional text to make sure Chapter Alpha overflows page 1 and the counter values for page 2 are exercised under "Ch. 1" since the next h2 has not appeared yet.</p></div>
+<div class="box"><p>Filler 4 — even more content. The chapter counter should still be 1 on page 2 because <code>counter-increment</code> only fires when a new <code>h2</code> is encountered.</p></div>
+<div class="box"><p>Filler 5.</p></div>
+<div class="box"><p>Filler 6.</p></div>
+<div class="box"><p>Filler 7.</p></div>
+<h2 style="page-break-before: always">Chapter Beta</h2>
+<p>Chapter Beta starts on a new page. <code>counter(chapter)</code> must read "2" here.</p>
+<div class="box"><p>Top-right should read "Ch. 2" on this page.</p></div>
+<div class="box"><p>Bottom-center should read "Page N of N".</p></div>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page {
+  size: A4;
+  margin: 80pt 60pt;
+  @top-center { content: element(pageHeader); font-size: 9pt; color: #555; }
+  @bottom-center { content: element(pageFooter); font-size: 8pt; color: #888; }
+}
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; }
+.head { position: running(pageHeader); border-bottom: 1pt solid #999; padding-bottom: 4pt; }
+.foot { position: running(pageFooter); border-top: 1pt solid #ccc; padding-top: 4pt; }
+h2 { margin-top: 18pt; }
+p { margin: 8pt 0; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<div class="head">Fulgur VRT — Running Element Fixture</div>
+<div class="foot">Confidential</div>
+<h2>Section 1</h2>
+<p>This document tests that <code>position: running()</code> elements appear in margin boxes on every page that the document spans. The header and footer above and below this content are running elements.</p>
+<div class="box"><p>The header should read "Fulgur VRT — Running Element Fixture" on each page, including page 2.</p></div>
+<div class="box"><p>Page break verification: the second section below has page-break-before so that the running header is exercised on page 2 too.</p></div>
+<h2 style="page-break-before: always">Section 2 (page 2)</h2>
+<p>This section starts on page 2. The same running header / footer must appear here.</p>
+<div class="box"><p>If running elements are not collected per-page correctly, the @top-center / @bottom-center boxes on this page will be empty and the byte-eq comparison against the seeded golden will fail.</p></div>
+</body>
+</html>
