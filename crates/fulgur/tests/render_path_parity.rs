@@ -225,6 +225,12 @@ fn render_path_byte_equality() {
         allowlist.len(),
     );
 
+    if std::env::var_os("FULGUR_PARITY_VERBOSE").is_some() {
+        for (label, v1l, v2l) in &diffs {
+            eprintln!("  diff {label}: v1={v1l}B v2={v2l}B");
+        }
+    }
+
     if !allowlist_failures.is_empty() {
         let detail = allowlist_failures
             .iter()
