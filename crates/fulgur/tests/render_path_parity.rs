@@ -378,6 +378,28 @@ fn inline_byte_equality_cases() {
             "block with transform rotate around center",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#fce;transform:rotate(15deg);transform-origin:center}</style></head><body><div class="box"></div></body></html>"##,
         ),
+        // PR 6 follow-up: shared-node_id inner content (inline-root
+        // paragraph from `convert::inline_root`, replaced image/svg
+        // from `convert::replaced`) must paint at the wrapping block's
+        // *content-box* top-left, not its border-box top-left, when
+        // the block carries `padding` or `border`. v1 expresses this
+        // via `PositionedChild { x: content_inset.x, y:
+        // content_inset.y }`; v2 mirrors it by adding
+        // `block.style.content_inset()` inside
+        // `draw_block_with_inner_content` (and
+        // `draw_list_item_with_block`). Without that offset, every
+        // text run inside a padded block landed `padding+border`
+        // worth of px high-and-left of where it should — the bug that
+        // kept `examples/transform`'s `.box { padding: 6px }` 11
+        // bytes short.
+        (
+            "padded paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##,
+        ),
+        (
+            "bordered paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;border:3px solid #444;background:#fce}</style></head><body><p>hello</p></body></html>"##,
+        ),
     ];
 
     let cases = pr3_cases

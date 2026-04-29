@@ -744,16 +744,31 @@ fn draw_block_with_inner_content(
 ) {
     use crate::pageable::draw_with_opacity;
 
+    // Inner content (inline-root paragraph from `convert::inline_root`
+    // or replaced image / svg from `convert::replaced`) is positioned
+    // at the block's content-box top-left, not its border-box top-left.
+    // v1 expresses this via `PositionedChild { x: content_inset.x, y:
+    // content_inset.y, .. }` so `BlockPageable::draw` recurses into the
+    // child at `(x + ix, y + iy)`. v2 has no `PositionedChild` here —
+    // the inner payload shares the block's `node_id` and would
+    // otherwise paint at the block's border-box origin, dropping
+    // `padding + border` worth of offset for every inline-root or
+    // replaced element. Mirror v1 by reading the inset from the
+    // BlockStyle and adding it before recursing.
+    let (ix, iy) = block.style.content_inset();
+    let inner_x = x + ix;
+    let inner_y = y + iy;
+
     draw_with_opacity(canvas, block.opacity, |canvas| {
         draw_block_inner_paint(canvas, block, x, y, frag);
         if let Some(p) = paragraph {
-            draw_paragraph_inner_paint(canvas, p, x, y, fragments, page_index);
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
         }
         if let Some(i) = image {
-            draw_image_inner_paint(canvas, i, x, y);
+            draw_image_inner_paint(canvas, i, inner_x, inner_y);
         }
         if let Some(s) = svg {
-            draw_svg_inner_paint(canvas, s, x, y);
+            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
         }
     });
 }
@@ -785,6 +800,14 @@ fn draw_list_item_with_block(
 ) {
     use crate::pageable::draw_with_opacity;
 
+    // Same content-box offset trick as `draw_block_with_inner_content`
+    // — when the body block carries `padding` / `border`, the
+    // inline-root paragraph that shares the list item's node_id has to
+    // paint at the body block's content-box top-left.
+    let inset = block.map(|b| b.style.content_inset()).unwrap_or((0.0, 0.0));
+    let inner_x = x + inset.0;
+    let inner_y = y + inset.1;
+
     draw_with_opacity(canvas, list_item.opacity, |canvas| {
         if list_item.visible {
             draw_list_item_marker(canvas, list_item, x, y);
@@ -793,7 +816,7 @@ fn draw_list_item_with_block(
             draw_block_inner_paint(canvas, b, x, y, frag);
         }
         if let Some(p) = paragraph {
-            draw_paragraph_inner_paint(canvas, p, x, y, fragments, page_index);
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
         }
     });
 }
