@@ -118,16 +118,19 @@ pub fn render_v2(
                 bookmark_collector: bookmark_collector.as_mut(),
                 link_collector: Some(&mut link_collector),
             };
-            // Root `<html>` background pre-pass. v1's
-            // `BlockPageable::draw` for the html element paints its
-            // own bg/border/shadow BEFORE recursing into body — but
-            // v2's `geometry` table only carries body + descendants,
-            // so the dispatcher would otherwise skip html entirely.
-            // Paint at `(margin.left, margin.top)` with html's own
-            // `layout_size` (mirrors v1's
-            // `total_width = self.layout_size.or(cached_size)...`).
-            // Done on every page so multi-page docs with `html { background: ... }`
-            // pick up the fill on each page.
+            // Root `<html>` + `<body>` background pre-pass. v1's
+            // `BlockPageable::draw` for these elements paints
+            // bg/border/shadow on EVERY page because each page's
+            // sliced root pageable still calls them. v2's main
+            // dispatch sees them via the fragmenter's single fragment
+            // on page 0 only — multi-page docs would lose those fills
+            // on continuation pages. Paint each here at its own offset
+            // (`(margin.left, margin.top)` for html, plus
+            // `body_offset_pt` for body) using `layout_size` from the
+            // entry — mirrors v1's
+            // `total_width = self.layout_size.or(cached_size)...`
+            // derivation. The main dispatch loop skips both `root_id`
+            // and `body_id` to avoid double-painting on page 0.
             if let Some(root_id) = drawables.root_id
                 && let Some(root_block) = drawables.block_styles.get(&root_id)
             {
@@ -136,6 +139,23 @@ pub fn render_v2(
                     root_block,
                     resolved_margin.left,
                     resolved_margin.top,
+                );
+            }
+            // body's bg pre-pass runs on continuation pages only.
+            // Page 0 already paints body via the main dispatch loop
+            // (the fragmenter records body's fragment on page 0, with
+            // `layout_size` covering body's full height — clipped to
+            // page area at PDF render time, mirroring v1 exactly).
+            // Without this guard, page 0 would double-paint body's bg.
+            if page_idx > 0
+                && let Some(body_id) = drawables.body_id
+                && let Some(body_block) = drawables.block_styles.get(&body_id)
+            {
+                paint_root_block_v2(
+                    &mut canvas,
+                    body_block,
+                    resolved_margin.left + drawables.body_offset_pt.0,
+                    resolved_margin.top + drawables.body_offset_pt.1,
                 );
             }
             // `frag.x` is html-relative (fragmenter folds body's x
@@ -227,6 +247,16 @@ fn draw_v2_page(
             // Drawn inside an ancestor transform group elsewhere in
             // this loop. Skipping prevents double-painting. Bookmark
             // anchor recording above already ran unconditionally.
+            continue;
+        }
+        // Skip the html root: its bg / border / shadow are painted
+        // per-page in the pre-pass (`paint_root_block_v2`) above.
+        // Body intentionally is NOT skipped here — page 0 needs the
+        // main dispatch to paint body normally (so inline-root
+        // children at body's node_id keep flowing through
+        // `draw_block_with_inner_content`); page 1+ relies on the
+        // body branch of the pre-pass.
+        if Some(node_id) == drawables.root_id {
             continue;
         }
 

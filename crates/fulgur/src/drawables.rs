@@ -216,6 +216,18 @@ pub struct Drawables {
     /// That mirrors v1's `total_width / total_height` derivation in
     /// `BlockPageable::draw` (`pageable.rs:1771-1778`).
     pub root_id: Option<NodeId>,
+    /// NodeId of the `<body>` element when present.
+    ///
+    /// v1 paints body's `background` on EVERY page because each
+    /// page's sliced root pageable still calls body's draw method.
+    /// v2's main dispatch sees body via the fragmenter's single
+    /// fragment on page 0 only, so multi-page documents would lose
+    /// body's bg fill on continuation pages. `render_v2` mirrors v1
+    /// by painting body as a pre-pass on every page (using
+    /// `block_styles[body_id].layout_size` for the rect dimensions
+    /// and `body_offset_pt` for the margin offset), then skipping
+    /// body in the main dispatch loop to avoid double-painting.
+    pub body_id: Option<NodeId>,
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,
