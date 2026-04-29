@@ -47,6 +47,7 @@ pub fn render_v2(
         };
         if let Some(para) = drawables.paragraphs.get(&node_id)
             && let Some(id) = &para.id
+            && !id.is_empty()
         {
             let page_idx = first_frag.page_index as usize;
             dest_registry.set_current_page(page_idx);
@@ -178,7 +179,7 @@ fn draw_v2_page(
                 continue;
             }
             if let Some(para) = drawables.paragraphs.get(&node_id) {
-                draw_paragraph_v2(canvas, para, x_pt, y_pt);
+                draw_paragraph_v2(canvas, para, x_pt, y_pt, &geom.fragments, page_index);
                 continue;
             }
             // Other types (block_styles / tables / ...) land in
@@ -265,14 +266,92 @@ fn draw_paragraph_v2(
     entry: &crate::drawables::ParagraphEntry,
     x: f32,
     y: f32,
+    fragments: &[crate::pagination_layout::Fragment],
+    page_index: u32,
 ) {
     use crate::pageable::draw_with_opacity;
     if !entry.visible {
         return;
     }
+    let Some(slice) = paragraph_lines_for_page(&entry.lines, fragments, page_index) else {
+        return;
+    };
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        crate::paragraph::draw_shaped_lines(canvas, &entry.lines, x, y);
+        crate::paragraph::draw_shaped_lines(canvas, &slice, x, y);
     });
+}
+
+/// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
+/// `ParagraphPageable::slice_for_page` so multi-page paragraphs only
+/// emit the lines belonging to the requested page.
+///
+/// Single-fragment fast path: clone every line. Multi-fragment case:
+/// recover line range from cumulative fragment heights (CSS px → pt
+/// before comparing) and rebase line baselines / inline-image
+/// `computed_y` by the consumed amount so the slice is fragment-local.
+fn paragraph_lines_for_page(
+    all_lines: &[crate::paragraph::ShapedLine],
+    fragments: &[crate::pagination_layout::Fragment],
+    page_index: u32,
+) -> Option<Vec<crate::paragraph::ShapedLine>> {
+    let target_pos = fragments.iter().position(|f| f.page_index == page_index)?;
+
+    if fragments.len() == 1 && target_pos == 0 {
+        return Some(all_lines.to_vec());
+    }
+
+    let target_h = crate::convert::px_to_pt(fragments[target_pos].height);
+    let consumed: f32 = crate::convert::px_to_pt(
+        fragments[..target_pos]
+            .iter()
+            .map(|f| f.height)
+            .sum::<f32>(),
+    );
+
+    let eps = 0.01_f32;
+    let mut line_top: f32 = 0.0;
+    let mut start_idx = 0usize;
+    while start_idx < all_lines.len() {
+        let next_top = line_top + all_lines[start_idx].height;
+        if next_top > consumed + eps {
+            break;
+        }
+        line_top = next_top;
+        start_idx += 1;
+    }
+
+    let mut end_idx = start_idx;
+    let mut accum = 0.0_f32;
+    while end_idx < all_lines.len() {
+        let line_h = all_lines[end_idx].height;
+        if accum + line_h > target_h + eps {
+            break;
+        }
+        accum += line_h;
+        end_idx += 1;
+    }
+
+    if end_idx <= start_idx {
+        return None;
+    }
+
+    let sliced: Vec<crate::paragraph::ShapedLine> = all_lines[start_idx..end_idx]
+        .iter()
+        .cloned()
+        .map(|mut line| {
+            // Rebase paragraph-absolute coords (baseline + inline
+            // image `computed_y`) to fragment-local. Mirror
+            // `ParagraphPageable::slice_for_page` exactly.
+            line.baseline -= consumed;
+            for item in &mut line.items {
+                if let crate::paragraph::LineItem::Image(img) = item {
+                    img.computed_y -= consumed;
+                }
+            }
+            line
+        })
+        .collect();
+    Some(sliced)
 }
 
 /// Render a Pageable tree to PDF bytes using fragmenter geometry to
