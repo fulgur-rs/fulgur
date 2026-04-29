@@ -2692,12 +2692,26 @@ impl Pageable for BlockPageable {
             });
         }
 
-        // No own fragment AND no descendant slices → not on this
-        // page. Without this, the transparent-ancestor branch would
-        // emit an empty Block placeholder for every page, which both
-        // wastes geometry and breaks `collect_*_states` page
+        // No own fragment AND no in-flow descendant slices → not on
+        // this page. Without this, the transparent-ancestor branch
+        // would emit an empty Block placeholder for every page, which
+        // both wastes geometry and breaks `collect_*_states` page
         // alignment.
-        if self_frag.is_none() && sliced_children.is_empty() {
+        //
+        // fulgur-frmj (Devin Review on PR #294): only count in-flow
+        // children when deciding whether the block should be emitted.
+        // A `position: fixed` child gets unconditionally cloned across
+        // pages (CSS paged media spec) but it should not drag its DOM
+        // parent's `layout_size` / background / border onto pages
+        // where the parent itself is absent. For body specifically —
+        // which has a single geometry entry on page 0 but spans every
+        // page — its in-flow children (h1, p, …) keep
+        // `sliced_children` non-empty on each page, so this guard
+        // does not fire spuriously.
+        let has_in_flow_descendant = sliced_children
+            .iter()
+            .any(|pc| !pc.out_of_flow && !pc.is_fixed);
+        if self_frag.is_none() && !has_in_flow_descendant {
             return None;
         }
 
