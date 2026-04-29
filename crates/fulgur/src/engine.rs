@@ -279,32 +279,18 @@ impl Engine {
             map
         };
 
-        // fulgur-cj6u Phase 1.3 / fulgur-s67g Phase 2.3: keep copies of
-        // the string-set and counter-op maps for post-convert parity
-        // comparison. `convert::dom_to_pageable` drains both via
-        // `.remove(&node_id)` as it wraps content with the
-        // corresponding marker types, so by render time the versions
-        // on `ConvertContext` are empty. Each clone is small (one
-        // `Vec` per node that declares the property) and only used
-        // by the debug parity assertion —
-        // `cfg!(debug_assertions)` short-circuits the comparisons in
-        // release.
-        let string_set_by_node_for_parity = string_set_by_node.clone();
-        // Counter ops use a `BTreeMap` for the parity assertion to
-        // match the fragmenter's deterministic-iteration signature.
-        let counter_ops_by_node_for_parity: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> =
-            counter_ops_map
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-        // fulgur-s67g Phase 2.4: same pattern for bookmark_by_node —
-        // ConvertContext drains it via `.remove()` while wrapping
-        // content with `BookmarkMarkerWrapperPageable`.
-        let bookmark_by_node_for_parity: BTreeMap<usize, crate::blitz_adapter::BookmarkInfo> =
-            bookmark_by_node
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
+        // `convert::dom_to_pageable` drains `string_set_by_node` and
+        // `counter_ops_by_node` via `.remove(&node_id)` as it wraps
+        // content with the corresponding marker types, so we keep
+        // copies for the fragmenter-driven `collect_*_states` calls in
+        // `render_to_pdf_with_gcpm` (which need the data after convert
+        // has run). Each clone is small (one `Vec` per node that
+        // declares the property).
+        let string_set_for_render = string_set_by_node.clone();
+        let counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = counter_ops_map
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
 
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
@@ -334,9 +320,8 @@ impl Engine {
                 &running_store,
                 fonts,
                 &convert_ctx.pagination_geometry,
-                &string_set_by_node_for_parity,
-                &counter_ops_by_node_for_parity,
-                &bookmark_by_node_for_parity,
+                &string_set_for_render,
+                &counter_ops_for_render,
             )
         }
     }
