@@ -188,11 +188,18 @@ pub fn dom_to_drawables(
     doc: &HtmlDocument,
     ctx: &mut ConvertContext<'_>,
 ) -> crate::drawables::Drawables {
+    // Snapshot bookmark map *before* `dom_to_pageable` runs:
+    // `convert_node` drains `ctx.bookmark_by_node` via `.remove(&node_id)`
+    // for every node it visits, so by the time we'd read back from
+    // `ctx.bookmark_by_node` below it would be empty (PR #301 Devin
+    // review). The clone is small (one `BookmarkInfo` per heading);
+    // the v1 path already accepts the same allocation cost via
+    // `bookmark_by_node_for_parity` in `engine.rs`.
+    let bookmark_snapshot = ctx.bookmark_by_node.clone();
     let root_pageable = dom_to_pageable(doc, ctx);
     let mut drawables = crate::drawables::Drawables::new();
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
-    let bookmark_anchors_drained = extract_bookmark_anchors(doc, &ctx.bookmark_by_node, ctx.assets);
-    drawables.bookmark_anchors = bookmark_anchors_drained;
+    drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
     drawables
 }
 
@@ -207,8 +214,8 @@ fn extract_drawables_from_pageable(
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
-        RunningElementWrapperPageable, StringSetWrapperPageable, TablePageable,
-        TransformWrapperPageable,
+        MulticolRulePageable, RunningElementWrapperPageable, StringSetWrapperPageable,
+        TablePageable, TransformWrapperPageable,
     };
     use crate::svg::SvgPageable;
 
@@ -288,10 +295,20 @@ fn extract_drawables_from_pageable(
     }
     if let Some(w) = any.downcast_ref::<CounterOpWrapperPageable>() {
         extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
     }
-    // Other types (Spacer, ParagraphPageable, MulticolRulePageable,
-    // marker-only Pageables) have no PR 2 payload — markers and
-    // Spacers stay no-op in v2; Paragraph / Multicol land in PR 3 / 6.
+    // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
+    // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
+    // around any multicol container. Without this arm, images / SVGs
+    // nested inside a multicol container fall through to "Other" and
+    // never enter `Drawables.images` / `.svgs`. Multicol's own
+    // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
+    if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
+        extract_drawables_from_pageable(w.child.as_ref(), out);
+    }
+    // Other types (Spacer, ParagraphPageable, marker-only Pageables)
+    // have no PR 2 payload — markers and Spacers stay no-op in v2;
+    // Paragraph / Multicol-rule paint land in PR 3 / 6.
 }
 
 #[cfg(test)]
@@ -364,6 +381,53 @@ mod extract_drawables_tests {
         let mut out = Drawables::new();
         extract_drawables_from_pageable(&wrapped, &mut out);
         assert!(out.images.contains_key(&99));
+    }
+
+    /// Regression: `MulticolRulePageable` is a wrapper too. Images
+    /// nested inside a multicol container reach `drawables.images`
+    /// only if the extractor descends into its `child` (PR #301
+    /// Devin). Without the dedicated arm the wrapper falls through
+    /// to "Other" and the image is silently dropped.
+    #[test]
+    fn descends_into_multicol_rule_wrapper_to_reach_image() {
+        use crate::column_css::ColumnRuleSpec;
+        use crate::pageable::MulticolRulePageable;
+
+        let img = ImagePageable::new(Arc::new(vec![0u8; 4]), ImageFormat::Png, 10.0, 10.0)
+            .with_node_id(Some(123));
+        let wrapped =
+            MulticolRulePageable::new(Box::new(img), ColumnRuleSpec::default(), Vec::new());
+        let mut out = Drawables::new();
+        extract_drawables_from_pageable(&wrapped, &mut out);
+        assert!(
+            out.images.contains_key(&123),
+            "MulticolRulePageable's child must be visited by the extractor"
+        );
+    }
+
+    /// Regression: `dom_to_drawables` must snapshot `ctx.bookmark_by_node`
+    /// **before** calling `dom_to_pageable`. `convert_node` drains the
+    /// map via `.remove(&node_id)` for every visited node, so a naive
+    /// post-call read sees an empty map (PR #301 Devin). End-to-end
+    /// test through `Engine::render_html_v2` with `bookmarks(true)`:
+    /// the rendered PDF must contain `/Outlines` even though the v2
+    /// path is the one that builds the outline.
+    #[test]
+    fn dom_to_drawables_preserves_bookmark_anchors_for_outline() {
+        use crate::config::PageSize;
+        use crate::engine::Engine;
+
+        let html = "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}</style></head><body><h1>Heading</h1></body></html>";
+        let engine = Engine::builder()
+            .page_size(PageSize::A4)
+            .bookmarks(true)
+            .build();
+        let pdf = engine.render_html_v2(html).expect("render v2");
+        let pdf_str = String::from_utf8_lossy(&pdf);
+        assert!(
+            pdf_str.contains("/Outlines"),
+            "bookmark anchors must reach the v2 outline pipeline; PDF missing /Outlines"
+        );
     }
 }
 
