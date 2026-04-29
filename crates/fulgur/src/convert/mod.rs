@@ -210,7 +210,7 @@ fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
     out: &mut crate::drawables::Drawables,
 ) {
-    use crate::drawables::{ImageEntry, ParagraphEntry, SvgEntry};
+    use crate::drawables::{BlockEntry, ImageEntry, ParagraphEntry, SvgEntry};
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
@@ -286,8 +286,21 @@ fn extract_drawables_from_pageable(
         }
         return;
     }
-    // Block / List / Table / wrappers — recurse into children.
+    // Block / List / Table / wrappers — recurse into children. Block
+    // also records its own paint payload (PR 4).
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        if let Some(node_id) = block.node_id {
+            out.block_styles.insert(
+                node_id,
+                BlockEntry {
+                    style: block.style.clone(),
+                    opacity: block.opacity,
+                    visible: block.visible,
+                    id: block.id.clone(),
+                    layout_size: block.layout_size.or(block.cached_size),
+                },
+            );
+        }
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }

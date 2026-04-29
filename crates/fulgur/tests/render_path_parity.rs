@@ -281,7 +281,30 @@ fn inline_byte_equality_cases() {
         ),
     ];
 
-    for (label, html) in pr3_cases {
+    // PR 4 (Block migration) coverage — backgrounds, borders,
+    // border-radius, box-shadow at the block frame. Body is set to
+    // margin:0 so the v2 frame anchor matches v1's block.draw call.
+    let pr4_cases: &[(&str, &str)] = &[
+        (
+            "solid block with background color",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:100px;height:80px;background:#e53935}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with solid border",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;border:4px solid #444}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with border-radius",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;background:#bdf;border-radius:12px}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "two stacked blocks",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:60px}.a{background:#fcd}.b{background:#cdf}</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
+        ),
+    ];
+
+    let cases = pr3_cases.iter().chain(pr4_cases.iter());
+    for (label, html) in cases {
         let engine = Engine::builder().build();
         let v1 = engine
             .render_html(html)

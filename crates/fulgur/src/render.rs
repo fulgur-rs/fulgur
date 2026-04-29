@@ -37,9 +37,8 @@ pub fn render_v2(
     let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
 
     // Pre-pass: register `id` anchors for `href="#..."` resolution.
-    // PR 3 covers paragraph anchors (the only id-bearing type in
-    // Drawables this PR). PR 4+ will add block / list-item anchors
-    // when their entry types arrive.
+    // PR 3 records paragraph ids; PR 4 adds block ids. List-item ids
+    // arrive in PR 5.
     let mut dest_registry = crate::pageable::DestinationRegistry::new();
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
@@ -170,6 +169,14 @@ fn draw_v2_page(
             let x_pt = margin_left_pt + px_to_pt(frag.x);
             let y_pt = margin_top_pt + px_to_pt(frag.y);
 
+            // Block backgrounds/borders draw FIRST so subsequent inner
+            // content (paragraph / image / svg sharing the same node_id —
+            // see `convert::replaced` and `convert::inline_root`)
+            // overlays on top. No `continue;`: the dispatch falls through
+            // to the inner-content checks below.
+            if let Some(block) = drawables.block_styles.get(&node_id) {
+                draw_block_v2(canvas, block, x_pt, y_pt, frag);
+            }
             if let Some(img) = drawables.images.get(&node_id) {
                 draw_image_v2(canvas, img, x_pt, y_pt);
                 continue;
@@ -182,7 +189,7 @@ fn draw_v2_page(
                 draw_paragraph_v2(canvas, para, x_pt, y_pt, &geom.fragments, page_index);
                 continue;
             }
-            // Other types (block_styles / tables / ...) land in
+            // Other types (tables / list_items / ...) land in
             // subsequent PRs.
         }
     }
@@ -252,6 +259,65 @@ fn draw_svg_v2(
             .surface
             .draw_svg(&entry.tree, size, SvgSettings::default());
         canvas.surface.pop();
+    });
+}
+
+/// v2 block draw. Mirrors `BlockPageable::draw`'s background / border /
+/// box-shadow emission. Children paint themselves via their own
+/// per-NodeId dispatch in `draw_v2_page`, so this fn does **not**
+/// recurse into block children.
+///
+/// Overflow clip (`overflow: hidden`) is intentionally not pushed
+/// here — the v1 recursive draw scope owns push/pop while the v2 flat
+/// dispatch does not have a natural "end of children" point. Phase 4
+/// PR 5+ will add a per-block clip scope by tracking child-exit
+/// fragments. Documents that rely on `overflow: hidden` won't
+/// byte-eq until then; the inline test cases avoid that property.
+fn draw_block_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::BlockEntry,
+    x: f32,
+    y: f32,
+    frag: &crate::pagination_layout::Fragment,
+) {
+    use crate::pageable::draw_with_opacity;
+
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        let total_width = entry
+            .layout_size
+            .map(|s| s.width)
+            .unwrap_or_else(|| crate::convert::px_to_pt(frag.width));
+        let total_height = entry
+            .layout_size
+            .map(|s| s.height)
+            .unwrap_or_else(|| crate::convert::px_to_pt(frag.height));
+
+        if entry.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+        }
     });
 }
 

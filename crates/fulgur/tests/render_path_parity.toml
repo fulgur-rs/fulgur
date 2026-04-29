@@ -21,6 +21,12 @@
 # fixture roots in `render_path_parity.rs::FIXTURE_ROOTS`.
 
 allowlist = [
-    # PR 2 will add: vrt://basic/solid-box, vrt://basic/borders,
-    # examples://image, etc.
+    # PR 4 (Block migration) — block backgrounds / borders / radius
+    # unlock fixtures that are pure-block content with margin:0 body
+    # (no inline-block, no overflow:hidden, no images, no text).
+    "vrt://basic/border-radius.html",
+    "vrt://basic/borders.html",
+    "vrt://layout/flex-row.html",
+    "vrt://layout/grid-simple.html",
+    "vrt://layout/multicol-2.html",
 ]

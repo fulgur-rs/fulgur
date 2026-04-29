@@ -35,10 +35,21 @@ pub type NodeId = usize;
 // the `Drawables` struct compiles before any draw migration starts; the
 // shadow harness can already exercise the pipeline plumbing.
 
-/// PR 4 target: per-node block-level paint state (background layers,
-/// borders, box-shadow, opacity, overflow clip).
-#[derive(Debug, Clone, Default)]
-pub struct BlockEntry;
+/// Block draw payload for v2. Mirrors the fields `BlockPageable`
+/// holds for paint dispatch — backgrounds, borders, box-shadow,
+/// overflow clip, opacity, and the anchor id used by
+/// `DestinationRegistry`.
+#[derive(Debug, Clone)]
+pub struct BlockEntry {
+    pub style: crate::pageable::BlockStyle,
+    pub opacity: f32,
+    pub visible: bool,
+    pub id: Option<std::sync::Arc<String>>,
+    /// Taffy-computed border-box size (pt). Preferred when set; falls
+    /// back to the fragment's width/height (CSS px → pt) at render
+    /// time when absent.
+    pub layout_size: Option<crate::pageable::Size>,
+}
 
 /// Paragraph draw payload for v2. Holds the shaped lines that
 /// `paragraph::draw_shaped_lines` consumes verbatim — no re-shaping
