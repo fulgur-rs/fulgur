@@ -180,6 +180,10 @@ let pages = partition_pageable_by_geometry(root, pagination_geometry);
 - `cargo test -p fulgur` 全 pass
 - examples_determinism / VRT / WPT 全 pass
 
+#### 実装メモ
+
+`StringSetPageState` / `PageRunningState` は `pagination_layout` モジュールに移管。`pagination_layout::collect_running_element_states(geometry, &running_store)` を新設し、`render_to_pdf_with_gcpm` の per-page state 収集をすべて fragmenter geometry 駆動に切り替えた。これにより render.rs の parity assertion helper (`assert_pageable_fragmenter_parity` / `assert_string_set_states_parity` / `assert_counter_states_parity` / `assert_bookmark_entries_parity` / `parity_gate_pageable_excess`) と `pagination_layout::collect_bookmark_entries` / `BookmarkPageEntry` も削除。`render_to_pdf_with_gcpm` の `bookmark_by_node` パラメータも不要になったため削除した。
+
 ## サブタスク依存
 
 ```text

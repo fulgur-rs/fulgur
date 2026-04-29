@@ -123,215 +123,6 @@ fn render_pages_to_pdf(pages: Vec<Box<dyn Pageable>>, config: &Config) -> Result
     Ok(pdf_bytes)
 }
 
-/// fulgur-cj6u Phase 1.2: in debug builds, assert that
-/// `pagination_layout::implied_page_count(geometry)` matches the
-/// Pageable-driven page count from `paginate(...)`. Drift between
-/// the two is the regression signal Phase 2 work needs to chase
-/// (widow/orphan, running element / margin-box, counter, table-row
-/// break, …).
-///
-/// Skipped when `geometry` is empty — the fragmenter pass was either not
-/// run or the document had no body / no in-flow children, in which
-/// case Pageable's "always at least one page" convention diverges
-/// from the fragmenter's "no fragments" output and the assertion is
-/// uninformative. Empty bodies still go through Pageable's single-
-/// empty-page fallback.
-///
-/// Release builds compile this to a no-op via `cfg!(debug_assertions)`.
-fn assert_pageable_fragmenter_parity(
-    pages: &[Box<dyn Pageable>],
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-) {
-    if !cfg!(debug_assertions) || geometry.is_empty() {
-        return;
-    }
-    let pageable_count = pages.len() as u32;
-    let fragmenter_count = crate::pagination_layout::implied_page_count(geometry);
-    // fulgur-7hf5 follow-up: a small number of fixtures still produce
-    // `paginate > fragmenter` (Pageable splits where the fragmenter
-    // packs one more child per page). The known case lives in
-    // `fulgur-wpt::render_multi_page::renders_all_pages_from_overflow`
-    // (40 plain paragraphs in a 300×200pt page; paginate=6
-    // fragmenter=5). Investigation of the cursor / margin accounting
-    // gap between Pageable and the fragmenter is tracked in
-    // `fulgur-a9qf` follow-up — until then, skip parity in this
-    // direction. The reverse (`fragmenter > pageable`) is still a
-    // hard regression.
-    if pageable_count > fragmenter_count {
-        return;
-    }
-    debug_assert_eq!(
-        pageable_count, fragmenter_count,
-        "page count parity drift: paginate={pageable_count} fragmenter={fragmenter_count}",
-    );
-}
-
-/// fulgur-g9e3.1 follow-up: detect "Pageable produced more pages
-/// than the fragmenter" — used to skip the dependent parity helpers
-/// (`assert_string_set_states_parity` / `assert_counter_states_parity`
-/// / `assert_bookmark_entries_parity`) when their per-page state
-/// vectors can't be meaningfully compared.
-///
-/// As of fulgur-7hf5 (in-place mid-element split + forced-break
-/// recursion landed) this no longer fires for any of the original
-/// three Phase 3.1.5 fixtures. The remaining trigger is the
-/// 40-paragraph WPT overflow fixture noted on
-/// `assert_pageable_fragmenter_parity`'s gate above; the gate exists
-/// to keep the rest of the suite unbroken while that investigation
-/// runs.
-fn parity_gate_pageable_excess(
-    pageable_pages: usize,
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-) -> bool {
-    let fragmenter_count = crate::pagination_layout::implied_page_count(geometry) as usize;
-    pageable_pages > fragmenter_count
-}
-
-/// fulgur-cj6u Phase 1.3: in debug builds, assert that the fragmenter's
-/// `pagination_layout::collect_string_set_states` produces the same
-/// per-page `(start, first, last)` shape Pageable's tree walk does.
-/// Same skip semantics as `assert_pageable_fragmenter_parity`: empty
-/// geometry → fragmenter pass not run; release builds compile to a no-op.
-///
-/// `string_set_by_node` is the engine-side `HashMap`; the fragmenter
-/// wants a `BTreeMap` (deterministic iteration), so we materialise
-/// one once for the comparison. The conversion is debug-only via
-/// `cfg!(debug_assertions)`.
-fn assert_string_set_states_parity(
-    pageable_states: &[BTreeMap<String, crate::paginate::StringSetPageState>],
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-    string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
-) {
-    if !cfg!(debug_assertions) || geometry.is_empty() {
-        return;
-    }
-    if parity_gate_pageable_excess(pageable_states.len(), geometry) {
-        return;
-    }
-    let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    let fragmenter_states =
-        crate::pagination_layout::collect_string_set_states(geometry, &by_node_btree);
-    debug_assert_eq!(
-        pageable_states.len(),
-        fragmenter_states.len(),
-        "string-set state vec length drift: pageable={} fragmenter={}",
-        pageable_states.len(),
-        fragmenter_states.len(),
-    );
-    for (idx, (pg, sp)) in pageable_states
-        .iter()
-        .zip(fragmenter_states.iter())
-        .enumerate()
-    {
-        debug_assert_eq!(
-            pg, sp,
-            "string-set state drift on page {idx}:\n  pageable   = {pg:#?}\n  fragmenter = {sp:#?}",
-        );
-    }
-}
-
-/// fulgur-s67g Phase 2.3: in debug builds, assert that the fragmenter's
-/// `pagination_layout::collect_counter_states` produces the same
-/// per-page counter snapshot Pageable's tree walk does. Same skip
-/// semantics as the other parity helpers: empty geometry → fragmenter pass
-/// not run; release builds compile to a no-op.
-fn assert_counter_states_parity(
-    pageable_states: &[BTreeMap<String, i32>],
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-    counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
-) {
-    if !cfg!(debug_assertions) || geometry.is_empty() {
-        return;
-    }
-    // `fragment_pagination_root` skips zero-height body children
-    // (e.g. `<div class="reset"></div>` carrying `counter-set: ..`),
-    // so a counter-op node can be absent from `geometry` while
-    // Pageable still applies its op during the tree walk. Skip the
-    // assertion in that case — the fragmenter's view is intentionally
-    // incomplete here, same scope limitation as the function's
-    // docstring already calls out for nested declarations.
-    if counter_ops_by_node
-        .keys()
-        .any(|id| !geometry.contains_key(id))
-    {
-        return;
-    }
-    if parity_gate_pageable_excess(pageable_states.len(), geometry) {
-        return;
-    }
-    let fragmenter_states =
-        crate::pagination_layout::collect_counter_states(geometry, counter_ops_by_node);
-    debug_assert_eq!(
-        pageable_states.len(),
-        fragmenter_states.len(),
-        "counter state vec length drift: pageable={} fragmenter={}",
-        pageable_states.len(),
-        fragmenter_states.len(),
-    );
-    for (idx, (pg, sp)) in pageable_states
-        .iter()
-        .zip(fragmenter_states.iter())
-        .enumerate()
-    {
-        debug_assert_eq!(
-            pg, sp,
-            "counter state drift on page {idx}:\n  pageable   = {pg:#?}\n  fragmenter = {sp:#?}",
-        );
-    }
-}
-
-/// fulgur-s67g Phase 2.4: in debug builds, assert that the fragmenter's
-/// `pagination_layout::collect_bookmark_entries` produces the same
-/// `(page_idx, level, label)` triples Pageable's collector emits at
-/// draw time. `y_pt` is intentionally not compared — see the
-/// docstring on `collect_bookmark_entries` for the rationale.
-fn assert_bookmark_entries_parity(
-    pageable_entries: &[crate::pageable::BookmarkEntry],
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
-    total_pages: usize,
-) {
-    if !cfg!(debug_assertions) || geometry.is_empty() {
-        return;
-    }
-    if parity_gate_pageable_excess(total_pages, geometry) {
-        return;
-    }
-    let pageable_triples: Vec<crate::pagination_layout::BookmarkPageEntry> = pageable_entries
-        .iter()
-        .map(|e| crate::pagination_layout::BookmarkPageEntry {
-            page_idx: e.page_idx,
-            level: e.level,
-            label: e.label.clone(),
-        })
-        .collect();
-    let mut fragmenter_triples =
-        crate::pagination_layout::collect_bookmark_entries(geometry, bookmark_by_node);
-    // Sort both by (page_idx, label) so iteration order from BTreeMap
-    // (NodeId-ordered) matches Pageable's draw-order recording when
-    // the source order happens to disagree on tie-breaks.
-    let mut sorted_pageable = pageable_triples.clone();
-    sorted_pageable.sort_by(|a, b| {
-        a.page_idx
-            .cmp(&b.page_idx)
-            .then(a.level.cmp(&b.level))
-            .then(a.label.cmp(&b.label))
-    });
-    fragmenter_triples.sort_by(|a, b| {
-        a.page_idx
-            .cmp(&b.page_idx)
-            .then(a.level.cmp(&b.level))
-            .then(a.label.cmp(&b.label))
-    });
-    debug_assert_eq!(
-        sorted_pageable, fragmenter_triples,
-        "bookmark entries drift:\n  pageable   = {sorted_pageable:#?}\n  fragmenter = {fragmenter_triples:#?}",
-    );
-}
-
 /// Build krilla Metadata from Config.
 fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
     let mut metadata = krilla::metadata::Metadata::new();
@@ -466,7 +257,6 @@ pub fn render_to_pdf_with_gcpm(
     pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
-    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
 ) -> Result<Vec<u8>> {
     // Resolve the default (no-selector) CSS @page margin for initial pagination.
     // :first/:left/:right overrides are applied per-page during rendering below.
@@ -486,67 +276,39 @@ pub fn render_to_pdf_with_gcpm(
     let content_width = init_size.width - init_margin.left - init_margin.right;
     let _content_height = init_size.height - init_margin.top - init_margin.bottom;
 
-    // fulgur-4ltp (Phase 3.2.c): body-content page split is now
-    // geometry-driven. The fragmenter populated
-    // `pagination_geometry` upstream; this helper slices the Pageable
-    // tree per page using that geometry, replacing the previous
-    // `paginate(root, content_width, content_height)` Pageable-driven
-    // split. The collect_*_states / parity gates downstream still
-    // walk the resulting per-page Pageable trees — they keep working
-    // because PR 1 (`fulgur-r6we`) / PR 2 (`fulgur-3vwx`) implemented
-    // `slice_for_page` for every Pageable impl with the same
-    // first-page-only marker semantics that `split()` had.
+    // body-content page split is geometry-driven: the fragmenter
+    // populated `pagination_geometry` upstream and this helper slices
+    // the Pageable tree per page using that geometry.
     let pages = crate::pagination_layout::partition_pageable_by_geometry(
         root.as_ref(),
         pagination_geometry,
     );
     drop(root);
-    // fulgur-cj6u Phase 1.2 / fulgur-s67g Phase 2.6: page-count
-    // cross-check. After Phase 3.2.c both sides come from the same
-    // `pagination_geometry`, so this is a structural invariant
-    // (partition.len() == implied_page_count). Phase 3.4 will delete
-    // the helper once `paginate.rs` is gone.
-    assert_pageable_fragmenter_parity(&pages, pagination_geometry);
-    // Suppress unused-variable warnings for the parity inputs that
-    // are now redundant. Phase 3.3 / 3.4 will delete the parity
-    // helpers entirely; until then we keep the parameters in the
-    // function signature so Engine::render_html callers don't need
-    // to change.
-    let _ = (string_set_by_node, counter_ops_by_node, bookmark_by_node);
     let total_pages = pages.len();
+
+    // Per-page state collected directly from the fragmenter geometry
+    // (no Pageable tree walk required).
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
-        vec![BTreeMap::new(); pages.len()]
+        vec![BTreeMap::new(); total_pages]
     } else {
-        crate::paginate::collect_string_set_states(&pages)
+        let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        crate::pagination_layout::collect_string_set_states(pagination_geometry, &by_node_btree)
     };
-    // fulgur-cj6u Phase 1.3: parity-check the fragmenter's geometry-table-
-    // driven `collect_string_set_states` against Pageable's tree walk.
-    // No activation gate beyond "string-set actually used" — Phase 2.2
-    // / 2.6 ungated the running-elements and `@page` skips.
-    if !gcpm.string_set_mappings.is_empty() {
-        assert_string_set_states_parity(
-            &string_set_states,
-            pagination_geometry,
-            string_set_by_node,
-        );
-    }
     let running_states = if gcpm.running_mappings.is_empty() {
-        vec![BTreeMap::new(); pages.len()]
+        vec![BTreeMap::new(); total_pages]
     } else {
-        crate::paginate::collect_running_element_states(&pages)
+        crate::pagination_layout::collect_running_element_states(pagination_geometry, running_store)
     };
-    let counter_states =
-        if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
-            vec![BTreeMap::new(); pages.len()]
-        } else {
-            crate::paginate::collect_counter_states(&pages)
-        };
-    // fulgur-s67g Phase 2.3: parity-check the fragmenter's geometry-table-
-    // driven `collect_counter_states` against Pageable's tree walk.
-    // No activation gate beyond "counter actually used".
-    if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
-        assert_counter_states_parity(&counter_states, pagination_geometry, counter_ops_by_node);
-    }
+    let counter_states = if gcpm.counter_mappings.is_empty()
+        && gcpm.content_counter_mappings.is_empty()
+    {
+        vec![BTreeMap::new(); total_pages]
+    } else {
+        crate::pagination_layout::collect_counter_states(pagination_geometry, counter_ops_by_node)
+    };
 
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
@@ -862,20 +624,6 @@ pub fn render_to_pdf_with_gcpm(
 
     if let Some(c) = collector {
         let entries = c.into_entries();
-        // fulgur-s67g Phase 2.4: parity-check the fragmenter's
-        // geometry-driven bookmark walk against Pageable's draw-time
-        // collector output. Compares only `(page_idx, level, label)`
-        // — the fragmenter does not work in PDF-pt frames so y_pt parity
-        // is deferred to Phase 4 (convert / render rewrite).
-        // Phase 2.6 ungated the `@page`-content-height skip.
-        if !entries.is_empty() {
-            assert_bookmark_entries_parity(
-                &entries,
-                pagination_geometry,
-                bookmark_by_node,
-                total_pages,
-            );
-        }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
         }
@@ -1221,7 +969,6 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1241,7 +988,6 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1258,7 +1004,6 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
-            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1285,7 +1030,6 @@ mod tests {
             &gcpm,
             &RunningElementStore::new(),
             &[],
-            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1323,7 +1067,6 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
-            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),

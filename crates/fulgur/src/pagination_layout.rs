@@ -186,8 +186,8 @@ pub fn run_pass_with_break_styles<'a>(
 /// [`run_pass_with_break_styles`] with awareness of `position:
 /// running()` element instances. Running children are skipped during
 /// the body walk so they do not contribute to body cursor or page
-/// fragments — Pageable handles their per-page placement via
-/// [`crate::paginate::collect_running_element_states`].
+/// fragments — per-page placement is handled by
+/// [`collect_running_element_states`].
 pub fn run_pass_with_break_and_running<'a>(
     doc: &'a mut BaseDocument,
     page_height_px: f32,
@@ -434,16 +434,37 @@ impl<'a> PaginationLayoutTree<'a> {
                 }
             }
             // fulgur-s67g Phase 2.2: skip `position: running()` named
-            // children. They are removed from body flow and placed
-            // into `@page` margin boxes per page; including them in
-            // the body cursor would over-count height and diverge
-            // from Pageable's view (which sees them as
-            // `RunningElementWrapperPageable` markers with zero
-            // contribution to body height).
+            // children from the body cursor. They are removed from
+            // body flow and placed into `@page` margin boxes per page;
+            // including them in the cursor would over-count height.
+            //
+            // Phase 3.4 follow-up (PR #296 Devin): record a zero-height
+            // fragment at the cursor position before skipping so the
+            // running node enters `geometry` keyed by its NodeId. The
+            // fragment carries `height = 0` (cursor does not advance)
+            // but `page_index` is the page on which the running
+            // element's source position lands — exactly what
+            // `collect_running_element_states` needs to map running
+            // instances to their per-page state.
             if self
                 .running_store
                 .is_some_and(|s| s.instance_for_node(child_id).is_some())
             {
+                if child.element_data().is_some() {
+                    let layout = child.final_layout;
+                    self.geometry
+                        .entry(child_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: body_x + layout.location.x,
+                            y: cursor_y,
+                            width: 0.0,
+                            height: 0.0,
+                        });
+                    emitted += 1;
+                }
                 continue;
             }
             let layout = child.final_layout;
@@ -729,12 +750,10 @@ impl<'a> PaginationLayoutTree<'a> {
 
             // fulgur-s67g Phase 2.5: descend into the child's subtree
             // and record per-node fragments for every visible
-            // descendant. Pageable's `paginate::collect_*` walks
-            // recurse into `BlockPageable`, `ListItemPageable`,
-            // wrapper types, and table cells; the fragmenter side needs
-            // matching coverage so bookmark / counter / string-set
-            // markers attached to nested DOM elements (e.g. an `h2`
-            // inside a wrapper `<div>`) appear in geometry too.
+            // descendant. The collect_*_states walks expect coverage of
+            // nested DOM elements so bookmark / counter / string-set
+            // markers attached e.g. to an `h2` inside a wrapper `<div>`
+            // appear in geometry too.
             //
             // The descendant fragments live on the same page as
             // their ancestor — exact mid-element split inside a
@@ -794,9 +813,9 @@ impl<'a> PaginationLayoutTree<'a> {
 /// Mid-element split inside a body child (a deeply nested element
 /// crossing the page boundary that the parent itself did not split
 /// at) is **not** modelled here — descendants land on the same page
-/// as their ancestor. This is the fragmenter's "block-level only" gap;
-/// closing it requires the full per-strip layout pass that Phase 3
-/// (paginate.rs replacement) introduces.
+/// as their ancestor. Closing this "block-level only" gap requires the
+/// full per-strip layout pass that future fragmenter work will
+/// introduce.
 fn record_subtree_descendants(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
@@ -1589,15 +1608,27 @@ fn fragment_inline_root(
     (page_index, cursor_y, emitted)
 }
 
+/// Per-page state for a named string emitted by `string-set:`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringSetPageState {
+    /// Value at start of page (carried from previous page's `last`).
+    pub start: Option<String>,
+    /// First value set on this page.
+    pub first: Option<String>,
+    /// Last value set on this page.
+    pub last: Option<String>,
+}
+
+/// Per-page state for running element instances of a given name.
+#[derive(Debug, Clone, Default)]
+pub struct PageRunningState {
+    /// Instance IDs of running elements whose source position falls on
+    /// this page, in source order.
+    pub instance_ids: Vec<usize>,
+}
+
 /// fulgur-6tco: walk the geometry table page-by-page to thread
-/// `string-set` state across pages, mirroring
-/// [`crate::paginate::collect_string_set_states`].
-///
-/// Used by fulgur-cj6u Phase 1.3 as the fragmenter-side input to a
-/// per-page state parity assertion against `paginate`'s walk in
-/// `render_to_pdf_with_gcpm`. Drift between the two outputs is the
-/// regression signal that catches geometry-vs-Pageable divergence
-/// for `string-set` resolution.
+/// `string-set` state across pages.
 ///
 /// For each page index 0..max_page:
 ///
@@ -1610,22 +1641,19 @@ fn fragment_inline_root(
 ///
 /// Markers fire only on a node's first appearance: when an inline
 /// root spans two pages, its second-page fragment does **not** re-
-/// emit the marker. This matches Pageable's invariant that
-/// `StringSetWrapperPageable.markers` "always travel with the content
-/// they describe" (`paginate.rs:91-96`) — markers attach to the
-/// first split fragment.
+/// emit the marker.
 ///
 /// Source-order assumption: `geometry` is a `BTreeMap<usize, ..>` so
 /// iteration is by ascending NodeId. For body's direct children that
 /// matches DOM source order, since Blitz allocates ids sequentially
 /// during parse. Nested string-set declarations (markers attached to
-/// a `<span>` inside a `<p>`) are not in the fragmenter's geometry table
-/// today and so are silently dropped — same scope limitation as
+/// a `<span>` inside a `<p>`) are not in the fragmenter's geometry
+/// table today and so are silently dropped — same scope limitation as
 /// `fragment_pagination_root` itself.
 pub fn collect_string_set_states(
     geometry: &PaginationGeometryTable,
     string_set_by_node: &BTreeMap<usize, Vec<(String, String)>>,
-) -> Vec<BTreeMap<String, crate::paginate::StringSetPageState>> {
+) -> Vec<BTreeMap<String, StringSetPageState>> {
     let max_page = geometry
         .values()
         .flat_map(|g| g.fragments.iter())
@@ -1645,12 +1673,12 @@ pub fn collect_string_set_states(
         }
     }
 
-    let mut result: Vec<BTreeMap<String, crate::paginate::StringSetPageState>> =
+    let mut result: Vec<BTreeMap<String, StringSetPageState>> =
         Vec::with_capacity(nodes_per_page.len());
     let mut carry: BTreeMap<String, String> = BTreeMap::new();
 
     for nodes in &nodes_per_page {
-        let mut page_state: BTreeMap<String, crate::paginate::StringSetPageState> = BTreeMap::new();
+        let mut page_state: BTreeMap<String, StringSetPageState> = BTreeMap::new();
         for (name, value) in &carry {
             page_state.entry(name.clone()).or_default().start = Some(value.clone());
         }
@@ -1673,25 +1701,63 @@ pub fn collect_string_set_states(
     result
 }
 
+/// Walk the geometry table page-by-page and emit the running element
+/// instances whose first fragment lands on each page.
+///
+/// Each `instance_id` is adopted only once — on the page where its
+/// node's first fragment lands. This matches the source-order policy
+/// the margin-box renderer uses with `resolve_element_policy` to pick
+/// the right instance for `first` / `last` / `first-except`.
+pub fn collect_running_element_states(
+    geometry: &PaginationGeometryTable,
+    running_store: &crate::gcpm::running::RunningElementStore,
+) -> Vec<BTreeMap<String, PageRunningState>> {
+    let max_page = geometry
+        .values()
+        .flat_map(|g| g.fragments.iter())
+        .map(|f| f.page_index)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
+
+    let mut result: Vec<BTreeMap<String, PageRunningState>> =
+        vec![BTreeMap::new(); max_page as usize];
+
+    for (&node_id, geom) in geometry {
+        let Some(first_frag) = geom.fragments.first() else {
+            continue;
+        };
+        let page_idx = first_frag.page_index as usize;
+        if page_idx >= result.len() {
+            continue;
+        }
+        let Some(instance_id) = running_store.instance_for_node(node_id) else {
+            continue;
+        };
+        let Some(name) = running_store.name_of(instance_id) else {
+            continue;
+        };
+        result[page_idx]
+            .entry(name.to_string())
+            .or_default()
+            .instance_ids
+            .push(instance_id);
+    }
+
+    result
+}
+
 /// fulgur-s67g Phase 2.3: walk the geometry table page-by-page and
 /// replay counter operations in document order, returning the
-/// cumulative counter snapshot at the end of each page. Mirrors
-/// [`crate::paginate::collect_counter_states`] which walks the
-/// Pageable tree to collect the same data.
+/// cumulative counter snapshot at the end of each page.
 ///
 /// Same source-order assumption as
 /// [`collect_string_set_states`]: the per-node counter ops are
 /// applied in the order they appear in the body's children list,
 /// approximated by `BTreeMap<NodeId, _>` iteration. Nested counter
 /// declarations on descendants of body's direct children are not in
-/// the fragmenter's geometry today and are silently dropped — same scope
-/// limitation as `fragment_pagination_root` itself.
-///
-/// Used by fulgur-cj6u Phase 1.x parity gates extension in
-/// `render_to_pdf_with_gcpm`. Drift between Pageable's counter walk
-/// and the fragmenter's geometry-driven walk is the regression signal
-/// for counter-correctness on documents with `counter-increment` /
-/// `counter-reset` / `counter-set`.
+/// the fragmenter's geometry today and are silently dropped — same
+/// scope limitation as `fragment_pagination_root` itself.
 pub fn collect_counter_states(
     geometry: &PaginationGeometryTable,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
@@ -1738,64 +1804,6 @@ pub fn collect_counter_states(
     }
 
     result
-}
-
-/// fulgur-s67g Phase 2.4: walk the geometry table and emit
-/// `(page_idx, level, label)` triples for every body child whose
-/// `BookmarkInfo` is registered. Mirrors what
-/// `pageable::BookmarkMarkerPageable::record_if_collecting`
-/// records during draw, except the fragmenter works off the
-/// `PaginationGeometryTable` directly without traversing the
-/// Pageable tree.
-///
-/// Source order is `BTreeMap<NodeId, _>` iteration — same
-/// approximation as [`collect_string_set_states`] and
-/// [`collect_counter_states`]. A node that registers a bookmark
-/// emits one triple on the page where its first fragment lands
-/// (subsequent split fragments do not re-emit, matching
-/// `BookmarkMarkerWrapperPageable`'s "marker travels with the
-/// first split fragment" invariant).
-///
-/// `y_pt` is intentionally **not** returned: the fragmenter works in
-/// CSS px / fragment frames while Pageable records absolute PDF
-/// pt at draw time (after applying `config.margin.top` and
-/// per-page running-element offsets). The Phase 2.4 parity
-/// assertion in `render_to_pdf_with_gcpm` compares only
-/// `(page_idx, level, label)` triples, which are sufficient to
-/// detect a regression in the bookmark-to-page mapping. Y-pt
-/// matching is a downstream concern handled by the convert /
-/// render path that will eventually consume this geometry
-/// directly (Phase 4).
-pub fn collect_bookmark_entries(
-    geometry: &PaginationGeometryTable,
-    bookmark_by_node: &BTreeMap<usize, crate::blitz_adapter::BookmarkInfo>,
-) -> Vec<BookmarkPageEntry> {
-    let mut result = Vec::new();
-    for (&node_id, geom) in geometry {
-        let Some(first_frag) = geom.fragments.first() else {
-            continue;
-        };
-        let Some(info) = bookmark_by_node.get(&node_id) else {
-            continue;
-        };
-        result.push(BookmarkPageEntry {
-            page_idx: first_frag.page_index as usize,
-            level: info.level,
-            label: info.label.clone(),
-        });
-    }
-    result
-}
-
-/// Reduced view of `pageable::BookmarkEntry` exposed by
-/// [`collect_bookmark_entries`]. Drops `y_pt` because the fragmenter
-/// does not work in PDF-pt frames; see the function's docstring
-/// for the parity rationale.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BookmarkPageEntry {
-    pub page_idx: usize,
-    pub level: u8,
-    pub label: String,
 }
 
 /// fulgur-jkl5: enumerate `position: fixed` elements and emit one
@@ -1944,30 +1952,14 @@ pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
 }
 
 /// fulgur-r6we (Phase 3.2.a): build the per-page Pageable list from a
-/// root Pageable + fragmenter geometry. Phase 3.2 replaces
-/// [`crate::paginate::paginate`]'s split-driven page decomposition
-/// with this geometry-driven pass: the fragmenter has already decided
-/// where the page breaks fall, this helper just slices the Pageable
+/// root Pageable + fragmenter geometry. The fragmenter has already
+/// decided where the page breaks fall; this helper slices the Pageable
 /// tree to match.
 ///
 /// Returns one `Box<dyn Pageable>` per page (`implied_page_count(geometry)`
 /// total). Pages whose subtree slice is empty (every node returned
-/// `None` from `slice_for_page`) get an empty `BlockPageable` placeholder
-/// so page count is preserved — this matches `paginate()`'s output for
-/// rendered pages with no in-flow content.
-///
-/// Phase 3.2.a only supports plain Pageable types (`BlockPageable` /
-/// `ParagraphPageable` / `SpacerPageable` / `ImagePageable`). Wrapper
-/// types (`CounterOpWrapperPageable`, `BookmarkMarkerWrapperPageable`,
-/// etc.) and special-split impls (`TablePageable`, `ListItemPageable`)
-/// will reach `unimplemented!()` in their `slice_for_page` until Phase
-/// 3.2.b implements them.
-///
-/// `#[allow(dead_code)]` is temporary: this function's only callers in
-/// PR 1 are unit tests under `mod tests`. Phase 3.2.c (`fulgur-4ltp`)
-/// wires it into `render.rs::render_to_pdf` / `render_to_pdf_with_gcpm`
-/// in place of `paginate()`, at which point the attribute is removed.
-#[allow(dead_code)]
+/// `None` from `slice_for_page`) get an empty `BlockPageable`
+/// placeholder so page count is preserved.
 pub fn partition_pageable_by_geometry(
     root: &dyn crate::pageable::Pageable,
     geometry: &PaginationGeometryTable,
@@ -2280,13 +2272,83 @@ mod tests {
         );
     }
 
+    /// Phase 3.4 follow-up (PR #296 Devin): regression for the
+    /// fragmenter's running-element handling. `fragment_pagination_root`
+    /// must record a zero-height fragment for every
+    /// `position: running()` element so the running NodeId appears in
+    /// geometry; without this, the downstream collect walk returns
+    /// all-empty maps and `content: element(name)` in margin boxes
+    /// silently produces nothing. Drive the engine pipeline through
+    /// `Engine::render_html` and inspect the geometry table built by
+    /// the same fragmenter pass.
+    #[test]
+    fn running_element_node_lands_in_geometry_with_zero_height() {
+        use crate::blitz_adapter;
+        use crate::convert::pt_to_px;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        let css = ".header { position: running(pageHeader); }";
+        let html = r#"<!DOCTYPE html>
+<html><head><style>.header { position: running(pageHeader); }</style></head>
+<body>
+<div class="header">Doc Header</div>
+<p>Body.</p>
+</body></html>"#;
+
+        let gcpm = parse_gcpm(css);
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+        blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
+        let store = pass.into_running_store();
+        blitz_adapter::resolve(&mut doc);
+        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+
+        let geometry = run_pass_with_break_and_running(
+            doc.deref_mut(),
+            pt_to_px(800.0),
+            &column_styles,
+            &store,
+        );
+
+        // The running element's NodeId must exist in geometry on page 0
+        // with a zero-height fragment.
+        let mut found_running_node = None;
+        for (&node_id, geom) in &geometry {
+            if store.instance_for_node(node_id).is_some() {
+                found_running_node = Some((node_id, geom.fragments.clone()));
+                break;
+            }
+        }
+        let (node_id, fragments) =
+            found_running_node.expect("running element NodeId must appear in geometry table");
+        assert_eq!(fragments.len(), 1, "single zero-height fragment");
+        assert_eq!(fragments[0].page_index, 0);
+        assert_eq!(
+            fragments[0].height, 0.0,
+            "running fragment must not advance the cursor"
+        );
+
+        // collect_running_element_states must surface the instance.
+        let states = collect_running_element_states(&geometry, &store);
+        let entry = states[0]
+            .get("pageHeader")
+            .expect("pageHeader entry must appear in page 0 state");
+        assert_eq!(
+            entry.instance_ids,
+            vec![store.instance_for_node(node_id).unwrap()]
+        );
+    }
+
     /// fulgur-6tco: synthesize a geometry table + string_set_by_node
-    /// map and verify `collect_string_set_states` produces the same
-    /// per-page state shape Pageable's `paginate::collect_string_set_states`
-    /// produces for an equivalent Pageable tree.
+    /// map and verify `collect_string_set_states` produces the expected
+    /// per-page `(start, first, last)` shape.
     #[test]
     fn string_set_state_carries_across_pages() {
-        use crate::paginate::StringSetPageState;
+        use super::StringSetPageState;
 
         // Three nodes: A on page 0, B on page 0, C on page 1.
         // A sets header="a", B sets header="b" (so first/last on page 0
@@ -2347,7 +2409,7 @@ mod tests {
     fn string_set_first_appearance_only_for_split_paragraph() {
         // A node spans two pages (inline-aware split). Markers fire
         // only on the first appearance.
-        use crate::paginate::StringSetPageState;
+        use super::StringSetPageState;
 
         let mut geom = PaginationGeometryTable::new();
         geom.entry(42).or_default().fragments.push(Fragment {
