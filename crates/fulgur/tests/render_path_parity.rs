@@ -301,6 +301,15 @@ fn inline_byte_equality_cases() {
             "two stacked blocks",
             "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:60px}.a{background:#fcd}.b{background:#cdf}</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
         ),
+        // Regression for PR #303 Devin: convert wraps an inline-root
+        // paragraph in a BlockPageable that shares the same node_id, so
+        // both `block_styles[id]` and `paragraphs[id]` are populated. The
+        // block dispatch must not `continue` past the paragraph check —
+        // background draws first, glyph runs draw on top.
+        (
+            "paragraph with background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#fce}</style></head><body><p>hello</p></body></html>",
+        ),
     ];
 
     let cases = pr3_cases.iter().chain(pr4_cases.iter());
