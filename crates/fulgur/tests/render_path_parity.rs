@@ -310,6 +310,15 @@ fn inline_byte_equality_cases() {
             "paragraph with background (shared node_id)",
             "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#fce}</style></head><body><p>hello</p></body></html>",
         ),
+        // Regression for PR #303 Devin (block id anchors): `<a href="#x">`
+        // targeting `<div id="x">` must resolve in v2 the same way it
+        // does in v1 (`BlockPageable::collect_ids`). v1 emits a
+        // `/Link → /Dest` mapping; v2 must register block ids in the
+        // pre-pass `DestinationRegistry`.
+        (
+            "anchor link to block id",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:40px}#target{background:#cef}p{margin:0}</style></head><body><div id="target"></div><p><a href="#target">jump</a></p></body></html>"##,
+        ),
     ];
 
     let cases = pr3_cases.iter().chain(pr4_cases.iter());

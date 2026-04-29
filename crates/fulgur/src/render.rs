@@ -38,14 +38,25 @@ pub fn render_v2(
 
     // Pre-pass: register `id` anchors for `href="#..."` resolution.
     // PR 3 records paragraph ids; PR 4 adds block ids. List-item ids
-    // arrive in PR 5.
+    // arrive in PR 5. A node may appear in both `paragraphs` and
+    // `block_styles` (shared node_id case — see `convert::replaced` /
+    // `convert::inline_root`); paragraph wins so the chain mirrors the
+    // priority v1 establishes via the Pageable tree walk.
     let mut dest_registry = crate::pageable::DestinationRegistry::new();
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
             continue;
         };
-        if let Some(para) = drawables.paragraphs.get(&node_id)
-            && let Some(id) = &para.id
+        let para_id = drawables
+            .paragraphs
+            .get(&node_id)
+            .and_then(|p| p.id.as_ref());
+        let block_id = drawables
+            .block_styles
+            .get(&node_id)
+            .and_then(|b| b.id.as_ref());
+        let id = para_id.or(block_id);
+        if let Some(id) = id
             && !id.is_empty()
         {
             let page_idx = first_frag.page_index as usize;
