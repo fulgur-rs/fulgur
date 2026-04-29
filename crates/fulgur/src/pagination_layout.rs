@@ -2272,6 +2272,75 @@ mod tests {
         );
     }
 
+    /// Phase 4 prerequisite repro: confirm `string-set` carry semantic
+    /// across page break.
+    #[test]
+    fn string_set_carry_across_page_break() {
+        use crate::blitz_adapter;
+        use crate::convert::pt_to_px;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        let html = r#"<!DOCTYPE html>
+<html>
+<head><style>
+@page { size: A4; margin: 60pt; }
+h2 { string-set: chapter-title content(text); }
+.box { padding: 60pt 0; }
+</style></head>
+<body>
+<h2>Introduction</h2>
+<div class="box">f1</div>
+<div class="box">f2</div>
+<div class="box">f3</div>
+<div class="box">f4</div>
+<div class="box">f5</div>
+<div class="box">f6</div>
+<div class="box">f7</div>
+<div class="box">f8</div>
+<h2 style="page-break-before:always">Background</h2>
+</body></html>"#;
+        let css = "h2 { string-set: chapter-title content(text); }";
+        let gcpm = parse_gcpm(css);
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass = blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+        blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
+        let store = pass.into_store();
+        blitz_adapter::resolve(&mut doc);
+        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+        let geometry = run_pass_with_break_styles(doc.deref_mut(), pt_to_px(720.0), &column_styles);
+
+        let mut by_node: std::collections::BTreeMap<usize, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for entry in store.entries() {
+            by_node
+                .entry(entry.node_id)
+                .or_default()
+                .push((entry.name.clone(), entry.value.clone()));
+        }
+        let states = collect_string_set_states(&geometry, &by_node);
+        assert!(
+            states.len() >= 2,
+            "must span at least 2 pages, got {}",
+            states.len()
+        );
+        let p0 = states[0]
+            .get("chapter-title")
+            .expect("page 0 must have chapter-title state");
+        assert_eq!(p0.first.as_deref(), Some("Introduction"), "page 0 first");
+        let p1 = states[1]
+            .get("chapter-title")
+            .expect("page 1 must have chapter-title state (carry)");
+        assert_eq!(
+            p1.start.as_deref(),
+            Some("Introduction"),
+            "page 1 start (carry from page 0 last)"
+        );
+    }
+
     /// Phase 3.4 follow-up (PR #296 Devin): regression for the
     /// fragmenter's running-element handling. `fragment_pagination_root`
     /// must record a zero-height fragment for every

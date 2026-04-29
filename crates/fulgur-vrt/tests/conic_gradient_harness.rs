@@ -80,6 +80,7 @@ fn conic_gradient_quadrants_match_rect_reference() {
         page_size: "A4",
         margin_pt: Some(0.0),
         dpi: 150,
+        bookmarks: false,
     };
 
     let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
