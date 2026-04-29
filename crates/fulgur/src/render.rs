@@ -228,12 +228,38 @@ fn draw_v2_page(
                 );
                 continue;
             }
-            // Block backgrounds/borders draw FIRST so subsequent inner
-            // content (paragraph / image / svg sharing the same node_id —
-            // see `convert::replaced` and `convert::inline_root`)
-            // overlays on top. No `continue;`: the dispatch falls through
-            // to the inner-content checks below.
+            // Block + inner content (paragraph / image / svg) sharing
+            // the same node_id: v1's `BlockPageable::draw`
+            // (`pageable.rs:1771`) wraps bg/border AND the children
+            // draw inside ONE `draw_with_opacity(self.opacity, ...)`
+            // group. The inline-root paragraph + replaced-image /
+            // replaced-svg patterns from `convert::inline_root` /
+            // `convert::replaced` deliberately leave the inner draw
+            // payload at `opacity: 1.0` because the wrapping block
+            // carries the real opacity.
+            //
+            // Mirror v1 by combining all four paints into one group at
+            // dispatch time and `continue;`-ing past the standalone
+            // arms. Same pattern as `draw_list_item_with_block`.
             if let Some(block) = drawables.block_styles.get(&node_id) {
+                let para_for_block = drawables.paragraphs.get(&node_id);
+                let img_for_block = drawables.images.get(&node_id);
+                let svg_for_block = drawables.svgs.get(&node_id);
+                if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
+                    draw_block_with_inner_content(
+                        canvas,
+                        block,
+                        para_for_block,
+                        img_for_block,
+                        svg_for_block,
+                        x_pt,
+                        y_pt,
+                        frag,
+                        &geom.fragments,
+                        page_index,
+                    );
+                    continue;
+                }
                 draw_block_v2(canvas, block, x_pt, y_pt, frag);
             }
             if let Some(img) = drawables.images.get(&node_id) {
@@ -265,22 +291,35 @@ fn draw_image_v2(
     y: f32,
 ) {
     use crate::pageable::draw_with_opacity;
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        draw_image_inner_paint(canvas, entry, x, y);
+    });
+}
 
+/// Image paint without `draw_with_opacity` wrapper. Used by
+/// `draw_block_with_inner_content` so a `<img>` whose wrapping inline-root
+/// `BlockPageable` shares its node_id (`convert::replaced`) composes
+/// with the block bg/border under one opacity group, mirroring v1's
+/// `BlockPageable::draw` (`pageable.rs:1771`).
+fn draw_image_inner_paint(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::ImageEntry,
+    x: f32,
+    y: f32,
+) {
     if !entry.visible {
         return;
     }
-    draw_with_opacity(canvas, entry.opacity, |canvas| {
-        let Some(image) = decode_image_for_v2(entry) else {
-            return;
-        };
-        let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
-            return;
-        };
-        let transform = krilla::geom::Transform::from_translate(x, y);
-        canvas.surface.push_transform(&transform);
-        canvas.surface.draw_image(image, size);
-        canvas.surface.pop();
-    });
+    let Some(image) = decode_image_for_v2(entry) else {
+        return;
+    };
+    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+        return;
+    };
+    let transform = krilla::geom::Transform::from_translate(x, y);
+    canvas.surface.push_transform(&transform);
+    canvas.surface.draw_image(image, size);
+    canvas.surface.pop();
 }
 
 fn decode_image_for_v2(entry: &crate::drawables::ImageEntry) -> Option<krilla::image::Image> {
@@ -303,22 +342,33 @@ fn draw_svg_v2(
     y: f32,
 ) {
     use crate::pageable::draw_with_opacity;
-    use krilla_svg::{SurfaceExt, SvgSettings};
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        draw_svg_inner_paint(canvas, entry, x, y);
+    });
+}
 
+/// SVG paint without `draw_with_opacity` wrapper. See
+/// `draw_image_inner_paint` for the rationale (inline-root `<svg>`
+/// shares node_id with the wrapping block).
+fn draw_svg_inner_paint(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::SvgEntry,
+    x: f32,
+    y: f32,
+) {
+    use krilla_svg::{SurfaceExt, SvgSettings};
     if !entry.visible {
         return;
     }
-    draw_with_opacity(canvas, entry.opacity, |canvas| {
-        let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
-            return;
-        };
-        let transform = krilla::geom::Transform::from_translate(x, y);
-        canvas.surface.push_transform(&transform);
-        let _ = canvas
-            .surface
-            .draw_svg(&entry.tree, size, SvgSettings::default());
-        canvas.surface.pop();
-    });
+    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+        return;
+    };
+    let transform = krilla::geom::Transform::from_translate(x, y);
+    canvas.surface.push_transform(&transform);
+    let _ = canvas
+        .surface
+        .draw_svg(&entry.tree, size, SvgSettings::default());
+    canvas.surface.pop();
 }
 
 /// v2 block draw. Mirrors `BlockPageable::draw`'s background / border /
@@ -426,6 +476,47 @@ fn draw_table_v2(
                 total_width,
                 total_height,
             );
+        }
+    });
+}
+
+/// v2 block + inner content combined draw. Mirrors v1's
+/// `BlockPageable::draw` (`pageable.rs:1771`) which wraps bg/border
+/// **and** the children draw inside ONE
+/// `draw_with_opacity(self.opacity, ...)` group.
+///
+/// The shared-node_id patterns from `convert::inline_root` (block
+/// wraps an inline-root paragraph) and `convert::replaced` (block
+/// wraps `<img>` / `<svg>`) deliberately leave the inner draw payload
+/// at `opacity: 1.0` — the wrapping block carries the real opacity.
+/// Composing them all under a single `draw_with_opacity(block.opacity, ...)`
+/// keeps the v1 `q .. Q` framing intact so byte-eq holds for
+/// `<p style="opacity:0.5; background:red">text</p>` and friends.
+#[allow(clippy::too_many_arguments)]
+fn draw_block_with_inner_content(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    paragraph: Option<&crate::drawables::ParagraphEntry>,
+    image: Option<&crate::drawables::ImageEntry>,
+    svg: Option<&crate::drawables::SvgEntry>,
+    x: f32,
+    y: f32,
+    frag: &crate::pagination_layout::Fragment,
+    fragments: &[crate::pagination_layout::Fragment],
+    page_index: u32,
+) {
+    use crate::pageable::draw_with_opacity;
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        draw_block_inner_paint(canvas, block, x, y, frag);
+        if let Some(p) = paragraph {
+            draw_paragraph_inner_paint(canvas, p, x, y, fragments, page_index);
+        }
+        if let Some(i) = image {
+            draw_image_inner_paint(canvas, i, x, y);
+        }
+        if let Some(s) = svg {
+            draw_svg_inner_paint(canvas, s, x, y);
         }
     });
 }

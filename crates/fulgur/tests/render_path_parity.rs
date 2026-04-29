@@ -319,6 +319,17 @@ fn inline_byte_equality_cases() {
             "anchor link to block id",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:40px}#target{background:#cef}p{margin:0}</style></head><body><div id="target"></div><p><a href="#target">jump</a></p></body></html>"##,
         ),
+        // Regression for PR #303 follow-up Devin: shared node_id
+        // (block + paragraph from `convert::inline_root`) with
+        // `opacity < 1.0` must compose under ONE
+        // `draw_with_opacity(block.opacity, ...)` group, mirroring v1's
+        // `BlockPageable::draw` which wraps bg/border + child draws in
+        // a single group. Separate wrappers paint the bg at 50% but
+        // glyphs at 100% — visually wrong AND byte-divergent.
+        (
+            "paragraph with opacity and background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#cef;opacity:0.5}</style></head><body><p>hello</p></body></html>",
+        ),
     ];
 
     // PR 5 (Table + ListItem) extends `Drawables` with `tables` and
