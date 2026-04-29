@@ -2849,6 +2849,113 @@ mod tests {
         );
     }
 
+    /// Devin Review on PR #288: `TablePageable::slice_for_page` must
+    /// **recursively** slice body cells (`pc.child.slice_for_page(...)`)
+    /// rather than `clone_box()` them. Otherwise a body cell that
+    /// spans pages internally contributes its full content to every
+    /// page where it appears, breaking the slice contract.
+    ///
+    /// Setup: a single body cell whose child is a `BlockPageable`
+    /// containing A (h=100, page 0) and B (h=100, page 1). On page 1
+    /// the table's body cell must contain ONLY B, not the full A+B.
+    #[test]
+    fn table_slice_for_page_recursively_slices_multi_page_body_cells() {
+        use crate::pageable::TablePageable;
+
+        const TABLE_ID: usize = 700;
+        const CELL_ID: usize = 701;
+        const A_ID: usize = 702;
+        const B_ID: usize = 703;
+
+        let cell_block = BlockPageable::with_positioned_children(vec![
+            PositionedChild::in_flow(
+                Box::new(SpacerPageable::new(100.0).with_node_id(Some(A_ID))),
+                0.0,
+                0.0,
+            ),
+            PositionedChild::in_flow(
+                Box::new(SpacerPageable::new(100.0).with_node_id(Some(B_ID))),
+                0.0,
+                100.0,
+            ),
+        ])
+        .with_node_id(Some(CELL_ID));
+
+        let table = TablePageable {
+            header_cells: Vec::new(),
+            body_cells: vec![PositionedChild::in_flow(Box::new(cell_block), 0.0, 0.0)],
+            header_height: 0.0,
+            style: Default::default(),
+            layout_size: None,
+            width: 200.0,
+            cached_height: 0.0,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+            node_id: Some(TABLE_ID),
+        };
+
+        // Geometry: table + cell span both pages, A only on page 0,
+        // B only on page 1.
+        let mut geom = PaginationGeometryTable::new();
+        for id in [TABLE_ID, CELL_ID] {
+            geom.entry(id).or_default().fragments.extend([
+                Fragment {
+                    page_index: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                Fragment {
+                    page_index: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+            ]);
+        }
+        geom.entry(A_ID).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+        geom.entry(B_ID).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+
+        let page1 = table
+            .slice_for_page(1, &geom)
+            .expect("table on page 1")
+            .as_any()
+            .downcast_ref::<TablePageable>()
+            .cloned()
+            .expect("page 1 is a TablePageable");
+        assert_eq!(page1.body_cells.len(), 1, "page 1 keeps the cell");
+        let cell_block = page1.body_cells[0]
+            .child
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("cell child is a BlockPageable");
+        // Pre-fix: cell_block.children would have BOTH A and B
+        // (clone_box() copies everything). Post-fix: only B is sliced
+        // in for page 1 (A's slice_for_page returns None since A has
+        // no fragment on page 1).
+        assert_eq!(
+            cell_block.children.len(),
+            1,
+            "cell on page 1 keeps only B (slice recurses), got {} children",
+            cell_block.children.len(),
+        );
+    }
+
     /// BookmarkMarkerWrapper.slice_for_page applies the same first-page-only
     /// rule for outline anchors.
     #[test]

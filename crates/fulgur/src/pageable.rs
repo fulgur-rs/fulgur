@@ -4554,38 +4554,59 @@ impl Pageable for TablePageable {
     ) -> Option<Box<dyn Pageable>> {
         // Headers repeat on every page where the table appears
         // (matches `split()` cloning `header_cells` to both halves).
-        // Body cells are filtered to those with a fragment on this
-        // page, then their `pc.y` is rebased so the first kept body
-        // cell sits right after the repeated header (mirrors
-        // `split()`'s `header_height + (pc.y - split_y)` formula).
+        // Body cells are recursively sliced via `slice_for_page` so a
+        // cell that spans pages internally only contributes its
+        // page-specific content here (Devin Review on PR #288: full
+        // `clone_box()` would leak content from other pages). `pc.y`
+        // is rebased so the first kept body cell sits right after
+        // the repeated header (mirrors `split()`'s `header_height +
+        // (pc.y - split_y)` formula).
         let node_id = self.node_id?;
         let _self_frag = fragment_on_page(geometry, node_id, page_index)?;
 
-        let kept: Vec<&PositionedChild> = self
+        // First pass: recursively slice each body cell and pair the
+        // result with the original `pc.y` (needed for rebase
+        // calculation). Cells whose `slice_for_page` returns `None`
+        // are dropped from this page.
+        let sliced: Vec<(f32, PositionedChild)> = self
             .body_cells
             .iter()
-            .filter(|pc| {
-                pc.child
-                    .node_id()
-                    .is_some_and(|id| fragment_on_page(geometry, id, page_index).is_some())
+            .filter_map(|pc| {
+                let sliced_child = pc.child.slice_for_page(page_index, geometry)?;
+                Some((
+                    pc.y,
+                    PositionedChild {
+                        child: sliced_child,
+                        x: pc.x,
+                        // Placeholder, rebased in the second pass.
+                        y: pc.y,
+                        out_of_flow: pc.out_of_flow,
+                        is_fixed: pc.is_fixed,
+                    },
+                ))
             })
             .collect();
 
-        let first_kept_y = kept.iter().map(|pc| pc.y).fold(f32::INFINITY, f32::min);
+        let first_kept_y = sliced
+            .iter()
+            .map(|(orig_y, _)| *orig_y)
+            .fold(f32::INFINITY, f32::min);
         let rebase_delta = if first_kept_y.is_finite() && first_kept_y > self.header_height + 0.01 {
             first_kept_y - self.header_height
         } else {
             0.0
         };
 
-        let body_cells: Vec<PositionedChild> = kept
-            .iter()
-            .map(|pc| PositionedChild {
-                child: pc.child.clone_box(),
-                x: pc.x,
-                y: pc.y - rebase_delta,
-                out_of_flow: pc.out_of_flow,
-                is_fixed: pc.is_fixed,
+        // Second pass: apply the rebase delta to each sliced cell's
+        // `pc.y`. The first kept body cell ends up at exactly
+        // `header_height` (page 0: rebase_delta = 0; later pages:
+        // shifted up so the first kept cell sits right after the
+        // repeated header).
+        let body_cells: Vec<PositionedChild> = sliced
+            .into_iter()
+            .map(|(_, mut pc)| {
+                pc.y -= rebase_delta;
+                pc
             })
             .collect();
 
