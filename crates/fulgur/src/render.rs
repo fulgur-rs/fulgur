@@ -55,7 +55,11 @@ pub fn render_v2(
             .block_styles
             .get(&node_id)
             .and_then(|b| b.id.as_ref());
-        let id = para_id.or(block_id);
+        let table_id = drawables
+            .tables
+            .get(&node_id)
+            .and_then(|t| t.id.as_ref());
+        let id = para_id.or(block_id).or(table_id);
         if let Some(id) = id
             && !id.is_empty()
         {
@@ -72,8 +76,14 @@ pub fn render_v2(
                     page_count,
                     config,
                 );
+            // `frag.x` is html-relative (already includes body's x
+            // offset from the fragmenter); only y needs `body_offset_pt`
+            // applied because fragments are body-content-area-relative
+            // along the y axis.
             let x_pt = resolved_margin.left + crate::convert::px_to_pt(first_frag.x);
-            let y_pt = resolved_margin.top + crate::convert::px_to_pt(first_frag.y);
+            let y_pt = resolved_margin.top
+                + drawables.body_offset_pt.1
+                + crate::convert::px_to_pt(first_frag.y);
             dest_registry.record(id.as_str(), x_pt, y_pt);
         }
     }
@@ -111,11 +121,14 @@ pub fn render_v2(
                 bookmark_collector: bookmark_collector.as_mut(),
                 link_collector: Some(&mut link_collector),
             };
+            // `frag.x` is html-relative (fragmenter folds body's x
+            // offset in); `frag.y` is body-content-area-relative — so
+            // only y receives `body_offset_pt`.
             draw_v2_page(
                 &mut canvas,
                 page_idx as u32,
                 resolved_margin.left,
-                resolved_margin.top,
+                resolved_margin.top + drawables.body_offset_pt.1,
                 geometry,
                 drawables,
             );
@@ -180,6 +193,20 @@ fn draw_v2_page(
             let x_pt = margin_left_pt + px_to_pt(frag.x);
             let y_pt = margin_top_pt + px_to_pt(frag.y);
 
+            if let Some(table) = drawables.tables.get(&node_id) {
+                draw_table_v2(canvas, table, x_pt, y_pt, frag);
+                continue;
+            }
+            // ListItem marker draws before block frame. v1's
+            // `ListItemPageable::draw` calls `self.body.draw(...)` so
+            // the body block's background / border paint underneath the
+            // marker (`pageable.rs:3362`). `<li>` and its body
+            // BlockPageable share the same node_id (`convert/list_item.rs:81`),
+            // so `block_styles[node_id]` carries the body block style;
+            // dropping `continue;` lets the dispatch fall through to it.
+            if let Some(li) = drawables.list_items.get(&node_id) {
+                draw_list_item_v2(canvas, li, x_pt, y_pt);
+            }
             // Block backgrounds/borders draw FIRST so subsequent inner
             // content (paragraph / image / svg sharing the same node_id —
             // see `convert::replaced` and `convert::inline_root`)
@@ -329,6 +356,102 @@ fn draw_block_v2(
                 total_height,
             );
         }
+    });
+}
+
+/// v2 table draw. Mirrors `TablePageable::draw`'s outer-frame
+/// background / border / shadow emission. Cell paint (each `<th>` /
+/// `<td>` is a `BlockPageable` with its own NodeId in geometry) lands
+/// through the standard per-NodeId dispatch.
+///
+/// Same overflow-clip caveat as `draw_block_v2`: clip is not pushed
+/// here because flat dispatch lacks a natural close point. Multi-page
+/// table header repetition is also deferred to a later PR — single-
+/// page tables byte-eq today.
+fn draw_table_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::TableEntry,
+    x: f32,
+    y: f32,
+    frag: &crate::pagination_layout::Fragment,
+) {
+    use crate::pageable::draw_with_opacity;
+
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        let total_width = entry.layout_size.map(|s| s.width).unwrap_or(entry.width);
+        let total_height = entry.layout_size.map(|s| s.height).unwrap_or_else(|| {
+            let from_frag = crate::convert::px_to_pt(frag.height);
+            if from_frag > 0.0 {
+                from_frag
+            } else {
+                entry.cached_height
+            }
+        });
+        if entry.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &entry.style,
+                x,
+                y,
+                total_width,
+                total_height,
+            );
+        }
+    });
+}
+
+/// v2 list-item draw. Paints the marker (text glyphs / image / svg)
+/// at a negative-x offset relative to the list item's body anchor —
+/// mirrors `ListItemPageable::draw`. The body block paints itself
+/// through its own `BlockEntry` dispatch on the next iteration.
+fn draw_list_item_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::ListItemEntry,
+    x: f32,
+    y: f32,
+) {
+    use crate::pageable::{ImageMarker, ListItemMarker, draw_with_opacity};
+
+    if !entry.visible {
+        return;
+    }
+    draw_with_opacity(canvas, entry.opacity, |canvas| match &entry.marker {
+        ListItemMarker::Text { lines, width } if !lines.is_empty() => {
+            crate::paragraph::draw_shaped_lines(canvas, lines, x - *width, y);
+        }
+        ListItemMarker::Image {
+            marker,
+            width,
+            height,
+        } => {
+            let marker_x = x - *width;
+            let marker_y = y + (entry.marker_line_height - *height) / 2.0;
+            match marker {
+                ImageMarker::Raster(img) => {
+                    img.draw(canvas, marker_x, marker_y, *width, *height);
+                }
+                ImageMarker::Svg(svg) => {
+                    svg.draw(canvas, marker_x, marker_y, *width, *height);
+                }
+            }
+        }
+        _ => {}
     });
 }
 

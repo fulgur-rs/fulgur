@@ -200,7 +200,35 @@ pub fn dom_to_drawables(
     let mut drawables = crate::drawables::Drawables::new();
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
+    drawables.body_offset_pt = extract_body_offset_pt(doc);
     drawables
+}
+
+/// Phase 4 PR 5: walk the DOM looking for `<body>` and return its
+/// `(location.x, location.y)` in pt. The fragmenter records body's
+/// own fragment at `(body_x, 0)` (body-content-area relative) and
+/// slicing depends on that frame; the html → body offset that CSS
+/// margin collapsing puts onto `body.location` lives separately so
+/// `render_v2` can add it to per-fragment draw positions.
+fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let root = doc.root_element();
+    let Some(root_node) = base.get_node(root.id) else {
+        return (0.0, 0.0);
+    };
+    for &child_id in &root_node.children {
+        let Some(child) = base.get_node(child_id) else {
+            continue;
+        };
+        if let blitz_dom::NodeData::Element(elem) = &child.data
+            && elem.name.local.as_ref() == "body"
+        {
+            let (x, y, _, _) = layout_in_pt(&child.final_layout);
+            return (x, y);
+        }
+    }
+    (0.0, 0.0)
 }
 
 /// Walk a Pageable tree and populate each `Drawables` map by
@@ -210,7 +238,9 @@ fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
     out: &mut crate::drawables::Drawables,
 ) {
-    use crate::drawables::{BlockEntry, ImageEntry, ParagraphEntry, SvgEntry};
+    use crate::drawables::{
+        BlockEntry, ImageEntry, ListItemEntry, ParagraphEntry, SvgEntry, TableEntry,
+    };
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
@@ -307,6 +337,20 @@ fn extract_drawables_from_pageable(
         return;
     }
     if let Some(table) = any.downcast_ref::<TablePageable>() {
+        if let Some(node_id) = table.node_id {
+            out.tables.insert(
+                node_id,
+                TableEntry {
+                    style: table.style.clone(),
+                    opacity: table.opacity,
+                    visible: table.visible,
+                    id: table.id.clone(),
+                    layout_size: table.layout_size,
+                    width: table.width,
+                    cached_height: table.cached_height,
+                },
+            );
+        }
         for pc in &table.header_cells {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
@@ -316,6 +360,17 @@ fn extract_drawables_from_pageable(
         return;
     }
     if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        if let Some(node_id) = list_item.node_id {
+            out.list_items.insert(
+                node_id,
+                ListItemEntry {
+                    marker: list_item.marker.clone(),
+                    marker_line_height: list_item.marker_line_height,
+                    opacity: list_item.opacity,
+                    visible: list_item.visible,
+                },
+            );
+        }
         extract_drawables_from_pageable(list_item.body.as_ref(), out);
         return;
     }
