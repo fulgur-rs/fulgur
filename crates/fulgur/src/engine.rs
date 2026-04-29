@@ -7,6 +7,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 
+/// Phase 4 PR 1 (fulgur-9t3z): selects which render pipeline produces
+/// the PDF. `V1` is the existing `Pageable` tree path; `V2` is the new
+/// geometry-driven `Drawables` path that replaces it. Both paths share
+/// upstream parse / Stylo / fragmenter work; they diverge only after
+/// `ConvertContext` has been populated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderPath {
+    V1,
+    V2,
+}
+
 /// Reusable PDF generation engine.
 pub struct Engine {
     config: Config,
@@ -45,6 +56,25 @@ impl Engine {
     /// a 2-pass rendering pipeline is used: pass 1 paginates body content, pass 2
     /// renders each page with resolved margin boxes.
     pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
+        self.render_html_via_path(html, RenderPath::V1)
+    }
+
+    /// Phase 4 PR 1 (fulgur-9t3z): render HTML through the parallel
+    /// `render_v2` path. Hidden from public docs while migration is in
+    /// progress; the shadow harness in
+    /// `crates/fulgur/tests/render_path_parity.rs` exercises it
+    /// alongside `render_html` and asserts byte equality on the
+    /// fixtures listed in `render_path_parity.toml`.
+    ///
+    /// PR 1 emits blank pages because every map in `Drawables` is empty;
+    /// later PRs migrate one Pageable type at a time and the byte-eq
+    /// allowlist grows.
+    #[doc(hidden)]
+    pub fn render_html_v2(&self, html: &str) -> Result<Vec<u8>> {
+        self.render_html_via_path(html, RenderPath::V2)
+    }
+
+    fn render_html_via_path(&self, html: &str, path: RenderPath) -> Result<Vec<u8>> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -308,21 +338,38 @@ impl Engine {
                 crate::convert::pt_to_px(self.config.content_height()),
             )),
         };
-        let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
-        if gcpm.is_empty() {
-            crate::render::render_to_pdf(root, &self.config, &convert_ctx.pagination_geometry)
-        } else {
-            crate::render::render_to_pdf_with_gcpm(
-                root,
-                &self.config,
-                &gcpm,
-                &running_store,
-                fonts,
-                &convert_ctx.pagination_geometry,
-                &string_set_for_render,
-                &counter_ops_for_render,
-            )
+        match path {
+            RenderPath::V1 => {
+                let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
+                if gcpm.is_empty() {
+                    crate::render::render_to_pdf(
+                        root,
+                        &self.config,
+                        &convert_ctx.pagination_geometry,
+                    )
+                } else {
+                    crate::render::render_to_pdf_with_gcpm(
+                        root,
+                        &self.config,
+                        &gcpm,
+                        &running_store,
+                        fonts,
+                        &convert_ctx.pagination_geometry,
+                        &string_set_for_render,
+                        &counter_ops_for_render,
+                    )
+                }
+            }
+            RenderPath::V2 => {
+                let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
+                crate::render::render_v2(
+                    &self.config,
+                    &convert_ctx.pagination_geometry,
+                    &drawables,
+                    &gcpm,
+                )
+            }
         }
     }
 

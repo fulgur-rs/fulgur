@@ -173,6 +173,19 @@ pub fn dom_to_pageable(doc: &HtmlDocument, ctx: &mut ConvertContext<'_>) -> Box<
     convert_node(doc.deref(), root.id, ctx, 0)
 }
 
+/// Phase 4 PR 1 skeleton (fulgur-9t3z): convert a resolved Blitz document
+/// into a `Drawables` struct holding per-NodeId draw payload.
+///
+/// Returns an empty `Drawables` until subsequent PRs migrate each
+/// Pageable type's data extraction. The `_doc` / `_ctx` arguments are
+/// kept on the signature so PR 2+ does not need to re-thread them.
+pub fn dom_to_drawables(
+    _doc: &HtmlDocument,
+    _ctx: &mut ConvertContext<'_>,
+) -> crate::drawables::Drawables {
+    crate::drawables::Drawables::new()
+}
+
 fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
     if depth >= MAX_DOM_DEPTH {
         eprintln!("{}... (max depth reached)", "  ".repeat(depth));
