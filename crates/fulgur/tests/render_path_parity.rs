@@ -321,7 +321,40 @@ fn inline_byte_equality_cases() {
         ),
     ];
 
-    let cases = pr3_cases.iter().chain(pr4_cases.iter());
+    // PR 5 (Table + ListItem) extends `Drawables` with `tables` and
+    // `list_items` and adds `body_offset_pt` propagation so html→body
+    // collapsed margin reaches v2 children. Inline cases for the new
+    // types are deferred to PR 6 — table cells contain paragraphs
+    // whose text shaping resolves through inline_root, and inline-box
+    // wiring still has gaps that flake the byte-eq comparison on
+    // these specific configurations. The on-disk allowlist coverage
+    // (10 new fixtures) demonstrates the productive byte-eq advance.
+    //
+    // Regression for PR #304 Devin (list-item shared node_id): `<li>`
+    // and its body block share the same node_id — `list_items[id]`
+    // and `block_styles[id]` co-exist. The marker dispatch must NOT
+    // `continue;` past the block check or `<li style="background:...">`
+    // silently drops the body block paint in v2.
+    let pr5_cases: &[(&str, &str)] = &[
+        (
+            "list item with body block background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#fdf;height:40px}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+        // Regression for PR #304 follow-up Devin (list-item opacity
+        // grouping): v1's `ListItemPageable::draw` wraps marker + body
+        // block in a SINGLE `draw_with_opacity` group. v2 must produce
+        // the same single q/Q wrapper or the PDF stream diverges when
+        // `<li style="opacity:0.5">`.
+        (
+            "list item with opacity and body block background",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#cef;height:40px;opacity:0.5}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+    ];
+
+    let cases = pr3_cases
+        .iter()
+        .chain(pr4_cases.iter())
+        .chain(pr5_cases.iter());
     for (label, html) in cases {
         let engine = Engine::builder().build();
         let v1 = engine
