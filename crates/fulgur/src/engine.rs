@@ -3,7 +3,6 @@ use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
 use crate::pageable::Pageable;
-use crate::render::render_to_pdf;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
@@ -34,11 +33,6 @@ impl Engine {
 
     pub fn base_path(&self) -> Option<&Path> {
         self.base_path.as_deref()
-    }
-
-    /// Render a Pageable tree to PDF bytes.
-    pub fn render_pageable(&self, root: Box<dyn Pageable>) -> Result<Vec<u8>> {
-        render_to_pdf(root, &self.config)
     }
 
     pub fn assets(&self) -> Option<&AssetBundle> {
@@ -331,11 +325,7 @@ impl Engine {
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
         if gcpm.is_empty() {
-            crate::render::render_to_pdf_with_partition(
-                root,
-                &self.config,
-                &convert_ctx.pagination_geometry,
-            )
+            crate::render::render_to_pdf(root, &self.config, &convert_ctx.pagination_geometry)
         } else {
             crate::render::render_to_pdf_with_gcpm(
                 root,
@@ -453,17 +443,6 @@ impl Engine {
             )),
         };
         crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
-    }
-
-    /// Render a Pageable tree to a PDF file.
-    pub fn render_pageable_to_file(
-        &self,
-        root: Box<dyn Pageable>,
-        path: impl AsRef<Path>,
-    ) -> Result<()> {
-        let pdf = self.render_pageable(root)?;
-        std::fs::write(path, pdf)?;
-        Ok(())
     }
 }
 

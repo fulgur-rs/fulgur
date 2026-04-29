@@ -51,15 +51,6 @@ impl Pageable for SvgPageable {
         }
     }
 
-    fn split(
-        &self,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // SVGs are atomic — cannot be split across pages
-        None
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         use crate::pageable::draw_with_opacity;
         use krilla_svg::{SurfaceExt, SvgSettings};
@@ -163,12 +154,6 @@ mod tests {
         let size = svg.wrap(1000.0, 1000.0);
         assert_eq!(size.width, 120.0);
         assert_eq!(size.height, 60.0);
-    }
-
-    #[test]
-    fn test_split_returns_none() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert!(svg.split(1000.0, 1000.0).is_none());
     }
 
     #[test]

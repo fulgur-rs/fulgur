@@ -611,8 +611,7 @@ impl<'a> PaginationLayoutTree<'a> {
             }
 
             // fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5: unified
-            // recursion gate covering all three cases that
-            // `BlockPageable::find_split_point` handles —
+            // recursion gate covering all three break cases —
             //   - truly oversized (`child_h > page_h_px`) caught
             //     here when `would_split_block_subtree` finds the
             //     overflowing grandchild,
@@ -856,10 +855,9 @@ fn record_subtree_descendants(
 /// OOF / whitespace skips, but no fragment emission. Returns `true`
 /// on the first overflow detected. Lets the caller decide "should I
 /// recurse here?" without paying the cost of recursion when recursion
-/// would not actually split — preserves Pageable's
-/// `BlockPageable::find_split_point` distinction between
-/// `WithinChild` (recurse and split) and `AtIndex` / `NoSplit`
-/// (push child to next page or emit whole).
+/// would not actually split — distinguishing "recurse and split"
+/// (within-child) from "push child whole / emit whole" (at-index or
+/// no split).
 ///
 /// `available_h` is the strip height left below the parent's entry
 /// cursor on the current page. `page_h_px` lets the simulator detect
@@ -961,20 +959,17 @@ fn has_forced_break_below(
 /// children and emitting per-page fragments for both the block itself
 /// and its children.
 ///
-/// Mirrors the geometry-overflow path of `BlockPageable::find_split_point`
-/// (`pageable.rs:1242` onward): for each in-flow child, if it does not
-/// fit in the remaining strip, advance the page boundary and continue
-/// placing on a fresh strip. Children with their own DOM children that
-/// are taller than a full page recurse so the split walks all the way
-/// down to where overflow actually resolves.
+/// For each in-flow child, if it does not fit in the remaining strip,
+/// advance the page boundary and continue placing on a fresh strip.
+/// Children with their own DOM children that are taller than a full page
+/// recurse so the split walks all the way down to where overflow actually
+/// resolves.
 ///
 /// Per-page parent fragments capture the height consumed by children on
-/// each page (`cursor - page_start_y`). This matches Pageable's
-/// `BlockPageable::split` head/tail-height semantics so the parity
-/// gates downstream (`collect_string_set_states` / `collect_counter_states`
-/// / `collect_bookmark_entries`) line up with Pageable's tree walk for
-/// counter / string-set / bookmark ops attached to elements that fit
-/// on a single page span within the parent.
+/// each page (`cursor - page_start_y`). The downstream collectors
+/// (`collect_string_set_states` / `collect_counter_states` /
+/// `collect_bookmark_entries`) consume the per-page snapshots produced
+/// here.
 ///
 /// fulgur-a36m (Phase 3.1.5b): also honours `break-before: page` /
 /// `break-after: page` on direct children, and recurses into children
@@ -1809,13 +1804,12 @@ pub struct BookmarkPageEntry {
 /// fixedpos-* family).
 ///
 /// Production currently achieves per-page fixed-element repetition via
-/// `pageable::PositionedChild::is_fixed` (suppresses the y-shift in
-/// `clone_pc_with_offset` so the existing `out_of_flow` replication
-/// path leaves fixed elements at their viewport-relative coordinates).
-/// The geometry-table approach this function provides is kept under
-/// `#[cfg(test)]` as scaffolding for a future architecture where
-/// convert / render consume the fragmenter's geometry directly. Both paths
-/// produce equivalent observable output today.
+/// `pageable::PositionedChild::is_fixed` (the slice path replicates
+/// fixed children at their viewport-relative coordinates on every
+/// page). The geometry-table approach this function provides is kept
+/// under `#[cfg(test)]` as scaffolding for a future architecture where
+/// convert / render consume the fragmenter's geometry directly. Both
+/// paths produce equivalent observable output today.
 #[cfg(test)]
 ///
 /// `total_pages` is the document's resolved page count, typically
@@ -3374,431 +3368,5 @@ mod tests {
             .expect("oversized child fragment");
         assert_eq!(oversize.fragments.len(), 1);
         assert_eq!(oversize.fragments[0].page_index, 0);
-    }
-}
-
-/// Comparison harness: drive the same HTML through `paginate::paginate(...)`
-/// and `pagination_layout::run_pass(...)` and tabulate the per-fixture
-/// page count agreement. The harness is observational — its purpose is to
-/// surface where the two paths agree (so the fragmenter can claim it covers
-/// the simple-block case) and where they diverge (so the next iteration
-/// of the fragmenter has a concrete target list).
-///
-/// Lives in the same file as the unit tests so it can use `pub(crate)`
-/// helpers like `crate::convert::pt_to_px` and `crate::paginate::paginate`
-/// directly without touching the public surface.
-#[cfg(test)]
-mod compare_with_pageable {
-    use crate::convert::pt_to_px;
-    use crate::paginate::paginate;
-    use crate::{Engine, PageSize};
-    use std::ops::DerefMut;
-
-    /// Compute the fragmenter's page count from a geometry table.
-    ///
-    /// Thin wrapper over [`super::implied_page_count`] so the comparison
-    /// harness and the production-facing helper can never drift apart on
-    /// the "empty → 1" convention.
-    fn fragmenter_page_count(table: &super::PaginationGeometryTable) -> u32 {
-        super::implied_page_count(table)
-    }
-
-    /// Run the engine's testing helper to build a `Pageable` for `html`,
-    /// paginate it at the engine's content size, and return the page
-    /// count. Uses A4 portrait with default margins so the test is stable
-    /// across machines.
-    fn pageable_page_count(html: &str) -> usize {
-        let engine = Engine::builder().page_size(PageSize::A4).build();
-        let pageable = engine.build_pageable_for_testing_no_gcpm(html);
-        let cfg = engine.config();
-        let pages = paginate(pageable, cfg.content_width(), cfg.content_height());
-        pages.len()
-    }
-
-    /// Run the fragmenter against the same HTML the Pageable side rendered.
-    /// Re-parses (deterministic) so we get a fresh `BaseDocument` and
-    /// can mutate it without unsafe shenanigans. Threads the column-
-    /// style side-table so `break-*` properties are honoured.
-    ///
-    /// (The fulgur-ik6o `StripMode::Definite` probe is no longer
-    /// reachable from production; its result is preserved in
-    /// `docs/plans/2026-04-28-pagination-layout-spike.md` follow-up
-    /// #2.)
-    fn fragmenter_page_count_for(html: &str) -> u32 {
-        use crate::blitz_adapter;
-        let engine = Engine::builder().page_size(PageSize::A4).build();
-        let cfg = engine.config();
-        let (mut doc, _gcpm) = blitz_adapter::parse_html_with_local_resources(
-            html,
-            pt_to_px(cfg.content_width()),
-            pt_to_px(cfg.page_height()) as u32,
-            &[],
-            None,
-        );
-        blitz_adapter::resolve(&mut doc);
-        let column_styles = blitz_adapter::extract_column_style_table(&doc);
-        let _multicol = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let table = super::run_pass_with_break_styles(
-            doc.deref_mut(),
-            pt_to_px(cfg.content_height()),
-            &column_styles,
-        );
-        fragmenter_page_count(&table)
-    }
-
-    /// Each fixture: (label, html, agreement expected?).
-    ///
-    /// `agreement_expected = false` means we already know Pageable and
-    /// the block-only fragmenter will diverge for this case (e.g. inline text
-    /// that wraps across pages). The harness still runs both sides and
-    /// records the disagreement so the next iteration knows what to fix.
-    fn fixtures() -> Vec<(&'static str, &'static str, bool)> {
-        vec![
-            (
-                "empty body → 1 page on both sides",
-                "<html><body></body></html>",
-                true,
-            ),
-            (
-                "three short blocks fit one page",
-                r#"<html><body>
-                    <div style="height: 100px"></div>
-                    <div style="height: 100px"></div>
-                    <div style="height: 100px"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "two blocks split across two pages",
-                // Each block is 600px = 450pt, so two stack to 900pt
-                // which exceeds A4 portrait content height (~770pt).
-                r#"<html><body>
-                    <div style="height: 600px"></div>
-                    <div style="height: 600px"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "five blocks span three pages",
-                // A4 portrait content height ≈ 1027 CSS px (770pt).
-                // 5 × 400px = 2000px stacks as: 400 → 800 → break (1200 >
-                // 1027), then 400 → 800 → break, then 400 — three pages
-                // on both sides. The harness only checks page-count
-                // agreement, not the predicted breakdown.
-                r#"<html><body>
-                    <div style="height: 400px"></div>
-                    <div style="height: 400px"></div>
-                    <div style="height: 400px"></div>
-                    <div style="height: 400px"></div>
-                    <div style="height: 400px"></div>
-                </body></html>"#,
-                true,
-            ),
-            // ── vh / percentage observation fixtures ──────────────────
-            //
-            // These probe the cases the block-only fragmenter is *expected* to
-            // disagree with Pageable on. Marking them
-            // `expected_agreement = false` documents the divergence; once
-            // the fragmenter grows mid-element splitting, flip these to `true`
-            // and use the test as a regression gate.
-            (
-                "single 100vh div (taller than content area)",
-                // A4: viewport height = page height (842pt = 1122 CSS
-                // px), but content height = 770pt = 1027 CSS px. A 100vh
-                // box is 1122px, ~95px taller than one page strip.
-                // Surprise: both report 1 page. Pageable's
-                // `BlockPageable::split` returns `Err(unsplit)` for a
-                // body whose only child is a single oversized empty
-                // box (no break point inside, refusing to emit an empty
-                // page first), and the fragmenter's `cursor_y > 0` guard does
-                // the same on its side. Convergent fallback rather than
-                // shared correctness — flagged here to remember.
-                r#"<html><body>
-                    <div style="height: 100vh"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "two 50vh divs sum to 100vh (overflows content area)",
-                // 2 × 50vh = 1122 CSS px (same total as 100vh). Spike:
-                // first 50vh = 561 px (cursor 0 → 561, no break since
-                // cursor was 0). Second 50vh would push cursor to 1122
-                // > 1027 → break, second block on page 1. Total 2 pages.
-                // Pageable should produce 2 pages too because the second
-                // block doesn't fit. Expected: agreement at 2 pages.
-                r#"<html><body>
-                    <div style="height: 50vh"></div>
-                    <div style="height: 50vh"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "one 1028px div (just over content area)",
-                // 1px taller than A4 content (~1027 CSS px). Same
-                // convergent fallback as the 100vh case — both sides
-                // report 1 page because neither will split a single
-                // oversized empty first child (no inner break point on
-                // an empty `<div>`, no useful split). Recorded to
-                // confirm the 1px-over case behaves the same as the
-                // 95px-over `100vh` case.
-                r#"<html><body>
-                    <div style="height: 1028px"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "nested 100% height with no parent height resolves to zero",
-                // CSS 2.1 §10.5: percentage height resolves to `auto`
-                // when the containing block has no explicit height. Both
-                // sides should produce a single empty page (the divs
-                // collapse). The fragmenter's measurement walk reads
-                // final_layout, so it sees the same zero-height boxes
-                // Pageable converts. Expected: both report 1 page.
-                r#"<html><body>
-                    <div style="height: 100%">
-                        <div style="height: 100%"></div>
-                    </div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "long paragraph wraps into multiple pages",
-                // fulgur-p55h: the fragmenter now probes Parley's line
-                // metrics (`Layout::lines()` → `LineMetrics`) and
-                // splits inline roots at line boundaries via
-                // `fragment_inline_root`. This fixture flipped from
-                // `expected_agreement = false` to `true` once the
-                // inline-aware path landed — leaving it as a
-                // regression gate for future changes.
-                // 50px font-size + line-height 1.5 → ~75 px per line.
-                // Lorem ipsum block wraps into ~70 lines at A4 content
-                // width → ~5250 px total, comfortably overflowing 2+
-                // pages. Pageable's `ParagraphPageable::split` (line
-                // boundaries) should split it across pages. The fragmenter's
-                // `fragment_pagination_root` sees one block child with
-                // a 5000+ px height and emits it whole → 1 page.
-                r#"<html><body><p style="font-size: 50px; line-height: 1.5">
-                    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
-                    do eiusmod tempor incididunt ut labore et dolore magna
-                    aliqua. Ut enim ad minim veniam, quis nostrud exercitation
-                    ullamco laboris nisi ut aliquip ex ea commodo consequat.
-                    Duis aute irure dolor in reprehenderit in voluptate velit
-                    esse cillum dolore eu fugiat nulla pariatur. Excepteur sint
-                    occaecat cupidatat non proident, sunt in culpa qui officia
-                    deserunt mollit anim id est laborum.
-                </p></body></html>"#,
-                true,
-            ),
-            (
-                "small lead block then oversized block forces page break",
-                // 100px small + 1100px tall block. Spike: cursor 0 → 100,
-                // then 100+1100=1200 > 1027 → break, oversized block
-                // emits whole on page 1. Total 2 pages. Pageable behaves
-                // similarly: small fits page 0, oversized doesn't fit
-                // remaining 927px so it pushes to page 1. Expected
-                // agreement at 2 pages.
-                r#"<html><body>
-                    <div style="height: 100px"></div>
-                    <div style="height: 1100px"></div>
-                </body></html>"#,
-                true,
-            ),
-            // ── fulgur-k0g0: break-before / break-after / break-inside ─
-            (
-                "break-before: page forces page boundary",
-                // Two 100px blocks, second has break-before: page. Spike:
-                // first block on page 0, second forced onto page 1 even
-                // though both could fit one page. Pageable does the same
-                // via paginate.rs split-on-break-before. Expected: 2.
-                r#"<html><head><style>
-                    .b { break-before: page; }
-                </style></head><body>
-                    <div style="height: 100px"></div>
-                    <div class="b" style="height: 100px"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                // fulgur-p3uf (Phase 3.1.5a): zero-height body-direct
-                // child with `break-before: page` must still force a
-                // page boundary. Pre-fix the fragmenter `continue`'d
-                // before reading break props for zero-height children,
-                // skipping the directive — same root cause as
-                // `tests/pseudo_only_break_before.rs::bare_img_honours_break_before_page`
-                // / `pseudo_only_inline_root_honours_break_before_page`
-                // but without an AssetBundle, so it fits in this
-                // doc-only fixture set.
-                "zero-height body-direct child honours break-before",
-                r#"<html><head><style>
-                    .first { height: 40px; }
-                    .zero { break-before: page; }
-                </style></head><body>
-                    <div class="first"></div>
-                    <div class="zero"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "zero-height body-direct child honours break-after",
-                r#"<html><head><style>
-                    .first { break-after: page; }
-                    .second { height: 40px; }
-                </style></head><body>
-                    <div class="first"></div>
-                    <div class="second"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "break-after: page forces page boundary",
-                // First block has break-after: page → second pushed to
-                // page 1. Same observable effect as break-before on the
-                // second block; this fixture exercises the
-                // post-emission branch in fragment_pagination_root.
-                r#"<html><head><style>
-                    .a { break-after: page; }
-                </style></head><body>
-                    <div class="a" style="height: 100px"></div>
-                    <div style="height: 100px"></div>
-                </body></html>"#,
-                true,
-            ),
-            (
-                "break-inside: avoid keeps tall paragraph whole",
-                // Intentional divergence: the fragmenter's
-                // `fragment_pagination_root` checks `break-inside:
-                // avoid` *before* entering the inline-split branch and
-                // emits the paragraph as a single oversized block →
-                // 1 page. Pageable's `ParagraphPageable::split`
-                // (paragraph.rs:945) does NOT check `break_inside`, so
-                // it splits at line boundaries regardless → 2 pages.
-                // The fragmenter behaviour is correct per CSS Fragmentation
-                // §3.3; Pageable has a latent bug here. Tracking the
-                // Pageable fix is out of scope for this fragmenter — file
-                // separately if it matters.
-                r#"<html><body><p style="font-size: 50px; line-height: 1.5; break-inside: avoid">
-                    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
-                    do eiusmod tempor incididunt ut labore et dolore magna
-                    aliqua. Ut enim ad minim veniam, quis nostrud exercitation
-                    ullamco laboris nisi ut aliquip ex ea commodo consequat.
-                    Duis aute irure dolor in reprehenderit in voluptate velit
-                    esse cillum dolore eu fugiat nulla pariatur. Excepteur sint
-                    occaecat cupidatat non proident, sunt in culpa qui officia
-                    deserunt mollit anim id est laborum.
-                </p></body></html>"#,
-                false,
-            ),
-        ]
-    }
-
-    #[test]
-    fn page_count_agreement_table() {
-        let fixtures = fixtures();
-        let mut disagreements: Vec<String> = Vec::new();
-
-        for (label, html, expected_agreement) in &fixtures {
-            let pageable_pages = pageable_page_count(html) as u32;
-            let fragmenter_pages = fragmenter_page_count_for(html);
-            let agree = pageable_pages == fragmenter_pages;
-
-            eprintln!(
-                "[{:>1}] {label:<55} pageable={pageable_pages} fragmenter={fragmenter_pages}",
-                if agree { "✓" } else { "✗" },
-            );
-
-            if agree != *expected_agreement {
-                disagreements.push(format!(
-                    "{label}: pageable={pageable_pages} fragmenter={fragmenter_pages} expected_agreement={expected_agreement}",
-                ));
-            }
-        }
-
-        assert!(
-            disagreements.is_empty(),
-            "Pageable vs fragmenter disagreement (or unexpected agreement) for:\n  - {}",
-            disagreements.join("\n  - "),
-        );
-    }
-
-    /// fulgur-g9e3.1: mid-element split must produce per-page parent
-    /// fragments whose `(y, height)` line up with what
-    /// `BlockPageable::split` emits as head/tail. If they diverge,
-    /// `collect_counter_states` (and the string-set / bookmark variants)
-    /// see different per-page entries on the fragmenter side and the
-    /// parity gate in `render.rs` fires.
-    ///
-    /// Smoke test: run the engine end-to-end on an oversized
-    /// `break-inside: avoid` block whose children carry a counter
-    /// operation. Debug-build parity assertions (`forced_break_skipped`
-    /// is `false` here because Pageable and fragmenter agree on page
-    /// count) panic if the per-page parent heights are wrong, so a
-    /// non-empty PDF is sufficient evidence.
-    #[test]
-    fn mid_element_split_keeps_counter_states_in_sync() {
-        let html = r#"<!doctype html><html><head><style>
-            @page { size: 200pt 200pt; margin: 0; }
-            body { margin: 0; counter-reset: chapter; }
-            .huge { break-inside: avoid; }
-            .row { height: 80pt; counter-increment: chapter; }
-        </style></head><body>
-          <div class="huge">
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-          </div>
-        </body></html>"#;
-        let engine = Engine::builder()
-            // 200pt × 200pt expressed in mm, same as
-            // tests/break_inside_avoid.rs.
-            .page_size(PageSize::custom(70.5556, 70.5556))
-            .build();
-        let pdf = engine.render_html(html).expect("render");
-        assert!(
-            !pdf.is_empty(),
-            "engine returned empty PDF — parity assertion likely panicked",
-        );
-    }
-
-    /// fulgur-7hf5 (Phase 3.1.5c): in-place mid-element split with
-    /// non-zero entry cursor. A spacer ahead of a splittable container
-    /// pushes the recursion's entry cursor above 0, so the
-    /// `would_split_block_subtree` pre-flight gate decides whether to
-    /// split in-place (`WithinChild` semantics, head on the current
-    /// page strip and tail on the next) or push the whole container
-    /// to the next page (`AtIndex` semantics).
-    ///
-    /// Counter ops on the rows make this a load-bearing parity check
-    /// — `assert_counter_states_parity` panics in debug builds if
-    /// the per-page entries diverge.
-    #[test]
-    fn in_place_mid_element_split_with_non_zero_cursor() {
-        let html = r#"<!doctype html><html><head><style>
-            @page { size: 300pt 400pt; margin: 0; }
-            body { margin: 0; counter-reset: chapter; }
-            .spacer { height: 200pt; background: #eee; }
-            .splittable { /* no explicit height; flows from children */ }
-            .row { height: 120pt; counter-increment: chapter; background: #036; }
-        </style></head><body>
-          <div class="spacer"></div>
-          <div class="splittable">
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-            <div class="row"></div>
-          </div>
-        </body></html>"#;
-        let engine = Engine::builder()
-            // 300pt × 400pt expressed in mm.
-            .page_size(PageSize::custom(105.8333, 141.1111))
-            .build();
-        let pdf = engine.render_html(html).expect("render");
-        assert!(
-            !pdf.is_empty(),
-            "engine returned empty PDF — parity assertion likely panicked",
-        );
     }
 }

@@ -177,15 +177,6 @@ impl Pageable for ImagePageable {
         }
     }
 
-    fn split(
-        &self,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Images cannot be split
-        None
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         use crate::pageable::draw_with_opacity;
 

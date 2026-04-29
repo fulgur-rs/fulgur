@@ -5,46 +5,25 @@ use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
 use crate::pageable::{Canvas, Pageable};
-use crate::paginate::paginate;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Render a Pageable tree to PDF bytes.
-///
-/// Public entry that does not run the fulgur-cj6u Phase 1.2
-/// page-count parity assertion: the caller built the Pageable
-/// directly without going through `Engine::render_html`, so no
-/// `pagination_layout::PaginationGeometryTable` is available. The
-/// parity gate lives in [`render_to_pdf_with_gcpm`] which is the
-/// engine-internal entry threaded with the fragmenter's geometry.
-pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>> {
-    let content_width = config.content_width();
-    let content_height = config.content_height();
-
-    // Paginate
-    let pages = paginate(root, content_width, content_height);
-
-    render_pages_to_pdf(pages, config)
-}
-
 /// Render a Pageable tree to PDF bytes using fragmenter geometry to
-/// split pages instead of `Pageable::split` (paginate.rs).
+/// split pages.
 ///
-/// fulgur-frmj: this entry is taken from `Engine::render_html` for the
-/// no-GCPM branch so the no-GCPM path uses the same partition split
-/// as `render_to_pdf_with_gcpm`. Phase 3.4 will retire `paginate.rs`
-/// once `Engine::render_pageable` test callers no longer rely on it.
-pub fn render_to_pdf_with_partition(
+/// Used from `Engine::render_html` for the no-GCPM branch so the
+/// no-GCPM path uses the same partition split as
+/// `render_to_pdf_with_gcpm`.
+pub fn render_to_pdf(
     root: Box<dyn Pageable>,
     config: &Config,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
 ) -> Result<Vec<u8>> {
-    // fulgur-frmj (coderabbit on PR #294): blank `<body>` and bodies
-    // containing only fragmenter-skipped descendants (e.g.
-    // `position: fixed`/`absolute`-only trees) leave `geometry` empty,
-    // and `partition_pageable_by_geometry` returns `vec![]`. The legacy
-    // `paginate()` path always emits one page for an empty body, so
-    // fall back to rendering `root` as a single page in that case.
+    // Blank `<body>` and bodies containing only fragmenter-skipped
+    // descendants (e.g. `position: fixed`/`absolute`-only trees) leave
+    // `geometry` empty, and `partition_pageable_by_geometry` returns
+    // `vec![]`. Fall back to rendering `root` as a single page in that
+    // case so empty bodies still produce a one-page PDF.
     let pages = if geometry.is_empty() {
         vec![root]
     } else {
@@ -1175,21 +1154,21 @@ mod tests {
 
     #[test]
     fn render_to_pdf_produces_valid_pdf() {
-        let pdf = render_to_pdf(simple_root(), &Config::default()).unwrap();
+        let pdf = render_to_pdf(simple_root(), &Config::default(), &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_landscape_page() {
         let config = Config::builder().landscape(true).build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_bookmarks_enabled() {
         let config = Config::builder().bookmarks(true).build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
@@ -1205,7 +1184,7 @@ mod tests {
             .producer("my-producer")
             .creation_date("2024-06-15T10:30:45Z")
             .build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
         assert_eq!(pdf_info_field(&pdf, b"Title").as_deref(), Some("My Title"));
         assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Alice"));
@@ -1223,7 +1202,7 @@ mod tests {
     #[test]
     fn render_to_pdf_creation_date_parse_failure_is_ignored() {
         let config = Config::builder().creation_date("not-a-date").build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 

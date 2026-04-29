@@ -951,86 +951,6 @@ impl Pageable for ParagraphPageable {
         }
     }
 
-    fn split(
-        &self,
-        _avail_width: Pt,
-        avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        if self.lines.len() <= 1 {
-            return None;
-        }
-
-        let orphans = self.pagination.orphans;
-        let widows = self.pagination.widows;
-
-        // Find the split point
-        let mut consumed: f32 = 0.0;
-        let mut split_at = 0;
-        for (i, line) in self.lines.iter().enumerate() {
-            if consumed + line.height > avail_height {
-                split_at = i;
-                break;
-            }
-            consumed += line.height;
-            split_at = i + 1;
-        }
-
-        if split_at == 0 || split_at >= self.lines.len() {
-            return None;
-        }
-
-        // Enforce orphans/widows
-        if split_at < orphans {
-            return None;
-        }
-        if self.lines.len() - split_at < widows {
-            let adjusted = self.lines.len().saturating_sub(widows);
-            if adjusted < orphans || adjusted == 0 {
-                return None;
-            }
-            // split_at = adjusted; -- would break orphan rule
-        }
-
-        let mut first = ParagraphPageable::new(self.lines[..split_at].to_vec());
-        first.opacity = self.opacity;
-        first.visible = self.visible;
-        first.id = self.id.clone();
-        first.node_id = self.node_id;
-
-        // Rebase second fragment: baseline is absolute from paragraph top,
-        // so subtract the consumed height to make it relative to the new fragment.
-        let second_lines: Vec<ShapedLine> = self.lines[split_at..]
-            .iter()
-            .cloned()
-            .map(|mut line| {
-                line.baseline -= consumed;
-                // Rebase inline image positions for the new fragment:
-                // computed_y is paragraph-absolute (like baseline), so it
-                // must also be shifted by the consumed height.
-                // InlineBoxItem.computed_y is line-relative — no per-item
-                // rebase needed; the new fragment's line_top accumulator
-                // handles it at draw time.
-                for item in &mut line.items {
-                    if let LineItem::Image(img) = item {
-                        img.computed_y -= consumed;
-                    }
-                }
-                line
-            })
-            .collect();
-        let mut second = ParagraphPageable::new(second_lines);
-        second.opacity = self.opacity;
-        second.visible = self.visible;
-        // Both fragments inherit the id. `DestinationRegistry::record` is
-        // first-write-wins, so the second fragment's entry is a no-op when
-        // it lands on a later page — we just carry the id so ordering quirks
-        // don't drop anchors.
-        second.id = self.id.clone();
-        second.node_id = self.node_id;
-
-        Some((Box::new(first), Box::new(second)))
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         if !self.visible {
             return;
@@ -1534,48 +1454,6 @@ mod tests {
         );
     }
 
-    // ---------- Split with inline image ----------
-
-    #[test]
-    fn split_rebases_inline_image_computed_y() {
-        // Four lines so orphans/widows (default=2) allow splitting at line 2.
-        // Split after lines 1+2 (consumed=32), leaving lines 3+4 in second fragment.
-        // Line4 has an image with paragraph-absolute computed_y.
-        let line1 = text_line(16.0, 12.0);
-        let line2 = text_line(16.0, 28.0);
-        let line3 = text_line(16.0, 44.0);
-        let mut line4 = text_line(16.0, 60.0);
-        let mut img = make_inline_image(10.0, 8.0, VerticalAlign::Baseline);
-        img.computed_y = 52.0; // paragraph-absolute (baseline 60 - img height 8)
-        line4.items.push(LineItem::Image(img));
-
-        let para = ParagraphPageable::new(vec![line1, line2, line3, line4]);
-
-        // Split after line2: avail_height = 32 fits lines 1+2 exactly
-        let (_first, second) = para.split(100.0, 32.0).expect("should split");
-
-        // Second fragment has 2 lines (line3, line4), rebased by consumed=32
-        let second_para = second.as_any().downcast_ref::<ParagraphPageable>().unwrap();
-        assert_eq!(second_para.lines.len(), 2);
-        let line = &second_para.lines[1]; // line4 in second fragment
-        // baseline was 60, consumed=32 → rebased to 28
-        assert!(
-            approx(line.baseline, 28.0),
-            "rebased baseline should be 28, got {}",
-            line.baseline
-        );
-        if let LineItem::Image(img) = &line.items[0] {
-            // computed_y was 52, consumed=32 → rebased to 20
-            assert!(
-                approx(img.computed_y, 20.0),
-                "rebased computed_y should be 20, got {}",
-                img.computed_y
-            );
-        } else {
-            panic!("expected image item");
-        }
-    }
-
     // ---------- Id propagation ----------
 
     #[test]
@@ -1607,29 +1485,6 @@ mod tests {
         let mut reg = DestinationRegistry::default();
         p.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
         assert!(reg.get("anything").is_none());
-    }
-
-    #[test]
-    fn split_propagates_id_to_both_fragments() {
-        // Four lines so orphans/widows (default=2) allow splitting at line 2.
-        let line1 = text_line(16.0, 12.0);
-        let line2 = text_line(16.0, 28.0);
-        let line3 = text_line(16.0, 44.0);
-        let line4 = text_line(16.0, 60.0);
-        let para = ParagraphPageable::new(vec![line1, line2, line3, line4])
-            .with_id(Some(Arc::new("heading".to_string())));
-
-        let (first, second) = para.split(100.0, 32.0).expect("should split");
-        let first_para = first.as_any().downcast_ref::<ParagraphPageable>().unwrap();
-        let second_para = second.as_any().downcast_ref::<ParagraphPageable>().unwrap();
-        assert_eq!(
-            first_para.id.as_deref().map(String::as_str),
-            Some("heading")
-        );
-        assert_eq!(
-            second_para.id.as_deref().map(String::as_str),
-            Some("heading")
-        );
     }
 
     #[test]
@@ -1902,7 +1757,7 @@ mod link_collect_tests {
             viewport_size_px: None,
         };
         let pageable = convert::dom_to_pageable(&doc, &mut ctx);
-        let pages = crate::paginate::paginate(pageable, 400.0, 600.0);
+        let pages: Vec<Box<dyn crate::pageable::Pageable>> = vec![pageable];
         let page_count = pages.len();
 
         let mut krilla_doc = krilla::Document::new();
