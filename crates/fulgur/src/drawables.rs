@@ -140,13 +140,37 @@ impl std::fmt::Debug for ListItemEntry {
     }
 }
 
-/// PR 6 target: column-rule paint spec + per-column-group geometry.
-#[derive(Debug, Clone, Default)]
-pub struct MulticolRuleEntry;
+/// Multicol column-rule paint spec + per-column-group geometry.
+/// Mirrors the fields `MulticolRulePageable` carries — render at the
+/// container's location after children paint, partitioning `groups`
+/// per page based on the container's fragment cumulative heights.
+#[derive(Debug, Clone)]
+pub struct MulticolRuleEntry {
+    pub rule: crate::column_css::ColumnRuleSpec,
+    pub groups: Vec<crate::multicol_layout::ColumnGroupGeometry>,
+}
 
-/// PR 6 target: CSS transform matrix + origin.
-#[derive(Debug, Clone, Default)]
-pub struct TransformEntry;
+/// CSS transform matrix + origin for a node (and its descendants).
+///
+/// Mirrors `TransformWrapperPageable`. v1 pushes the surface transform
+/// before drawing `inner.draw(...)` and pops after; v2's flat dispatch
+/// emulates this by recording every descendant `node_id` of the wrapper
+/// at convert time so the render loop can dispatch the wrapper's own
+/// payload + every descendant inside one push/pop pair.
+#[derive(Debug, Clone)]
+pub struct TransformEntry {
+    pub matrix: crate::pageable::Affine2D,
+    pub origin: crate::pageable::Point2,
+    /// Every strict descendant `NodeId` whose fragment must paint
+    /// inside this transform's `push_transform`/`pop` group. Does NOT
+    /// include the wrapper's own `node_id` (the entry's key) — the
+    /// render loop dispatches the wrapper node separately before
+    /// iterating descendants (see
+    /// `render::draw_under_transform`). Stored as a `Vec` for
+    /// deterministic iteration — order matches the depth-first walk
+    /// produced by `extract_drawables_from_pageable`.
+    pub descendants: Vec<NodeId>,
+}
 
 /// Bookmark anchor (level + label) keyed by source node. First-fragment-only
 /// emission is enforced at render time by reading `geometry.fragments[0]`.

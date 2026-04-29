@@ -239,7 +239,8 @@ fn extract_drawables_from_pageable(
     out: &mut crate::drawables::Drawables,
 ) {
     use crate::drawables::{
-        BlockEntry, ImageEntry, ListItemEntry, ParagraphEntry, SvgEntry, TableEntry,
+        BlockEntry, ImageEntry, ListItemEntry, MulticolRuleEntry, ParagraphEntry, SvgEntry,
+        TableEntry, TransformEntry,
     };
     use crate::image::ImagePageable;
     use crate::pageable::{
@@ -375,8 +376,40 @@ fn extract_drawables_from_pageable(
         return;
     }
     // Wrappers delegate.
+    //
+    // Transform wrapper: record `TransformEntry` keyed by the inner's
+    // `node_id` (the wrapper has no node_id of its own — it inherits
+    // from inner). After recursing, every NodeId added by the inner
+    // subtree is captured into the entry's `descendants` list so the
+    // render dispatcher can paint them all inside one
+    // `push_transform / pop` group, mirroring v1's
+    // `TransformWrapperPageable::draw`.
     if let Some(w) = any.downcast_ref::<TransformWrapperPageable>() {
+        let before_block = collect_drawables_node_ids(out);
         extract_drawables_from_pageable(w.inner.as_ref(), out);
+        if let Some(inner_id) = w.inner.node_id() {
+            let after_block = collect_drawables_node_ids(out);
+            // Exclude `inner_id` from `descendants` — it's the key the
+            // entry is filed under, and it is dispatched as the
+            // transform parent (`draw_under_transform` calls
+            // `dispatch_fragment(node_id, ..)` for it before iterating
+            // descendants). Without this filter, the render loop's
+            // skip set would contain `inner_id` itself and the parent
+            // node would never paint.
+            let descendants: Vec<usize> = after_block
+                .difference(&before_block)
+                .copied()
+                .filter(|&id| id != inner_id)
+                .collect();
+            out.transforms.insert(
+                inner_id,
+                TransformEntry {
+                    matrix: w.matrix,
+                    origin: w.origin,
+                    descendants,
+                },
+            );
+        }
         return;
     }
     if let Some(w) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
@@ -395,18 +428,44 @@ fn extract_drawables_from_pageable(
         extract_drawables_from_pageable(w.child.as_ref(), out);
         return;
     }
-    // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
-    // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
-    // around any multicol container. Without this arm, images / SVGs
-    // / paragraphs nested inside a multicol container fall through to
-    // "Other" and never enter `Drawables`. Multicol's own column-rule
-    // painting still lands in PR 6 (`drawables.multicol_rules`).
+    // MulticolRulePageable: record `MulticolRuleEntry` keyed by the
+    // multicol container (child) node_id, then recurse so the
+    // container's own block / paragraph / image payload land in their
+    // respective maps. Render-side post-pass paints rules per page
+    // using the container's fragments to partition `groups`.
     if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
+        if let Some(child_id) = w.child.node_id() {
+            out.multicol_rules.insert(
+                child_id,
+                MulticolRuleEntry {
+                    rule: w.rule,
+                    groups: w.groups.clone(),
+                },
+            );
+        }
         extract_drawables_from_pageable(w.child.as_ref(), out);
     }
-    // Other types (Spacer, marker-only Pageables) have no PR 3
-    // payload — markers and Spacers stay no-op in v2; Multicol-rule
-    // paint lands in PR 6.
+    // Other types (Spacer, marker-only Pageables) have no per-NodeId
+    // payload — Spacer is invisible, and the four marker wrappers
+    // (Bookmark / StringSet / Running / CounterOp) drive their effects
+    // through fragmenter geometry rather than per-marker entries.
+}
+
+/// Snapshot the union of `NodeId` keys currently present in `out`'s
+/// per-NodeId maps. Used by `extract_drawables_from_pageable`'s
+/// transform arm to compute `descendants = after - before` so the
+/// transform can list every node added by walking its inner subtree.
+fn collect_drawables_node_ids(
+    out: &crate::drawables::Drawables,
+) -> std::collections::BTreeSet<usize> {
+    let mut ids = std::collections::BTreeSet::new();
+    ids.extend(out.block_styles.keys().copied());
+    ids.extend(out.paragraphs.keys().copied());
+    ids.extend(out.images.keys().copied());
+    ids.extend(out.svgs.keys().copied());
+    ids.extend(out.tables.keys().copied());
+    ids.extend(out.list_items.keys().copied());
+    ids
 }
 
 #[cfg(test)]
