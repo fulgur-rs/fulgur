@@ -242,11 +242,13 @@ impl Pageable for ImagePageable {
     ) -> Option<Box<dyn Pageable>> {
         let node_id = self.node_id?;
         let frag = crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
+        // `Fragment.{width, height}` is CSS px; `ImagePageable` draws
+        // in PDF pt.
         Some(Box::new(ImagePageable {
             image_data: Arc::clone(&self.image_data),
             format: self.format,
-            width: frag.width,
-            height: frag.height,
+            width: crate::convert::px_to_pt(frag.width),
+            height: crate::convert::px_to_pt(frag.height),
             opacity: self.opacity,
             visible: self.visible,
             node_id: self.node_id,

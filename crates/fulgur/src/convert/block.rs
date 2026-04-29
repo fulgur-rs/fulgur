@@ -42,13 +42,14 @@ pub(super) fn convert(
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node_id));
             block.wrap(width, height);
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
         // Plain leaf node — create a spacer with the computed height
-        let mut spacer = SpacerPageable::new(height);
+        let mut spacer = SpacerPageable::new(height).with_node_id(Some(node_id));
         spacer.wrap(width, height);
         return Box::new(spacer);
     }
@@ -67,7 +68,8 @@ pub(super) fn convert(
         .with_style(style)
         .with_opacity(opacity)
         .with_visible(visible)
-        .with_id(extract_block_id(node));
+        .with_id(extract_block_id(node))
+        .with_node_id(Some(node_id));
     block.wrap(width, 10000.0);
     if has_style {
         block.layout_size = Some(Size { width, height });

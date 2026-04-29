@@ -79,7 +79,8 @@ where
             .with_style(style)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
@@ -100,7 +101,8 @@ where
             .with_pagination(pagination)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
@@ -175,13 +177,16 @@ fn convert_content_url(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
         node,
         assets,
         move |w, h, opacity, visible| {
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            img.node_id = Some(node_id);
             Box::new(img)
         },
     ))
@@ -198,6 +203,7 @@ fn convert_image(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(src)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
@@ -209,7 +215,9 @@ fn convert_image(
             // The shared helper then applies the same `ImagePageable::new`
             // construction path as the pseudo-content url() case, keeping
             // sizing behavior byte-identical to the previous <img> path.
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            img.node_id = Some(node_id);
             Box::new(img)
         },
     ))
@@ -227,6 +235,7 @@ fn convert_svg(
 ) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
     let tree = extract_inline_svg_tree(elem)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
@@ -236,6 +245,7 @@ fn convert_svg(
             let mut svg = SvgPageable::new(tree, w, h);
             svg.opacity = opacity;
             svg.visible = visible;
+            svg.node_id = Some(node_id);
             Box::new(svg)
         },
     ))

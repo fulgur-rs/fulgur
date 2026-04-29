@@ -2518,14 +2518,19 @@ impl Pageable for BlockPageable {
         page_index: u32,
         geometry: &crate::pagination_layout::PaginationGeometryTable,
     ) -> Option<Box<dyn Pageable>> {
-        // No NodeId → no geometry lookup possible. Synthetic Pageables
-        // built by tests fall in this branch; production-built blocks
-        // always have node_id set by `convert::*`.
-        let node_id = self.node_id?;
-        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
-        let self_page_y = self_frag.y;
-        let frag_w = self_frag.width;
-        let frag_h = self_frag.height;
+        // Look up self's fragment on this page. The fragmenter only
+        // records geometry from `<body>` downwards
+        // (`fragment_pagination_root` walks `body.children`), so the
+        // ancestor `<html>` BlockPageable that wraps the convert tree
+        // has no entry — but its child `<body>` does, and slicing
+        // must descend into it. When `self_frag` is `None`, we treat
+        // this block as a transparent ancestor and rely solely on
+        // children's slices to decide whether the block is on this
+        // page.
+        let self_frag = self
+            .node_id
+            .and_then(|id| fragment_on_page(geometry, id, page_index));
+        let self_page_y = self_frag.map(|f| f.y).unwrap_or(0.0);
 
         // Recursively slice each child. `child.fragment.y - self.fragment.y`
         // gives the child's parent-relative y on this page, which equals the
@@ -2535,6 +2540,11 @@ impl Pageable for BlockPageable {
         // layout.location.y`). On a forced break, `cursor_y` resets and the
         // gap is discarded — so the rebased y differs from `pc.y` and is the
         // value we want.
+        //
+        // `Fragment.y` is in CSS px (Taffy's native unit) while
+        // `PositionedChild.y` is in PDF pt. Convert the rebased y
+        // before storing — without this, children end up 4/3× lower
+        // on the page than intended.
         let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
         for pc in &self.children {
             let Some(sliced) = pc.child.slice_for_page(page_index, geometry) else {
@@ -2543,7 +2553,7 @@ impl Pageable for BlockPageable {
             let new_y = match pc.child.node_id() {
                 Some(child_node_id) => {
                     match fragment_on_page(geometry, child_node_id, page_index) {
-                        Some(child_frag) => child_frag.y - self_page_y,
+                        Some(child_frag) => crate::convert::px_to_pt(child_frag.y - self_page_y),
                         None => pc.y,
                     }
                 }
@@ -2558,6 +2568,15 @@ impl Pageable for BlockPageable {
             });
         }
 
+        // No own fragment AND no descendant slices → not on this
+        // page. Without this, the transparent-ancestor branch would
+        // emit an empty Block placeholder for every page, which both
+        // wastes geometry and breaks `collect_*_states` page
+        // alignment.
+        if self_frag.is_none() && sliced_children.is_empty() {
+            return None;
+        }
+
         let mut block = BlockPageable::with_positioned_children(sliced_children)
             .with_pagination(self.pagination)
             .with_style(self.style.clone())
@@ -2565,14 +2584,23 @@ impl Pageable for BlockPageable {
             .with_visible(self.visible)
             .with_id(self.id.clone())
             .with_node_id(self.node_id);
-        block.cached_size = Some(Size {
-            width: frag_w,
-            height: frag_h,
-        });
-        block.layout_size = Some(Size {
-            width: frag_w,
-            height: frag_h,
-        });
+        // Match `split()`'s semantics: per-fragment `cached_size`
+        // sourced from this page's fragment, but `layout_size` left
+        // as `None` so the draw path falls back to `cached_size`.
+        // Setting `layout_size = fragment_size` would discard the
+        // node's intrinsic Taffy size, which the draw path uses to
+        // size shadows / clip rects on blocks that fit one page.
+        //
+        // `Fragment` records width / height in CSS px (Taffy's
+        // native unit), but `BlockPageable::cached_size` is in PDF
+        // pt. Convert before assigning — without this, every sliced
+        // block ends up 4/3× larger than intended.
+        if let Some(frag) = self_frag {
+            block.cached_size = Some(Size {
+                width: crate::convert::px_to_pt(frag.width),
+                height: crate::convert::px_to_pt(frag.height),
+            });
+        }
         Some(Box::new(block))
     }
 }
@@ -2648,9 +2676,10 @@ impl Pageable for SpacerPageable {
         // Spacer adopts the fragment's height — when fragmenter spans
         // a Spacer across pages it would split the height, but the
         // current fragmenter emits a single fragment per Spacer (no
-        // mid-element split for atomic Pageables).
+        // mid-element split for atomic Pageables). `Fragment.height`
+        // is CSS px; `Spacer.height` is PDF pt.
         Some(Box::new(SpacerPageable {
-            height: frag.height,
+            height: crate::convert::px_to_pt(frag.height),
             node_id: self.node_id,
         }))
     }
@@ -3835,8 +3864,12 @@ impl Pageable for MulticolRulePageable {
                 let target_pos = frags.iter().position(|f| f.page_index == page_index);
                 match target_pos {
                     Some(pos) => {
-                        let consumed: f32 = frags[..pos].iter().map(|f| f.height).sum();
-                        let cutoff = frags[pos].height;
+                        // `Fragment.height` is CSS px; multicol group
+                        // geometry uses PDF pt for y_offset / col_heights.
+                        let consumed: f32 = crate::convert::px_to_pt(
+                            frags[..pos].iter().map(|f| f.height).sum::<f32>(),
+                        );
+                        let cutoff = crate::convert::px_to_pt(frags[pos].height);
                         // Shift groups by `-consumed` so y_offset is
                         // page-local, then partition at `cutoff`.
                         let shifted: Vec<_> = self
@@ -4198,6 +4231,8 @@ impl Pageable for ListItemPageable {
         // `ListItemMarker::None` on the bottom half). Body is sliced
         // per page via the body's own `slice_for_page`. The list
         // item's outer fragment determines self_h on this page.
+        // `Fragment.height` is CSS px; `ListItemPageable.height` is
+        // PDF pt.
         let node_id = self.node_id?;
         let self_frag = fragment_on_page(geometry, node_id, page_index)?;
         let sliced_body = self.body.slice_for_page(page_index, geometry)?;
@@ -4216,7 +4251,7 @@ impl Pageable for ListItemPageable {
             body: sliced_body,
             style: self.style.clone(),
             width: self.width,
-            height: self_frag.height,
+            height: crate::convert::px_to_pt(self_frag.height),
             opacity: self.opacity,
             visible: self.visible,
             node_id: self.node_id,

@@ -224,7 +224,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, 10000.0);
                 if needs_wrapper {
                     block.layout_size = Some(Size { width, height });
@@ -296,7 +297,8 @@ pub(super) fn try_convert(
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node_id));
             block.wrap(width, 10000.0);
             if has_style {
                 block.layout_size = Some(Size { width, height });
@@ -406,7 +408,8 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
@@ -461,7 +464,8 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
@@ -487,7 +491,8 @@ fn build_list_item_body(
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node.id));
             block.wrap(width, 10000.0);
             Box::new(block)
         }
@@ -508,7 +513,8 @@ fn build_list_item_body(
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, 10000.0);
         Box::new(block)
     }

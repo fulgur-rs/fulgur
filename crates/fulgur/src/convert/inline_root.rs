@@ -135,7 +135,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, height);
                 // Use Taffy's computed height (includes padding + border) instead of children-only height
                 block.layout_size = Some(Size { width, height });
@@ -144,6 +145,7 @@ pub(super) fn try_convert(
             let mut p = paragraph;
             p.opacity = opacity;
             p.visible = visible;
+            p.node_id = Some(node_id);
             return Some(Box::new(p));
         } else if before_inline.is_some() || after_inline.is_some() {
             // Synthesize a minimal paragraph for pseudo-only elements (e.g.
@@ -162,6 +164,7 @@ pub(super) fn try_convert(
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             let mut paragraph = ParagraphPageable::new(vec![line]);
             paragraph.visible = visible;
+            paragraph.node_id = Some(node_id);
 
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
@@ -194,7 +197,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
@@ -524,7 +528,11 @@ pub(super) fn extract_paragraph(
     // end up as plain `ParagraphPageable` (no block wrapper triggered by the
     // default style) still register with `DestinationRegistry` for
     // `href="#top"` resolution.
-    Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
+    Some(
+        ParagraphPageable::new(shaped_lines)
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id)),
+    )
 }
 
 #[cfg(test)]

@@ -1120,8 +1120,11 @@ impl Pageable for ParagraphPageable {
         let node_id = self.node_id?;
         let frags = &geometry.get(&node_id)?.fragments;
         let target_pos = frags.iter().position(|f| f.page_index == page_index)?;
-        let target_h = frags[target_pos].height;
-        let consumed: f32 = frags[..target_pos].iter().map(|f| f.height).sum();
+        // `Fragment.height` is CSS px; line metrics in `self.lines`
+        // are PDF pt. Convert before comparing.
+        let target_h = crate::convert::px_to_pt(frags[target_pos].height);
+        let consumed: f32 =
+            crate::convert::px_to_pt(frags[..target_pos].iter().map(|f| f.height).sum::<f32>());
 
         let eps = 0.01_f32;
         let mut line_top: f32 = 0.0;
