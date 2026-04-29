@@ -247,3 +247,139 @@ fn render_path_byte_equality() {
     // visible signal — the test passes regardless.
     let _ = diffs;
 }
+
+/// Inline byte-equality cases. These exist alongside the on-disk
+/// fixtures because PR 3's Paragraph migration only unlocks byte-eq
+/// for documents with **purely paragraph content under a margin:0
+/// body** — no Block backgrounds, no inline-block, no Table. The
+/// existing VRT / examples fixtures all have richer content that
+/// requires later PRs (Block, Table, Multicol, Transform). Inline
+/// cases let each PR demonstrate productive byte-eq advancement
+/// without seeding VRT goldens that lock in incomplete v2 output.
+///
+/// Each case asserts unconditionally — they are the unit-of-progress
+/// for the migration. PR N adds cases that PR N's migration covers.
+#[test]
+fn inline_byte_equality_cases() {
+    // PR 3 (Paragraph + inline content) coverage.
+    let pr3_cases: &[(&str, &str)] = &[
+        (
+            "minimal body text",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}</style></head><body>hello world</body></html>",
+        ),
+        (
+            "two paragraphs",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>first paragraph</p><p>second paragraph here</p></body></html>",
+        ),
+        (
+            "paragraph with anchor link",
+            r#"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>before <a href="https://example.com">link</a> after</p></body></html>"#,
+        ),
+        (
+            "paragraph with internal anchor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p id="top">heading line</p><p><a href="#top">jump</a></p></body></html>"##,
+        ),
+    ];
+
+    // PR 4 (Block migration) coverage — backgrounds, borders,
+    // border-radius, box-shadow at the block frame. Body is set to
+    // margin:0 so the v2 frame anchor matches v1's block.draw call.
+    let pr4_cases: &[(&str, &str)] = &[
+        (
+            "solid block with background color",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:100px;height:80px;background:#e53935}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with solid border",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;border:4px solid #444}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with border-radius",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;background:#bdf;border-radius:12px}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "two stacked blocks",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:60px}.a{background:#fcd}.b{background:#cdf}</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
+        ),
+        // Regression for PR #303 Devin: convert wraps an inline-root
+        // paragraph in a BlockPageable that shares the same node_id, so
+        // both `block_styles[id]` and `paragraphs[id]` are populated. The
+        // block dispatch must not `continue` past the paragraph check —
+        // background draws first, glyph runs draw on top.
+        (
+            "paragraph with background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#fce}</style></head><body><p>hello</p></body></html>",
+        ),
+        // Regression for PR #303 Devin (block id anchors): `<a href="#x">`
+        // targeting `<div id="x">` must resolve in v2 the same way it
+        // does in v1 (`BlockPageable::collect_ids`). v1 emits a
+        // `/Link → /Dest` mapping; v2 must register block ids in the
+        // pre-pass `DestinationRegistry`.
+        (
+            "anchor link to block id",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:40px}#target{background:#cef}p{margin:0}</style></head><body><div id="target"></div><p><a href="#target">jump</a></p></body></html>"##,
+        ),
+        // Regression for PR #303 follow-up Devin: shared node_id
+        // (block + paragraph from `convert::inline_root`) with
+        // `opacity < 1.0` must compose under ONE
+        // `draw_with_opacity(block.opacity, ...)` group, mirroring v1's
+        // `BlockPageable::draw` which wraps bg/border + child draws in
+        // a single group. Separate wrappers paint the bg at 50% but
+        // glyphs at 100% — visually wrong AND byte-divergent.
+        (
+            "paragraph with opacity and background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#cef;opacity:0.5}</style></head><body><p>hello</p></body></html>",
+        ),
+    ];
+
+    // PR 5 (Table + ListItem) extends `Drawables` with `tables` and
+    // `list_items` and adds `body_offset_pt` propagation so html→body
+    // collapsed margin reaches v2 children. Inline cases for the new
+    // types are deferred to PR 6 — table cells contain paragraphs
+    // whose text shaping resolves through inline_root, and inline-box
+    // wiring still has gaps that flake the byte-eq comparison on
+    // these specific configurations. The on-disk allowlist coverage
+    // (10 new fixtures) demonstrates the productive byte-eq advance.
+    //
+    // Regression for PR #304 Devin (list-item shared node_id): `<li>`
+    // and its body block share the same node_id — `list_items[id]`
+    // and `block_styles[id]` co-exist. The marker dispatch must NOT
+    // `continue;` past the block check or `<li style="background:...">`
+    // silently drops the body block paint in v2.
+    let pr5_cases: &[(&str, &str)] = &[
+        (
+            "list item with body block background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#fdf;height:40px}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+        // Regression for PR #304 follow-up Devin (list-item opacity
+        // grouping): v1's `ListItemPageable::draw` wraps marker + body
+        // block in a SINGLE `draw_with_opacity` group. v2 must produce
+        // the same single q/Q wrapper or the PDF stream diverges when
+        // `<li style="opacity:0.5">`.
+        (
+            "list item with opacity and body block background",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#cef;height:40px;opacity:0.5}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+    ];
+
+    let cases = pr3_cases
+        .iter()
+        .chain(pr4_cases.iter())
+        .chain(pr5_cases.iter());
+    for (label, html) in cases {
+        let engine = Engine::builder().build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+}

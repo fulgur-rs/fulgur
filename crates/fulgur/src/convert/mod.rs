@@ -200,7 +200,35 @@ pub fn dom_to_drawables(
     let mut drawables = crate::drawables::Drawables::new();
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
+    drawables.body_offset_pt = extract_body_offset_pt(doc);
     drawables
+}
+
+/// Phase 4 PR 5: walk the DOM looking for `<body>` and return its
+/// `(location.x, location.y)` in pt. The fragmenter records body's
+/// own fragment at `(body_x, 0)` (body-content-area relative) and
+/// slicing depends on that frame; the html → body offset that CSS
+/// margin collapsing puts onto `body.location` lives separately so
+/// `render_v2` can add it to per-fragment draw positions.
+fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let root = doc.root_element();
+    let Some(root_node) = base.get_node(root.id) else {
+        return (0.0, 0.0);
+    };
+    for &child_id in &root_node.children {
+        let Some(child) = base.get_node(child_id) else {
+            continue;
+        };
+        if let blitz_dom::NodeData::Element(elem) = &child.data
+            && elem.name.local.as_ref() == "body"
+        {
+            let (x, y, _, _) = layout_in_pt(&child.final_layout);
+            return (x, y);
+        }
+    }
+    (0.0, 0.0)
 }
 
 /// Walk a Pageable tree and populate each `Drawables` map by
@@ -210,13 +238,16 @@ fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
     out: &mut crate::drawables::Drawables,
 ) {
-    use crate::drawables::{ImageEntry, SvgEntry};
+    use crate::drawables::{
+        BlockEntry, ImageEntry, ListItemEntry, ParagraphEntry, SvgEntry, TableEntry,
+    };
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
         MulticolRulePageable, RunningElementWrapperPageable, StringSetWrapperPageable,
         TablePageable, TransformWrapperPageable,
     };
+    use crate::paragraph::ParagraphPageable;
     use crate::svg::SvgPageable;
 
     let any = pageable.as_any();
@@ -254,16 +285,72 @@ fn extract_drawables_from_pageable(
         }
         return;
     }
-    // Block / List / Table / wrappers — recurse into children. PR 4+
-    // will record their own draw payload (BlockEntry, etc.); for PR 2
-    // we only walk past them to reach the leaves.
+    // Paragraph leaf — record the shaped lines verbatim. The lines
+    // already carry per-glyph positions, link spans, decoration spans,
+    // and inline-image / inline-box items, so no re-shaping at render
+    // time. Inline content (LineItem::InlineBox) embeds whole Pageable
+    // subtrees that need their own draw payload — recurse so wrapper
+    // markers / nested blocks land in the appropriate `Drawables` map.
+    if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
+        if let Some(node_id) = para.node_id {
+            out.paragraphs.insert(
+                node_id,
+                ParagraphEntry {
+                    lines: para.lines.clone(),
+                    opacity: para.opacity,
+                    visible: para.visible,
+                    id: para.id.clone(),
+                },
+            );
+        }
+        // Recurse into inline-box content. Each `LineItem::InlineBox`
+        // holds a `Box<dyn Pageable>` (typically a `BlockPageable` for
+        // `<span>`-style inline blocks) so its descendants can register
+        // their own payloads.
+        for line in &para.lines {
+            for item in &line.items {
+                if let crate::paragraph::LineItem::InlineBox(ib) = item {
+                    extract_drawables_from_pageable(ib.content.as_ref(), out);
+                }
+            }
+        }
+        return;
+    }
+    // Block / List / Table / wrappers — recurse into children. Block
+    // also records its own paint payload (PR 4).
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        if let Some(node_id) = block.node_id {
+            out.block_styles.insert(
+                node_id,
+                BlockEntry {
+                    style: block.style.clone(),
+                    opacity: block.opacity,
+                    visible: block.visible,
+                    id: block.id.clone(),
+                    layout_size: block.layout_size.or(block.cached_size),
+                },
+            );
+        }
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
         return;
     }
     if let Some(table) = any.downcast_ref::<TablePageable>() {
+        if let Some(node_id) = table.node_id {
+            out.tables.insert(
+                node_id,
+                TableEntry {
+                    style: table.style.clone(),
+                    opacity: table.opacity,
+                    visible: table.visible,
+                    id: table.id.clone(),
+                    layout_size: table.layout_size,
+                    width: table.width,
+                    cached_height: table.cached_height,
+                },
+            );
+        }
         for pc in &table.header_cells {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
@@ -273,6 +360,17 @@ fn extract_drawables_from_pageable(
         return;
     }
     if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        if let Some(node_id) = list_item.node_id {
+            out.list_items.insert(
+                node_id,
+                ListItemEntry {
+                    marker: list_item.marker.clone(),
+                    marker_line_height: list_item.marker_line_height,
+                    opacity: list_item.opacity,
+                    visible: list_item.visible,
+                },
+            );
+        }
         extract_drawables_from_pageable(list_item.body.as_ref(), out);
         return;
     }
@@ -300,15 +398,15 @@ fn extract_drawables_from_pageable(
     // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
     // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
     // around any multicol container. Without this arm, images / SVGs
-    // nested inside a multicol container fall through to "Other" and
-    // never enter `Drawables.images` / `.svgs`. Multicol's own
-    // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
+    // / paragraphs nested inside a multicol container fall through to
+    // "Other" and never enter `Drawables`. Multicol's own column-rule
+    // painting still lands in PR 6 (`drawables.multicol_rules`).
     if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
         extract_drawables_from_pageable(w.child.as_ref(), out);
     }
-    // Other types (Spacer, ParagraphPageable, marker-only Pageables)
-    // have no PR 2 payload — markers and Spacers stay no-op in v2;
-    // Paragraph / Multicol-rule paint land in PR 3 / 6.
+    // Other types (Spacer, marker-only Pageables) have no PR 3
+    // payload — markers and Spacers stay no-op in v2; Multicol-rule
+    // paint lands in PR 6.
 }
 
 #[cfg(test)]

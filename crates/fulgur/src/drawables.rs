@@ -35,15 +35,46 @@ pub type NodeId = usize;
 // the `Drawables` struct compiles before any draw migration starts; the
 // shadow harness can already exercise the pipeline plumbing.
 
-/// PR 4 target: per-node block-level paint state (background layers,
-/// borders, box-shadow, opacity, overflow clip).
-#[derive(Debug, Clone, Default)]
-pub struct BlockEntry;
+/// Block draw payload for v2. Mirrors the fields `BlockPageable`
+/// holds for paint dispatch — backgrounds, borders, box-shadow,
+/// overflow clip, opacity, and the anchor id used by
+/// `DestinationRegistry`.
+#[derive(Debug, Clone)]
+pub struct BlockEntry {
+    pub style: crate::pageable::BlockStyle,
+    pub opacity: f32,
+    pub visible: bool,
+    pub id: Option<std::sync::Arc<String>>,
+    /// Taffy-computed border-box size (pt). Preferred when set; falls
+    /// back to the fragment's width/height (CSS px → pt) at render
+    /// time when absent.
+    pub layout_size: Option<crate::pageable::Size>,
+}
 
-/// PR 3 target: per-node shaped lines (`Vec<ShapedLine>`) reused from
-/// the existing `paragraph::draw_shaped_lines` path.
-#[derive(Debug, Clone, Default)]
-pub struct ParagraphEntry;
+/// Paragraph draw payload for v2. Holds the shaped lines that
+/// `paragraph::draw_shaped_lines` consumes verbatim — no re-shaping
+/// at render time. Mirrors the per-paragraph fields from
+/// `ParagraphPageable` that survive draw.
+#[derive(Clone)]
+pub struct ParagraphEntry {
+    pub lines: Vec<crate::paragraph::ShapedLine>,
+    pub opacity: f32,
+    pub visible: bool,
+    /// Anchor id (`id="..."` on the inline root) — drives
+    /// `DestinationRegistry` for `href="#..."` resolution.
+    pub id: Option<std::sync::Arc<String>>,
+}
+
+impl std::fmt::Debug for ParagraphEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParagraphEntry")
+            .field("lines", &self.lines.len())
+            .field("opacity", &self.opacity)
+            .field("visible", &self.visible)
+            .field("id", &self.id)
+            .finish()
+    }
+}
 
 /// Image draw payload for v2. Mirrors the fields `ImagePageable` holds.
 #[derive(Debug, Clone)]
@@ -66,14 +97,48 @@ pub struct SvgEntry {
     pub visible: bool,
 }
 
-/// PR 5 target: table layout state — header cell ids, body cell offsets,
-/// header height. Per-page slicing happens at render time.
-#[derive(Debug, Clone, Default)]
-pub struct TableEntry;
+/// Table draw payload for v2. Holds the border-box paint state
+/// (background / borders / shadow) applied to the table's outer
+/// frame. Cell content (`<th>` / `<td>`) lives as separate
+/// `BlockEntry` / `ParagraphEntry` keyed by the cell's own NodeId
+/// and paints through the standard per-NodeId dispatch.
+///
+/// Multi-page header repetition (`<thead>` cloned on continuation
+/// pages) is **not** modelled in PR 5; single-page tables byte-eq
+/// already, multi-page tables follow in a later PR alongside the
+/// per-block clip work.
+#[derive(Debug, Clone)]
+pub struct TableEntry {
+    pub style: crate::pageable::BlockStyle,
+    pub opacity: f32,
+    pub visible: bool,
+    pub id: Option<std::sync::Arc<String>>,
+    pub layout_size: Option<crate::pageable::Size>,
+    pub width: f32,
+    pub cached_height: f32,
+}
 
-/// PR 5 target: list item marker + body wrapper data.
-#[derive(Debug, Clone, Default)]
-pub struct ListItemEntry;
+/// List-item marker payload for v2. The body block paints itself
+/// through `BlockEntry`; `ListItemEntry` only carries the marker
+/// (text / image / svg / none) and the line-height needed to
+/// vertically centre image markers.
+#[derive(Clone)]
+pub struct ListItemEntry {
+    pub marker: crate::pageable::ListItemMarker,
+    pub marker_line_height: f32,
+    pub opacity: f32,
+    pub visible: bool,
+}
+
+impl std::fmt::Debug for ListItemEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListItemEntry")
+            .field("marker_line_height", &self.marker_line_height)
+            .field("opacity", &self.opacity)
+            .field("visible", &self.visible)
+            .finish()
+    }
+}
 
 /// PR 6 target: column-rule paint spec + per-column-group geometry.
 #[derive(Debug, Clone, Default)]
@@ -106,6 +171,16 @@ pub struct LinkSpanEntry;
 /// fill each map by migrating one Pageable type at a time.
 #[derive(Debug, Default, Clone)]
 pub struct Drawables {
+    /// `body_layout.location.x/y` in pt. Captures the html → body
+    /// offset that CSS margin collapsing folds onto the body element.
+    /// `render_v2` adds this to every per-fragment `(x, y)` so v2 paint
+    /// matches v1's `html → body @ pc=(body.x, body.y)` chain exactly.
+    /// Pre-Phase-4 the fragmenter intentionally records body's own
+    /// fragment at `y=0` in body-content-area-relative coordinates and
+    /// downstream slicing logic depends on that — keeping it relative
+    /// in geometry but absolute on Drawables avoids touching the
+    /// fragmenter contract.
+    pub body_offset_pt: (f32, f32),
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,
@@ -126,6 +201,11 @@ impl Drawables {
     /// `true` when no draw payload has been registered for any node.
     /// PR 1 always returns `true` because the convert side has not
     /// migrated yet.
+    ///
+    /// `body_offset_pt` is intentionally excluded — it is a global
+    /// coordinate offset (e.g. `body { margin: 8px }`), not a per-node
+    /// draw payload, so an empty `<body>` with default browser margins
+    /// should still report `true`.
     pub fn is_empty(&self) -> bool {
         self.block_styles.is_empty()
             && self.paragraphs.is_empty()

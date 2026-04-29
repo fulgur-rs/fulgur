@@ -21,6 +21,26 @@
 # fixture roots in `render_path_parity.rs::FIXTURE_ROOTS`.
 
 allowlist = [
-    # PR 2 will add: vrt://basic/solid-box, vrt://basic/borders,
-    # examples://image, etc.
+    # PR 4 (Block migration) — block backgrounds / borders / radius
+    # unlock fixtures that are pure-block content with margin:0 body
+    # (no inline-block, no overflow:hidden, no images, no text).
+    "vrt://basic/border-radius.html",
+    "vrt://basic/borders.html",
+    "vrt://layout/flex-row.html",
+    "vrt://layout/grid-simple.html",
+    "vrt://layout/multicol-2.html",
+    # PR 5 (Table + ListItem + html→body offset fix) — adds the
+    # `body_y` propagation that lets the html → body collapsed-margin
+    # offset reach v2 children. Most pure-block paint / gradient
+    # fixtures fall in once that's in place.
+    "vrt://basic/solid-box.html",
+    "vrt://paint/background-gradient.html",
+    "vrt://paint/gradient-repeat-round.html",
+    "vrt://paint/gradient-repeat-x-with-position.html",
+    "vrt://paint/gradient-size-no-repeat-center.html",
+    "vrt://paint/gradient-to-top-right-tile-aspect.html",
+    "vrt://paint/opacity.html",
+    "vrt://paint/radial-gradient-no-repeat-corner.html",
+    "vrt://paint/radial-gradient-repeat-round.html",
+    "vrt://paint/radial-gradient-tiled.html",
 ]
