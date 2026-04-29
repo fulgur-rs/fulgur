@@ -3,8 +3,7 @@ use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
 use crate::pageable::Pageable;
-use crate::render::render_to_pdf;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 
@@ -34,11 +33,6 @@ impl Engine {
 
     pub fn base_path(&self) -> Option<&Path> {
         self.base_path.as_deref()
-    }
-
-    /// Render a Pageable tree to PDF bytes.
-    pub fn render_pageable(&self, root: Box<dyn Pageable>) -> Result<Vec<u8>> {
-        render_to_pdf(root, &self.config)
     }
 
     pub fn assets(&self) -> Option<&AssetBundle> {
@@ -199,6 +193,71 @@ impl Engine {
         // and docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
+        // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
+        // body's children's existing `final_layout` (populated by
+        // `resolve()` and `multicol_layout::run_pass`) and produces a
+        // per-node `PaginationGeometryTable`. fulgur-cj6u Phase 1.1
+        // captures the result on `ConvertContext` so future consumers
+        // — parity assertion, counter / string-set replacement,
+        // per-page fixed repetition redesign — can read it without
+        // re-walking layout.
+        //
+        // Side-effect safety: `run_pass_with_break_and_running` is a
+        // read-only walk of `final_layout` via
+        // `fragment_pagination_root` — it does not re-drive Taffy or
+        // mutate any node's layout. The wrapper's `LayoutPartialTree`
+        // / `RoundTree` / `CacheTree` / `TraversePartialTree` impls
+        // are kept compile-time live as scaffolding for a future
+        // per-strip-constrained variant and are exercised at runtime
+        // only by the test-gated `drive_taffy_root_layout` (see
+        // `pagination_layout.rs` module docs). VRT /
+        // examples_determinism / WPT all stay byte-identical with
+        // this call inserted.
+        //
+        // fulgur-s67g Phase 2.2: thread `running_store` so the
+        // fragmenter skips `position: running()` named children. They
+        // belong in `@page` margin boxes, not body flow, so including
+        // their height would over-count and diverge from Pageable.
+        //
+        // fulgur-s67g Phase 2.6 (`@page` size / margin resolution):
+        // resolve the page-1 size + margin from `gcpm.page_settings`
+        // before driving the fragmenter, so its strip height matches
+        // `render_to_pdf_with_gcpm`'s `content_height` exactly. Both
+        // sides use the page-1 result for *all* pages — Pageable
+        // does the same in `render.rs:283-291` and does not re-resolve
+        // per-page size for `:left` / `:right` / named selectors.
+        // This lets the parity gates drop the
+        // `(content_height - config.content_height()).abs() < 0.001`
+        // skip: documents that override page size / margin via
+        // `@page { size: ...; margin: ...; }` now feed the fragmenter a
+        // matching strip height by construction.
+        let default_page_rules: Vec<_> = gcpm
+            .page_settings
+            .iter()
+            .filter(|r| r.page_selector.is_none())
+            .cloned()
+            .collect();
+        let (resolved_page_size, resolved_page_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &default_page_rules,
+                1,
+                0,
+                &self.config,
+            );
+        let resolved_page_size = if resolved_landscape {
+            resolved_page_size.landscape()
+        } else {
+            resolved_page_size
+        };
+        let resolved_content_height_pt =
+            resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(resolved_content_height_pt),
+            &column_styles,
+            &running_store,
+        );
+
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {
@@ -220,6 +279,19 @@ impl Engine {
             map
         };
 
+        // `convert::dom_to_pageable` drains `string_set_by_node` and
+        // `counter_ops_by_node` via `.remove(&node_id)` as it wraps
+        // content with the corresponding marker types, so we keep
+        // copies for the fragmenter-driven `collect_*_states` calls in
+        // `render_to_pdf_with_gcpm` (which need the data after convert
+        // has run). Each clone is small (one `Vec` per node that
+        // declares the property).
+        let string_set_for_render = string_set_by_node.clone();
+        let counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = counter_ops_map
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
             assets: self.assets.as_ref(),
@@ -229,6 +301,7 @@ impl Engine {
             bookmark_by_node,
             column_styles,
             multicol_geometry,
+            pagination_geometry,
             link_cache: Default::default(),
             viewport_size_px: Some((
                 crate::convert::pt_to_px(self.config.content_width()),
@@ -238,9 +311,18 @@ impl Engine {
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
         if gcpm.is_empty() {
-            self.render_pageable(root)
+            crate::render::render_to_pdf(root, &self.config, &convert_ctx.pagination_geometry)
         } else {
-            crate::render::render_to_pdf_with_gcpm(root, &self.config, &gcpm, &running_store, fonts)
+            crate::render::render_to_pdf_with_gcpm(
+                root,
+                &self.config,
+                &gcpm,
+                &running_store,
+                fonts,
+                &convert_ctx.pagination_geometry,
+                &string_set_for_render,
+                &counter_ops_for_render,
+            )
         }
     }
 
@@ -320,6 +402,13 @@ impl Engine {
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        // fulgur-cj6u Phase 1.1: capture pagination geometry on
+        // ConvertContext for parity with the production path.
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
@@ -331,6 +420,7 @@ impl Engine {
             bookmark_by_node: HashMap::new(),
             column_styles,
             multicol_geometry,
+            pagination_geometry,
             link_cache: Default::default(),
             viewport_size_px: Some((
                 crate::convert::pt_to_px(self.config.content_width()),
@@ -338,17 +428,6 @@ impl Engine {
             )),
         };
         crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
-    }
-
-    /// Render a Pageable tree to a PDF file.
-    pub fn render_pageable_to_file(
-        &self,
-        root: Box<dyn Pageable>,
-        path: impl AsRef<Path>,
-    ) -> Result<()> {
-        let pdf = self.render_pageable(root)?;
-        std::fs::write(path, pdf)?;
-        Ok(())
     }
 }
 

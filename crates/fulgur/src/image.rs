@@ -74,6 +74,9 @@ pub struct ImagePageable {
     pub height: f32,
     pub opacity: f32,
     pub visible: bool,
+    /// fulgur-r6we (Phase 3.2.a): DOM NodeId for `slice_for_page`
+    /// geometry lookup. See `BlockPageable::node_id`.
+    pub node_id: Option<usize>,
 }
 
 impl ImagePageable {
@@ -85,7 +88,13 @@ impl ImagePageable {
             height,
             opacity: 1.0,
             visible: true,
+            node_id: None,
         }
+    }
+
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
+        self
     }
 
     /// Decode image dimensions (width, height) from header bytes.
@@ -168,15 +177,6 @@ impl Pageable for ImagePageable {
         }
     }
 
-    fn split(
-        &self,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Images cannot be split
-        None
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         use crate::pageable::draw_with_opacity;
 
@@ -220,6 +220,28 @@ impl Pageable for ImagePageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn node_id(&self) -> Option<usize> {
+        self.node_id
+    }
+
+    fn slice_for_page(
+        &self,
+        page_index: u32,
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+    ) -> Option<Box<dyn Pageable>> {
+        let node_id = self.node_id?;
+        // Presence check only. The fragment dimensions are unreliable
+        // for the inner-of-styled-block case (fulgur-frmj): when the
+        // wrapping `BlockPageable` shares this `node_id`, the fragmenter
+        // records the wrapper's full border-box size, not the image's
+        // content-box size. `self.{width, height}` is the layout-time
+        // content-box value, which is correct for both standalone and
+        // wrapped images since `wrap_replaced_in_block_style` already
+        // resolved the inset before constructing this `ImagePageable`.
+        crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
+        Some(Box::new(self.clone()))
     }
 }
 

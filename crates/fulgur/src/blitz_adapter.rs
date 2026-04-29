@@ -360,7 +360,8 @@ pub fn resolve(doc: &mut HtmlDocument) {
 ///
 /// Page-repetition of fixed content (Chrome's "should repeat on every page"
 /// behavior in WPT fixedpos-* tests) is intentionally **not** done here —
-/// that's a paginate-time concern owned by `crate::paginate`.
+/// the slice path replicates `is_fixed` children at their viewport-relative
+/// coordinates on every page.
 pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewport_h_px: f32) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     use std::ops::DerefMut;

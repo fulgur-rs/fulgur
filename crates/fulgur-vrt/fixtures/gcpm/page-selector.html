@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page {
+  size: A4;
+  margin: 60pt;
+  @top-center { content: "Default Header"; font-size: 9pt; color: #555; }
+  @bottom-center { content: counter(page); font-size: 9pt; }
+}
+@page :first {
+  @top-center { content: ""; }
+}
+@page :left {
+  @top-left { content: "Left"; font-size: 8pt; color: #888; }
+}
+@page :right {
+  @top-right { content: "Right"; font-size: 8pt; color: #888; }
+}
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; }
+h2 { margin-top: 18pt; }
+p { margin: 8pt 0; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<h2>Page Selector Fixture</h2>
+<p>This fixture verifies that <code>@page :first</code> / <code>@page :left</code> / <code>@page :right</code> selectors override the default <code>@page</code> rule per page:</p>
+<ul>
+  <li>Page 1 (:first): no top-center header.</li>
+  <li>Page 2 (:left, even): "Left" appears top-left.</li>
+  <li>Page 3 (:right, odd): "Right" appears top-right.</li>
+</ul>
+<div class="box"><p>Filler.</p></div>
+<div class="box"><p>Filler so content reaches page 2.</p></div>
+<div class="box"><p>More filler.</p></div>
+<div class="box"><p>More filler still.</p></div>
+<h2 style="page-break-before: always">Page 2 Heading</h2>
+<p>This page is :left (even). The default top-center remains, plus "Left" should appear top-left.</p>
+<div class="box"><p>Filler to reach page 3.</p></div>
+<div class="box"><p>More filler.</p></div>
+<h2 style="page-break-before: always">Page 3 Heading</h2>
+<p>This page is :right (odd). The default top-center remains, plus "Right" should appear top-right.</p>
+</body>
+</html>

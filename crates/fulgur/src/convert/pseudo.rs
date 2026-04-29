@@ -255,6 +255,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             x: parent_cb.origin_x,
             y: parent_cb.origin_y,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
     out.extend(children);
@@ -264,6 +265,7 @@ pub(super) fn wrap_with_block_pseudo_images(
             x: parent_cb.origin_x,
             y: parent_cb.origin_y + parent_cb.height,
             out_of_flow: false,
+            is_fixed: false,
         });
     }
     out
@@ -672,6 +674,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -722,6 +725,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -797,6 +801,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -856,6 +861,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -906,6 +912,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };

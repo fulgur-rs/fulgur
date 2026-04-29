@@ -18,7 +18,7 @@ pub(crate) mod multicol_layout;
 pub(crate) mod net;
 pub mod outline;
 pub mod pageable;
-pub mod paginate;
+pub(crate) mod pagination_layout;
 pub mod paragraph;
 pub mod render;
 pub mod schema;

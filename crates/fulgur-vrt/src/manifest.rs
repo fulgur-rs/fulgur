@@ -31,6 +31,9 @@ pub struct FixtureRow {
     pub page_size: Option<String>,
     pub dpi: Option<u32>,
     pub margin_pt: Option<f32>,
+    /// Enable PDF outline generation (`Engine::builder().bookmarks(true)`).
+    /// Default `false` to keep existing goldens stable.
+    pub bookmarks: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +51,7 @@ pub struct Fixture {
     pub dpi: u32,
     pub tolerance_chrome: Tolerance,
     pub margin_pt: Option<f32>,
+    pub bookmarks: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +80,7 @@ impl Manifest {
                     .tolerance_chrome
                     .unwrap_or(raw.defaults.tolerance_chrome),
                 margin_pt: row.margin_pt,
+                bookmarks: row.bookmarks.unwrap_or(false),
             })
             .collect();
         Ok(Self { fixtures })

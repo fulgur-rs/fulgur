@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page { size: A4; margin: 60pt; }
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; }
+h2 { margin-top: 18pt; }
+p { margin: 8pt 0; }
+a { color: #0a64c8; text-decoration: underline; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<h2 id="top">Link Annotations</h2>
+<p>This fixture exercises both internal and external link annotations. The PDF must emit <code>/Annots</code> entries with <code>/Subtype /Link</code> for each <code>&lt;a href&gt;</code> with a non-empty href.</p>
+<p>External link: <a href="https://example.com">visit example.com</a>.</p>
+<p>Internal link: <a href="#bottom">jump to bottom</a> on page 2.</p>
+<div class="box"><p>Filler box to push the bottom anchor onto a separate page.</p></div>
+<div class="box"><p>More filler.</p></div>
+<div class="box"><p>Even more filler.</p></div>
+<div class="box"><p>Filler so the destination is below the page boundary.</p></div>
+<div class="box"><p>Last filler.</p></div>
+<h2 id="bottom" style="page-break-before: always">Bottom Anchor (page 2)</h2>
+<p>The internal link above should resolve to this heading on page 2. <a href="#top">back to top</a>.</p>
+</body>
+</html>

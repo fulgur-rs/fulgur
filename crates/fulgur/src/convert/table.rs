@@ -69,6 +69,7 @@ fn convert_table(
         opacity,
         visible,
         id: extract_block_id(node),
+        node_id: Some(node.id),
     };
     Box::new(table)
 }
@@ -159,6 +160,7 @@ fn collect_table_cells(
             x: cx,
             y: cy,
             out_of_flow: false,
+            is_fixed: false,
         };
 
         if is_header {

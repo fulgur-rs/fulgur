@@ -48,6 +48,16 @@ fn wrap_replaced_in_block_style<F>(
     build_inner: F,
 ) -> Box<dyn Pageable>
 where
+    // `build_inner` always sets `node_id` on the inner Pageable. When
+    // wrapped in a styled BlockPageable both share the DOM node's
+    // geometry: the wrapping block carries `node_id` so it can locate
+    // its fragment, and the inner also carries `node_id` so its
+    // `slice_for_page` returns the per-page slice (single-fragment
+    // fast path or line range for multi-page wraps).
+    // `BlockPageable::slice_for_page` detects the shared-node_id case
+    // and uses `pc.y` (content inset = padding + border) instead of
+    // `child_frag.y - self_frag.y == 0`, so the inset is not collapsed
+    // (fulgur-frmj — restores content lost by the PR #291 attempt).
     F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
 {
     let (width, height) = size_in_pt(node.final_layout.size);
@@ -72,13 +82,15 @@ where
             x: cx,
             y: cy,
             out_of_flow: false,
+            is_fixed: false,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_pagination(pagination)
             .with_style(style)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
@@ -93,16 +105,19 @@ where
             x: 0.0,
             y: 0.0,
             out_of_flow: false,
+            is_fixed: false,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
             .with_pagination(pagination)
             .with_opacity(opacity)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
     } else {
+        // No wrapping block — inner IS the outermost Pageable for this DOM node.
         build_inner(width, height, opacity, visible)
     }
 }
@@ -173,13 +188,16 @@ fn convert_content_url(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(asset_name)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
         node,
         assets,
         move |w, h, opacity, visible| {
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            img.node_id = Some(node_id);
             Box::new(img)
         },
     ))
@@ -196,6 +214,7 @@ fn convert_image(
     let bundle = assets?;
     let data = Arc::clone(bundle.get_image(src)?);
     let format = ImagePageable::detect_format(&data)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
@@ -207,7 +226,9 @@ fn convert_image(
             // The shared helper then applies the same `ImagePageable::new`
             // construction path as the pseudo-content url() case, keeping
             // sizing behavior byte-identical to the previous <img> path.
-            let img = make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            let mut img =
+                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
+            img.node_id = Some(node_id);
             Box::new(img)
         },
     ))
@@ -225,6 +246,7 @@ fn convert_svg(
 ) -> Option<Box<dyn Pageable>> {
     let elem = node.element_data()?;
     let tree = extract_inline_svg_tree(elem)?;
+    let node_id = node.id;
 
     Some(wrap_replaced_in_block_style(
         ctx,
@@ -234,6 +256,7 @@ fn convert_svg(
             let mut svg = SvgPageable::new(tree, w, h);
             svg.opacity = opacity;
             svg.visible = visible;
+            svg.node_id = Some(node_id);
             Box::new(svg)
         },
     ))
@@ -335,6 +358,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -369,6 +393,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -406,6 +431,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };

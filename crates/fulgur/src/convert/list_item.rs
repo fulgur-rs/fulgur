@@ -78,6 +78,7 @@ pub(super) fn try_convert(
             height: 0.0,
             opacity,
             visible,
+            node_id: Some(node_id),
         };
         item.wrap(width, 10000.0);
         return Some(Box::new(item));
@@ -135,6 +136,7 @@ pub(super) fn try_convert(
                 height: 0.0,
                 opacity,
                 visible,
+                node_id: Some(node_id),
             };
             item.wrap(width, 10000.0);
             return Some(Box::new(item));
@@ -206,6 +208,7 @@ pub(super) fn try_convert(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let (positioned_children, _has_pseudo) = pseudo::wrap_with_pseudo_content(
                     doc,
@@ -221,7 +224,8 @@ pub(super) fn try_convert(
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node_id));
                 block.wrap(width, 10000.0);
                 if needs_wrapper {
                     block.layout_size = Some(Size { width, height });
@@ -273,6 +277,7 @@ pub(super) fn try_convert(
                             x: 0.0,
                             y: 0.0,
                             out_of_flow: false,
+                            is_fixed: false,
                         },
                     );
                 }
@@ -292,7 +297,8 @@ pub(super) fn try_convert(
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node_id));
             block.wrap(width, 10000.0);
             if has_style {
                 block.layout_size = Some(Size { width, height });
@@ -389,6 +395,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
@@ -401,13 +408,19 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
+                // Unwrapped: paragraph is the outermost Pageable for
+                // this DOM node — set `node_id` here. (extract_paragraph
+                // intentionally leaves it unset so the wrapped branch
+                // above can put node_id on the BlockPageable instead.)
                 let mut p = paragraph;
                 p.visible = visible;
+                p.node_id = Some(node.id);
                 Box::new(p)
             }
         } else if before_inline.is_some() || after_inline.is_some() {
@@ -443,6 +456,7 @@ fn build_list_item_body(
                     x: child_x,
                     y: child_y,
                     out_of_flow: false,
+                    is_fixed: false,
                 }];
                 let mut children = pseudo::wrap_with_block_pseudo_images(
                     before_pseudo,
@@ -455,12 +469,17 @@ fn build_list_item_body(
                     .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
-                    .with_id(extract_block_id(node));
+                    .with_id(extract_block_id(node))
+                    .with_node_id(Some(node.id));
                 block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
-                Box::new(paragraph)
+                // Unwrapped synthetic paragraph: outermost Pageable
+                // for this DOM node — set `node_id` here.
+                let mut p = paragraph;
+                p.node_id = Some(node.id);
+                Box::new(p)
             }
         } else {
             // Inline root with no text and no inline pseudo images —
@@ -481,7 +500,8 @@ fn build_list_item_body(
                 .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_visible(visible)
-                .with_id(extract_block_id(node));
+                .with_id(extract_block_id(node))
+                .with_node_id(Some(node.id));
             block.wrap(width, 10000.0);
             Box::new(block)
         }
@@ -502,7 +522,8 @@ fn build_list_item_body(
             .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_visible(visible)
-            .with_id(extract_block_id(node));
+            .with_id(extract_block_id(node))
+            .with_node_id(Some(node.id));
         block.wrap(width, 10000.0);
         Box::new(block)
     }
@@ -529,6 +550,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -555,6 +577,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };
@@ -581,6 +604,7 @@ mod tests {
             bookmark_by_node: HashMap::new(),
             column_styles: crate::column_css::ColumnStyleTable::new(),
             multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+            pagination_geometry: ::std::collections::BTreeMap::new(),
             link_cache: Default::default(),
             viewport_size_px: None,
         };

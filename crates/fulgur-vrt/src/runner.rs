@@ -140,6 +140,7 @@ pub fn run(ctx: &RunnerContext) -> anyhow::Result<RunResult> {
                 page_size: &fx.page_size,
                 margin_pt: fx.margin_pt,
                 dpi: fx.dpi,
+                bookmarks: fx.bookmarks,
             },
         )?;
 

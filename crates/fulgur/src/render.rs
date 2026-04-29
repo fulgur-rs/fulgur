@@ -5,17 +5,39 @@ use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
 use crate::pageable::{Canvas, Pageable};
-use crate::paginate::paginate;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Render a Pageable tree to PDF bytes.
-pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>> {
+/// Render a Pageable tree to PDF bytes using fragmenter geometry to
+/// split pages.
+///
+/// Used from `Engine::render_html` for the no-GCPM branch so the
+/// no-GCPM path uses the same partition split as
+/// `render_to_pdf_with_gcpm`.
+pub fn render_to_pdf(
+    root: Box<dyn Pageable>,
+    config: &Config,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+) -> Result<Vec<u8>> {
+    // Blank `<body>` and bodies containing only fragmenter-skipped
+    // descendants (e.g. `position: fixed`/`absolute`-only trees) leave
+    // `geometry` empty, and `partition_pageable_by_geometry` returns
+    // `vec![]`. Fall back to rendering `root` as a single page in that
+    // case so empty bodies still produce a one-page PDF.
+    let pages = if geometry.is_empty() {
+        vec![root]
+    } else {
+        let pages =
+            crate::pagination_layout::partition_pageable_by_geometry(root.as_ref(), geometry);
+        drop(root);
+        pages
+    };
+    render_pages_to_pdf(pages, config)
+}
+
+fn render_pages_to_pdf(pages: Vec<Box<dyn Pageable>>, config: &Config) -> Result<Vec<u8>> {
     let content_width = config.content_width();
     let content_height = config.content_height();
-
-    // Paginate
-    let pages = paginate(root, content_width, content_height);
 
     // Create PDF document
     let mut document = krilla::Document::new();
@@ -225,12 +247,16 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
 /// - Pass 1: paginate the body content to determine page count
 /// - Pass 2: render each page, resolving margin box content (counters, running elements)
 ///   and laying them out via Blitz before drawing
+#[allow(clippy::too_many_arguments)]
 pub fn render_to_pdf_with_gcpm(
     root: Box<dyn Pageable>,
     config: &Config,
     gcpm: &GcpmContext,
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
+    pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
+    string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
+    counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
 ) -> Result<Vec<u8>> {
     // Resolve the default (no-selector) CSS @page margin for initial pagination.
     // :first/:left/:right overrides are applied per-page during rendering below.
@@ -248,27 +274,41 @@ pub fn render_to_pdf_with_gcpm(
         init_size
     };
     let content_width = init_size.width - init_margin.left - init_margin.right;
-    let content_height = init_size.height - init_margin.top - init_margin.bottom;
+    let _content_height = init_size.height - init_margin.top - init_margin.bottom;
 
-    // Pass 1: paginate body content
-    let pages = paginate(root, content_width, content_height);
+    // body-content page split is geometry-driven: the fragmenter
+    // populated `pagination_geometry` upstream and this helper slices
+    // the Pageable tree per page using that geometry.
+    let pages = crate::pagination_layout::partition_pageable_by_geometry(
+        root.as_ref(),
+        pagination_geometry,
+    );
+    drop(root);
     let total_pages = pages.len();
+
+    // Per-page state collected directly from the fragmenter geometry
+    // (no Pageable tree walk required).
     let string_set_states = if gcpm.string_set_mappings.is_empty() {
-        vec![BTreeMap::new(); pages.len()]
+        vec![BTreeMap::new(); total_pages]
     } else {
-        crate::paginate::collect_string_set_states(&pages)
+        let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        crate::pagination_layout::collect_string_set_states(pagination_geometry, &by_node_btree)
     };
     let running_states = if gcpm.running_mappings.is_empty() {
-        vec![BTreeMap::new(); pages.len()]
+        vec![BTreeMap::new(); total_pages]
     } else {
-        crate::paginate::collect_running_element_states(&pages)
+        crate::pagination_layout::collect_running_element_states(pagination_geometry, running_store)
     };
-    let counter_states =
-        if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
-            vec![BTreeMap::new(); pages.len()]
-        } else {
-            crate::paginate::collect_counter_states(&pages)
-        };
+    let counter_states = if gcpm.counter_mappings.is_empty()
+        && gcpm.content_counter_mappings.is_empty()
+    {
+        vec![BTreeMap::new(); total_pages]
+    } else {
+        crate::pagination_layout::collect_counter_states(pagination_geometry, counter_ops_by_node)
+    };
 
     // Build margin-box CSS: strip display:none rules that the parser
     // injected for running elements (they need to be visible in margin boxes).
@@ -539,6 +579,7 @@ pub fn render_to_pdf_with_gcpm(
                     bookmark_by_node: HashMap::new(),
                     column_styles: crate::column_css::ColumnStyleTable::new(),
                     multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+                    pagination_geometry: crate::pagination_layout::PaginationGeometryTable::new(),
                     link_cache: Default::default(),
                     viewport_size_px: None,
                 };
@@ -861,21 +902,21 @@ mod tests {
 
     #[test]
     fn render_to_pdf_produces_valid_pdf() {
-        let pdf = render_to_pdf(simple_root(), &Config::default()).unwrap();
+        let pdf = render_to_pdf(simple_root(), &Config::default(), &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_landscape_page() {
         let config = Config::builder().landscape(true).build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
     #[test]
     fn render_to_pdf_bookmarks_enabled() {
         let config = Config::builder().bookmarks(true).build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
@@ -891,7 +932,7 @@ mod tests {
             .producer("my-producer")
             .creation_date("2024-06-15T10:30:45Z")
             .build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
         assert_eq!(pdf_info_field(&pdf, b"Title").as_deref(), Some("My Title"));
         assert_eq!(pdf_info_field(&pdf, b"Author").as_deref(), Some("Alice"));
@@ -909,7 +950,7 @@ mod tests {
     #[test]
     fn render_to_pdf_creation_date_parse_failure_is_ignored() {
         let config = Config::builder().creation_date("not-a-date").build();
-        let pdf = render_to_pdf(simple_root(), &config).unwrap();
+        let pdf = render_to_pdf(simple_root(), &config, &Default::default()).unwrap();
         assert_pdf_header(&pdf);
     }
 
@@ -925,6 +966,9 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -941,6 +985,9 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -957,6 +1004,9 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -980,6 +1030,9 @@ mod tests {
             &gcpm,
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);
@@ -1014,6 +1067,9 @@ mod tests {
             &GcpmContext::default(),
             &RunningElementStore::new(),
             &[],
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_pdf_header(&pdf);

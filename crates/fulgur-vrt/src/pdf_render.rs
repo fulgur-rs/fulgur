@@ -12,6 +12,7 @@ pub struct RenderSpec<'a> {
     pub page_size: &'a str,
     pub margin_pt: Option<f32>,
     pub dpi: u32,
+    pub bookmarks: bool,
 }
 
 fn page_size_from_name(name: &str) -> anyhow::Result<PageSize> {
@@ -32,6 +33,9 @@ pub fn render_html_to_pdf(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Ve
     let mut builder = Engine::builder().page_size(page_size_from_name(spec.page_size)?);
     if let Some(mpt) = spec.margin_pt {
         builder = builder.margin(Margin::uniform(mpt));
+    }
+    if spec.bookmarks {
+        builder = builder.bookmarks(true);
     }
     let engine = builder.build();
 
@@ -92,6 +96,7 @@ mod tests {
                 page_size: "A4",
                 margin_pt: Some(0.0),
                 dpi: 150,
+                bookmarks: false,
             },
             tmp.path(),
         )
@@ -111,6 +116,7 @@ mod tests {
                 page_size: "A4",
                 margin_pt: Some(0.0),
                 dpi: 150,
+                bookmarks: false,
             },
         )
         .expect("render should succeed");
@@ -131,6 +137,7 @@ mod tests {
             page_size: "A4",
             margin_pt: Some(0.0),
             dpi: 150,
+            bookmarks: false,
         };
         let a = render_html_to_pdf(html, spec).unwrap();
         let b = render_html_to_pdf(html, spec).unwrap();
@@ -151,6 +158,7 @@ mod tests {
                 page_size: "A4",
                 margin_pt: None,
                 dpi: 150,
+                bookmarks: false,
             },
         )
         .expect("render with None should succeed");
@@ -160,6 +168,7 @@ mod tests {
                 page_size: "A4",
                 margin_pt: Some(0.0),
                 dpi: 150,
+                bookmarks: false,
             },
         )
         .expect("render with Some(0.0) should succeed");
