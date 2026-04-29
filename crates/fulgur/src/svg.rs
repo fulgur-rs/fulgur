@@ -109,17 +109,16 @@ impl Pageable for SvgPageable {
         geometry: &crate::pagination_layout::PaginationGeometryTable,
     ) -> Option<Box<dyn Pageable>> {
         let node_id = self.node_id?;
-        let frag = crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
-        // `Fragment.{width, height}` is CSS px; `SvgPageable` draws
-        // in PDF pt.
-        Some(Box::new(SvgPageable {
-            tree: Arc::clone(&self.tree),
-            width: crate::convert::px_to_pt(frag.width),
-            height: crate::convert::px_to_pt(frag.height),
-            opacity: self.opacity,
-            visible: self.visible,
-            node_id: self.node_id,
-        }))
+        // Presence check only. The fragment dimensions are unreliable
+        // for the inner-of-styled-block case (fulgur-frmj): when the
+        // wrapping `BlockPageable` shares this `node_id`, the fragmenter
+        // records the wrapper's full border-box size, not the SVG's
+        // content-box size. `self.{width, height}` is the layout-time
+        // content-box value, which is correct for both standalone and
+        // wrapped SVGs since `wrap_replaced_in_block_style` already
+        // resolved the inset before constructing this `SvgPageable`.
+        crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
+        Some(Box::new(self.clone()))
     }
 }
 

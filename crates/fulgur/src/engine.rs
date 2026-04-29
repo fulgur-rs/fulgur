@@ -331,7 +331,11 @@ impl Engine {
         let root = crate::convert::dom_to_pageable(&doc, &mut convert_ctx);
 
         if gcpm.is_empty() {
-            self.render_pageable(root)
+            crate::render::render_to_pdf_with_partition(
+                root,
+                &self.config,
+                &convert_ctx.pagination_geometry,
+            )
         } else {
             crate::render::render_to_pdf_with_gcpm(
                 root,

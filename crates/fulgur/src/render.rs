@@ -24,6 +24,30 @@ pub fn render_to_pdf(root: Box<dyn Pageable>, config: &Config) -> Result<Vec<u8>
     // Paginate
     let pages = paginate(root, content_width, content_height);
 
+    render_pages_to_pdf(pages, config)
+}
+
+/// Render a Pageable tree to PDF bytes using fragmenter geometry to
+/// split pages instead of `Pageable::split` (paginate.rs).
+///
+/// fulgur-frmj: this entry is taken from `Engine::render_html` for the
+/// no-GCPM branch so the no-GCPM path uses the same partition split
+/// as `render_to_pdf_with_gcpm`. Phase 3.4 will retire `paginate.rs`
+/// once `Engine::render_pageable` test callers no longer rely on it.
+pub fn render_to_pdf_with_partition(
+    root: Box<dyn Pageable>,
+    config: &Config,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+) -> Result<Vec<u8>> {
+    let pages = crate::pagination_layout::partition_pageable_by_geometry(root.as_ref(), geometry);
+    drop(root);
+    render_pages_to_pdf(pages, config)
+}
+
+fn render_pages_to_pdf(pages: Vec<Box<dyn Pageable>>, config: &Config) -> Result<Vec<u8>> {
+    let content_width = config.content_width();
+    let content_height = config.content_height();
+
     // Create PDF document
     let mut document = krilla::Document::new();
 

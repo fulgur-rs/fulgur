@@ -114,8 +114,15 @@ pub(super) fn try_convert(
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
                 // but the node's own text content, so it must respect the node's visibility.
                 // Do NOT propagate opacity — the wrapping block handles it via push_opacity.
+                // `node_id` is set so the inner paragraph's `slice_for_page`
+                // can locate its own fragment (fulgur-frmj). The wrapping
+                // `BlockPageable` shares the same `node_id` and detects the
+                // shared case in `slice_for_page` to keep `pc.y` as the
+                // content inset (padding + border) instead of collapsing to
+                // `child_frag.y - self_frag.y == 0`.
                 let mut p = paragraph;
                 p.visible = visible;
+                p.node_id = Some(node_id);
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(p),
                     x: child_x,
@@ -164,10 +171,14 @@ pub(super) fn try_convert(
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             let mut paragraph = ParagraphPageable::new(vec![line]);
             paragraph.visible = visible;
-            // `node_id` is set below only on the unwrapped return path —
-            // when wrapped in a `BlockPageable`, the block gets `node_id`
-            // and the inner paragraph leaves it `None` to avoid the
-            // shared-node_id collapse bug (Devin Review on PR #291).
+            // `node_id` is always set on the inner paragraph so its
+            // `slice_for_page` can locate its fragment. When wrapped in
+            // a `BlockPageable` below, the block carries the same
+            // `node_id`; `BlockPageable::slice_for_page` detects the
+            // shared case and uses `pc.y` (content inset) instead of
+            // collapsing to `child_frag.y - self_frag.y == 0`
+            // (fulgur-frmj).
+            paragraph.node_id = Some(node_id);
 
             // Check for block pseudo images too
             let (before_pseudo, after_pseudo) =
@@ -207,7 +218,6 @@ pub(super) fn try_convert(
                 return Some(Box::new(block));
             }
             paragraph.opacity = opacity;
-            paragraph.node_id = Some(node_id);
             return Some(Box::new(paragraph));
         }
         // Fall through: inline root with no text and no inline pseudo images
@@ -533,13 +543,13 @@ pub(super) fn extract_paragraph(
     // default style) still register with `DestinationRegistry` for
     // `href="#top"` resolution.
     //
-    // `node_id` is intentionally NOT set here. Callers either return this
-    // paragraph as the outermost Pageable (and set `node_id` on it then) or
-    // wrap it in a `BlockPageable` (and set `node_id` on the block instead).
-    // Setting `node_id` on both block and inner paragraph would collapse
-    // the inner `pc.y` (content inset = padding + border) to 0 in
-    // `BlockPageable::slice_for_page` because both lookups resolve to the
-    // same `Fragment` (Devin Review on PR #291).
+    // `node_id` is intentionally NOT set here. Callers set it on the
+    // returned paragraph (whether it ends up as the outermost Pageable
+    // or wrapped in a `BlockPageable`); the wrapping path also sets
+    // `node_id` on the block so `BlockPageable::slice_for_page` can
+    // detect the shared-node case and use `pc.y` (content inset)
+    // instead of collapsing to `child_frag.y - self_frag.y == 0`
+    // (fulgur-frmj).
     Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
 }
 
