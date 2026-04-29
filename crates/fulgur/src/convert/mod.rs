@@ -305,6 +305,7 @@ fn extract_drawables_from_pageable(
     // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
     if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
         extract_drawables_from_pageable(w.child.as_ref(), out);
+        return;
     }
     // Other types (Spacer, ParagraphPageable, marker-only Pageables)
     // have no PR 2 payload — markers and Spacers stay no-op in v2;
