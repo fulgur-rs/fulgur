@@ -1048,7 +1048,25 @@ fn fragment_block_subtree(
     // starts. We close one parent fragment and start a new one each
     // time we cross a page boundary.
     let mut page_start_y = cursor_in;
-    let mut prev_bottom_in_parent: f32 = 0.0;
+    // fulgur-kv0r: parent-relative y of the first in-flow child on
+    // the current page strip. Taffy's `layout.location.y` is in the
+    // parent's full coordinate system (same value across page
+    // splits); each child's page-local y becomes
+    // `page_start_y + (this_top_in_parent - page_taffy_origin)`,
+    // which gives:
+    // - block siblings: sequential placement (same as cursor-advance)
+    // - grid / flex parallel siblings: same y (Taffy reports same
+    //   `location.y` for cards in the same row, so the offset
+    //   collapses to the row's first y).
+    //
+    // `origin_pending` defers the rebase: after a page advance
+    // (forced break, strip overflow, recursion crossing) we don't
+    // immediately know whether the next child is sequential or
+    // parallel, so we set the origin lazily to the next-arriving
+    // child's `this_top_in_parent` — that child lands at
+    // `page_start_y` regardless of what its absolute Taffy y is.
+    let mut page_taffy_origin: f32 = 0.0;
+    let mut origin_pending: bool = false;
 
     for &child_id in &parent.children {
         let Some(child) = doc.get_node(child_id) else {
@@ -1094,6 +1112,19 @@ fn fragment_block_subtree(
             Some(crate::pageable::BreakAfter::Page)
         );
 
+        // Compute Taffy parent-relative top early — both the zero-
+        // height path below and the non-zero path further down use
+        // it (and break-before / break-after rebases the
+        // `page_taffy_origin` against it on page advance).
+        let this_top_in_parent = layout.location.y;
+        // Apply deferred origin rebase: the previous child's
+        // page advance left `origin_pending` set, so this child
+        // becomes the "first child on the new page strip".
+        if origin_pending {
+            page_taffy_origin = this_top_in_parent;
+            origin_pending = false;
+        }
+
         if child_h <= 0.0 {
             // Phase 2.3 fix: zero-height **element** nodes still
             // need to enter geometry so their counter / string-set
@@ -1118,6 +1149,10 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
+                // Zero-height break-before: this child IS the first
+                // on the new page — apply origin rebase eagerly.
+                page_taffy_origin = this_top_in_parent;
+                origin_pending = false;
             }
             if child.element_data().is_some() {
                 geometry
@@ -1150,20 +1185,28 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
+                // Zero-height break-after: NEXT child is the first
+                // on the new page — defer origin rebase.
+                origin_pending = true;
             }
             continue;
         }
 
-        // Inter-child gap (collapsed margins, padding) in parent
-        // coordinates — same convention as `fragment_pagination_root`.
-        // The gap MUST be folded into `cursor_y` before the break-before
-        // check so a forced break properly discards the gap (cursor_y
-        // is reset to 0 on the new page). Doing break-before first
-        // would re-apply the gap on the new page, placing the child at
-        // y=gap instead of y=0 (Devin Review on PR #285).
-        let this_top_in_parent = layout.location.y;
-        let gap = (this_top_in_parent - prev_bottom_in_parent).max(0.0);
-        cursor_y += gap;
+        // fulgur-kv0r: place the child at its Taffy-reported parent-
+        // relative y, offset by the parent's start on the current
+        // page (`page_start_y`) and rebased against
+        // `page_taffy_origin` so the first child on each page strip
+        // lands at `page_start_y` regardless of its absolute parent
+        // y. For grid / flex parallel siblings (same `location.y`),
+        // this places them at the same page-local y; for sequential
+        // block flow, it matches Taffy's stacked positions exactly.
+        let mut child_page_y = page_start_y + (this_top_in_parent - page_taffy_origin);
+        // Update the cursor only when the child's bottom advances
+        // past it. For block flow this matches cursor advancing by
+        // `gap + child_h`; for grid parallel siblings the cursor
+        // tracks the row's max bottom (so break-before / overflow
+        // checks see the full row height).
+        cursor_y = cursor_y.max(child_page_y);
 
         // Honour `break-before: page`. Leading collapse: only fires
         // when some content has already been placed on this page —
@@ -1184,6 +1227,13 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
+            // The breaking child is the first in-flow child on the
+            // new page strip. Rebase the Taffy origin to its
+            // `this_top_in_parent` so it lands at `page_start_y` (= 0)
+            // — discarding the inter-child gap, matching CSS 3
+            // Fragmentation §3 (margins at forced breaks truncate).
+            page_taffy_origin = this_top_in_parent;
+            child_page_y = 0.0;
         }
 
         // (Strip-overflow page cut moved below the recursion gate as
@@ -1238,8 +1288,13 @@ fn fragment_block_subtree(
             // backward cursor returns (impossible in normal flow).
             if page_index != pre_recursion_page || nc < page_start_y {
                 page_start_y = 0.0;
+                // Recursion crossed pages: NEXT sibling is the first
+                // child on the new page — defer origin rebase to its
+                // arrival (could be sequential block or grid / flex
+                // parallel, same handling either way).
+                origin_pending = true;
             }
-            prev_bottom_in_parent = this_top_in_parent + child_h;
+
             // Honour `break-after: page` after recursion.
             if break_after_page {
                 geometry
@@ -1256,6 +1311,9 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
+                // Break-after: NEXT child starts the new page —
+                // defer origin rebase to its arrival.
+                origin_pending = true;
             }
             continue;
         }
@@ -1264,7 +1322,10 @@ fn fragment_block_subtree(
         // children that don't split (non-splittable, or splittable
         // but all grandchildren fit the available strip — the
         // parent-CSS-height-vs-children-sum case stays here).
-        if cursor_y > page_start_y && cursor_y + child_h > page_height_px {
+        // Use `child_page_y + child_h` (the actual placement bottom)
+        // rather than `cursor_y + child_h` so a parallel sibling
+        // returning to a smaller page-local y is checked correctly.
+        if child_page_y > page_start_y && child_page_y + child_h > page_height_px {
             geometry
                 .entry(parent_id)
                 .or_default()
@@ -1279,6 +1340,11 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
+            // Forced to a fresh page: rebase the Taffy origin so the
+            // current child lands at page_start_y (= 0) on the new
+            // page. Sequential siblings then continue from this point.
+            page_taffy_origin = this_top_in_parent;
+            child_page_y = 0.0;
         }
 
         // Child fits the strip (or is an atomic oversized leaf that
@@ -1293,7 +1359,7 @@ fn fragment_block_subtree(
             .push(Fragment {
                 page_index,
                 x: child_x_in_body,
-                y: cursor_y,
+                y: child_page_y,
                 width: child_w,
                 height: child_h,
             });
@@ -1302,12 +1368,16 @@ fn fragment_block_subtree(
             doc,
             child_id,
             page_index,
-            cursor_y,
+            child_page_y,
             child_x_in_body,
             depth + 1,
         );
-        cursor_y += child_h;
-        prev_bottom_in_parent = this_top_in_parent + child_h;
+        // Track the lowest point reached on this page so the
+        // overflow / break-before checks above see the full row's
+        // bottom for grid / flex parents (parallel siblings update
+        // `cursor_y` to `max(cursor_y, child_page_y + child_h)` —
+        // the per-row max bottom).
+        cursor_y = cursor_y.max(child_page_y + child_h);
 
         // Honour `break-after: page` after the child fragment lands
         // (and the descendant walk records same-page entries).
@@ -1326,6 +1396,9 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
+            // Break-after: NEXT child starts the new page — defer
+            // origin rebase to its arrival.
+            origin_pending = true;
         }
     }
 
@@ -2442,6 +2515,58 @@ mod tests {
         for (id, direct) in &direct_geom {
             let taffy = taffy_geom.get(id).expect("same node id in both passes");
             assert_eq!(direct.fragments, taffy.fragments, "node {id}");
+        }
+    }
+
+    /// fulgur-kv0r: parallel siblings in a grid / flex parent should
+    /// share the same page-local y when they share Taffy's
+    /// `layout.location.y`. Pre-fix, `fragment_block_subtree`
+    /// advanced `cursor_y` after each child via `cursor_y += child_h`,
+    /// so card 2 (Taffy y=0) was recorded at y=200 (= card 1's
+    /// height) in geometry. Post-fix the loop reads
+    /// `child_page_y = page_start_y + (this_top_in_parent - page_taffy_origin)`
+    /// directly from Taffy, and updates `cursor_y` only as a row's
+    /// max bottom for break / overflow checks.
+    #[test]
+    fn fragment_block_subtree_grid_parallel_siblings_share_page_y() {
+        // Two cells in a 2-column grid row, each 100px tall and
+        // 100px wide so the grid container distinguishes them by x.
+        // Pre-fix: card 2 placed at y=100 (cursor-advanced after
+        // card 1). Post-fix: card 2 placed at y=0 (Taffy `location.y`).
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="height: 100px; width: 100px"></div>
+                <div style="height: 100px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+
+        // Filter to fragments whose width is exactly the cell width
+        // (100) — that's only the two cards. Grid container has
+        // width 200 (two columns), html / body have viewport width.
+        let card_y: Vec<f32> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| {
+                f.page_index == 0 && (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5
+            })
+            .map(|f| f.y)
+            .collect();
+        assert_eq!(
+            card_y.len(),
+            2,
+            "expected two grid cells (100×100) on page 0, got {card_y:?}"
+        );
+        for y in &card_y {
+            assert!(
+                y.abs() < 0.5,
+                "grid parallel siblings must share y=0, got {y} (pre-fix: card 2 at y=100 due \
+                 to cursor-advance)",
+            );
         }
     }
 
