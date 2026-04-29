@@ -40,10 +40,30 @@ pub type NodeId = usize;
 #[derive(Debug, Clone, Default)]
 pub struct BlockEntry;
 
-/// PR 3 target: per-node shaped lines (`Vec<ShapedLine>`) reused from
-/// the existing `paragraph::draw_shaped_lines` path.
-#[derive(Debug, Clone, Default)]
-pub struct ParagraphEntry;
+/// Paragraph draw payload for v2. Holds the shaped lines that
+/// `paragraph::draw_shaped_lines` consumes verbatim — no re-shaping
+/// at render time. Mirrors the per-paragraph fields from
+/// `ParagraphPageable` that survive draw.
+#[derive(Clone)]
+pub struct ParagraphEntry {
+    pub lines: Vec<crate::paragraph::ShapedLine>,
+    pub opacity: f32,
+    pub visible: bool,
+    /// Anchor id (`id="..."` on the inline root) — drives
+    /// `DestinationRegistry` for `href="#..."` resolution.
+    pub id: Option<std::sync::Arc<String>>,
+}
+
+impl std::fmt::Debug for ParagraphEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParagraphEntry")
+            .field("lines", &self.lines.len())
+            .field("opacity", &self.opacity)
+            .field("visible", &self.visible)
+            .field("id", &self.id)
+            .finish()
+    }
+}
 
 /// Image draw payload for v2. Mirrors the fields `ImagePageable` holds.
 #[derive(Debug, Clone)]

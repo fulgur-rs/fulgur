@@ -210,13 +210,14 @@ fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
     out: &mut crate::drawables::Drawables,
 ) {
-    use crate::drawables::{ImageEntry, SvgEntry};
+    use crate::drawables::{ImageEntry, ParagraphEntry, SvgEntry};
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
         MulticolRulePageable, RunningElementWrapperPageable, StringSetWrapperPageable,
         TablePageable, TransformWrapperPageable,
     };
+    use crate::paragraph::ParagraphPageable;
     use crate::svg::SvgPageable;
 
     let any = pageable.as_any();
@@ -254,9 +255,38 @@ fn extract_drawables_from_pageable(
         }
         return;
     }
-    // Block / List / Table / wrappers — recurse into children. PR 4+
-    // will record their own draw payload (BlockEntry, etc.); for PR 2
-    // we only walk past them to reach the leaves.
+    // Paragraph leaf — record the shaped lines verbatim. The lines
+    // already carry per-glyph positions, link spans, decoration spans,
+    // and inline-image / inline-box items, so no re-shaping at render
+    // time. Inline content (LineItem::InlineBox) embeds whole Pageable
+    // subtrees that need their own draw payload — recurse so wrapper
+    // markers / nested blocks land in the appropriate `Drawables` map.
+    if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
+        if let Some(node_id) = para.node_id {
+            out.paragraphs.insert(
+                node_id,
+                ParagraphEntry {
+                    lines: para.lines.clone(),
+                    opacity: para.opacity,
+                    visible: para.visible,
+                    id: para.id.clone(),
+                },
+            );
+        }
+        // Recurse into inline-box content. Each `LineItem::InlineBox`
+        // holds a `Box<dyn Pageable>` (typically a `BlockPageable` for
+        // `<span>`-style inline blocks) so its descendants can register
+        // their own payloads.
+        for line in &para.lines {
+            for item in &line.items {
+                if let crate::paragraph::LineItem::InlineBox(ib) = item {
+                    extract_drawables_from_pageable(ib.content.as_ref(), out);
+                }
+            }
+        }
+        return;
+    }
+    // Block / List / Table / wrappers — recurse into children.
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
@@ -300,15 +330,15 @@ fn extract_drawables_from_pageable(
     // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
     // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
     // around any multicol container. Without this arm, images / SVGs
-    // nested inside a multicol container fall through to "Other" and
-    // never enter `Drawables.images` / `.svgs`. Multicol's own
-    // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
+    // / paragraphs nested inside a multicol container fall through to
+    // "Other" and never enter `Drawables`. Multicol's own column-rule
+    // painting still lands in PR 6 (`drawables.multicol_rules`).
     if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
         extract_drawables_from_pageable(w.child.as_ref(), out);
     }
-    // Other types (Spacer, ParagraphPageable, marker-only Pageables)
-    // have no PR 2 payload — markers and Spacers stay no-op in v2;
-    // Paragraph / Multicol-rule paint land in PR 3 / 6.
+    // Other types (Spacer, marker-only Pageables) have no PR 3
+    // payload — markers and Spacers stay no-op in v2; Multicol-rule
+    // paint lands in PR 6.
 }
 
 #[cfg(test)]

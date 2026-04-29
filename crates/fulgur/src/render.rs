@@ -35,6 +35,40 @@ pub fn render_v2(
     };
 
     let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
+
+    // Pre-pass: register `id` anchors for `href="#..."` resolution.
+    // PR 3 covers paragraph anchors (the only id-bearing type in
+    // Drawables this PR). PR 4+ will add block / list-item anchors
+    // when their entry types arrive.
+    let mut dest_registry = crate::pageable::DestinationRegistry::new();
+    for (&node_id, geom) in geometry {
+        let Some(first_frag) = geom.fragments.first() else {
+            continue;
+        };
+        if let Some(para) = drawables.paragraphs.get(&node_id)
+            && let Some(id) = &para.id
+        {
+            let page_idx = first_frag.page_index as usize;
+            dest_registry.set_current_page(page_idx);
+            // The fragment is in body content-area-relative CSS px;
+            // resolve the page-specific margin so destination y_pt is
+            // page-absolute (matches v1's `collect_ids` semantics).
+            let page_num = page_idx + 1;
+            let (_resolved_size, resolved_margin, _resolved_landscape) =
+                crate::gcpm::page_settings::resolve_page_settings(
+                    &gcpm.page_settings,
+                    page_num,
+                    page_count,
+                    config,
+                );
+            let x_pt = resolved_margin.left + crate::convert::px_to_pt(first_frag.x);
+            let y_pt = resolved_margin.top + crate::convert::px_to_pt(first_frag.y);
+            dest_registry.record(id.as_str(), x_pt, y_pt);
+        }
+    }
+
+    let mut link_collector = crate::pageable::LinkCollector::new();
+
     for page_idx in 0..page_count {
         let page_num = page_idx + 1;
         // Pass the full `gcpm.page_settings` (including selector
@@ -58,12 +92,13 @@ pub fn render_v2(
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
         }
+        link_collector.set_current_page(page_idx);
         {
             let mut surface = page.surface();
             let mut canvas = crate::pageable::Canvas {
                 surface: &mut surface,
                 bookmark_collector: bookmark_collector.as_mut(),
-                link_collector: None,
+                link_collector: Some(&mut link_collector),
             };
             draw_v2_page(
                 &mut canvas,
@@ -74,6 +109,8 @@ pub fn render_v2(
                 drawables,
             );
         }
+        let per_page = link_collector.take_page(page_idx);
+        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
     }
 
     if let Some(c) = bookmark_collector {
@@ -140,8 +177,12 @@ fn draw_v2_page(
                 draw_svg_v2(canvas, svg, x_pt, y_pt);
                 continue;
             }
-            // Other types (block_styles / paragraphs / tables / ...)
-            // land in subsequent PRs.
+            if let Some(para) = drawables.paragraphs.get(&node_id) {
+                draw_paragraph_v2(canvas, para, x_pt, y_pt);
+                continue;
+            }
+            // Other types (block_styles / tables / ...) land in
+            // subsequent PRs.
         }
     }
 }
@@ -210,6 +251,27 @@ fn draw_svg_v2(
             .surface
             .draw_svg(&entry.tree, size, SvgSettings::default());
         canvas.surface.pop();
+    });
+}
+
+/// v2 paragraph draw. Mirrors `paragraph::ParagraphPageable::draw`:
+/// honour `visible`, wrap with `draw_with_opacity`, then call the
+/// existing `paragraph::draw_shaped_lines` which already handles glyph
+/// runs / inline images / inline boxes / link rect emission /
+/// decoration spans. Reusing the helper keeps the per-glyph PDF output
+/// byte-identical between v1 and v2.
+fn draw_paragraph_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::ParagraphEntry,
+    x: f32,
+    y: f32,
+) {
+    use crate::pageable::draw_with_opacity;
+    if !entry.visible {
+        return;
+    }
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        crate::paragraph::draw_shaped_lines(canvas, &entry.lines, x, y);
     });
 }
 

@@ -247,3 +247,54 @@ fn render_path_byte_equality() {
     // visible signal — the test passes regardless.
     let _ = diffs;
 }
+
+/// Inline byte-equality cases. These exist alongside the on-disk
+/// fixtures because PR 3's Paragraph migration only unlocks byte-eq
+/// for documents with **purely paragraph content under a margin:0
+/// body** — no Block backgrounds, no inline-block, no Table. The
+/// existing VRT / examples fixtures all have richer content that
+/// requires later PRs (Block, Table, Multicol, Transform). Inline
+/// cases let each PR demonstrate productive byte-eq advancement
+/// without seeding VRT goldens that lock in incomplete v2 output.
+///
+/// Each case asserts unconditionally — they are the unit-of-progress
+/// for the migration. PR N adds cases that PR N's migration covers.
+#[test]
+fn inline_byte_equality_cases() {
+    // PR 3 (Paragraph + inline content) coverage.
+    let pr3_cases: &[(&str, &str)] = &[
+        (
+            "minimal body text",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}</style></head><body>hello world</body></html>",
+        ),
+        (
+            "two paragraphs",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>first paragraph</p><p>second paragraph here</p></body></html>",
+        ),
+        (
+            "paragraph with anchor link",
+            r#"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>before <a href="https://example.com">link</a> after</p></body></html>"#,
+        ),
+        (
+            "paragraph with internal anchor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p id="top">heading line</p><p><a href="#top">jump</a></p></body></html>"##,
+        ),
+    ];
+
+    for (label, html) in pr3_cases {
+        let engine = Engine::builder().build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+}
