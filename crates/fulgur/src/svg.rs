@@ -20,6 +20,9 @@ pub struct SvgPageable {
     pub height: f32,
     pub opacity: f32,
     pub visible: bool,
+    /// fulgur-3vwx (Phase 3.2.b): DOM NodeId for `slice_for_page`
+    /// geometry lookup. See `BlockPageable::node_id`.
+    pub node_id: Option<usize>,
 }
 
 impl SvgPageable {
@@ -30,7 +33,13 @@ impl SvgPageable {
             height,
             opacity: 1.0,
             visible: true,
+            node_id: None,
         }
+    }
+
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
+        self
     }
 }
 
@@ -88,6 +97,27 @@ impl Pageable for SvgPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn node_id(&self) -> Option<usize> {
+        self.node_id
+    }
+
+    fn slice_for_page(
+        &self,
+        page_index: u32,
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+    ) -> Option<Box<dyn Pageable>> {
+        let node_id = self.node_id?;
+        let frag = crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
+        Some(Box::new(SvgPageable {
+            tree: Arc::clone(&self.tree),
+            width: frag.width,
+            height: frag.height,
+            opacity: self.opacity,
+            visible: self.visible,
+            node_id: self.node_id,
+        }))
     }
 }
 

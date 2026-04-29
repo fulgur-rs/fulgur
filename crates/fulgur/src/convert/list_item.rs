@@ -78,6 +78,7 @@ pub(super) fn try_convert(
             height: 0.0,
             opacity,
             visible,
+            node_id: Some(node_id),
         };
         item.wrap(width, 10000.0);
         return Some(Box::new(item));
@@ -135,6 +136,7 @@ pub(super) fn try_convert(
                 height: 0.0,
                 opacity,
                 visible,
+                node_id: Some(node_id),
             };
             item.wrap(width, 10000.0);
             return Some(Box::new(item));

@@ -2781,6 +2781,307 @@ mod tests {
         );
     }
 
+    // ─── slice_for_page wrapper / special-split tests (fulgur-3vwx Phase 3.2.b) ───
+
+    use crate::gcpm::CounterOp;
+    use crate::pageable::{
+        BookmarkMarkerPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable,
+    };
+
+    /// CounterOpWrapper.slice_for_page keeps the marker on the first page
+    /// where the wrapped child appears, drops it on continuation pages
+    /// (returns the inner child unwrapped). Without this, counter
+    /// operations would be replayed on every page the child spans.
+    #[test]
+    fn counter_op_wrapper_keeps_marker_on_first_page_only() {
+        const ID: usize = 600;
+        let inner = SpacerPageable::new(100.0).with_node_id(Some(ID));
+        let wrapped = CounterOpWrapperPageable::new(
+            vec![CounterOp::Increment {
+                name: "section".into(),
+                value: 1,
+            }],
+            Box::new(inner),
+        );
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page0 = wrapped
+            .slice_for_page(0, &geom)
+            .expect("inner has fragment on page 0");
+        assert!(
+            page0
+                .as_any()
+                .downcast_ref::<CounterOpWrapperPageable>()
+                .is_some(),
+            "page 0 keeps the wrapper (counter op fires here)"
+        );
+
+        let page1 = wrapped
+            .slice_for_page(1, &geom)
+            .expect("inner has fragment on page 1");
+        assert!(
+            page1
+                .as_any()
+                .downcast_ref::<CounterOpWrapperPageable>()
+                .is_none(),
+            "page 1 strips the wrapper (counter op already fired)"
+        );
+        assert!(
+            page1.as_any().downcast_ref::<SpacerPageable>().is_some(),
+            "page 1 returns the unwrapped inner Spacer, got {:?}",
+            std::any::type_name_of_val(&*page1)
+        );
+    }
+
+    /// Devin Review on PR #288: `TablePageable::slice_for_page` must
+    /// **recursively** slice body cells (`pc.child.slice_for_page(...)`)
+    /// rather than `clone_box()` them. Otherwise a body cell that
+    /// spans pages internally contributes its full content to every
+    /// page where it appears, breaking the slice contract.
+    ///
+    /// Setup: a single body cell whose child is a `BlockPageable`
+    /// containing A (h=100, page 0) and B (h=100, page 1). On page 1
+    /// the table's body cell must contain ONLY B, not the full A+B.
+    #[test]
+    fn table_slice_for_page_recursively_slices_multi_page_body_cells() {
+        use crate::pageable::TablePageable;
+
+        const TABLE_ID: usize = 700;
+        const CELL_ID: usize = 701;
+        const A_ID: usize = 702;
+        const B_ID: usize = 703;
+
+        let cell_block = BlockPageable::with_positioned_children(vec![
+            PositionedChild::in_flow(
+                Box::new(SpacerPageable::new(100.0).with_node_id(Some(A_ID))),
+                0.0,
+                0.0,
+            ),
+            PositionedChild::in_flow(
+                Box::new(SpacerPageable::new(100.0).with_node_id(Some(B_ID))),
+                0.0,
+                100.0,
+            ),
+        ])
+        .with_node_id(Some(CELL_ID));
+
+        let table = TablePageable {
+            header_cells: Vec::new(),
+            body_cells: vec![PositionedChild::in_flow(Box::new(cell_block), 0.0, 0.0)],
+            header_height: 0.0,
+            style: Default::default(),
+            layout_size: None,
+            width: 200.0,
+            cached_height: 0.0,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+            node_id: Some(TABLE_ID),
+        };
+
+        // Geometry: table + cell span both pages, A only on page 0,
+        // B only on page 1.
+        let mut geom = PaginationGeometryTable::new();
+        for id in [TABLE_ID, CELL_ID] {
+            geom.entry(id).or_default().fragments.extend([
+                Fragment {
+                    page_index: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                Fragment {
+                    page_index: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+            ]);
+        }
+        geom.entry(A_ID).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+        geom.entry(B_ID).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+
+        let page1 = table
+            .slice_for_page(1, &geom)
+            .expect("table on page 1")
+            .as_any()
+            .downcast_ref::<TablePageable>()
+            .cloned()
+            .expect("page 1 is a TablePageable");
+        assert_eq!(page1.body_cells.len(), 1, "page 1 keeps the cell");
+        let cell_block = page1.body_cells[0]
+            .child
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .expect("cell child is a BlockPageable");
+        // Pre-fix: cell_block.children would have BOTH A and B
+        // (clone_box() copies everything). Post-fix: only B is sliced
+        // in for page 1 (A's slice_for_page returns None since A has
+        // no fragment on page 1).
+        assert_eq!(
+            cell_block.children.len(),
+            1,
+            "cell on page 1 keeps only B (slice recurses), got {} children",
+            cell_block.children.len(),
+        );
+    }
+
+    /// Devin Review on PR #288 (second comment):
+    /// `MulticolRulePageable::slice_for_page` was clamping
+    /// per-column heights to `visible_h` for groups straddling from a
+    /// prior page (`group_top < 0`), without subtracting the
+    /// `consumed_above` portion that was already painted on earlier
+    /// pages. Result: a column whose entire content ended on a prior
+    /// page got `visible_h` (non-zero) instead of 0 on this page,
+    /// causing a stranded rule painted from y=0 to y=visible_h with
+    /// no actual content underneath.
+    ///
+    /// Setup: child has fragments on page 0 (height=20) and page 1
+    /// (height=50). Group at y_offset=0 with col_heights=[10, 30].
+    /// On page 1, group_top = 0 - 20 = -20. Column 0 (h=10) ends at
+    /// -10 (entirely above page) → expect 0. Column 1 (h=30) ends at
+    /// 10 (10pt visible on page 1) → expect 10.
+    #[test]
+    fn multicol_rule_slice_for_page_subtracts_consumed_above_when_straddling() {
+        use crate::multicol_layout::ColumnGroupGeometry;
+        use crate::pageable::MulticolRulePageable;
+
+        const CHILD_ID: usize = 800;
+
+        let child = SpacerPageable::new(70.0).with_node_id(Some(CHILD_ID));
+        let group = ColumnGroupGeometry {
+            y_offset: 0.0,
+            x_offset: 0.0,
+            n: 2,
+            col_w: 100.0,
+            gap: 10.0,
+            col_heights: vec![10.0, 30.0],
+        };
+        let wrapper = MulticolRulePageable {
+            child: Box::new(child),
+            rule: crate::column_css::ColumnRuleSpec {
+                width: 1.0,
+                style: crate::column_css::ColumnRuleStyle::Solid,
+                color: [0, 0, 0, 255],
+            },
+            groups: vec![group],
+        };
+
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(CHILD_ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 20.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page1 = wrapper
+            .slice_for_page(1, &geom)
+            .expect("child has page 1 fragment")
+            .as_any()
+            .downcast_ref::<MulticolRulePageable>()
+            .cloned()
+            .expect("page 1 slice is a MulticolRulePageable");
+        assert_eq!(page1.groups.len(), 1, "straddling group survives on page 1");
+        let g = &page1.groups[0];
+        assert!(
+            (g.col_heights[0] - 0.0).abs() < 0.01,
+            "column 0 (h=10) was entirely above page 1, expected 0, got {}",
+            g.col_heights[0],
+        );
+        assert!(
+            (g.col_heights[1] - 10.0).abs() < 0.01,
+            "column 1 (h=30) has 10pt remaining on page 1, expected 10, got {}",
+            g.col_heights[1],
+        );
+    }
+
+    /// BookmarkMarkerWrapper.slice_for_page applies the same first-page-only
+    /// rule for outline anchors.
+    #[test]
+    fn bookmark_marker_wrapper_keeps_marker_on_first_page_only() {
+        const ID: usize = 601;
+        let inner = SpacerPageable::new(100.0).with_node_id(Some(ID));
+        let wrapped = BookmarkMarkerWrapperPageable::new(
+            BookmarkMarkerPageable::new(1, "Chapter 1".into()),
+            Box::new(inner),
+        );
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(ID).or_default().fragments.extend([
+            Fragment {
+                page_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            Fragment {
+                page_index: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        ]);
+
+        let page0 = wrapped.slice_for_page(0, &geom).unwrap();
+        assert!(
+            page0
+                .as_any()
+                .downcast_ref::<BookmarkMarkerWrapperPageable>()
+                .is_some(),
+            "bookmark anchor lands on first page"
+        );
+        let page1 = wrapped.slice_for_page(1, &geom).unwrap();
+        assert!(
+            page1
+                .as_any()
+                .downcast_ref::<BookmarkMarkerWrapperPageable>()
+                .is_none(),
+            "continuation page has no bookmark anchor"
+        );
+    }
+
     /// fulgur-s67g Phase 2.1: a 3-line paragraph that overflows the
     /// page strip after line 2 cannot split between line 2 and the
     /// final line — the second fragment would have only 1 line, below
