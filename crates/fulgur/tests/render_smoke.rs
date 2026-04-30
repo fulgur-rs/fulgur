@@ -629,19 +629,18 @@ fn position_fixed_repeats_on_every_page() {
 
 // ── Phase 4 v2 render path smoke tests (fulgur-9t3z) ─────────────────
 //
-// Exercise the v2 dispatcher (`render_v2`) so the patch-coverage gate
-// sees the new draw helpers added in PR 6 (`draw_under_transform`,
+// Exercise the v2 render path (`render_v2`) so the patch-coverage
+// gate sees the new draw helpers added in PR 6 (`draw_under_transform`,
 // `draw_under_clip`, `draw_under_opacity`, `paint_multicol_rule_for_page`,
 // `paint_root_block_v2`, `MarginBoxRenderer`). These run end-to-end
-// through `Engine::render_html_v2` and assert only that the bytes
-// come back non-empty — byte-eq with v1 is already covered by the
-// `render_path_parity` shadow harness.
+// through `Engine::render_html` (defaulted to v2 in PR 7) and assert
+// only that the bytes come back non-empty.
 
 #[test]
 fn render_v2_smoke_transform_translate() {
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -652,7 +651,7 @@ fn render_v2_smoke_nested_transforms() {
     // matrices must compose.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;background:#cef;transform:rotate(10deg)}.inner{width:60px;height:40px;background:#fce;transform:translate(8px,4px)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -662,7 +661,7 @@ fn render_v2_smoke_multicol_with_column_rule() {
     // declare `column-rule` so this path needs an explicit smoke test.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -672,7 +671,7 @@ fn render_v2_smoke_html_body_bg_multi_page() {
     // every page) and `<body>` (pre-pass on continuation pages).
     let html = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;background:#fafafa}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -682,7 +681,7 @@ fn render_v2_smoke_block_with_inline_root_padding() {
     // the `padding: 6px` shift fix that landed in PR 6.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -692,7 +691,7 @@ fn render_v2_smoke_bookmarks_under_transform() {
     // before `transformed_descendants` skip) added in PR 6 Devin fix.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().bookmarks(true).build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -704,7 +703,7 @@ fn render_v2_smoke_transform_inside_overflow_clip() {
     // pre-skips `clipped_descendants` before the transform check.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -726,9 +725,9 @@ fn render_v2_smoke_body_overflow_hidden_multi_page_content_survives() {
     let with_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}body{overflow:hidden}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
     let without_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf_clip = engine.render_html_v2(with_clip).expect("v2 render w/ clip");
+    let pdf_clip = engine.render_html(with_clip).expect("v2 render w/ clip");
     let pdf_plain = engine
-        .render_html_v2(without_clip)
+        .render_html(without_clip)
         .expect("v2 render w/o clip");
     let ratio = pdf_clip.len() as f32 / pdf_plain.len() as f32;
     assert!(
@@ -750,7 +749,7 @@ fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
     // must paint before `push_clip_path`.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -763,7 +762,7 @@ fn render_v2_smoke_overflow_clip_inside_transform() {
     // clip path fired, leaking content past the boundary.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:140px;height:80px;background:#cef;transform:translate(8px,4px)}.inner{width:60px;height:40px;background:#fce;overflow:hidden}.leaf{width:120px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -776,7 +775,7 @@ fn render_v2_smoke_nested_overflow_clip_blocks() {
     // boundary while overflowing content escaped through it.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;overflow:hidden;background:#fce}.leaf{width:200px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -789,8 +788,8 @@ fn render_v2_smoke_multicol_dashed_and_dotted_column_rule() {
     let html_dashed = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt dashed #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
     let html_dotted = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt dotted #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf_dashed = engine.render_html_v2(html_dashed).expect("dashed render");
-    let pdf_dotted = engine.render_html_v2(html_dotted).expect("dotted render");
+    let pdf_dashed = engine.render_html(html_dashed).expect("dashed render");
+    let pdf_dotted = engine.render_html(html_dotted).expect("dotted render");
     assert!(!pdf_dashed.is_empty());
     assert!(!pdf_dotted.is_empty());
 }
@@ -811,7 +810,7 @@ fn render_v2_smoke_paragraph_multi_fragment_slice() {
         r##"<!DOCTYPE html><html><head><style>html,body{{margin:0;padding:0}}p{{margin:0;font-size:14pt;line-height:1.4}}</style></head><body><p>{paragraph_text}</p></body></html>"##
     );
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(&html).expect("v2 render");
+    let pdf = engine.render_html(&html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity check: multiple `Type /Page` entries (one per
     // page object) — without slicing, only the first fragment would
@@ -843,7 +842,7 @@ fn render_v2_smoke_list_item_image_marker() {
     let html =
         r##"<!doctype html><html><body><ul><li>Item 1</li><li>Item 2</li></ul></body></html>"##;
     let engine = Engine::builder().assets(bundle).build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -856,7 +855,7 @@ fn render_v2_smoke_multicol_rule_inside_transform() {
     // Otherwise the rules render in untransformed page coordinates.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:translate(8px,4px)}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="tx"><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -873,7 +872,7 @@ fn render_v2_smoke_opacity_descendants_block_with_svg() {
     // chain.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.faded{opacity:0.4}</style></head><body><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#1a6faa"/></svg></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -888,7 +887,7 @@ fn render_v2_smoke_opacity_inside_overflow_clip() {
     // wrap).
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.clip{overflow:hidden;width:120pt;height:80pt}.faded{opacity:0.5}</style></head><body><div class="clip"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><circle cx="30" cy="30" r="25" fill="#e74c3c"/></svg></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -900,7 +899,7 @@ fn render_v2_smoke_opacity_inside_transform() {
     // `draw_under_opacity` arm in the recursive descend.
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:rotate(5deg)}.faded{opacity:0.6}</style></head><body><div class="tx"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#27ae60"/></svg></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -926,8 +925,8 @@ fn render_v2_smoke_anonymous_block_inline_level_sibling() {
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}.label{display:inline-block;background:#cef;padding:2pt 6pt}</style></head><body><div class="card"><div>block child</div><span class="label">BADGE</span></div></body></html>"##;
     let html_no_badge = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}</style></head><body><div class="card"><div>block child</div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
-    let pdf_no_badge = engine.render_html_v2(html_no_badge).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
+    let pdf_no_badge = engine.render_html(html_no_badge).expect("v2 render");
     assert!(!pdf.is_empty());
     assert!(
         pdf.len() > pdf_no_badge.len(),
@@ -963,7 +962,7 @@ fn render_v2_smoke_split_block_uses_per_slice_height() {
         <div class="box"></div>
     </body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Sanity: must produce a multi-page PDF (the box straddles page
     // bottom).
@@ -993,8 +992,8 @@ fn render_v2_smoke_body_layout_children_for_form_siblings() {
     let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}label{margin-right:8pt}input{padding:2pt;border:1pt solid #888;width:120pt}</style></head><body><h1>Form sample</h1><label>Name:</label><input type="text" value="hello"></body></html>"##;
     let html_no_inline = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}</style></head><body><h1>Form sample</h1></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
-    let pdf_no_inline = engine.render_html_v2(html_no_inline).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
+    let pdf_no_inline = engine.render_html(html_no_inline).expect("v2 render");
     assert!(!pdf.is_empty());
     // Sanity: body with inline-level form siblings produces a
     // larger PDF than h1-only baseline. Without the body-level
@@ -1035,7 +1034,7 @@ fn render_v2_smoke_body_opacity_multi_page_content_survives() {
         <div class="tail">tail content on page 2</div>
     </body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Sanity: must be multi-page (filler 800pt + tail 132pt > A4
     // content height of ~842pt).
@@ -1059,7 +1058,7 @@ fn render_v2_smoke_body_opacity_multi_page_content_survives() {
         <div class="filler"></div>
         <div class="tail">tail content on page 2</div>
     </body></html>"##;
-    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    let pdf_baseline = engine.render_html(html_baseline).expect("v2 render");
     // Allow some room for the opacity group XObject overhead but
     // require at least 90% of the baseline content survives. A real
     // regression (silent page-2 blanking) drops the size by far more
@@ -1101,7 +1100,7 @@ fn render_v2_smoke_split_opacity_block_uses_per_slice_height() {
         </div>
     </body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity.
     let pdf_str = String::from_utf8_lossy(&pdf);
@@ -1137,7 +1136,7 @@ fn render_v2_smoke_split_overflow_clip_block_uses_per_slice_height() {
         <div class="clip"><div class="inner">clipped content</div></div>
     </body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity (filler 600pt + clip 300pt + 12pt margin
     // = 912pt > A4 ~842pt content height).
@@ -1176,7 +1175,7 @@ fn render_v2_smoke_html_opacity_multi_page_content_survives() {
         <div class="tail">tail content on page 2</div>
     </body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
-    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity.
     let pdf_str = String::from_utf8_lossy(&pdf);
@@ -1198,7 +1197,7 @@ fn render_v2_smoke_html_opacity_multi_page_content_survives() {
         <div class="filler"></div>
         <div class="tail">tail content on page 2</div>
     </body></html>"##;
-    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    let pdf_baseline = engine.render_html(html_baseline).expect("v2 render");
     assert!(
         pdf.len() * 100 >= pdf_baseline.len() * 85,
         "with-html-opacity PDF lost too much content vs baseline \
