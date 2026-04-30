@@ -755,13 +755,24 @@ fn draw_under_transform(
     // `dispatch_fragment` would double-paint them outside the clip.
     // Mirrors the symmetric handling in `draw_under_clip`'s descendant
     // loop (PR #309 follow-up Devin).
-    let clip_skip: std::collections::BTreeSet<usize> = tx
+    let mut clip_skip: std::collections::BTreeSet<usize> = tx
         .descendants
         .iter()
         .filter_map(|id| drawables.block_styles.get(id))
         .filter(|b| b.style.has_overflow_clip())
         .flat_map(|b| b.clip_descendants.iter().copied())
         .collect();
+    // Tables with `overflow: hidden | clip` carry `clip_descendants`
+    // too — `draw_under_clip_table` (called below) iterates them
+    // inside the clip path, so the dispatch loop must skip them
+    // here just like the block-clip case (fulgur-bvhw PR #320 Devin).
+    clip_skip.extend(
+        tx.descendants
+            .iter()
+            .filter_map(|id| drawables.tables.get(id))
+            .filter(|t| t.style.has_overflow_clip())
+            .flat_map(|t| t.clip_descendants.iter().copied()),
+    );
     // Symmetric pre-skip for opacity-scoped descendants. When an
     // opacity block sits inside this transform, `draw_under_opacity`
     // (called below) iterates its own `opacity_descendants` to paint
@@ -822,6 +833,31 @@ fn draw_under_transform(
                     canvas,
                     desc_block,
                     desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+            } else if let Some(desc_table) = drawables
+                .tables
+                .get(&desc_id)
+                .filter(|t| t.style.has_overflow_clip())
+            {
+                // Table descendant with `overflow:hidden|clip` —
+                // mirror the block-clip arm above so the table's clip
+                // path is pushed inside the transform scope. Without
+                // this, `<div style="transform:..."><table style=
+                // "overflow:hidden">` paints cells under the transform
+                // but loses the table boundary (fulgur-bvhw PR #320
+                // Devin).
+                draw_under_clip_table(
+                    canvas,
+                    desc_table,
                     desc_geom,
                     desc_frag,
                     desc_x,
@@ -1107,13 +1143,26 @@ fn draw_under_clip(
         // outer's `clip_descendants` for those same nodes here would
         // re-dispatch them outside the inner clip
         // (PR #309 follow-up Devin).
-        let nested_clip_skip: std::collections::BTreeSet<usize> = block
+        let mut nested_clip_skip: std::collections::BTreeSet<usize> = block
             .clip_descendants
             .iter()
             .filter_map(|id| drawables.block_styles.get(id))
             .filter(|b| b.style.has_overflow_clip())
             .flat_map(|b| b.clip_descendants.iter().copied())
             .collect();
+        // Tables with overflow-clip nested inside this block's clip
+        // scope carry their own `clip_descendants` — the recursive
+        // `draw_under_clip_table` arm below paints them inside the
+        // table's clip path, so skip them here too (fulgur-bvhw PR
+        // #320 Devin).
+        nested_clip_skip.extend(
+            block
+                .clip_descendants
+                .iter()
+                .filter_map(|id| drawables.tables.get(id))
+                .filter(|t| t.style.has_overflow_clip())
+                .flat_map(|t| t.clip_descendants.iter().copied()),
+        );
         // Symmetric pre-skip for opacity-scoped descendants nested
         // inside this clip. Mirrors `nested_clip_skip` — without it,
         // an opacity descendant's sub-children would be dispatched by
@@ -1174,6 +1223,28 @@ fn draw_under_clip(
                         canvas,
                         desc_block,
                         desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_table) = drawables
+                    .tables
+                    .get(&desc_id)
+                    .filter(|t| t.style.has_overflow_clip())
+                {
+                    // Nested table with overflow-clip — recurse into
+                    // `draw_under_clip_table` so the table boundary
+                    // is pushed inside this block's clip scope.
+                    // (fulgur-bvhw PR #320 Devin)
+                    draw_under_clip_table(
+                        canvas,
+                        desc_table,
                         desc_geom,
                         desc_frag,
                         desc_x,
@@ -1384,13 +1455,25 @@ fn draw_under_opacity(
             .filter_map(|id| drawables.transforms.get(id))
             .flat_map(|tx| tx.descendants.iter().copied())
             .collect();
-        let nested_clip_skip: std::collections::BTreeSet<usize> = block
+        let mut nested_clip_skip: std::collections::BTreeSet<usize> = block
             .opacity_descendants
             .iter()
             .filter_map(|id| drawables.block_styles.get(id))
             .filter(|b| b.style.has_overflow_clip())
             .flat_map(|b| b.clip_descendants.iter().copied())
             .collect();
+        // Tables with overflow-clip nested inside this opacity scope
+        // recurse into `draw_under_clip_table`; pre-skip their cell
+        // descendants here so they don't double-paint outside the
+        // table's clip path (fulgur-bvhw PR #320 Devin).
+        nested_clip_skip.extend(
+            block
+                .opacity_descendants
+                .iter()
+                .filter_map(|id| drawables.tables.get(id))
+                .filter(|t| t.style.has_overflow_clip())
+                .flat_map(|t| t.clip_descendants.iter().copied()),
+        );
         let nested_opacity_skip: std::collections::BTreeSet<usize> = block
             .opacity_descendants
             .iter()
@@ -1438,6 +1521,26 @@ fn draw_under_opacity(
                         canvas,
                         desc_block,
                         desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_table) = drawables
+                    .tables
+                    .get(&desc_id)
+                    .filter(|t| t.style.has_overflow_clip())
+                {
+                    // Table with overflow-clip nested inside this
+                    // opacity scope. (fulgur-bvhw PR #320 Devin)
+                    draw_under_clip_table(
+                        canvas,
+                        desc_table,
                         desc_geom,
                         desc_frag,
                         desc_x,
@@ -1934,10 +2037,47 @@ fn draw_under_clip_table(
             false
         };
 
-        // Dispatch each cell descendant inside the clip. `dispatch_fragment`
-        // handles cells (BlockEntry) and any inner content sharing
-        // their node_id (e.g. inline-root paragraph in a `<td>text</td>`).
+        // Mirror `draw_under_clip`'s nested-scope skip sets so cells
+        // carrying their own `transform` / `overflow:hidden` /
+        // fractional opacity recurse into the proper helper rather
+        // than fall through to plain `dispatch_fragment` (which would
+        // silently lose the inner clip / transform / opacity wrap).
+        // (PR #320 Devin Review)
+        let transform_skip: std::collections::BTreeSet<usize> = table
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.transforms.get(id))
+            .flat_map(|tx| tx.descendants.iter().copied())
+            .collect();
+        let mut nested_clip_skip: std::collections::BTreeSet<usize> = table
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .filter(|b| b.style.has_overflow_clip())
+            .flat_map(|b| b.clip_descendants.iter().copied())
+            .collect();
+        nested_clip_skip.extend(
+            table
+                .clip_descendants
+                .iter()
+                .filter_map(|id| drawables.tables.get(id))
+                .filter(|t| t.style.has_overflow_clip())
+                .flat_map(|t| t.clip_descendants.iter().copied()),
+        );
+        let nested_opacity_skip: std::collections::BTreeSet<usize> = table
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .flat_map(|b| b.opacity_descendants.iter().copied())
+            .collect();
+
         for &desc_id in &table.clip_descendants {
+            if transform_skip.contains(&desc_id)
+                || nested_clip_skip.contains(&desc_id)
+                || nested_opacity_skip.contains(&desc_id)
+            {
+                continue;
+            }
             let Some(desc_geom) = geometry.get(&desc_id) else {
                 continue;
             };
@@ -1947,9 +2087,84 @@ fn draw_under_clip_table(
                 }
                 let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
                 let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
-                dispatch_fragment(
-                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
-                );
+                if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                    draw_under_transform(
+                        canvas,
+                        desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| b.style.has_overflow_clip())
+                    .filter(|_| Some(desc_id) != drawables.body_id)
+                {
+                    draw_under_clip(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_table) = drawables
+                    .tables
+                    .get(&desc_id)
+                    .filter(|t| t.style.has_overflow_clip())
+                {
+                    draw_under_clip_table(
+                        canvas,
+                        desc_table,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| !b.opacity_descendants.is_empty())
+                {
+                    draw_under_opacity(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else {
+                    dispatch_fragment(
+                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        page_index,
+                    );
+                }
             }
         }
 
