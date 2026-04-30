@@ -339,7 +339,12 @@ fn extract_drawables_from_pageable(
     // Block / List / Table / wrappers — recurse into children. Block
     // also records its own paint payload (PR 4).
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
-        let clipping = block.style.has_overflow_clip();
+        // Track strict descendants when the block needs a scope group
+        // — `overflow: hidden|clip` (clip path) OR non-trivial opacity
+        // (compositing group). Without that scope, cross-node_id
+        // children would either escape the clip or land in a separate
+        // PDF compositing group from the parent's bg / border / shadow.
+        let needs_scope = block.style.has_overflow_clip() || block.opacity < 1.0;
         if let Some(node_id) = block.node_id {
             out.block_styles.insert(
                 node_id,
@@ -349,38 +354,33 @@ fn extract_drawables_from_pageable(
                     visible: block.visible,
                     id: block.id.clone(),
                     layout_size: block.layout_size.or(block.cached_size),
-                    clip_descendants: Vec::new(),
+                    scope_descendants: Vec::new(),
                 },
             );
         }
-        // Snapshot the per-NodeId map keys before recursing so we can
-        // identify which descendants belong inside this block's
-        // `push_clip / pop` scope when the block carries
-        // `overflow: hidden | clip`. Mirrors the
-        // `TransformWrapperPageable` arm exactly.
-        let before = clipping.then(|| collect_drawables_node_ids(out));
+        // Snapshot the per-NodeId map keys before recursing into
+        // children so the difference (after - before) gives the strict
+        // descendant set. Mirrors the `TransformWrapperPageable` arm.
+        let before = needs_scope.then(|| collect_drawables_node_ids(out));
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
         if let (Some(before), Some(node_id)) = (before, block.node_id) {
             let after = collect_drawables_node_ids(out);
-            // Strict descendants only — exclude the wrapper's own key
-            // because the dispatcher emits its bg / border / shadow
-            // OUTSIDE the clip (matching v1's
-            // `BlockPageable::draw` ordering at
-            // `pageable.rs:1796-1827`). Inner content sharing the
-            // wrapper's `node_id` (inline-root paragraph, replaced
-            // image / svg from `convert::replaced` /
-            // `convert::inline_root`) is dispatched as part of the
-            // wrapper's own painting path, not via descendant
-            // iteration.
+            // Strict descendants only — exclude the wrapper's own key.
+            // The dispatcher paints the wrapper's bg / border / shadow
+            // and any inner content sharing `node_id` (inline-root
+            // paragraph, replaced image / svg from
+            // `convert::inline_root` / `convert::replaced`) inside the
+            // same scope group. Matches v1
+            // `BlockPageable::draw` (`pageable.rs:1796-1827`).
             let descendants: Vec<usize> = after
                 .difference(&before)
                 .copied()
                 .filter(|&id| id != node_id)
                 .collect();
             if let Some(entry) = out.block_styles.get_mut(&node_id) {
-                entry.clip_descendants = descendants;
+                entry.scope_descendants = descendants;
             }
         }
         return;

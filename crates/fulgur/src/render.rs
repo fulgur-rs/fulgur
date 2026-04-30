@@ -264,15 +264,16 @@ fn draw_v2_page(
         transformed_descendants.extend(tx.descendants.iter().copied());
     }
     // Same shape as `transformed_descendants` but keyed by an ancestor
-    // block whose `style.has_overflow_clip()` is true. Strict
-    // descendants paint inside the clip's `push_clip_path / pop` group;
-    // skipping them here prevents the main loop from also dispatching
-    // them outside the clip.
-    let mut clipped_descendants: std::collections::BTreeSet<usize> =
+    // block that needs a scope group (`overflow: hidden|clip`,
+    // non-trivial opacity, or both). Strict descendants paint inside
+    // that scope's `push_clip_path / pop` or `draw_with_opacity`
+    // group; skipping them here prevents the main loop from also
+    // dispatching them outside the scope.
+    let mut block_scope_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     for block in drawables.block_styles.values() {
-        if block.style.has_overflow_clip() {
-            clipped_descendants.extend(block.clip_descendants.iter().copied());
+        if block.style.has_overflow_clip() || block.opacity < 1.0 {
+            block_scope_descendants.extend(block.scope_descendants.iter().copied());
         }
     }
 
@@ -305,9 +306,11 @@ fn draw_v2_page(
             // anchor recording above already ran unconditionally.
             continue;
         }
-        if clipped_descendants.contains(&node_id) {
-            // Drawn inside an ancestor `overflow: hidden|clip` block's
-            // `push_clip_path / pop` group elsewhere in this loop.
+        if block_scope_descendants.contains(&node_id) {
+            // Drawn inside an ancestor block's scope group
+            // (`push_clip_path / pop` for `overflow: hidden|clip`,
+            // `draw_with_opacity` for non-trivial opacity, or both)
+            // elsewhere in this loop.
             continue;
         }
         // Skip the html root: its bg / border / shadow are painted
@@ -351,23 +354,50 @@ fn draw_v2_page(
             // `BlockPageable::draw` ordering at
             // `pageable.rs:1796-1827`), then push the clip path,
             // dispatch self's inner content + every strict descendant
-            // INSIDE the clip, then pop. Same shape as
-            // `draw_under_transform` but with `push_clip_path`.
+            // INSIDE the clip, then pop. Whole region is wrapped in
+            // `draw_with_opacity` so a block with both clip and
+            // opacity still produces one combined group.
             //
-            // No `!clip_descendants.is_empty()` guard: shared-node_id
+            // No `!scope_descendants.is_empty()` guard: shared-node_id
             // inner content (inline-root paragraph from
             // `convert::inline_root`, replaced image / svg from
             // `convert::replaced`) lands at the same `node_id` as the
-            // wrapper and so produces an empty `clip_descendants`. v1
+            // wrapper and so produces an empty `scope_descendants`. v1
             // pushes the clip unconditionally when
             // `has_overflow_clip()` is true (`pageable.rs:1808-1826`),
             // so a `<div style="overflow:hidden;width:50px">long
-            // text</div>` still needs the text clipped at the 50px
-            // box even with no separate descendant NodeIds.
+            // text</div>` still needs the text clipped at the 50px box
+            // even with no separate descendant NodeIds (PR #310 Devin).
             if let Some(block) = drawables.block_styles.get(&node_id)
                 && block.style.has_overflow_clip()
             {
                 draw_under_clip(
+                    canvas,
+                    block,
+                    node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            // Opacity-only scope: block has `opacity < 1.0` but no
+            // overflow clip, AND there are cross-node_id descendants.
+            // v1 wraps everything in a single `draw_with_opacity`
+            // group; v2 must too or
+            // `<div style="opacity:0.4"><svg>` paints `<svg>` in a
+            // separate compositing group from `<div>`'s bg/border.
+            if let Some(block) = drawables.block_styles.get(&node_id)
+                && block.opacity < 1.0
+                && !block.scope_descendants.is_empty()
+            {
+                draw_under_opacity(
                     canvas,
                     block,
                     node_id,
@@ -683,7 +713,7 @@ fn draw_under_clip(
         }
 
         // Strict descendants — each at its own fragment's coords.
-        for &desc_id in &block.clip_descendants {
+        for &desc_id in &block.scope_descendants {
             let Some(desc_geom) = geometry.get(&desc_id) else {
                 continue;
             };
@@ -701,6 +731,76 @@ fn draw_under_clip(
 
         if clip_pushed {
             canvas.surface.pop();
+        }
+    });
+}
+
+/// Wrap a non-trivial-opacity block + its strict descendants in a
+/// single `draw_with_opacity` group. Mirrors v1's
+/// `BlockPageable::draw` for the case where the block has
+/// `opacity < 1.0` but no overflow clip — v1 emits one
+/// `q (gs ..) ... Q` covering bg / border / shadow + every recursed
+/// child. v2 had no equivalent path before this PR, so cross-node_id
+/// children (e.g. `<div style="opacity:0.4"><svg>`) painted in a
+/// separate compositing group from the block's own bg / border.
+///
+/// Same shape as `draw_under_clip` minus the `push_clip_path`.
+#[allow(clippy::too_many_arguments)]
+fn draw_under_opacity(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    let para_for_block = drawables.paragraphs.get(&node_id);
+    let img_for_block = drawables.images.get(&node_id);
+    let svg_for_block = drawables.svgs.get(&node_id);
+    let inner_inset = block.style.content_inset();
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        // bg / border / shadow at the block's border-box.
+        draw_block_inner_paint(canvas, block, x_pt, y_pt, frag);
+
+        // Inner content sharing `node_id` (inline-root paragraph,
+        // replaced image / svg) at the content-box top-left.
+        let inner_x = x_pt + inner_inset.0;
+        let inner_y = y_pt + inner_inset.1;
+        if let Some(p) = para_for_block {
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, &geom.fragments, page_index);
+        }
+        if let Some(i) = img_for_block {
+            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+        }
+        if let Some(s) = svg_for_block {
+            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+        }
+
+        // Strict descendants at their own fragment coords.
+        for &desc_id in &block.scope_descendants {
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                dispatch_fragment(
+                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+                );
+            }
         }
     });
 }

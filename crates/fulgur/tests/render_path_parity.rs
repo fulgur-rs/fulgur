@@ -442,7 +442,7 @@ fn inline_byte_equality_cases() {
         // v1 `BlockPageable::draw` (`pageable.rs:1796-1827`) paints
         // bg / border / shadow OUTSIDE the clip, then pushes the
         // overflow clip path, draws children INSIDE, then pops. v2 now
-        // tracks `BlockEntry.clip_descendants` and replays the same
+        // tracks `BlockEntry.scope_descendants` and replays the same
         // ordering via `draw_under_clip`. Without this fix, overflow
         // children that overshoot the parent's box paint past the
         // clip boundary.
@@ -457,10 +457,21 @@ fn inline_byte_equality_cases() {
         // `<div style="overflow:hidden;width:50px">long overflowing
         // text</div>` clips the long text at the 50px boundary. v2's
         // dispatcher must do the same regardless of whether
-        // `clip_descendants` is empty.
+        // `scope_descendants` is empty.
         (
             "overflow hidden block with shared-node_id inline text",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
+        ),
+        // PR 6 follow-up (opacity scope tracking, fulgur-gdb9). v1
+        // `BlockPageable::draw` wraps bg / border / shadow + every
+        // recursed child in one `draw_with_opacity` group. Without
+        // scope tracking, v2 painted `<div style="opacity:0.4">`'s
+        // bg/border in one compositing group and its child `<svg>`
+        // in a separate group, diverging in PDF stream output even
+        // though the visible result was the same.
+        (
+            "opacity-only block with cross-node-id child",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.faded{opacity:0.4}</style></head><body><div class="faded"><svg width="120" height="40" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="40" fill="#1a6faa"/></svg></div></body></html>"##,
         ),
     ];
 

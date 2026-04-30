@@ -97,7 +97,7 @@ allowlist = [
     "examples://header-footer-split",
     # PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
     # `overflow: hidden | clip` blocks now record their strict
-    # descendants in `BlockEntry.clip_descendants`. v2 dispatcher
+    # descendants in `BlockEntry.scope_descendants`. v2 dispatcher
     # paints bg / border / shadow OUTSIDE the clip, pushes the clip
     # path, dispatches inner content + descendants INSIDE the clip,
     # then pops — mirroring v1's `BlockPageable::draw` ordering
@@ -106,4 +106,14 @@ allowlist = [
     "vrt://layout/overflow-hidden.html",
     "vrt://layout/overflow-hidden-rounded.html",
     "examples://overflow-hidden",
+    # PR 6 follow-up (opacity scope tracking, fulgur-gdb9) —
+    # `<div style="opacity:0.4"><svg>` etc. with cross-node_id
+    # children now emits a single `draw_with_opacity` group covering
+    # bg / border + every descendant. v1 wraps the whole subtree in
+    # one `q (gs ..) … Q`; v2 was emitting separate compositing groups
+    # for the parent's bg vs the children. `BlockEntry.scope_descendants`
+    # is now also populated for opacity-only blocks;
+    # `draw_under_opacity` mirrors `draw_under_clip` without the
+    # `push_clip_path`.
+    "examples://svg",
 ]

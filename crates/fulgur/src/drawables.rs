@@ -50,17 +50,24 @@ pub struct BlockEntry {
     /// time when absent.
     pub layout_size: Option<crate::pageable::Size>,
     /// Strict descendant `NodeId`s that must paint INSIDE this block's
-    /// `push_clip_path` / `pop` group. Populated by
-    /// `extract_drawables_from_pageable` only when
-    /// `style.has_overflow_clip()` is true — non-clipping blocks leave
-    /// this empty so the dispatcher's main loop handles them with the
-    /// regular shared-node_id pattern.
+    /// scope group (`push_clip_path / pop`, `draw_with_opacity`, or
+    /// both). Populated by `extract_drawables_from_pageable` only when
+    /// the block needs a scope group — i.e.
+    /// `style.has_overflow_clip() || opacity != 1.0`. Blocks without
+    /// any scope leave this empty so the dispatcher's main loop
+    /// handles them with the regular shared-node_id pattern.
     ///
-    /// Mirrors the `TransformEntry.descendants` shape: render time
-    /// emits bg / border / shadow first (outside the clip, matching v1
-    /// `BlockPageable::draw` at `pageable.rs:1796-1827`), then pushes
-    /// the clip path, dispatches each descendant fragment, and pops.
-    pub clip_descendants: Vec<NodeId>,
+    /// Mirrors the `TransformEntry.descendants` shape:
+    ///
+    /// - **Clipping blocks**: bg / border / shadow paint outside the
+    ///   clip, `push_clip_path`, descendants paint inside, `pop` —
+    ///   matches v1 `BlockPageable::draw` at `pageable.rs:1796-1827`.
+    /// - **Opacity-only blocks**: everything wraps in a single
+    ///   `draw_with_opacity(opacity, ...)` group so cross-node_id
+    ///   children (e.g. `<div style="opacity:0.4"><svg>`) compose into
+    ///   one PDF compositing group, matching v1's
+    ///   `draw_with_opacity → recurse children`.
+    pub scope_descendants: Vec<NodeId>,
 }
 
 /// Paragraph draw payload for v2. Holds the shaped lines that
