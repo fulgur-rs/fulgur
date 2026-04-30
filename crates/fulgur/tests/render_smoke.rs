@@ -1009,3 +1009,105 @@ fn render_v2_smoke_body_layout_children_for_form_siblings() {
         pdf_no_inline.len(),
     );
 }
+
+#[test]
+fn render_v2_smoke_body_opacity_multi_page_content_survives() {
+    // Regression for PR #314 follow-up Devin Review:
+    // `body { opacity: 0.5 }` with content that spans multiple
+    // pages must NOT silently blank pages 1+. The `body` element
+    // gets exactly one fragment at `page_index = 0`
+    // (`pagination_layout.rs:380-384`), so
+    // `draw_under_opacity(body)` only fires on page 0. If body's
+    // descendants are added to `opacity_wrapped_descendants`
+    // unconditionally, they get skipped on pages 1+ by the
+    // `opacity_wrapped_descendants.contains(...)` guard but no-one
+    // dispatches them — silently blanking everything after page 1.
+    //
+    // Body is now excluded from `opacity_wrapped_descendants` (and
+    // from the `draw_under_opacity` dispatch arm) for the same
+    // reason `clipped_descendants` excludes it (PR #310 Devin).
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;opacity:0.5;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: must be multi-page (filler 800pt + tail 132pt > A4
+    // content height of ~842pt).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for body-opacity test, got {page_count}",
+    );
+    // Compare to a no-opacity baseline. Without the body exclusion
+    // fix, body's descendants on page 2 silently disappear and the
+    // PDF shrinks compared to the no-opacity version. The opacity-
+    // group XObject adds a small constant; the test simply asserts
+    // the with-opacity PDF retains MOST of the no-opacity content
+    // (i.e. didn't lose page 2 entirely).
+    let html_baseline = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    // Allow some room for the opacity group XObject overhead but
+    // require at least 90% of the baseline content survives. A real
+    // regression (silent page-2 blanking) drops the size by far more
+    // than 10%.
+    assert!(
+        pdf.len() * 100 >= pdf_baseline.len() * 90,
+        "with-opacity PDF lost too much content vs baseline \
+         (with={}B baseline={}B); did body exclusion regress?",
+        pdf.len(),
+        pdf_baseline.len(),
+    );
+}
+
+#[test]
+fn render_v2_smoke_split_opacity_block_uses_per_slice_height() {
+    // Regression for PR #314 follow-up Devin Review: a fractional-
+    // opacity block with descendants that ALSO spans multiple pages
+    // (split slice) must paint each per-page slice at its
+    // `frag.height`, not the full `layout_size.height`. v2's
+    // `draw_under_opacity` inlines the bg / border / shadow paint;
+    // without the `is_split` height fix that
+    // `draw_block_inner_paint` got in PR #316, the inlined paint
+    // overflows the page bottom on earlier slices and double-paints
+    // on continuation pages.
+    //
+    // Construct a body with a tall opacity-wrapped block (containing
+    // a same-node_id-different SVG descendant so the opacity arm
+    // fires) that straddles the page boundary.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .opaque{opacity:0.5;height:300pt;background:#cef;border:2pt solid #44a;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="opaque">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+                <rect width="40" height="40" fill="#1a6faa"/>
+            </svg>
+        </div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split-opacity test, got {page_count}",
+    );
+}

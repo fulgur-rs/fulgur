@@ -295,10 +295,20 @@ fn draw_v2_page(
     // `draw_under_opacity`). Without skipping these in the main loop
     // they'd be dispatched twice: once at full opacity here, once
     // again under the parent's opacity wrap.
+    //
+    // Body is excluded for the same reason as `clipped_descendants`:
+    // the fragmenter records body with exactly one fragment at
+    // `page_index = 0`, so `draw_under_opacity(body)` only fires on
+    // page 0. Keeping body's descendants in this set would silently
+    // blank all content on pages 1+ (descendants get skipped by the
+    // `opacity_wrapped_descendants.contains(...)` guard but no-one
+    // dispatches them — same `body { opacity: 0.5 }` pitfall the
+    // clip path documents at the `clipped_descendants` collection
+    // (PR #314 follow-up Devin Review).
     let mut opacity_wrapped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
-    for block in drawables.block_styles.values() {
-        if !block.opacity_descendants.is_empty() {
+    for (&node_id, block) in &drawables.block_styles {
+        if !block.opacity_descendants.is_empty() && Some(node_id) != drawables.body_id {
             opacity_wrapped_descendants.extend(block.opacity_descendants.iter().copied());
         }
     }
@@ -438,10 +448,21 @@ fn draw_v2_page(
             // `<div opacity:0.4><svg>..</svg></div>` paints the svg
             // outside the parent's opacity wrap, dropping the parent's
             // opacity from the svg. (fulgur-gdb9)
+            //
+            // Body is excluded for the same reason as the clip arm
+            // above: body has only a page-0 fragment so a
+            // `draw_under_opacity(body)` would only wrap page-0
+            // content while the `opacity_wrapped_descendants` skip
+            // (collected above) excludes body explicitly so the main
+            // loop dispatches body's descendants on pages 1+
+            // normally. Without this exclusion `body { opacity: 0.5 }`
+            // would silently blank pages 1+. (PR #314 follow-up Devin
+            // Review)
             if let Some(block) = drawables
                 .block_styles
                 .get(&node_id)
                 .filter(|b| !b.opacity_descendants.is_empty())
+                .filter(|_| Some(node_id) != drawables.body_id)
             {
                 draw_under_opacity(
                     canvas,
@@ -1196,9 +1217,25 @@ fn draw_under_opacity(
                 .layout_size
                 .map(|s| s.width)
                 .unwrap_or_else(|| px_to_pt(frag.width));
+            // Mirror `draw_block_inner_paint`'s `is_split` height fix.
+            // When this opacity-scoped block spans multiple pages
+            // (one fragment per page slice), use `frag.height` so each
+            // slice paints its per-page bg / border height instead of
+            // the full layout height — without this the bg / border
+            // overflows the page bottom on earlier slices and double-
+            // paints on continuation pages, exactly the bug the
+            // `draw_block_inner_paint` fix addresses for non-opacity
+            // blocks (PR #316). (PR #314 follow-up Devin Review)
+            let is_split = geom.fragments.len() > 1;
             let total_height = block
                 .layout_size
-                .map(|s| s.height)
+                .map(|s| {
+                    if is_split && frag.height > 0.0 {
+                        px_to_pt(frag.height)
+                    } else {
+                        s.height
+                    }
+                })
                 .unwrap_or_else(|| px_to_pt(frag.height));
             if block.visible {
                 crate::background::draw_box_shadows(
