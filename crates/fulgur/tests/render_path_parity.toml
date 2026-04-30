@@ -107,3 +107,45 @@ allowlist = [
     "vrt://layout/overflow-hidden-rounded.html",
     "examples://overflow-hidden",
 ]
+
+# Known-divergent fixtures (fulgur-g7a1, 2026-04-30)
+# ----------------------------------------------------------------------
+# These produce 1 ULP differences in numeric `Tm` operands and CANNOT
+# be made byte-equivalent without deliberately degrading v2's accuracy
+# to match v1's per-step rounding pattern. They are intentionally NOT
+# allowlisted, and will become moot when PR 8 (fulgur-9t3z.5) deletes
+# the v1 path entirely.
+#
+# Root cause: f32 addition non-associativity between v1 and v2 chains.
+#
+# - v1 (`BlockPageable::draw`): each `PositionedChild.y` is set during
+#   convert as `px_to_pt(taffy_loc.y)` (per-level f32 conversion), and
+#   the draw chain accumulates `y + pc0.y + pc1.y + ...` in pt — every
+#   intermediate sum gets rounded.
+# - v2 (`dispatch_fragment`): `Fragment.y` is the cumulative absolute
+#   y in CSS px from the fragmenter, converted in a single
+#   `margin_top_pt + px_to_pt(frag.y)` step at draw time — only one
+#   rounding occurs.
+#
+# Empirical example (examples/box-shadow, page 0, node_id=34):
+#
+#   v1: ((56.692913 + 132.750) + 70.500) = 189.442917 + 70.500
+#       = 259.942932 (bits=4381f8b2)
+#   v2: 56.692913 + 203.250 = 259.942902 (bits=4381f8b1)
+#   true: 259.94291305...
+#
+# v2 is closer to the true mathematical result; v1's chain accumulates
+# intermediate rounding error. Making v2 byte-eq with v1 means
+# replicating v1's two-step rounding — pure regression in accuracy
+# for transitional benefit only.
+#
+# Affected fixtures (3) — diff is exactly one Tm operand off by 1 ULP:
+# - examples/multicol      (v1 hex b2f88743 / v2 hex b1f88743)
+# - examples/multicol-span-all  (v1 b2789543 / v2 b1789543)
+# - examples/box-shadow    (v1 585c0644 / v2 595c0644 — note reversed
+#                           direction confirming order-of-operations,
+#                           not a unidirectional offset)
+#
+# Resolution: defer to PR 8 v1 deletion. Once v1 is gone, the parity
+# test compares v2 vs v2 (trivially byte-eq) and these fixtures need
+# no special handling.

@@ -610,3 +610,68 @@ fn inline_byte_equality_cases() {
         );
     }
 }
+
+/// Bounded-divergence regression for the 3 fixtures known to suffer
+/// from f32 chain non-associativity between v1 and v2 (fulgur-g7a1).
+///
+/// These fixtures cannot be byte-eq without deliberately degrading v2's
+/// accuracy (see the "Known-divergent" comment block in
+/// `render_path_parity.toml`). They are intentionally not allowlisted,
+/// but we still want a regression catch: if some future change grows
+/// the divergence past pure 1 ULP rounding, the divergence pattern
+/// will change shape and this test will catch it.
+///
+/// Empirically, each fixture currently differs in exactly one Tm
+/// operand by 1 ULP, which makes the v2 PDF ≤ 4 bytes longer than v1
+/// (one extra digit in the ASCII-formatted f32). The xref / ID table
+/// shift is constant. We assert |len_diff| ≤ 8 to leave margin for
+/// xref re-flow without masking real regressions.
+///
+/// PR 8 (fulgur-9t3z.5) deletes the v1 path; this test becomes moot
+/// then and should be removed alongside the parity harness itself.
+#[test]
+fn known_divergent_fixtures_stay_within_f32_ulp_bound() {
+    use fulgur::Engine;
+
+    // FONTCONFIG_FILE pinning is required for box-shadow's text
+    // rendering. Skip silently when missing — matches the convention
+    // used by `render_path_byte_equality`.
+    if std::env::var_os("FONTCONFIG_FILE").is_none() {
+        eprintln!("known_divergent_fixtures: FONTCONFIG_FILE unset — skipping (CI sets this)");
+        return;
+    }
+
+    let root = repo_root();
+    let cases: &[&str] = &["multicol", "multicol-span-all", "box-shadow"];
+
+    for name in cases {
+        let dir = root.join("examples").join(name);
+        let html_path = dir.join("index.html");
+        let html = std::fs::read_to_string(&html_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", html_path.display()));
+
+        let engine = Engine::builder()
+            .page_size(fulgur::config::PageSize::A4)
+            .base_path(dir.clone())
+            .build();
+        let v1 = engine
+            .render_html(&html)
+            .unwrap_or_else(|e| panic!("v1 render {name}: {e}"));
+        let v2 = engine
+            .render_html_v2(&html)
+            .unwrap_or_else(|e| panic!("v2 render {name}: {e}"));
+
+        // |len_diff| must stay small. f32 ULP changing a Tm operand
+        // adds at most 1 character (e.g. "537.4429" → "537.44293"),
+        // and the xref/ID shift cascades a small constant. Anything
+        // bigger means real layout has changed.
+        let len_diff = (v1.len() as isize - v2.len() as isize).unsigned_abs();
+        assert!(
+            len_diff <= 8,
+            "{name}: byte-length divergence ballooned (v1={}B v2={}B, |diff|={len_diff}B). \
+             Expected ≤8B for f32 ULP-only divergence + xref shift.",
+            v1.len(),
+            v2.len(),
+        );
+    }
+}
