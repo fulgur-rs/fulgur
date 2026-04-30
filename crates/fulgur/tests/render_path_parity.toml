@@ -143,6 +143,16 @@ allowlist = [
     # `vrt://layout/review_card_inline_block.html` and any future
     # mixed-block-and-inline content.
     "vrt://layout/review_card_inline_block.html",
+    # PR follow-up (per-slice block height, fulgur-bq6i:break-inside) —
+    # split blocks (one fragment per page) were painting the FULL
+    # `layout_size.height` on every slice, so a `break-inside: avoid`
+    # callout that doesn't fit on page 1 painted overflowing-the-page-
+    # bottom on page 1 AND repeated full-size on page 2. v2 now passes
+    # `is_split = geom.fragments.len() > 1` from `dispatch_fragment` to
+    # `draw_block_inner_paint`, which uses `frag.height` per slice when
+    # split — mirroring v1's `BlockPageable::slice_for_page` which
+    # adjusts `layout_size.height` per sliced pageable.
+    "examples://break-inside",
 ]
 
 # Known-divergent fixtures (fulgur-g7a1, 2026-04-30)

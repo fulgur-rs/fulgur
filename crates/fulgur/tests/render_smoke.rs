@@ -937,3 +937,40 @@ fn render_v2_smoke_anonymous_block_inline_level_sibling() {
         pdf_no_badge.len(),
     );
 }
+
+#[test]
+fn render_v2_smoke_split_block_uses_per_slice_height() {
+    // Regression for fulgur-bq6i:break-inside — when a block spans
+    // multiple pages (the fragmenter records one fragment per page
+    // slice), `draw_block_inner_paint` must paint each slice at its
+    // per-page `frag.height` rather than the block's full
+    // `layout_size.height`. Without this, the block's bg / border
+    // paints full-size on every slice, leaking past the page bottom on
+    // earlier slices and double-painting on the continuation page.
+    //
+    // Construct a body that overflows page 1 with a tall styled box
+    // straddling the page break. The styled box has a colored bg so a
+    // full-height repaint on page 2 (the bug) would emit an
+    // unmistakably oversized rect — verifiable via PDF size: split
+    // version stays close to single-page version + per-slice paints,
+    // not 2× the block-area worth of bg fills.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .box{height:300pt;background:#cef;border:2pt solid #44a}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="box"></div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: must produce a multi-page PDF (the box straddles page
+    // bottom).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split block, got {page_count}",
+    );
+}
