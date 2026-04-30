@@ -875,7 +875,11 @@ pub fn draw_shaped_lines(
                         let off_x = ox - geo_x_pt;
                         let off_y = oy - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
+                        let link_affine = crate::pageable::Affine2D::translation(off_x, off_y);
                         crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.push_transform(link_affine);
+                            }
                             canvas.surface.push_transform(&transform);
                             crate::render::dispatch_inline_box_content(
                                 canvas,
@@ -892,6 +896,9 @@ pub fn draw_shaped_lines(
                                 &ctx.drawables.inline_box_subtree_descendants,
                             );
                             canvas.surface.pop();
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.pop_transform();
+                            }
                         });
                     } else {
                         // No v2 ctx (legacy `Pageable::draw` invocation
