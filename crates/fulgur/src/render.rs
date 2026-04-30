@@ -118,6 +118,46 @@ pub fn render_v2(
                 bookmark_collector: bookmark_collector.as_mut(),
                 link_collector: Some(&mut link_collector),
             };
+            // Root `<html>` + `<body>` background pre-pass. v1's
+            // `BlockPageable::draw` for these elements paints
+            // bg/border/shadow on EVERY page because each page's
+            // sliced root pageable still calls them. v2's main
+            // dispatch sees them via the fragmenter's single fragment
+            // on page 0 only — multi-page docs would lose those fills
+            // on continuation pages. Paint each here at its own offset
+            // (`(margin.left, margin.top)` for html, plus
+            // `body_offset_pt` for body) using `layout_size` from the
+            // entry — mirrors v1's
+            // `total_width = self.layout_size.or(cached_size)...`
+            // derivation. The main dispatch loop skips both `root_id`
+            // and `body_id` to avoid double-painting on page 0.
+            if let Some(root_id) = drawables.root_id
+                && let Some(root_block) = drawables.block_styles.get(&root_id)
+            {
+                paint_root_block_v2(
+                    &mut canvas,
+                    root_block,
+                    resolved_margin.left,
+                    resolved_margin.top,
+                );
+            }
+            // body's bg pre-pass runs on continuation pages only.
+            // Page 0 already paints body via the main dispatch loop
+            // (the fragmenter records body's fragment on page 0, with
+            // `layout_size` covering body's full height — clipped to
+            // page area at PDF render time, mirroring v1 exactly).
+            // Without this guard, page 0 would double-paint body's bg.
+            if page_idx > 0
+                && let Some(body_id) = drawables.body_id
+                && let Some(body_block) = drawables.block_styles.get(&body_id)
+            {
+                paint_root_block_v2(
+                    &mut canvas,
+                    body_block,
+                    resolved_margin.left + drawables.body_offset_pt.0,
+                    resolved_margin.top + drawables.body_offset_pt.1,
+                );
+            }
             // `frag.x` is html-relative (fragmenter folds body's x
             // offset in); `frag.y` is body-content-area-relative — so
             // only y receives `body_offset_pt`.
@@ -207,6 +247,16 @@ fn draw_v2_page(
             // Drawn inside an ancestor transform group elsewhere in
             // this loop. Skipping prevents double-painting. Bookmark
             // anchor recording above already ran unconditionally.
+            continue;
+        }
+        // Skip the html root: its bg / border / shadow are painted
+        // per-page in the pre-pass (`paint_root_block_v2`) above.
+        // Body intentionally is NOT skipped here — page 0 needs the
+        // main dispatch to paint body normally (so inline-root
+        // children at body's node_id keep flowing through
+        // `draw_block_with_inner_content`); page 1+ relies on the
+        // body branch of the pre-pass.
+        if Some(node_id) == drawables.root_id {
             continue;
         }
 
@@ -649,6 +699,59 @@ fn draw_block_v2(
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         draw_block_inner_paint(canvas, entry, x, y, frag);
+    });
+}
+
+/// v2 root-element (`<html>`) background pre-pass. The fragmenter's
+/// `geometry` table only carries body + descendants, so the standard
+/// per-(node_id, fragment) dispatch never visits html. Mirror v1's
+/// `BlockPageable::draw` for the html root by painting bg / border /
+/// shadow at `(margin.left, margin.top)` with html's own
+/// `layout_size` (which equals body's outer height including
+/// collapsed margins, matching v1's `total_height` derivation).
+///
+/// Called once per page from `render_v2`; intentionally bypasses the
+/// `body_offset_pt.y` adjustment that the main dispatch loop applies,
+/// because html's bg paints at the page's margin top, not at body's
+/// content origin.
+fn paint_root_block_v2(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::BlockEntry,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+) {
+    use crate::pageable::draw_with_opacity;
+    let Some(size) = entry.layout_size else {
+        return;
+    };
+
+    draw_with_opacity(canvas, entry.opacity, |canvas| {
+        if entry.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &entry.style,
+                margin_left_pt,
+                margin_top_pt,
+                size.width,
+                size.height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &entry.style,
+                margin_left_pt,
+                margin_top_pt,
+                size.width,
+                size.height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &entry.style,
+                margin_left_pt,
+                margin_top_pt,
+                size.width,
+                size.height,
+            );
+        }
     });
 }
 
