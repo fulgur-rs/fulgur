@@ -1390,7 +1390,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub running_states: Vec<BTreeMap<String, crate::pagination_layout::PageRunningState>>,
     pub counter_states: Vec<BTreeMap<String, i32>>,
     pub measure_cache: MeasureCache,
-    pub height_cache: HashMap<(String, u32), f32>,
+    pub height_cache: HashMap<(String, u32, u32), f32>,
     pub render_cache: RenderCache,
 }
 
@@ -1571,7 +1571,18 @@ impl<'a> MarginBoxRenderer<'a> {
                 Some(Edge::Right) => resolved_margin.right,
                 _ => continue,
             };
-            let hc_key = (html.clone(), width_key(fixed_width));
+            // Include `page_size.height` in the key so a `@page :first`
+            // (or other matched-page selector) that overrides the page
+            // SIZE — not just margins — gets a fresh measurement on
+            // the second page. Mirrors `measure_cache`'s key (which
+            // already records `page_size.height`); without this, two
+            // pages with the same fixed margin width but different
+            // page heights would share a stale entry. (PR #309 Devin)
+            let hc_key = (
+                html.clone(),
+                width_key(fixed_width),
+                width_key(page_size.height),
+            );
             self.height_cache.entry(hc_key).or_insert_with(|| {
                 let measure_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
@@ -1609,7 +1620,11 @@ impl<'a> MarginBoxRenderer<'a> {
                     resolved_margin.right
                 };
                 self.height_cache
-                    .get(&(html.clone(), width_key(fixed_width)))
+                    .get(&(
+                        html.clone(),
+                        width_key(fixed_width),
+                        width_key(page_size.height),
+                    ))
                     .copied()
             };
             if let Some(s) = size {
