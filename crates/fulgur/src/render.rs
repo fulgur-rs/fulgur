@@ -268,10 +268,24 @@ fn draw_v2_page(
     // descendants paint inside the clip's `push_clip_path / pop` group;
     // skipping them here prevents the main loop from also dispatching
     // them outside the clip.
+    //
+    // Body is excluded from this collection: the fragmenter records
+    // body with exactly one fragment at `page_index = 0`
+    // (`pagination_layout.rs:380-384`), so `draw_under_clip(body)`
+    // only fires on page 0. If we kept body in `clipped_descendants`,
+    // every descendant would still be skipped via the
+    // `clipped_descendants.contains(&node_id)` guard on page 1+ but
+    // nobody would dispatch them — silently blanking all content
+    // after page 1 on `<body style="overflow:hidden|auto|scroll">`
+    // (PR #310 follow-up Devin). Skipping body here means body-level
+    // overflow clip is not applied in v2, matching the pre-PR
+    // behavior; body clipping in a paged context is unusual and the
+    // pre-pass at `paint_root_block_v2` already handles body's own
+    // bg / border on continuation pages.
     let mut clipped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
-    for block in drawables.block_styles.values() {
-        if block.style.has_overflow_clip() {
+    for (&node_id, block) in &drawables.block_styles {
+        if block.style.has_overflow_clip() && Some(node_id) != drawables.body_id {
             clipped_descendants.extend(block.clip_descendants.iter().copied());
         }
     }
@@ -364,8 +378,20 @@ fn draw_v2_page(
             // so a `<div style="overflow:hidden;width:50px">long
             // text</div>` still needs the text clipped at the 50px
             // box even with no separate descendant NodeIds.
+            // Body is intentionally excluded from `draw_under_clip`:
+            // body has only a page-0 fragment so the clip would only
+            // wrap page-0 content, but body's `clip_descendants`
+            // include every block in the document. Descendants on
+            // page 1+ are dispatched by the main loop via
+            // `dispatch_fragment` (they're omitted from
+            // `clipped_descendants` above). Without this skip, body's
+            // page-0 clip would also re-dispatch every descendant
+            // already painted by the main loop, causing a double
+            // paint. See the `clipped_descendants` collection block
+            // for the rest of the body-overflow rationale.
             if let Some(block) = drawables.block_styles.get(&node_id)
                 && block.style.has_overflow_clip()
+                && Some(node_id) != drawables.body_id
             {
                 draw_under_clip(
                     canvas,

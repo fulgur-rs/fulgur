@@ -709,6 +709,38 @@ fn render_v2_smoke_transform_inside_overflow_clip() {
 }
 
 #[test]
+fn render_v2_smoke_body_overflow_hidden_multi_page_content_survives() {
+    // Regression for PR #310 follow-up Devin: `<body style="overflow:
+    // hidden|auto|scroll">` previously blanked every descendant on
+    // page 1+. The fragmenter records body with a single fragment at
+    // `page_index=0`, so `draw_under_clip(body)` would only fire on
+    // page 0; the main loop's `clipped_descendants.contains` guard
+    // then ate every body descendant on every page, leaving page 1+
+    // with only the body bg pre-pass and nothing else.
+    //
+    // Render with `body{overflow:hidden}` AND with a tall enough
+    // child to force multi-page output, and assert the v2 PDF size
+    // stays close to the no-overflow render (within 5%). If the bug
+    // returns, page 1's content stream collapses and the PDF shrinks
+    // dramatically.
+    let with_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}body{overflow:hidden}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let without_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf_clip = engine.render_html_v2(with_clip).expect("v2 render w/ clip");
+    let pdf_plain = engine
+        .render_html_v2(without_clip)
+        .expect("v2 render w/o clip");
+    let ratio = pdf_clip.len() as f32 / pdf_plain.len() as f32;
+    assert!(
+        ratio > 0.95 && ratio < 1.05,
+        "body overflow:hidden v2 size ({} B) diverges too much from baseline ({} B); \
+         likely indicates page 1+ content was dropped by the clipped_descendants pre-skip",
+        pdf_clip.len(),
+        pdf_plain.len(),
+    );
+}
+
+#[test]
 fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
     // Exercises `draw_under_clip`'s list_items branch added in PR #310
     // Devin fix: when the clipped block's NodeId also has a
