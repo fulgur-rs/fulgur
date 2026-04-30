@@ -566,7 +566,7 @@ fn dispatch_fragment(
     // slice height (`frag.height`) instead of `layout_size.height`
     // — without it, every slice paints the FULL block, which
     // doubled the callout in `examples/break-inside` (fulgur-bq6i).
-    let is_split = geom.fragments.len() > 1;
+    let is_split = geom.is_split();
     // ListItem case: marker + body block + inline-root paragraph
     // share a single opacity group. See `draw_list_item_with_block`
     // for the v1 mirror.
@@ -621,7 +621,15 @@ fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
-        draw_paragraph_v2(canvas, para, x_pt, y_pt, &geom.fragments, page_index);
+        draw_paragraph_v2(
+            canvas,
+            para,
+            x_pt,
+            y_pt,
+            &geom.fragments,
+            page_index,
+            is_split,
+        );
     }
 }
 
@@ -922,7 +930,7 @@ fn draw_under_clip(
     // continuation pages, AND the clip rect on continuation pages
     // covers content that should be cut off.
     // (PR #313 follow-up Devin Review — completes the PR #316 fix.)
-    let is_split = geom.fragments.len() > 1;
+    let is_split = geom.is_split();
     let total_height = block
         .layout_size
         .map(|s| {
@@ -1017,7 +1025,15 @@ fn draw_under_clip(
         let inner_x = x_pt + inner_inset.0;
         let inner_y = y_pt + inner_inset.1;
         if let Some(p) = para_for_block {
-            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, &geom.fragments, page_index);
+            draw_paragraph_inner_paint(
+                canvas,
+                p,
+                inner_x,
+                inner_y,
+                &geom.fragments,
+                page_index,
+                is_split,
+            );
         }
         if let Some(i) = img_for_block {
             draw_image_inner_paint(canvas, i, inner_x, inner_y);
@@ -1260,7 +1276,7 @@ fn draw_under_opacity(
             // paints on continuation pages, exactly the bug the
             // `draw_block_inner_paint` fix addresses for non-opacity
             // blocks (PR #316). (PR #314 follow-up Devin Review)
-            let is_split = geom.fragments.len() > 1;
+            let is_split = geom.is_split();
             let total_height = block
                 .layout_size
                 .map(|s| {
@@ -1308,6 +1324,7 @@ fn draw_under_opacity(
                     inner_y,
                     &geom.fragments,
                     page_index,
+                    is_split,
                 );
             }
             if let Some(i) = img_for_block {
@@ -1871,7 +1888,9 @@ fn draw_block_with_inner_content(
     draw_with_opacity(canvas, block.opacity, |canvas| {
         draw_block_inner_paint(canvas, block, x, y, frag, is_split);
         if let Some(p) = paragraph {
-            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
+            draw_paragraph_inner_paint(
+                canvas, p, inner_x, inner_y, fragments, page_index, is_split,
+            );
         }
         if let Some(i) = image {
             draw_image_inner_paint(canvas, i, inner_x, inner_y);
@@ -1926,7 +1945,9 @@ fn draw_list_item_with_block(
             draw_block_inner_paint(canvas, b, x, y, frag, is_split);
         }
         if let Some(p) = paragraph {
-            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
+            draw_paragraph_inner_paint(
+                canvas, p, inner_x, inner_y, fragments, page_index, is_split,
+            );
         }
     });
 }
@@ -1979,10 +2000,11 @@ fn draw_paragraph_v2(
     y: f32,
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
+    is_split: bool,
 ) {
     use crate::pageable::draw_with_opacity;
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        draw_paragraph_inner_paint(canvas, entry, x, y, fragments, page_index);
+        draw_paragraph_inner_paint(canvas, entry, x, y, fragments, page_index, is_split);
     });
 }
 
@@ -1999,11 +2021,13 @@ fn draw_paragraph_inner_paint(
     y: f32,
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
+    is_split: bool,
 ) {
     if !entry.visible {
         return;
     }
-    let Some(slice) = paragraph_lines_for_page(&entry.lines, fragments, page_index) else {
+    let Some(slice) = paragraph_lines_for_page(&entry.lines, fragments, page_index, is_split)
+    else {
         return;
     };
     crate::paragraph::draw_shaped_lines(canvas, &slice, x, y);
@@ -2013,18 +2037,21 @@ fn draw_paragraph_inner_paint(
 /// `ParagraphPageable::slice_for_page` so multi-page paragraphs only
 /// emit the lines belonging to the requested page.
 ///
-/// Single-fragment fast path: clone every line. Multi-fragment case:
-/// recover line range from cumulative fragment heights (CSS px → pt
-/// before comparing) and rebase line baselines / inline-image
-/// `computed_y` by the consumed amount so the slice is fragment-local.
+/// `is_split` is the parent `PaginationGeometry::is_split()` —
+/// `false` when the paragraph fits one page OR when the geometry
+/// represents per-page repetition (`is_repeat=true`, e.g.
+/// `position: fixed`). Either case means each fragment carries the
+/// full content, so the function returns every line unmodified.
+/// `true` triggers the cumulative-height slicing logic.
 fn paragraph_lines_for_page(
     all_lines: &[crate::paragraph::ShapedLine],
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
+    is_split: bool,
 ) -> Option<Vec<crate::paragraph::ShapedLine>> {
     let target_pos = fragments.iter().position(|f| f.page_index == page_index)?;
 
-    if fragments.len() == 1 && target_pos == 0 {
+    if !is_split {
         return Some(all_lines.to_vec());
     }
 
