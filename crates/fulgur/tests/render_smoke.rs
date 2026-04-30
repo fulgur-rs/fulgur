@@ -753,3 +753,29 @@ fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_overflow_clip_inside_transform() {
+    // Regression for PR #309 follow-up Devin: an `overflow:hidden`
+    // descendant of a `transform` ancestor must enter
+    // `draw_under_clip` so its clip path is pushed. Previously the
+    // descendant's bg/border landed via `dispatch_fragment` but no
+    // clip path fired, leaking content past the boundary.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:140px;height:80px;background:#cef;transform:translate(8px,4px)}.inner{width:60px;height:40px;background:#fce;overflow:hidden}.leaf{width:120px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_nested_overflow_clip_blocks() {
+    // Regression for PR #309 follow-up Devin: nested
+    // `overflow:hidden` blocks must each push their own clip path.
+    // Previously the inner block's bg/border landed via
+    // `dispatch_fragment` and no inner clip fired, losing the inner
+    // boundary while overflowing content escaped through it.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;overflow:hidden;background:#fce}.leaf{width:200px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}

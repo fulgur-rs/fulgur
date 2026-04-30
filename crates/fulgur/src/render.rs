@@ -588,8 +588,22 @@ fn draw_under_transform(
         .filter_map(|id| drawables.transforms.get(id))
         .flat_map(|inner_tx| inner_tx.descendants.iter().copied())
         .collect();
+    // Symmetric pre-skip for `overflow:hidden` descendants. When a
+    // clip block sits inside this transform, `draw_under_clip` (called
+    // below) iterates its own `clip_descendants` to paint them inside
+    // the clip; iterating those nodes again here via
+    // `dispatch_fragment` would double-paint them outside the clip.
+    // Mirrors the symmetric handling in `draw_under_clip`'s descendant
+    // loop (PR #309 follow-up Devin).
+    let clip_skip: std::collections::BTreeSet<usize> = tx
+        .descendants
+        .iter()
+        .filter_map(|id| drawables.block_styles.get(id))
+        .filter(|b| b.style.has_overflow_clip())
+        .flat_map(|b| b.clip_descendants.iter().copied())
+        .collect();
     for &desc_id in &tx.descendants {
-        if nested_skip.contains(&desc_id) {
+        if nested_skip.contains(&desc_id) || clip_skip.contains(&desc_id) {
             continue;
         }
         let Some(desc_geom) = geometry.get(&desc_id) else {
@@ -605,6 +619,33 @@ fn draw_under_transform(
                 draw_under_transform(
                     canvas,
                     desc_tx,
+                    desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+            } else if let Some(desc_block) = drawables
+                .block_styles
+                .get(&desc_id)
+                .filter(|b| b.style.has_overflow_clip())
+                .filter(|_| Some(desc_id) != drawables.body_id)
+            {
+                // Descendant carries `overflow:hidden|clip` — push its
+                // clip path the same way the main loop does. Without
+                // this, transforms wrapping a clipping block would
+                // emit the inner block's bg/border via
+                // `dispatch_fragment` but never push the clip, leaking
+                // overflow content past the clip boundary
+                // (PR #309 follow-up Devin).
+                draw_under_clip(
+                    canvas,
+                    desc_block,
                     desc_id,
                     desc_geom,
                     desc_frag,
@@ -795,8 +836,21 @@ fn draw_under_clip(
             .filter_map(|id| drawables.transforms.get(id))
             .flat_map(|tx| tx.descendants.iter().copied())
             .collect();
+        // Symmetric pre-skip for nested `overflow:hidden` descendants.
+        // The recursive `draw_under_clip` call below paints the inner
+        // clip's children inside its push/pop group; iterating the
+        // outer's `clip_descendants` for those same nodes here would
+        // re-dispatch them outside the inner clip
+        // (PR #309 follow-up Devin).
+        let nested_clip_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .filter(|b| b.style.has_overflow_clip())
+            .flat_map(|b| b.clip_descendants.iter().copied())
+            .collect();
         for &desc_id in &block.clip_descendants {
-            if transform_skip.contains(&desc_id) {
+            if transform_skip.contains(&desc_id) || nested_clip_skip.contains(&desc_id) {
                 continue;
             }
             let Some(desc_geom) = geometry.get(&desc_id) else {
@@ -812,6 +866,34 @@ fn draw_under_clip(
                     draw_under_transform(
                         canvas,
                         desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| b.style.has_overflow_clip())
+                    .filter(|_| Some(desc_id) != drawables.body_id)
+                {
+                    // Nested `overflow:hidden|clip` block — recurse so
+                    // its own clip path is pushed. Without this, a
+                    // `<div style="overflow:hidden"><div style="
+                    // overflow:hidden;width:30px"><p>text</p></div>
+                    // </div>` paints the inner block's bg/border via
+                    // `dispatch_fragment` but never pushes the inner
+                    // clip, losing the inner boundary
+                    // (PR #309 follow-up Devin).
+                    draw_under_clip(
+                        canvas,
+                        desc_block,
                         desc_id,
                         desc_geom,
                         desc_frag,

@@ -516,6 +516,31 @@ fn inline_byte_equality_cases() {
             "list item with overflow:hidden and opacity",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##,
         ),
+        // PR #309 follow-up Devin: an `overflow:hidden` block nested
+        // inside a `transform` ancestor was silently losing its clip.
+        // `draw_under_transform` dispatched the inner block via
+        // `dispatch_fragment` (which only paints bg/border/shadow) and
+        // never pushed the clip path. Same shape as the
+        // PR #310 transform-inside-clip fix but mirrored — clip inside
+        // transform also needs to enter `draw_under_clip`.
+        (
+            "overflow:hidden inside transform ancestor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:140px;height:80px;background:#cef;transform:translate(8px,4px)}.inner{width:60px;height:40px;background:#fce;overflow:hidden}.leaf{width:120px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
+        // PR #309 follow-up Devin: nested `overflow:hidden` blocks
+        // (`<div style="overflow:hidden"><div style="overflow:hidden">
+        // ...`) lost the inner clip because `draw_under_clip`'s
+        // descendant loop only checked for transforms, never for
+        // nested clips. The inner block's bg/border landed via
+        // `dispatch_fragment` but no inner push_clip_path fired, so
+        // overflowing content escaped the inner boundary. Fix:
+        // descendant dispatch recursively calls `draw_under_clip` for
+        // nested clip blocks (with a `nested_clip_skip` to avoid
+        // double-paint).
+        (
+            "nested overflow:hidden blocks",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;overflow:hidden;background:#fce}.leaf{width:200px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading
