@@ -20,11 +20,16 @@ use std::sync::Arc;
 /// Page settings (size, margins, landscape, GCPM `@page` overrides)
 /// resolve identically to the v1 path so byte equality is achievable
 /// once the draw migration completes.
+#[allow(clippy::too_many_arguments)]
 pub fn render_v2(
     config: &Config,
     geometry: &crate::pagination_layout::PaginationGeometryTable,
     drawables: &Drawables,
     gcpm: &GcpmContext,
+    running_store: &RunningElementStore,
+    font_data: &[Arc<Vec<u8>>],
+    string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
+    counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
 ) -> Result<Vec<u8>> {
     let mut document = krilla::Document::new();
 
@@ -87,6 +92,20 @@ pub fn render_v2(
 
     let mut link_collector = crate::pageable::LinkCollector::new();
 
+    // Build the GCPM margin-box renderer once. Reused across pages so
+    // measure / layout / render caches survive between pages and the
+    // pre-computed `string_set_states` / `counter_states` /
+    // `running_states` are paid for once.
+    let mut margin_box_renderer = MarginBoxRenderer::new(
+        gcpm,
+        running_store,
+        font_data,
+        geometry,
+        string_set_by_node,
+        counter_ops_by_node,
+        page_count,
+    );
+
     for page_idx in 0..page_count {
         let page_num = page_idx + 1;
         // Pass the full `gcpm.page_settings` (including selector
@@ -113,6 +132,31 @@ pub fn render_v2(
         link_collector.set_current_page(page_idx);
         {
             let mut surface = page.surface();
+            // Margin box pre-pass first (mirrors v1's
+            // `render_to_pdf_with_gcpm` per-page ordering — header /
+            // footer / corner content paint before body content). v1
+            // gives margin boxes their own collector-less canvas
+            // because running elements promoted into a margin box
+            // shouldn't re-record bookmarks every page; we mirror that
+            // here.
+            {
+                let mut margin_canvas = crate::pageable::Canvas {
+                    surface: &mut surface,
+                    bookmark_collector: None,
+                    link_collector: None,
+                };
+                let page_content_width =
+                    page_size.width - resolved_margin.left - resolved_margin.right;
+                margin_box_renderer.render_page(
+                    &mut margin_canvas,
+                    page_idx,
+                    page_num,
+                    page_count,
+                    page_size,
+                    resolved_margin,
+                    page_content_width,
+                );
+            }
             let mut canvas = crate::pageable::Canvas {
                 surface: &mut surface,
                 bookmark_collector: bookmark_collector.as_mut(),
@@ -219,6 +263,32 @@ fn draw_v2_page(
     for tx in drawables.transforms.values() {
         transformed_descendants.extend(tx.descendants.iter().copied());
     }
+    // Same shape as `transformed_descendants` but keyed by an ancestor
+    // block whose `style.has_overflow_clip()` is true. Strict
+    // descendants paint inside the clip's `push_clip_path / pop` group;
+    // skipping them here prevents the main loop from also dispatching
+    // them outside the clip.
+    //
+    // Body is excluded from this collection: the fragmenter records
+    // body with exactly one fragment at `page_index = 0`
+    // (`pagination_layout.rs:380-384`), so `draw_under_clip(body)`
+    // only fires on page 0. If we kept body in `clipped_descendants`,
+    // every descendant would still be skipped via the
+    // `clipped_descendants.contains(&node_id)` guard on page 1+ but
+    // nobody would dispatch them — silently blanking all content
+    // after page 1 on `<body style="overflow:hidden|auto|scroll">`
+    // (PR #310 follow-up Devin). Skipping body here means body-level
+    // overflow clip is not applied in v2, matching the pre-PR
+    // behavior; body clipping in a paged context is unusual and the
+    // pre-pass at `paint_root_block_v2` already handles body's own
+    // bg / border on continuation pages.
+    let mut clipped_descendants: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    for (&node_id, block) in &drawables.block_styles {
+        if block.style.has_overflow_clip() && Some(node_id) != drawables.body_id {
+            clipped_descendants.extend(block.clip_descendants.iter().copied());
+        }
+    }
 
     for (&node_id, geom) in geometry {
         // Bookmark anchor: emit on the page where the node's *first*
@@ -247,6 +317,11 @@ fn draw_v2_page(
             // Drawn inside an ancestor transform group elsewhere in
             // this loop. Skipping prevents double-painting. Bookmark
             // anchor recording above already ran unconditionally.
+            continue;
+        }
+        if clipped_descendants.contains(&node_id) {
+            // Drawn inside an ancestor `overflow: hidden|clip` block's
+            // `push_clip_path / pop` group elsewhere in this loop.
             continue;
         }
         // Skip the html root: its bg / border / shadow are painted
@@ -283,11 +358,60 @@ fn draw_v2_page(
                     margin_top_pt,
                     page_index,
                 );
-            } else {
-                dispatch_fragment(
-                    canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
-                );
+                continue;
             }
+            // `overflow: hidden | clip` block: bg / border / shadow
+            // paint OUTSIDE the clip (matching v1's
+            // `BlockPageable::draw` ordering at
+            // `pageable.rs:1796-1827`), then push the clip path,
+            // dispatch self's inner content + every strict descendant
+            // INSIDE the clip, then pop. Same shape as
+            // `draw_under_transform` but with `push_clip_path`.
+            //
+            // No `!clip_descendants.is_empty()` guard: shared-node_id
+            // inner content (inline-root paragraph from
+            // `convert::inline_root`, replaced image / svg from
+            // `convert::replaced`) lands at the same `node_id` as the
+            // wrapper and so produces an empty `clip_descendants`. v1
+            // pushes the clip unconditionally when
+            // `has_overflow_clip()` is true (`pageable.rs:1808-1826`),
+            // so a `<div style="overflow:hidden;width:50px">long
+            // text</div>` still needs the text clipped at the 50px
+            // box even with no separate descendant NodeIds.
+            // Body is intentionally excluded from `draw_under_clip`:
+            // body has only a page-0 fragment so the clip would only
+            // wrap page-0 content, but body's `clip_descendants`
+            // include every block in the document. Descendants on
+            // page 1+ are dispatched by the main loop via
+            // `dispatch_fragment` (they're omitted from
+            // `clipped_descendants` above). Without this skip, body's
+            // page-0 clip would also re-dispatch every descendant
+            // already painted by the main loop, causing a double
+            // paint. See the `clipped_descendants` collection block
+            // for the rest of the body-overflow rationale.
+            if let Some(block) = drawables.block_styles.get(&node_id)
+                && block.style.has_overflow_clip()
+                && Some(node_id) != drawables.body_id
+            {
+                draw_under_clip(
+                    canvas,
+                    block,
+                    node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            dispatch_fragment(
+                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+            );
         }
     }
 
@@ -464,8 +588,22 @@ fn draw_under_transform(
         .filter_map(|id| drawables.transforms.get(id))
         .flat_map(|inner_tx| inner_tx.descendants.iter().copied())
         .collect();
+    // Symmetric pre-skip for `overflow:hidden` descendants. When a
+    // clip block sits inside this transform, `draw_under_clip` (called
+    // below) iterates its own `clip_descendants` to paint them inside
+    // the clip; iterating those nodes again here via
+    // `dispatch_fragment` would double-paint them outside the clip.
+    // Mirrors the symmetric handling in `draw_under_clip`'s descendant
+    // loop (PR #309 follow-up Devin).
+    let clip_skip: std::collections::BTreeSet<usize> = tx
+        .descendants
+        .iter()
+        .filter_map(|id| drawables.block_styles.get(id))
+        .filter(|b| b.style.has_overflow_clip())
+        .flat_map(|b| b.clip_descendants.iter().copied())
+        .collect();
     for &desc_id in &tx.descendants {
-        if nested_skip.contains(&desc_id) {
+        if nested_skip.contains(&desc_id) || clip_skip.contains(&desc_id) {
             continue;
         }
         let Some(desc_geom) = geometry.get(&desc_id) else {
@@ -492,6 +630,33 @@ fn draw_under_transform(
                     margin_top_pt,
                     page_index,
                 );
+            } else if let Some(desc_block) = drawables
+                .block_styles
+                .get(&desc_id)
+                .filter(|b| b.style.has_overflow_clip())
+                .filter(|_| Some(desc_id) != drawables.body_id)
+            {
+                // Descendant carries `overflow:hidden|clip` — push its
+                // clip path the same way the main loop does. Without
+                // this, transforms wrapping a clipping block would
+                // emit the inner block's bg/border via
+                // `dispatch_fragment` but never push the clip, leaking
+                // overflow content past the clip boundary
+                // (PR #309 follow-up Devin).
+                draw_under_clip(
+                    canvas,
+                    desc_block,
+                    desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
             } else {
                 dispatch_fragment(
                     canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
@@ -504,6 +669,255 @@ fn draw_under_transform(
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
         lc.pop_transform();
     }
+}
+
+/// Push the block's overflow-clip path onto the surface, dispatch the
+/// wrapper's own bg / border / shadow + every descendant fragment that
+/// lands on `page_index`, then pop. Mirrors v1's `BlockPageable::draw`
+/// (`pageable.rs:1796-1827`):
+///
+/// ```text
+/// // bg/border/shadow paint OUTSIDE the clip
+/// draw_with_opacity(canvas, opacity, |c| {
+///     bg + border + shadow at (x, y, total_w, total_h);
+///     if let Some(clip) = compute_overflow_clip_path(...) {
+///         c.surface.push_clip_path(&clip, FillRule::default());
+///         for child in children { child.draw(c, x + child.x, y + child.y, ..); }
+///         c.surface.pop();
+///     }
+/// });
+/// ```
+///
+/// In v2 the wrapper's own inner content (paragraph / image / svg
+/// sharing the same `node_id`) is dispatched as part of the clipped
+/// region, then strict descendants iterate inside the clip. The block
+/// dispatcher's "shared node_id" combined helper
+/// (`draw_block_with_inner_content`) already handles the outer
+/// opacity wrap when used; here we replicate that ordering manually
+/// — bg/border outside clip, inner content + descendants inside clip,
+/// all wrapped in one opacity group.
+#[allow(clippy::too_many_arguments)]
+fn draw_under_clip(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    let total_width = block
+        .layout_size
+        .map(|s| s.width)
+        .unwrap_or_else(|| px_to_pt(frag.width));
+    let total_height = block
+        .layout_size
+        .map(|s| s.height)
+        .unwrap_or_else(|| px_to_pt(frag.height));
+
+    let para_for_block = drawables.paragraphs.get(&node_id);
+    let img_for_block = drawables.images.get(&node_id);
+    let svg_for_block = drawables.svgs.get(&node_id);
+    let inner_inset = block.style.content_inset();
+
+    // When this node is a list-item with overflow clip, mirror v1's
+    // `ListItemPageable::draw` ordering: outer opacity uses
+    // `list_item.opacity` (the body BlockPageable inside is built with
+    // default opacity=1.0 in `convert::list_item::build_list_item_body`,
+    // so `block.opacity` here would silently drop CSS opacity), and
+    // the marker draws before `push_clip_path` (markers sit at negative
+    // x outside the body box, so they must not be clipped). Without
+    // this, `<li style="overflow:hidden">` loses its marker entirely
+    // and any opacity set on the `<li>` is ignored. (PR #310 Devin)
+    let list_item = drawables.list_items.get(&node_id);
+    let opacity = list_item.map_or(block.opacity, |li| li.opacity);
+
+    draw_with_opacity(canvas, opacity, |canvas| {
+        // List-item marker paints first, OUTSIDE the clip — v1's
+        // `ListItemPageable::draw` emits the marker before delegating
+        // to `body.draw` (which paints bg / border / shadow). Markers
+        // sit at negative x relative to (x_pt, y_pt), so they must
+        // also stay outside the clip path pushed below.
+        if let Some(li) = list_item
+            && li.visible
+        {
+            draw_list_item_marker(canvas, li, x_pt, y_pt);
+        }
+
+        // bg / border / shadow outside the clip — same as
+        // `draw_block_inner_paint` but inlined so the opacity wrap
+        // covers the entire clipped region too.
+        if block.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+        }
+
+        // Push clip — fall through to inner content + descendants if
+        // `compute_overflow_clip_path` returns `None` (style somehow
+        // changed since extract decided this block clips).
+        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
+            &block.style,
+            x_pt,
+            y_pt,
+            total_width,
+            total_height,
+        ) {
+            canvas
+                .surface
+                .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+            true
+        } else {
+            false
+        };
+
+        // Inner content sharing `node_id` (inline-root paragraph,
+        // replaced image / svg) paints at the content-box top-left,
+        // not the border-box. Mirrors `draw_block_with_inner_content`.
+        let inner_x = x_pt + inner_inset.0;
+        let inner_y = y_pt + inner_inset.1;
+        if let Some(p) = para_for_block {
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, &geom.fragments, page_index);
+        }
+        if let Some(i) = img_for_block {
+            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+        }
+        if let Some(s) = svg_for_block {
+            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+        }
+
+        // Strict descendants — each at its own fragment's coords.
+        //
+        // Transform-aware dispatch: a descendant that has its own
+        // `TransformEntry` must enter `draw_under_transform` so the
+        // surface transform composes correctly. The main loop skips
+        // these nodes via `clipped_descendants.contains(...)` BEFORE
+        // it reaches the per-fragment transform check, so without the
+        // recursion below v2 silently drops transforms inside an
+        // `overflow: hidden` ancestor (`<div style="overflow:hidden">
+        // <div style="transform:..."/></div>` — PR #310 Devin).
+        //
+        // Pre-skip the strict descendants of those transforms so they
+        // are not dispatched twice — once via `draw_under_transform`
+        // (which iterates `tx.descendants`) and once via the loop
+        // body's `dispatch_fragment`.
+        let transform_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.transforms.get(id))
+            .flat_map(|tx| tx.descendants.iter().copied())
+            .collect();
+        // Symmetric pre-skip for nested `overflow:hidden` descendants.
+        // The recursive `draw_under_clip` call below paints the inner
+        // clip's children inside its push/pop group; iterating the
+        // outer's `clip_descendants` for those same nodes here would
+        // re-dispatch them outside the inner clip
+        // (PR #309 follow-up Devin).
+        let nested_clip_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .filter(|b| b.style.has_overflow_clip())
+            .flat_map(|b| b.clip_descendants.iter().copied())
+            .collect();
+        for &desc_id in &block.clip_descendants {
+            if transform_skip.contains(&desc_id) || nested_clip_skip.contains(&desc_id) {
+                continue;
+            }
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                    draw_under_transform(
+                        canvas,
+                        desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| b.style.has_overflow_clip())
+                    .filter(|_| Some(desc_id) != drawables.body_id)
+                {
+                    // Nested `overflow:hidden|clip` block — recurse so
+                    // its own clip path is pushed. Without this, a
+                    // `<div style="overflow:hidden"><div style="
+                    // overflow:hidden;width:30px"><p>text</p></div>
+                    // </div>` paints the inner block's bg/border via
+                    // `dispatch_fragment` but never pushes the inner
+                    // clip, losing the inner boundary
+                    // (PR #309 follow-up Devin).
+                    draw_under_clip(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else {
+                    dispatch_fragment(
+                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        page_index,
+                    );
+                }
+            }
+        }
+
+        if clip_pushed {
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Paint multicol column-rule lines on `page_index` for one
@@ -1323,11 +1737,322 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 /// Cached max-content width and render Pageable for margin boxes.
 /// Measure cache: (html, page_height as bits) → max-content width.
 /// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
-type MeasureCache = HashMap<(String, u32), f32>;
+type MeasureCache = HashMap<(String, u32, u32), f32>;
 type RenderCache = HashMap<(String, u32, u32), Box<dyn Pageable>>;
 
 fn width_key(w: f32) -> u32 {
     w.to_bits()
+}
+
+/// Per-page state and caches required to render `@page` margin boxes
+/// (`@top-center`, `@bottom-center`, `@left-middle`, etc.). Built once
+/// per render and reused across pages so measure / layout passes for
+/// repeated content (e.g. a page-number footer) hit the cache.
+///
+/// Used by both `render_to_pdf_with_gcpm` (v1 path) and `render_v2`
+/// (Phase 4 v2 path) — both call `render_page` per page.
+pub(crate) struct MarginBoxRenderer<'a> {
+    pub gcpm: &'a GcpmContext,
+    pub running_store: &'a RunningElementStore,
+    pub font_data: &'a [Arc<Vec<u8>>],
+    pub margin_css: String,
+    pub string_set_states: Vec<BTreeMap<String, crate::pagination_layout::StringSetPageState>>,
+    pub running_states: Vec<BTreeMap<String, crate::pagination_layout::PageRunningState>>,
+    pub counter_states: Vec<BTreeMap<String, i32>>,
+    pub measure_cache: MeasureCache,
+    pub height_cache: HashMap<(String, u32, u32), f32>,
+    pub render_cache: RenderCache,
+}
+
+impl<'a> MarginBoxRenderer<'a> {
+    /// Build a renderer from raw inputs. `string_set_by_node` /
+    /// `counter_ops_by_node` are the per-node maps drained out of
+    /// `ConvertContext` before `dom_to_pageable` consumed them.
+    pub(crate) fn new(
+        gcpm: &'a GcpmContext,
+        running_store: &'a RunningElementStore,
+        font_data: &'a [Arc<Vec<u8>>],
+        pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
+        string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
+        counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+        total_pages: usize,
+    ) -> Self {
+        let string_set_states = if gcpm.string_set_mappings.is_empty() {
+            vec![BTreeMap::new(); total_pages]
+        } else {
+            let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            crate::pagination_layout::collect_string_set_states(pagination_geometry, &by_node_btree)
+        };
+        let running_states = if gcpm.running_mappings.is_empty() {
+            vec![BTreeMap::new(); total_pages]
+        } else {
+            crate::pagination_layout::collect_running_element_states(
+                pagination_geometry,
+                running_store,
+            )
+        };
+        let counter_states =
+            if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
+                vec![BTreeMap::new(); total_pages]
+            } else {
+                crate::pagination_layout::collect_counter_states(
+                    pagination_geometry,
+                    counter_ops_by_node,
+                )
+            };
+        Self {
+            gcpm,
+            running_store,
+            font_data,
+            margin_css: strip_display_none(&gcpm.cleaned_css),
+            string_set_states,
+            running_states,
+            counter_states,
+            measure_cache: HashMap::new(),
+            height_cache: HashMap::new(),
+            render_cache: HashMap::new(),
+        }
+    }
+
+    /// Render every margin box that applies to `page_idx` onto
+    /// `canvas`. Mirrors the per-page block from
+    /// `render_to_pdf_with_gcpm`'s pre-Phase-4 implementation:
+    ///
+    /// 1. Filter `gcpm.margin_boxes` by `@page` selector matching
+    ///    (`:first` / `:left` / `:right`), preferring more-specific
+    ///    selectors over the default.
+    /// 2. Resolve each box's HTML content (substituting `counter()` /
+    ///    `element()` / `string()` from per-page state).
+    /// 3. Measure max-content width (top/bottom) or height (left/right).
+    /// 4. Distribute boxes along each edge with `compute_edge_layout`.
+    /// 5. Render each box at its final rect via Blitz parse + layout +
+    ///    `dom_to_pageable`, then `pageable.draw(canvas, rect)`.
+    ///
+    /// `content_width` is the page content area width in pt — used as
+    /// the available width during measure passes for top/bottom boxes.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_page(
+        &mut self,
+        canvas: &mut Canvas<'_, '_>,
+        page_idx: usize,
+        page_num: usize,
+        total_pages: usize,
+        page_size: crate::config::PageSize,
+        resolved_margin: crate::config::Margin,
+        content_width: f32,
+    ) {
+        // Resolve effective boxes: pick the most specific matching rule
+        // per position. Pseudo-class selectors (`:first`, `:left`,
+        // `:right`) override the default `@page` rule.
+        let mut effective_boxes: BTreeMap<MarginBoxPosition, &crate::gcpm::MarginBoxRule> =
+            BTreeMap::new();
+        for margin_box in &self.gcpm.margin_boxes {
+            let matches = match &margin_box.page_selector {
+                None => true,
+                Some(sel) => match sel.as_str() {
+                    ":first" => page_num == 1,
+                    ":left" => page_num % 2 == 0,
+                    ":right" => page_num % 2 != 0,
+                    _ => true,
+                },
+            };
+            if !matches {
+                continue;
+            }
+            let should_replace = effective_boxes
+                .get(&margin_box.position)
+                .map(|existing| {
+                    existing.page_selector.is_none() && margin_box.page_selector.is_some()
+                })
+                .unwrap_or(true);
+            if should_replace {
+                effective_boxes.insert(margin_box.position, margin_box);
+            }
+        }
+
+        // Resolve HTML for each effective box.
+        let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
+        for (&pos, rule) in &effective_boxes {
+            let content_html = resolve_content_to_html(
+                &rule.content,
+                self.running_store,
+                &self.running_states,
+                &self.string_set_states[page_idx],
+                page_num,
+                total_pages,
+                page_idx,
+                &self.counter_states[page_idx],
+            );
+            if !content_html.is_empty() {
+                let html = if rule.declarations.is_empty() {
+                    content_html
+                } else {
+                    format!(
+                        "<div style=\"{}\">{}</div>",
+                        escape_attr(&rule.declarations),
+                        content_html
+                    )
+                };
+                resolved_htmls.insert(pos, html);
+            }
+        }
+
+        // Stage 1a: measure max-content width for top / bottom boxes.
+        for (&pos, html) in &resolved_htmls {
+            if !pos.edge().is_some_and(|e| e.is_horizontal()) {
+                continue;
+            }
+            // Cache key includes `content_width` because `@page :first` /
+            // `:left` / `:right` can override margins per page, changing
+            // the available viewport width that Blitz lays the
+            // `display: inline-block` measure document at. Pre-Phase-4
+            // v1 had a single global `content_width` so two-tuple keys
+            // were complete; the v2 port made `content_width` a
+            // per-page parameter and a stale cache entry could
+            // misalign margin boxes on pages with overridden margins
+            // (PR #309 Devin).
+            let measure_key = (
+                html.clone(),
+                width_key(page_size.height),
+                width_key(content_width),
+            );
+            self.measure_cache.entry(measure_key).or_insert_with(|| {
+                let measure_html = format!(
+                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
+                    self.margin_css, html
+                );
+                let measure_doc = crate::blitz_adapter::parse_and_layout(
+                    &measure_html,
+                    crate::convert::pt_to_px(content_width),
+                    crate::convert::pt_to_px(page_size.height),
+                    self.font_data,
+                );
+                get_body_child_dimension(&measure_doc, true)
+            });
+        }
+
+        // Stage 1b: measure max-content height for left / right boxes.
+        for (&pos, html) in &resolved_htmls {
+            let fixed_width = match pos.edge() {
+                Some(Edge::Left) => resolved_margin.left,
+                Some(Edge::Right) => resolved_margin.right,
+                _ => continue,
+            };
+            // Include `page_size.height` in the key so a `@page :first`
+            // (or other matched-page selector) that overrides the page
+            // SIZE — not just margins — gets a fresh measurement on
+            // the second page. Mirrors `measure_cache`'s key (which
+            // already records `page_size.height`); without this, two
+            // pages with the same fixed margin width but different
+            // page heights would share a stale entry. (PR #309 Devin)
+            let hc_key = (
+                html.clone(),
+                width_key(fixed_width),
+                width_key(page_size.height),
+            );
+            self.height_cache.entry(hc_key).or_insert_with(|| {
+                let measure_html = format!(
+                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
+                    self.margin_css, html
+                );
+                let measure_doc = crate::blitz_adapter::parse_and_layout(
+                    &measure_html,
+                    crate::convert::pt_to_px(fixed_width),
+                    crate::convert::pt_to_px(page_size.height),
+                    self.font_data,
+                );
+                get_body_child_dimension(&measure_doc, false)
+            });
+        }
+
+        // Stage 2: distribute each edge's boxes against the page rect.
+        let mut edge_defined: BTreeMap<Edge, BTreeMap<MarginBoxPosition, f32>> = BTreeMap::new();
+        for (&pos, html) in &resolved_htmls {
+            let edge = match pos.edge() {
+                Some(e) => e,
+                None => continue,
+            };
+            let size = if edge.is_horizontal() {
+                self.measure_cache
+                    .get(&(
+                        html.clone(),
+                        width_key(page_size.height),
+                        width_key(content_width),
+                    ))
+                    .copied()
+            } else {
+                let fixed_width = if edge == Edge::Left {
+                    resolved_margin.left
+                } else {
+                    resolved_margin.right
+                };
+                self.height_cache
+                    .get(&(
+                        html.clone(),
+                        width_key(fixed_width),
+                        width_key(page_size.height),
+                    ))
+                    .copied()
+            };
+            if let Some(s) = size {
+                edge_defined.entry(edge).or_default().insert(pos, s);
+            }
+        }
+        let mut all_rects: HashMap<MarginBoxPosition, MarginBoxRect> = HashMap::new();
+        for (edge, defined) in &edge_defined {
+            all_rects.extend(compute_edge_layout(
+                *edge,
+                defined,
+                page_size,
+                resolved_margin,
+            ));
+        }
+
+        // Stage 3: render at the confirmed rect.
+        for (&pos, html) in &resolved_htmls {
+            let rect = all_rects
+                .get(&pos)
+                .copied()
+                .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
+
+            let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
+            if !self.render_cache.contains_key(&cache_key) {
+                let render_html = format!(
+                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
+                    self.margin_css, html
+                );
+                let render_doc = crate::blitz_adapter::parse_and_layout(
+                    &render_html,
+                    crate::convert::pt_to_px(rect.width),
+                    crate::convert::pt_to_px(rect.height),
+                    self.font_data,
+                );
+                let dummy_store = RunningElementStore::new();
+                let mut dummy_ctx = crate::convert::ConvertContext {
+                    running_store: &dummy_store,
+                    assets: None,
+                    font_cache: HashMap::new(),
+                    string_set_by_node: HashMap::new(),
+                    counter_ops_by_node: HashMap::new(),
+                    bookmark_by_node: HashMap::new(),
+                    column_styles: crate::column_css::ColumnStyleTable::new(),
+                    multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
+                    pagination_geometry: crate::pagination_layout::PaginationGeometryTable::new(),
+                    link_cache: Default::default(),
+                    viewport_size_px: None,
+                };
+                let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
+                self.render_cache.insert(cache_key.clone(), pageable);
+            }
+
+            if let Some(pageable) = self.render_cache.get(&cache_key) {
+                pageable.draw(canvas, rect.x, rect.y, rect.width, rect.height);
+            }
+        }
+    }
 }
 
 /// Get a layout dimension of the first non-zero child of `<body>` in a Blitz document.
@@ -1402,7 +2127,7 @@ pub fn render_to_pdf_with_gcpm(
     } else {
         init_size
     };
-    let content_width = init_size.width - init_margin.left - init_margin.right;
+    let _content_width = init_size.width - init_margin.left - init_margin.right;
     let _content_height = init_size.height - init_margin.top - init_margin.bottom;
 
     // body-content page split is geometry-driven: the fragmenter
@@ -1415,39 +2140,19 @@ pub fn render_to_pdf_with_gcpm(
     drop(root);
     let total_pages = pages.len();
 
-    // Per-page state collected directly from the fragmenter geometry
-    // (no Pageable tree walk required).
-    let string_set_states = if gcpm.string_set_mappings.is_empty() {
-        vec![BTreeMap::new(); total_pages]
-    } else {
-        let by_node_btree: BTreeMap<usize, Vec<(String, String)>> = string_set_by_node
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        crate::pagination_layout::collect_string_set_states(pagination_geometry, &by_node_btree)
-    };
-    let running_states = if gcpm.running_mappings.is_empty() {
-        vec![BTreeMap::new(); total_pages]
-    } else {
-        crate::pagination_layout::collect_running_element_states(pagination_geometry, running_store)
-    };
-    let counter_states = if gcpm.counter_mappings.is_empty()
-        && gcpm.content_counter_mappings.is_empty()
-    {
-        vec![BTreeMap::new(); total_pages]
-    } else {
-        crate::pagination_layout::collect_counter_states(pagination_geometry, counter_ops_by_node)
-    };
-
-    // Build margin-box CSS: strip display:none rules that the parser
-    // injected for running elements (they need to be visible in margin boxes).
-    let margin_css = strip_display_none(&gcpm.cleaned_css);
-
-    // Caches: measure (html → max-content width), height ((html, layout_width) → max-content height),
-    // render (html+width → Pageable)
-    let mut measure_cache: MeasureCache = HashMap::new();
-    let mut height_cache: HashMap<(String, u32), f32> = HashMap::new();
-    let mut render_cache: RenderCache = HashMap::new();
+    // Per-page state + caches required for `@page` margin box rendering.
+    // Both v1 and `render_v2` (Phase 4) use the same renderer so that the
+    // margin box pipeline ports byte-eq from the v1 path without
+    // re-implementing it.
+    let mut margin_box_renderer = MarginBoxRenderer::new(
+        gcpm,
+        running_store,
+        font_data,
+        pagination_geometry,
+        string_set_by_node,
+        counter_ops_by_node,
+        total_pages,
+    );
 
     let mut document = krilla::Document::new();
 
@@ -1537,189 +2242,21 @@ pub fn render_to_pdf_with_gcpm(
             link_collector: None,
         };
 
-        // Resolve margin boxes: for each position, pick the most specific
-        // matching rule. Pseudo-class selectors (:first, :left, :right) override
-        // the default @page rule for the same position.
-        let mut effective_boxes: BTreeMap<MarginBoxPosition, &crate::gcpm::MarginBoxRule> =
-            BTreeMap::new();
-        for margin_box in &gcpm.margin_boxes {
-            let matches = match &margin_box.page_selector {
-                None => true,
-                Some(sel) => match sel.as_str() {
-                    ":first" => page_num == 1,
-                    ":left" => page_num % 2 == 0,
-                    ":right" => page_num % 2 != 0,
-                    _ => true,
-                },
-            };
-            if !matches {
-                continue;
-            }
-            // More specific selector (Some) overrides less specific (None)
-            let should_replace = effective_boxes
-                .get(&margin_box.position)
-                .map(|existing| {
-                    existing.page_selector.is_none() && margin_box.page_selector.is_some()
-                })
-                .unwrap_or(true);
-            if should_replace {
-                effective_boxes.insert(margin_box.position, margin_box);
-            }
-        }
-
-        // Collect resolved HTML for each effective box, wrapping in a div
-        // with the margin box's own declarations (font-size, color, margin, etc.)
-        let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
-        for (&pos, rule) in &effective_boxes {
-            let content_html = resolve_content_to_html(
-                &rule.content,
-                running_store,
-                &running_states,
-                &string_set_states[page_idx],
-                page_num,
-                total_pages,
-                page_idx,
-                &counter_states[page_idx],
-            );
-            if !content_html.is_empty() {
-                let html = if rule.declarations.is_empty() {
-                    content_html
-                } else {
-                    format!(
-                        "<div style=\"{}\">{}</div>",
-                        escape_attr(&rule.declarations),
-                        content_html
-                    )
-                };
-                resolved_htmls.insert(pos, html);
-            }
-        }
-
-        // Stage 1a: Measure max-content width for top/bottom boxes.
-        // Uses inline-block wrapper so Blitz computes shrink-to-fit width.
-        for (&pos, html) in &resolved_htmls {
-            if !pos.edge().is_some_and(|e| e.is_horizontal()) {
-                continue;
-            }
-            let measure_key = (html.clone(), width_key(page_size.height));
-            measure_cache.entry(measure_key).or_insert_with(|| {
-                let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
-                    margin_css, html
-                );
-                let measure_doc = crate::blitz_adapter::parse_and_layout(
-                    &measure_html,
-                    crate::convert::pt_to_px(content_width),
-                    crate::convert::pt_to_px(page_size.height),
-                    font_data,
-                );
-                get_body_child_dimension(&measure_doc, true)
-            });
-        }
-
-        // Stage 1b: Measure max-content height for left/right boxes.
-        // Layout at fixed margin width, then read the resulting height.
-        for (&pos, html) in &resolved_htmls {
-            let fixed_width = match pos.edge() {
-                Some(Edge::Left) => resolved_margin.left,
-                Some(Edge::Right) => resolved_margin.right,
-                _ => continue,
-            };
-            let hc_key = (html.clone(), width_key(fixed_width));
-            height_cache.entry(hc_key).or_insert_with(|| {
-                let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
-                    margin_css, html
-                );
-                let measure_doc = crate::blitz_adapter::parse_and_layout(
-                    &measure_html,
-                    crate::convert::pt_to_px(fixed_width),
-                    crate::convert::pt_to_px(page_size.height),
-                    font_data,
-                );
-                get_body_child_dimension(&measure_doc, false)
-            });
-        }
-
-        // Stage 2: Group by edge and compute layout
-        let mut edge_defined: BTreeMap<Edge, BTreeMap<MarginBoxPosition, f32>> = BTreeMap::new();
-
-        for (&pos, html) in &resolved_htmls {
-            let edge = match pos.edge() {
-                Some(e) => e,
-                None => continue, // corners
-            };
-            let size = if edge.is_horizontal() {
-                measure_cache
-                    .get(&(html.clone(), width_key(page_size.height)))
-                    .copied()
-            } else {
-                let fixed_width = if edge == Edge::Left {
-                    resolved_margin.left
-                } else {
-                    resolved_margin.right
-                };
-                height_cache
-                    .get(&(html.clone(), width_key(fixed_width)))
-                    .copied()
-            };
-            if let Some(s) = size {
-                edge_defined.entry(edge).or_default().insert(pos, s);
-            }
-        }
-
-        let mut all_rects: HashMap<MarginBoxPosition, MarginBoxRect> = HashMap::new();
-        for (edge, defined) in &edge_defined {
-            all_rects.extend(compute_edge_layout(
-                *edge,
-                defined,
-                page_size,
-                resolved_margin,
-            ));
-        }
-
-        // Stage 3: Render at confirmed width and draw.
-        // Pageable is created (or fetched from cache) at the final rect width.
-        for (&pos, html) in &resolved_htmls {
-            let rect = all_rects
-                .get(&pos)
-                .copied()
-                .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
-
-            let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
-            if !render_cache.contains_key(&cache_key) {
-                let render_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
-                    margin_css, html
-                );
-                let render_doc = crate::blitz_adapter::parse_and_layout(
-                    &render_html,
-                    crate::convert::pt_to_px(rect.width),
-                    crate::convert::pt_to_px(rect.height),
-                    font_data,
-                );
-                let dummy_store = RunningElementStore::new();
-                let mut dummy_ctx = crate::convert::ConvertContext {
-                    running_store: &dummy_store,
-                    assets: None,
-                    font_cache: HashMap::new(),
-                    string_set_by_node: HashMap::new(),
-                    counter_ops_by_node: HashMap::new(),
-                    bookmark_by_node: HashMap::new(),
-                    column_styles: crate::column_css::ColumnStyleTable::new(),
-                    multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-                    pagination_geometry: crate::pagination_layout::PaginationGeometryTable::new(),
-                    link_cache: Default::default(),
-                    viewport_size_px: None,
-                };
-                let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
-                render_cache.insert(cache_key.clone(), pageable);
-            }
-
-            if let Some(pageable) = render_cache.get(&cache_key) {
-                pageable.draw(&mut canvas, rect.x, rect.y, rect.width, rect.height);
-            }
-        }
+        // Margin boxes (`@top-center`, `@bottom-center`, etc.) — see
+        // `MarginBoxRenderer::render_page` for the multi-stage measure /
+        // layout / render pipeline. v1 uses the same renderer the v2
+        // path uses so both share the same per-page state caches and
+        // produce byte-equivalent margin-box output.
+        let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
+        margin_box_renderer.render_page(
+            &mut canvas,
+            page_idx,
+            page_num,
+            total_pages,
+            page_size,
+            resolved_margin,
+            page_content_width,
+        );
 
         // Draw body content with resolved per-page margin. Reuse `canvas`
         // by overwriting it so the previous (collector-less) Canvas's

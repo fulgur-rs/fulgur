@@ -368,6 +368,10 @@ impl Engine {
                     &convert_ctx.pagination_geometry,
                     &drawables,
                     &gcpm,
+                    &running_store,
+                    fonts,
+                    &string_set_for_render,
+                    &counter_ops_for_render,
                 )
             }
         }
