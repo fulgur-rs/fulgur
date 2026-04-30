@@ -974,3 +974,38 @@ fn render_v2_smoke_split_block_uses_per_slice_height() {
         "expected multi-page output for split block, got {page_count}",
     );
 }
+
+#[test]
+fn render_v2_smoke_body_layout_children_for_form_siblings() {
+    // Regression for fulgur-bq6i:wasm-demo — body with mixed
+    // block-level and inline-level children triggers Stylo's
+    // anonymous-block synthesis at the BODY level (CSS 2.1
+    // §9.2.1.1). The synthesized wrapper appears in
+    // `body.layout_children` but NOT in `body.children`, so the
+    // fragmenter's `fragment_pagination_root` (now preferring
+    // `layout_children` when non-empty) must visit it for v2 to
+    // see the inline-level group's paint.
+    //
+    // Without this fix, a body containing
+    // `<h1>title</h1><label>field: <input></label>` paints only
+    // the h1; the label + input row gets dropped because its
+    // anonymous wrapper isn't visited.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}label{margin-right:8pt}input{padding:2pt;border:1pt solid #888;width:120pt}</style></head><body><h1>Form sample</h1><label>Name:</label><input type="text" value="hello"></body></html>"##;
+    let html_no_inline = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}</style></head><body><h1>Form sample</h1></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf_no_inline = engine.render_html_v2(html_no_inline).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: body with inline-level form siblings produces a
+    // larger PDF than h1-only baseline. Without the body-level
+    // layout_children walk, the label + input row is dropped and
+    // the two sizes converge.
+    assert!(
+        pdf.len() > pdf_no_inline.len(),
+        "expected form-row rendering to produce more bytes than \
+         h1-only baseline (got {} vs {}); did body layout_children \
+         walk regress?",
+        pdf.len(),
+        pdf_no_inline.len(),
+    );
+}

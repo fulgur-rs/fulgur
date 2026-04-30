@@ -388,10 +388,40 @@ impl<'a> PaginationLayoutTree<'a> {
                 height: body_layout.size.height,
             });
 
+        // Prefer body's `layout_children` — same rationale as
+        // `record_subtree_descendants`. When a block container has
+        // mixed block-level and inline-level children, Stylo
+        // synthesizes anonymous block wrappers around the inline-
+        // level siblings (CSS 2.1 §9.2.1.1). Those wrappers carry
+        // their own `node_id` and Taffy layout, but they live ONLY
+        // in `layout_children` — `children` still points at the
+        // underlying inline elements (e.g. a body containing
+        // `<label>` followed by `<fieldset>` followed by
+        // `<select><option>...</option></select>` produces an
+        // anonymous block wrapping the `<select>` siblings, visible
+        // only in `layout_children`).
+        //
+        // Without this preference v2 silently drops the inline-level
+        // group's paint: extract assigns the inner paragraph's
+        // `node_id` to the synthesized wrapper, but the body iteration
+        // walks raw `children` and never visits the wrapper, so
+        // geometry has no fragment for that node_id and
+        // `dispatch_fragment` skips the paragraph entirely
+        // (fulgur-bq6i: examples/wasm-demo lost label / legend / option
+        // text content for this exact reason).
         let children = self
             .doc
             .get_node(body_id)
-            .map(|n| n.children.clone())
+            .map(|n| {
+                let layout_borrow = n.layout_children.borrow();
+                if let Some(lc) = layout_borrow.as_deref()
+                    && !lc.is_empty()
+                {
+                    lc.to_vec()
+                } else {
+                    n.children.clone()
+                }
+            })
             .unwrap_or_default();
 
         let mut page_index: u32 = 0;
