@@ -1148,3 +1148,62 @@ fn render_v2_smoke_split_overflow_clip_block_uses_per_slice_height() {
         "expected multi-page output for split-overflow-clip test, got {page_count}",
     );
 }
+
+#[test]
+fn render_v2_smoke_html_opacity_multi_page_content_survives() {
+    // Regression for PR #312 follow-up Devin Review: the
+    // `<html>` root element with fractional opacity must NOT
+    // silently blank the entire document.
+    //
+    // Root is never recorded in `geometry` (it's painted via
+    // `paint_root_block_v2` as a pre-pass). When `html { opacity:
+    // 0.5 }` is set, `extract_drawables_from_pageable` populates
+    // root's `BlockEntry.opacity_descendants` with body + all body
+    // descendants. Without the root exclusion in the
+    // `opacity_wrapped_descendants` collection, those descendants
+    // were added to the skip set and dropped from the main loop —
+    // but `draw_under_opacity(root)` never fires either (root is
+    // skipped at line 348), so the entire page content silently
+    // blanked.
+    //
+    // Same defense as the body exclusion (PR #314 follow-up).
+    let html = r##"<!DOCTYPE html><html style="opacity:0.5"><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for html-opacity test, got {page_count}",
+    );
+    // Compare against no-opacity baseline. Without the root
+    // exclusion fix, `html { opacity: 0.5 }` silently dropped all
+    // body content and the PDF shrunk to roughly the empty-page
+    // size. Require ≥85% of baseline (small overhead for the
+    // root-level transparency-group XObject).
+    let html_baseline = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    assert!(
+        pdf.len() * 100 >= pdf_baseline.len() * 85,
+        "with-html-opacity PDF lost too much content vs baseline \
+         (with={}B baseline={}B); did root exclusion regress?",
+        pdf.len(),
+        pdf_baseline.len(),
+    );
+}

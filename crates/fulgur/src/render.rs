@@ -285,7 +285,18 @@ fn draw_v2_page(
     let mut clipped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     for (&node_id, block) in &drawables.block_styles {
-        if block.style.has_overflow_clip() && Some(node_id) != drawables.body_id {
+        // Exclude body AND root: both are skipped by the main
+        // dispatch loop (body's only fragment lives on page 0, root
+        // is never recorded in `geometry` and is painted via
+        // `paint_root_block_v2`). Including either would silently
+        // blank descendants on pages 1+ because `draw_under_clip`
+        // never fires for them but the skip set still hides their
+        // descendants from the regular per-fragment dispatch.
+        // (PR #312 follow-up Devin: root exclusion symmetry.)
+        if block.style.has_overflow_clip()
+            && Some(node_id) != drawables.body_id
+            && Some(node_id) != drawables.root_id
+        {
             clipped_descendants.extend(block.clip_descendants.iter().copied());
         }
     }
@@ -296,19 +307,25 @@ fn draw_v2_page(
     // they'd be dispatched twice: once at full opacity here, once
     // again under the parent's opacity wrap.
     //
-    // Body is excluded for the same reason as `clipped_descendants`:
-    // the fragmenter records body with exactly one fragment at
-    // `page_index = 0`, so `draw_under_opacity(body)` only fires on
-    // page 0. Keeping body's descendants in this set would silently
-    // blank all content on pages 1+ (descendants get skipped by the
-    // `opacity_wrapped_descendants.contains(...)` guard but no-one
-    // dispatches them — same `body { opacity: 0.5 }` pitfall the
-    // clip path documents at the `clipped_descendants` collection
-    // (PR #314 follow-up Devin Review).
+    // Body and root are excluded for the same reason
+    // `clipped_descendants` excludes them: the fragmenter records
+    // body with exactly one fragment at `page_index = 0` (so
+    // `draw_under_opacity(body)` only fires on page 0), and root
+    // is never recorded in `geometry` at all (it's painted via
+    // the `paint_root_block_v2` pre-pass). Keeping either's
+    // descendants in this set would silently blank all content on
+    // pages 1+ because descendants get skipped by the guard but
+    // no-one dispatches them — `html { opacity: 0.5 }` would
+    // silently blank the whole document, and `body { opacity:
+    // 0.5 }` would silently blank pages 1+. (PR #314 + PR #312
+    // follow-up Devin Reviews.)
     let mut opacity_wrapped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     for (&node_id, block) in &drawables.block_styles {
-        if !block.opacity_descendants.is_empty() && Some(node_id) != drawables.body_id {
+        if !block.opacity_descendants.is_empty()
+            && Some(node_id) != drawables.body_id
+            && Some(node_id) != drawables.root_id
+        {
             opacity_wrapped_descendants.extend(block.opacity_descendants.iter().copied());
         }
     }
