@@ -300,6 +300,17 @@ fn draw_v2_page(
             clipped_descendants.extend(block.clip_descendants.iter().copied());
         }
     }
+    // Tables with `overflow: hidden | clip` clip their cells to the
+    // padding box. Mirror the block-clip skip set so the main loop
+    // doesn't dispatch cell descendants outside the table's clip
+    // scope — `draw_under_clip_table` paints them inside the clip.
+    // Unlike body/root, tables are always proper geometry-recorded
+    // nodes so no special exclusion is needed.
+    for table in drawables.tables.values() {
+        if table.style.has_overflow_clip() && !table.clip_descendants.is_empty() {
+            clipped_descendants.extend(table.clip_descendants.iter().copied());
+        }
+    }
     // Mirrors `clipped_descendants` for blocks that wrap their
     // descendants in a `draw_with_opacity` group (fractional opacity,
     // no clip — see `BlockEntry.opacity_descendants` and
@@ -445,6 +456,33 @@ fn draw_v2_page(
                     canvas,
                     block,
                     node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            // Table with `overflow: hidden | clip`: same shape as the
+            // block clip arm above. v1's `TablePageable::draw` mirrors
+            // `BlockPageable::draw` and pushes a clip path around its
+            // cell paint when `has_overflow_clip()` is true; v2 routes
+            // through `draw_under_clip_table` which paints the outer
+            // frame outside the clip and dispatches each cell descendant
+            // inside.
+            if let Some(table) = drawables
+                .tables
+                .get(&node_id)
+                .filter(|t| t.style.has_overflow_clip())
+            {
+                draw_under_clip_table(
+                    canvas,
+                    table,
                     geom,
                     frag,
                     x_pt,
@@ -1790,10 +1828,10 @@ fn draw_block_inner_paint(
 /// `<td>` is a `BlockPageable` with its own NodeId in geometry) lands
 /// through the standard per-NodeId dispatch.
 ///
-/// Same overflow-clip caveat as `draw_block_v2`: clip is not pushed
-/// here because flat dispatch lacks a natural close point. Multi-page
-/// table header repetition is also deferred to a later PR — single-
-/// page tables byte-eq today.
+/// Tables with `overflow: hidden | clip` route through
+/// [`draw_under_clip_table`] instead so the clip path wraps every cell
+/// dispatched in the same scope. Multi-page table header repetition
+/// (`<thead>` cloned on continuation pages) is deferred to a later PR.
 fn draw_table_v2(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     entry: &crate::drawables::TableEntry,
@@ -1804,40 +1842,119 @@ fn draw_table_v2(
     use crate::pageable::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        let total_width = entry.layout_size.map(|s| s.width).unwrap_or(entry.width);
-        let total_height = entry.layout_size.map(|s| s.height).unwrap_or_else(|| {
-            let from_frag = crate::convert::px_to_pt(frag.height);
-            if from_frag > 0.0 {
-                from_frag
-            } else {
-                entry.cached_height
-            }
-        });
+        let (total_width, total_height) = table_box_size(entry, frag);
         if entry.visible {
-            crate::background::draw_box_shadows(
-                canvas,
-                &entry.style,
-                x,
-                y,
-                total_width,
-                total_height,
-            );
-            crate::background::draw_background(
-                canvas,
-                &entry.style,
-                x,
-                y,
-                total_width,
-                total_height,
-            );
-            crate::pageable::draw_block_border(
-                canvas,
-                &entry.style,
-                x,
-                y,
-                total_width,
-                total_height,
-            );
+            paint_table_outer_frame(canvas, entry, x, y, total_width, total_height);
+        }
+    });
+}
+
+/// Resolve the table's outer-frame width/height from the cached
+/// layout. Falls back to the current Fragment height (and finally
+/// `cached_height`) when `layout_size` is unset (test-only paths).
+fn table_box_size(
+    entry: &crate::drawables::TableEntry,
+    frag: &crate::pagination_layout::Fragment,
+) -> (f32, f32) {
+    let total_width = entry.layout_size.map(|s| s.width).unwrap_or(entry.width);
+    let total_height = entry.layout_size.map(|s| s.height).unwrap_or_else(|| {
+        let from_frag = crate::convert::px_to_pt(frag.height);
+        if from_frag > 0.0 {
+            from_frag
+        } else {
+            entry.cached_height
+        }
+    });
+    (total_width, total_height)
+}
+
+/// Paint the table's outer-frame bg / border / shadow at the current
+/// (x, y, width, height). Shared between the no-clip path
+/// ([`draw_table_v2`]) and the clip path ([`draw_under_clip_table`])
+/// so the two emit identical PDF operators for the same input.
+fn paint_table_outer_frame(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    entry: &crate::drawables::TableEntry,
+    x: f32,
+    y: f32,
+    total_width: f32,
+    total_height: f32,
+) {
+    crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
+    crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
+    crate::pageable::draw_block_border(canvas, &entry.style, x, y, total_width, total_height);
+}
+
+/// Push a `compute_overflow_clip_path` clip around the table's outer
+/// frame, dispatch each cell descendant inside the clip, then pop.
+/// Mirrors [`draw_under_clip`]'s shape for blocks but specialised for
+/// tables (no list-item marker, no shared-node_id inner content).
+#[allow(clippy::too_many_arguments)]
+fn draw_under_clip_table(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    table: &crate::drawables::TableEntry,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    let _ = geom;
+    let (total_width, total_height) = table_box_size(table, frag);
+
+    draw_with_opacity(canvas, table.opacity, |canvas| {
+        // bg / border / shadow OUTSIDE the clip, mirroring
+        // `draw_under_clip` for blocks (`pageable.rs:1796-1827`).
+        if table.visible {
+            paint_table_outer_frame(canvas, table, x_pt, y_pt, total_width, total_height);
+        }
+
+        // Push clip — fall through to descendant dispatch even if
+        // `compute_overflow_clip_path` returns `None` so the cells
+        // still paint (defensive, mirrors `draw_under_clip`).
+        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
+            &table.style,
+            x_pt,
+            y_pt,
+            total_width,
+            total_height,
+        ) {
+            canvas
+                .surface
+                .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+            true
+        } else {
+            false
+        };
+
+        // Dispatch each cell descendant inside the clip. `dispatch_fragment`
+        // handles cells (BlockEntry) and any inner content sharing
+        // their node_id (e.g. inline-root paragraph in a `<td>text</td>`).
+        for &desc_id in &table.clip_descendants {
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                dispatch_fragment(
+                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+                );
+            }
+        }
+
+        if clip_pushed {
+            canvas.surface.pop();
         }
     });
 }

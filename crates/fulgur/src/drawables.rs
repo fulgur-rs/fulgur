@@ -131,8 +131,7 @@ pub struct SvgEntry {
 ///
 /// Multi-page header repetition (`<thead>` cloned on continuation
 /// pages) is **not** modelled in PR 5; single-page tables byte-eq
-/// already, multi-page tables follow in a later PR alongside the
-/// per-block clip work.
+/// already, multi-page tables follow in a later PR.
 #[derive(Debug, Clone)]
 pub struct TableEntry {
     pub style: crate::pageable::BlockStyle,
@@ -142,6 +141,11 @@ pub struct TableEntry {
     pub layout_size: Option<crate::pageable::Size>,
     pub width: f32,
     pub cached_height: f32,
+    /// Strict descendant `node_id`s (cell blocks + their children) when
+    /// `style.has_overflow_clip()` is true. Mirrors `BlockEntry::clip_descendants`
+    /// so the dispatcher can push the table's clip path once and
+    /// dispatch every cell inside it. Empty when the table doesn't clip.
+    pub clip_descendants: Vec<NodeId>,
 }
 
 /// List-item marker payload for v2. The body block paints itself

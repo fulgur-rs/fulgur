@@ -406,6 +406,7 @@ fn extract_drawables_from_pageable(
         return;
     }
     if let Some(table) = any.downcast_ref::<TablePageable>() {
+        let clipping = table.style.has_overflow_clip();
         if let Some(node_id) = table.node_id {
             out.tables.insert(
                 node_id,
@@ -417,14 +418,31 @@ fn extract_drawables_from_pageable(
                     layout_size: table.layout_size,
                     width: table.width,
                     cached_height: table.cached_height,
+                    clip_descendants: Vec::new(),
                 },
             );
         }
+        // Snapshot map keys before recursing so we can identify which
+        // descendants belong inside this table's `push_clip / pop`
+        // scope when `overflow: hidden | clip` is set. Mirrors the
+        // `BlockPageable` arm above.
+        let before = clipping.then(|| collect_drawables_node_ids(out));
         for pc in &table.header_cells {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
         for pc in &table.body_cells {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
+        }
+        if let (Some(before), Some(node_id)) = (before, table.node_id) {
+            let after = collect_drawables_node_ids(out);
+            let descendants: Vec<usize> = after
+                .difference(&before)
+                .copied()
+                .filter(|&id| id != node_id)
+                .collect();
+            if let Some(entry) = out.tables.get_mut(&node_id) {
+                entry.clip_descendants = descendants;
+            }
         }
         return;
     }
