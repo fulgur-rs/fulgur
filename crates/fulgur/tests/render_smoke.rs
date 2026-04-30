@@ -1206,3 +1206,57 @@ fn render_v2_smoke_html_opacity_multi_page_content_survives() {
         pdf_baseline.len(),
     );
 }
+
+#[test]
+fn render_v2_smoke_positioned_child_height_field_paths() {
+    // PR 8f added `PositionedChild.height` populated from Taffy at every
+    // production construction site (convert/{positioned, pseudo, replaced,
+    // list_item, inline_root, table, mod}.rs). Most existing smoke tests
+    // exercise individual paths, but the `let p_h = paragraph.cached_height;`
+    // and `let pseudo_h_pt = ...` assignments need coverage to satisfy
+    // codecov patch threshold. This consolidated render exercises:
+    //
+    // - inline_root paragraph wrapped in BlockPageable (inline_root.rs:122 / 187)
+    // - list_item paragraph + inline marker (list_item.rs:204, 268, 378, 433)
+    // - block pseudo `::before` / `::after` images (pseudo.rs:253, 263)
+    // - abs-positioned pseudo (positioned.rs:631)
+    // - replaced element with visual style (replaced.rs:75)
+    // - orphan string-set / counter-op / bookmark markers (mod.rs:911, 934, 970)
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", png_data);
+
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body { margin: 0; padding: 8pt; counter-reset: section; }
+        .styled { background: #cef; padding: 4pt; }
+        .styled::before { content: ""; display: block; width: 8pt; height: 8pt; background: #fce; }
+        .styled::after { content: ""; display: block; width: 8pt; height: 8pt; background: #fef; }
+        .abs-pseudo::before { content: ""; position: absolute; top: 0; right: 0; width: 6pt; height: 6pt; background: red; }
+        h1 { counter-increment: section; font-size: 14pt; }
+        h1::before { content: counter(section) ". "; }
+        ul { list-style-type: disc; }
+        li.tagged::before { content: "[" attr(data-tag) "] "; }
+    </style></head><body>
+        <h1>Heading One</h1>
+        <p class="styled">Paragraph with styled background and before/after pseudos.</p>
+        <div class="abs-pseudo" style="position: relative; padding: 8pt; background: #eef;">
+            Container with absolutely-positioned pseudo.
+        </div>
+        <ul>
+            <li>Plain item</li>
+            <li class="tagged" data-tag="A">Tagged item</li>
+            <li><p>Block-content list item.</p></li>
+        </ul>
+        <img src="dot.png" style="width: 32pt; height: 32pt; border: 2pt solid #888; padding: 4pt;">
+    </body></html>"##;
+    let engine = Engine::builder().assets(bundle).bookmarks(true).build();
+    let pdf = engine.render_html(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
