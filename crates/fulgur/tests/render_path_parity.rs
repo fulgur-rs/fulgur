@@ -247,3 +247,480 @@ fn render_path_byte_equality() {
     // visible signal — the test passes regardless.
     let _ = diffs;
 }
+
+/// Inline byte-equality cases. These exist alongside the on-disk
+/// fixtures because PR 3's Paragraph migration only unlocks byte-eq
+/// for documents with **purely paragraph content under a margin:0
+/// body** — no Block backgrounds, no inline-block, no Table. The
+/// existing VRT / examples fixtures all have richer content that
+/// requires later PRs (Block, Table, Multicol, Transform). Inline
+/// cases let each PR demonstrate productive byte-eq advancement
+/// without seeding VRT goldens that lock in incomplete v2 output.
+///
+/// Each case asserts unconditionally — they are the unit-of-progress
+/// for the migration. PR N adds cases that PR N's migration covers.
+#[test]
+fn inline_byte_equality_cases() {
+    // PR 3 (Paragraph + inline content) coverage.
+    let pr3_cases: &[(&str, &str)] = &[
+        (
+            "minimal body text",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}</style></head><body>hello world</body></html>",
+        ),
+        (
+            "two paragraphs",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>first paragraph</p><p>second paragraph here</p></body></html>",
+        ),
+        (
+            "paragraph with anchor link",
+            r#"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p>before <a href="https://example.com">link</a> after</p></body></html>"#,
+        ),
+        (
+            "paragraph with internal anchor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0}</style></head><body><p id="top">heading line</p><p><a href="#top">jump</a></p></body></html>"##,
+        ),
+    ];
+
+    // PR 4 (Block migration) coverage — backgrounds, borders,
+    // border-radius, box-shadow at the block frame. Body is set to
+    // margin:0 so the v2 frame anchor matches v1's block.draw call.
+    let pr4_cases: &[(&str, &str)] = &[
+        (
+            "solid block with background color",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:100px;height:80px;background:#e53935}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with solid border",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;border:4px solid #444}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "block with border-radius",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:80px;background:#bdf;border-radius:12px}</style></head><body><div></div></body></html>",
+        ),
+        (
+            "two stacked blocks",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:60px}.a{background:#fcd}.b{background:#cdf}</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
+        ),
+        // Regression for PR #303 Devin: convert wraps an inline-root
+        // paragraph in a BlockPageable that shares the same node_id, so
+        // both `block_styles[id]` and `paragraphs[id]` are populated. The
+        // block dispatch must not `continue` past the paragraph check —
+        // background draws first, glyph runs draw on top.
+        (
+            "paragraph with background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#fce}</style></head><body><p>hello</p></body></html>",
+        ),
+        // Regression for PR #303 Devin (block id anchors): `<a href="#x">`
+        // targeting `<div id="x">` must resolve in v2 the same way it
+        // does in v1 (`BlockPageable::collect_ids`). v1 emits a
+        // `/Link → /Dest` mapping; v2 must register block ids in the
+        // pre-pass `DestinationRegistry`.
+        (
+            "anchor link to block id",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}div{width:80px;height:40px}#target{background:#cef}p{margin:0}</style></head><body><div id="target"></div><p><a href="#target">jump</a></p></body></html>"##,
+        ),
+        // Regression for PR #303 follow-up Devin: shared node_id
+        // (block + paragraph from `convert::inline_root`) with
+        // `opacity < 1.0` must compose under ONE
+        // `draw_with_opacity(block.opacity, ...)` group, mirroring v1's
+        // `BlockPageable::draw` which wraps bg/border + child draws in
+        // a single group. Separate wrappers paint the bg at 50% but
+        // glyphs at 100% — visually wrong AND byte-divergent.
+        (
+            "paragraph with opacity and background (shared node_id)",
+            "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}p{margin:0;background:#cef;opacity:0.5}</style></head><body><p>hello</p></body></html>",
+        ),
+    ];
+
+    // PR 5 (Table + ListItem) extends `Drawables` with `tables` and
+    // `list_items` and adds `body_offset_pt` propagation so html→body
+    // collapsed margin reaches v2 children. Inline cases for the new
+    // types are deferred to PR 6 — table cells contain paragraphs
+    // whose text shaping resolves through inline_root, and inline-box
+    // wiring still has gaps that flake the byte-eq comparison on
+    // these specific configurations. The on-disk allowlist coverage
+    // (10 new fixtures) demonstrates the productive byte-eq advance.
+    //
+    // Regression for PR #304 Devin (list-item shared node_id): `<li>`
+    // and its body block share the same node_id — `list_items[id]`
+    // and `block_styles[id]` co-exist. The marker dispatch must NOT
+    // `continue;` past the block check or `<li style="background:...">`
+    // silently drops the body block paint in v2.
+    let pr5_cases: &[(&str, &str)] = &[
+        (
+            "list item with body block background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#fdf;height:40px}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+        // Regression for PR #304 follow-up Devin (list-item opacity
+        // grouping): v1's `ListItemPageable::draw` wraps marker + body
+        // block in a SINGLE `draw_with_opacity` group. v2 must produce
+        // the same single q/Q wrapper or the PDF stream diverges when
+        // `<li style="opacity:0.5">`.
+        (
+            "list item with opacity and body block background",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0;list-style:none}li{background:#cef;height:40px;opacity:0.5}</style></head><body><ul><li></li></ul></body></html>"##,
+        ),
+    ];
+
+    // PR 6 (Transform + MulticolRule + marker wrappers verification)
+    // exercises the new `Drawables.transforms` and
+    // `Drawables.multicol_rules` maps. Transform tests cover the
+    // shared-node_id case (block + transform same id) and the strict
+    // descendant case (block wraps a child with its own id). Multicol
+    // rule painting requires a `column-rule` style, which the example
+    // fixtures don't currently use, so we add minimal cases here.
+    let pr6_cases: &[(&str, &str)] = &[
+        (
+            "block with transform translate (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+        (
+            "block with transform rotate around center",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#fce;transform:rotate(15deg);transform-origin:center}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+        // PR #305 Devin: nested transforms — inner transform was
+        // silently dropped because `draw_under_transform` dispatched
+        // descendants via `dispatch_fragment` which never checks
+        // `drawables.transforms`. v1's nested
+        // `TransformWrapperPageable::draw` recursively pushes both
+        // matrices; v2 must do the same by recursing into
+        // `draw_under_transform` when a descendant has its own
+        // `TransformEntry`.
+        (
+            "nested transforms (rotate around translate)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;background:#cef;transform:translate(10px,5px)}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #305 follow-up Devin: nested transforms with a
+        // non-transform descendant inside the inner transform caused
+        // double-draw — `draw_under_transform` for the OUTER iterated
+        // its full `descendants` list (which includes the inner's own
+        // descendants), so the deeply nested node was painted once
+        // under outer*inner (correct, via the inner recursion) and a
+        // second time under outer only (wrong). Regression: a styled
+        // grandchild block inside two stacked transforms.
+        (
+            "triple nested transform descendant double-draw",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
+        // PR 6 follow-up: shared-node_id inner content (inline-root
+        // paragraph from `convert::inline_root`, replaced image/svg
+        // from `convert::replaced`) must paint at the wrapping block's
+        // *content-box* top-left, not its border-box top-left, when
+        // the block carries `padding` or `border`. v1 expresses this
+        // via `PositionedChild { x: content_inset.x, y:
+        // content_inset.y }`; v2 mirrors it by adding
+        // `block.style.content_inset()` inside
+        // `draw_block_with_inner_content` (and
+        // `draw_list_item_with_block`). Without that offset, every
+        // text run inside a padded block landed `padding+border`
+        // worth of px high-and-left of where it should — the bug that
+        // kept `examples/transform`'s `.box { padding: 6px }` 11
+        // bytes short.
+        (
+            "padded paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##,
+        ),
+        (
+            "bordered paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;border:3px solid #444;background:#fce}</style></head><body><p>hello</p></body></html>"##,
+        ),
+        // PR 6 follow-up (fulgur-9y1a) — html root element's
+        // background was silently dropped because the fragmenter's
+        // `geometry` only records body + descendants, never html. v2
+        // now paints html's bg as a pre-pass at `(margin.left,
+        // margin.top)` with `block_styles[root_id].layout_size`.
+        // Without that pre-pass v2 lost 13 bytes per gradient-hint
+        // fixture (six fixtures regressed simultaneously, all sharing
+        // `html, body { background: white }`).
+        (
+            "html background distinct from body background",
+            r##"<!DOCTYPE html><html><head><style>html, body { margin:0; padding:0; background:white; } .g { width:120px; height:80px; margin:24px; background:red; }</style></head><body><div class="g"></div></body></html>"##,
+        ),
+        // PR 6 follow-up (fulgur-9y1a) — `extract_drawables_from_pageable`
+        // recurses into the Pageable tree to populate per-NodeId draw
+        // payloads. `LineItem::InlineBox` carries inner content (e.g.
+        // an inline `<svg>`) that `paragraph::draw_shaped_lines`
+        // paints via `ib.content.draw(...)` directly. Recursing into
+        // that content registered it again in `svgs` / `block_styles`
+        // and the v2 dispatcher then double-painted at the fragment's
+        // own coordinates (e.g. `body + svg_margin` for
+        // `<svg style="margin:Npx">`). Drop the recurse so inline-box
+        // content stays a pure paragraph-rooted draw.
+        (
+            "body with inline svg margin",
+            r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0}</style></head><body><svg width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="margin:20px"><rect x="0" y="0" width="40" height="40" fill="#fa0"/></svg></body></html>"##,
+        ),
+        // PR 6 follow-up (fulgur-rtza) — GCPM `@page` margin box
+        // rendering ported to `render_v2` via the shared
+        // `MarginBoxRenderer`. Without the port, v2 silently dropped
+        // `@top-center` / `@bottom-center` / counter() / element() /
+        // string() content on every page. v1's `render_to_pdf_with_gcpm`
+        // per-page measure / layout / render pipeline now lives in
+        // `MarginBoxRenderer::render_page`; both paths share the same
+        // implementation and per-page state caches.
+        (
+            "page counter in @bottom-center",
+            r##"<!DOCTYPE html><html><head><style>@page { @bottom-center { content: counter(page) " / " counter(pages); font-size: 8pt; } } body { margin: 0; padding: 0; } .item { height: 720px; }</style></head><body><div class="item">first</div><div class="item">second</div></body></html>"##,
+        ),
+        // PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
+        // v1 `BlockPageable::draw` (`pageable.rs:1796-1827`) paints
+        // bg / border / shadow OUTSIDE the clip, then pushes the
+        // overflow clip path, draws children INSIDE, then pops. v2 now
+        // tracks `BlockEntry.clip_descendants` and replays the same
+        // ordering via `draw_under_clip`. Without this fix, overflow
+        // children that overshoot the parent's box paint past the
+        // clip boundary.
+        (
+            "overflow hidden block with overflowing child",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:80px;height:60px;overflow:hidden;background:#cef}.inner{width:200px;height:200px;background:#fce;margin:-20px}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #310 Devin: overflow:hidden block with shared-node_id
+        // inner content only (inline-root paragraph at the same
+        // `node_id`) — no separate descendant NodeIds. v1 pushes the
+        // clip unconditionally when `has_overflow_clip()` is true, so
+        // `<div style="overflow:hidden;width:50px">long overflowing
+        // text</div>` clips the long text at the 50px boundary. v2's
+        // dispatcher must do the same regardless of whether
+        // `clip_descendants` is empty.
+        (
+            "overflow hidden block with shared-node_id inline text",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
+        ),
+        // PR #310 follow-up Devin: a transform nested inside an
+        // `overflow:hidden` block was silently dropped because the
+        // main loop pre-skips `clipped_descendants` BEFORE the
+        // per-fragment transform check. `draw_under_clip` now
+        // dispatches transform-key descendants via
+        // `draw_under_transform` (and pre-skips their own descendants
+        // so they are not painted twice).
+        (
+            "transform inside overflow:hidden ancestor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #310 follow-up Devin: `<li style="overflow:hidden">` must
+        // (a) draw its marker (markers sit outside the body box at
+        // negative x, so `draw_under_clip` must emit the marker before
+        // pushing the clip path), and (b) honour `list_item.opacity`,
+        // not `block.opacity` — `convert::list_item::build_list_item_body`
+        // builds the body block with default opacity=1.0 because v1's
+        // `ListItemPageable::draw` carries the opacity at the outer
+        // wrap. Using `block.opacity` here silently drops any CSS
+        // opacity set on the `<li>`.
+        //
+        // The `<li>` wraps a sized `<div>` block child so the body
+        // BlockPageable's `cached_size.height` carries a non-zero
+        // value through to render — `convert::list_item::build_list_item_body`'s
+        // non-inline-root branch (line 508) doesn't set `layout_size`,
+        // and an empty body would collapse the bg paint to height=0.
+        (
+            "list item with overflow:hidden and opacity",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##,
+        ),
+        // PR #309 follow-up Devin: an `overflow:hidden` block nested
+        // inside a `transform` ancestor was silently losing its clip.
+        // `draw_under_transform` dispatched the inner block via
+        // `dispatch_fragment` (which only paints bg/border/shadow) and
+        // never pushed the clip path. Same shape as the
+        // PR #310 transform-inside-clip fix but mirrored — clip inside
+        // transform also needs to enter `draw_under_clip`.
+        (
+            "overflow:hidden inside transform ancestor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:140px;height:80px;background:#cef;transform:translate(8px,4px)}.inner{width:60px;height:40px;background:#fce;overflow:hidden}.leaf{width:120px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
+        // PR #309 follow-up Devin: nested `overflow:hidden` blocks
+        // (`<div style="overflow:hidden"><div style="overflow:hidden">
+        // ...`) lost the inner clip because `draw_under_clip`'s
+        // descendant loop only checked for transforms, never for
+        // nested clips. The inner block's bg/border landed via
+        // `dispatch_fragment` but no inner push_clip_path fired, so
+        // overflowing content escaped the inner boundary. Fix:
+        // descendant dispatch recursively calls `draw_under_clip` for
+        // nested clip blocks (with a `nested_clip_skip` to avoid
+        // double-paint).
+        (
+            "nested overflow:hidden blocks",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;overflow:hidden;background:#fce}.leaf{width:200px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
+        // PR #305 follow-up Devin: a multicol container with
+        // `column-rule` nested inside a `transform` ancestor used to
+        // paint its rule lines in untransformed page coordinates,
+        // because the post-pass at `draw_v2_page` ran outside any
+        // transform `push/pop` group. v1 emits rules from inside
+        // `TransformWrapperPageable::draw → MulticolRulePageable::draw`
+        // (`pageable.rs:2714-2725 → 3088`). The fix dispatches
+        // transform-scoped multicol rules from inside
+        // `draw_under_transform` and skips them in the post-pass.
+        (
+            "multicol with column-rule inside transform",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:translate(8px,4px)}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="tx"><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></div></body></html>"##,
+        ),
+    ];
+
+    // Bookmark-inside-transform regression (PR #305 Devin): a heading
+    // nested under a `transform`-wrapped ancestor must still record a
+    // bookmark anchor in the PDF outline. v1 invokes
+    // `BookmarkMarkerWrapperPageable::draw` recursively from inside
+    // `TransformWrapperPageable::draw`; v2 records the anchor BEFORE
+    // the `transformed_descendants` skip in the dispatcher.
+    let bookmark_in_transform = (
+        "bookmark anchor inside transformed ancestor",
+        r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##,
+    );
+
+    let cases = pr3_cases
+        .iter()
+        .chain(pr4_cases.iter())
+        .chain(pr5_cases.iter())
+        .chain(pr6_cases.iter());
+    for (label, html) in cases {
+        let engine = Engine::builder().build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+
+    // Bookmark anchors require `bookmarks(true)` on the engine —
+    // separate render so the assertion can target the
+    // bookmark-inside-transform case explicitly.
+    {
+        let (label, html) = bookmark_in_transform;
+        let engine = Engine::builder().bookmarks(true).build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+}
+
+/// Bounded-divergence regression for the 3 fixtures known to suffer
+/// from f32 chain non-associativity between v1 and v2 (fulgur-g7a1).
+///
+/// These fixtures cannot be byte-eq without deliberately degrading v2's
+/// accuracy (see the "Known-divergent" comment block in
+/// `render_path_parity.toml`). They are intentionally not allowlisted,
+/// but we still want a regression catch: if some future change grows
+/// the divergence past pure 1 ULP rounding, the divergence pattern
+/// will change shape and this test will catch it.
+///
+/// Empirically, each fixture currently differs in exactly one Tm
+/// operand by 1 ULP, which makes the v2 PDF ≤ 4 bytes longer than v1
+/// (one extra digit in the ASCII-formatted f32). The xref / ID table
+/// shift is constant. We assert |len_diff| ≤ 8 to leave margin for
+/// xref re-flow without masking real regressions.
+///
+/// PR 8 (fulgur-9t3z.5) deletes the v1 path; this test becomes moot
+/// then and should be removed alongside the parity harness itself.
+#[test]
+fn known_divergent_fixtures_stay_within_f32_ulp_bound() {
+    use fulgur::Engine;
+
+    // FONTCONFIG_FILE pinning is required for box-shadow's text
+    // rendering. Skip silently when missing — matches the convention
+    // used by `render_path_byte_equality`.
+    if std::env::var_os("FONTCONFIG_FILE").is_none() {
+        eprintln!("known_divergent_fixtures: FONTCONFIG_FILE unset — skipping (CI sets this)");
+        return;
+    }
+
+    let root = repo_root();
+    let cases: &[&str] = &["multicol", "multicol-span-all", "box-shadow"];
+
+    for name in cases {
+        let dir = root.join("examples").join(name);
+        let html_path = dir.join("index.html");
+        let html = std::fs::read_to_string(&html_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", html_path.display()));
+
+        let engine = Engine::builder()
+            .page_size(fulgur::config::PageSize::A4)
+            .base_path(dir.clone())
+            .build();
+        let v1 = engine
+            .render_html(&html)
+            .unwrap_or_else(|e| panic!("v1 render {name}: {e}"));
+        let v2 = engine
+            .render_html_v2(&html)
+            .unwrap_or_else(|e| panic!("v2 render {name}: {e}"));
+
+        // |len_diff| must stay small. f32 ULP changing a Tm operand
+        // adds at most 1 character (e.g. "537.4429" → "537.44293"),
+        // and the xref/ID shift cascades a small constant. Anything
+        // bigger means real layout has changed.
+        let len_diff = (v1.len() as isize - v2.len() as isize).unsigned_abs();
+        assert!(
+            len_diff <= 8,
+            "{name}: byte-length divergence ballooned (v1={}B v2={}B, |diff|={len_diff}B). \
+             Expected ≤8B for f32 ULP-only divergence + xref shift.",
+            v1.len(),
+            v2.len(),
+        );
+    }
+}
+
+/// Bounded-divergence regression for `vrt://bugs/grid-row-promote-background.html`
+/// (fulgur-bq6i). v1 paints an off-page card slice at a different
+/// numeric y than v2 because of a `BlockPageable::slice_for_page`
+/// quirk: when an ancestor (`.grid`) has no fragment on the current
+/// page but its descendants do, `self_page_y` falls back to 0 and
+/// the child's `new_y` is computed against that fallback while the
+/// ancestor's own `pc.y` (body-relative) is also added by the draw
+/// chain — producing y = 1681pt vs v2's correct 868.94pt. Both are
+/// off-page (page bottom is 822pt); only the numeric Tm operand
+/// differs and the renderer clips both via the page MediaBox.
+///
+/// See the "Known-divergent v1 quirk" comment block in
+/// `render_path_parity.toml` for the full chain.
+///
+/// Resolution: defer to PR 8 v1 deletion. This test asserts the
+/// divergence stays within the v1-quirk-only bound; if some future
+/// change grows it past that, this fires.
+#[test]
+fn grid_row_promote_v1_quirk_stays_within_quirk_bound() {
+    use fulgur::Engine;
+
+    let root = repo_root();
+    let html_path = root.join("crates/fulgur-vrt/fixtures/bugs/grid-row-promote-background.html");
+    let html = std::fs::read_to_string(&html_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", html_path.display()));
+
+    let engine = Engine::builder().build();
+    let v1 = engine
+        .render_html(&html)
+        .unwrap_or_else(|e| panic!("v1 render: {e}"));
+    let v2 = engine
+        .render_html_v2(&html)
+        .unwrap_or_else(|e| panic!("v2 render: {e}"));
+
+    // Empirically the diff is 15 bytes — single off-page slice y plus
+    // matching border-edge y. ≤32 leaves margin for xref re-flow
+    // without masking real layout regressions.
+    let len_diff = (v1.len() as isize - v2.len() as isize).unsigned_abs();
+    assert!(
+        len_diff <= 32,
+        "grid-row-promote: byte-length divergence ballooned \
+         (v1={}B v2={}B, |diff|={len_diff}B). Expected ≤32B for the \
+         v1 slice-y quirk. A larger diff means real visible layout \
+         has changed — investigate before raising the bound.",
+        v1.len(),
+        v2.len(),
+    );
+}

@@ -1455,7 +1455,7 @@ fn apply_border_style(
 }
 
 /// Helper to draw a simple line segment with a given stroke.
-fn stroke_line(
+pub(crate) fn stroke_line(
     canvas: &mut Canvas<'_, '_>,
     x1: f32,
     y1: f32,
@@ -1509,7 +1509,7 @@ pub(crate) fn alpha_to_opacity(alpha: u8) -> krilla::num::NormalizedF32 {
 }
 
 /// Create a stroke with a specific color and width, inheriting opacity from base.
-fn colored_stroke(
+pub(crate) fn colored_stroke(
     color: &[u8; 4],
     width: f32,
     opacity: krilla::num::NormalizedF32,
@@ -1611,7 +1611,7 @@ fn draw_border_line(
     }
 }
 
-fn draw_block_border(
+pub(crate) fn draw_block_border(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
     x: f32,

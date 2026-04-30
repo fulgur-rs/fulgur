@@ -21,6 +21,237 @@
 # fixture roots in `render_path_parity.rs::FIXTURE_ROOTS`.
 
 allowlist = [
-    # PR 2 will add: vrt://basic/solid-box, vrt://basic/borders,
-    # examples://image, etc.
+    # PR 4 (Block migration) — block backgrounds / borders / radius
+    # unlock fixtures that are pure-block content with margin:0 body
+    # (no inline-block, no overflow:hidden, no images, no text).
+    "vrt://basic/border-radius.html",
+    "vrt://basic/borders.html",
+    "vrt://layout/flex-row.html",
+    "vrt://layout/grid-simple.html",
+    "vrt://layout/multicol-2.html",
+    # PR 5 (Table + ListItem + html→body offset fix) — adds the
+    # `body_y` propagation that lets the html → body collapsed-margin
+    # offset reach v2 children. Most pure-block paint / gradient
+    # fixtures fall in once that's in place.
+    "vrt://basic/solid-box.html",
+    "vrt://paint/background-gradient.html",
+    "vrt://paint/gradient-repeat-round.html",
+    "vrt://paint/gradient-repeat-x-with-position.html",
+    "vrt://paint/gradient-size-no-repeat-center.html",
+    "vrt://paint/gradient-to-top-right-tile-aspect.html",
+    "vrt://paint/opacity.html",
+    "vrt://paint/radial-gradient-no-repeat-corner.html",
+    "vrt://paint/radial-gradient-repeat-round.html",
+    "vrt://paint/radial-gradient-tiled.html",
+    # PR 6 (Transform + MulticolRule + content-inset fix) — transform
+    # plumbing unlocks the `examples/transform` fixture, and the
+    # shared-node_id content-box offset (`block.style.content_inset()`
+    # added inside `draw_block_with_inner_content`) closes the
+    # `padding`/`border` shift that was keeping basic painted block
+    # fixtures off the allowlist.
+    "vrt://basic/box-shadow.html",
+    "examples://bookmark",
+    "examples://border-radius",
+    "examples://table-header",
+    "examples://transform",
+    # PR 6 follow-up (root `<html>` bg pre-pass, fulgur-9y1a) — html
+    # element's own `background` was silently dropped because the
+    # fragmenter's `geometry` only carries body + descendants. v2 now
+    # paints html's bg explicitly at `(margin.left, margin.top)` with
+    # `block_styles[root_id].layout_size` before the main loop runs.
+    # Six paint fixtures with `html, body { background: white }` lit up
+    # at once.
+    "vrt://paint/linear-gradient-hint-30pct.html",
+    "vrt://paint/linear-gradient-hint-70pct.html",
+    "vrt://paint/radial-gradient-hint.html",
+    "vrt://paint/repeating-linear-gradient.html",
+    "vrt://paint/repeating-linear-gradient-hint.html",
+    "vrt://paint/repeating-radial-gradient.html",
+    # PR 6 follow-up (skip InlineBox.content recurse, fulgur-9y1a) —
+    # inline-block / inline-flex / inline-grid / inline-svg content is
+    # painted via `paragraph::draw_shaped_lines` calling
+    # `ib.content.draw(...)`. extract was recursing into
+    # `InlineBox.content` and registering the inner Pageable in
+    # `block_styles` / `svgs` / etc., so v2 dispatch double-painted
+    # everything inside an inline box. Six layout fixtures lit up at
+    # once after dropping the recurse.
+    "vrt://layout/inline-block-basic.html",
+    "vrt://layout/inline-block-nested.html",
+    "vrt://layout/inline-block-overflow-hidden.html",
+    "vrt://layout/inline-flex-smoke.html",
+    "vrt://layout/inline-grid-smoke.html",
+    "vrt://svg/shapes.html",
+    # PR 6 follow-up (GCPM @page margin box port to render_v2,
+    # fulgur-rtza). v1's `render_to_pdf_with_gcpm` per-page margin box
+    # measure / layout / render pipeline was extracted into
+    # `MarginBoxRenderer` and called from `render_v2`. Both paths now
+    # share the same caches and produce byte-equivalent margin-box
+    # output, lighting up the GCPM family + cover-page-break-after +
+    # examples/header-footer{,-split}.
+    "vrt://gcpm/counter-page-numbers.html",
+    "vrt://gcpm/page-selector.html",
+    "vrt://gcpm/running-element.html",
+    "vrt://gcpm/string-set.html",
+    "vrt://bugs/cover-page-break-after.html",
+    "examples://header-footer",
+    "examples://header-footer-split",
+    # PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
+    # `overflow: hidden | clip` blocks now record their strict
+    # descendants in `BlockEntry.clip_descendants`. v2 dispatcher
+    # paints bg / border / shadow OUTSIDE the clip, pushes the clip
+    # path, dispatches inner content + descendants INSIDE the clip,
+    # then pops — mirroring v1's `BlockPageable::draw` ordering
+    # (`pageable.rs:1796-1827`). Both VRT overflow-hidden fixtures and
+    # the examples/overflow-hidden demo lit up.
+    "vrt://layout/overflow-hidden.html",
+    "vrt://layout/overflow-hidden-rounded.html",
+    "examples://overflow-hidden",
+    # Phase 4 stack merge enrollment — fixtures that became
+    # byte-identical incidentally (mostly through the GCPM port,
+    # InlineBox no-recurse fix, and content-inset / clip / transform
+    # work) but had not yet been allowlisted. Enrolling them locks
+    # in v1/v2 parity and progresses PR 7 (default flip) coverage.
+    "vrt://gcpm/bookmark-outline.html",
+    "vrt://gcpm/link-annotations.html",
+    "examples://image",
+    "examples://link-media",
+    "examples://link-stylesheet",
+    "examples://list-style-image",
+    "examples://pseudo-content-url",
+    "examples://text-align",
+    "examples://text-decoration",
+    # PR follow-up (cross-node_id opacity grouping, fulgur-gdb9) —
+    # `<div style="opacity:0.4"><svg>..</svg></div>` was painting the
+    # svg outside the parent's `draw_with_opacity` wrap because v2's
+    # flat dispatch had no way to nest descendants under a parent's
+    # opacity group. `BlockEntry.opacity_descendants` + new
+    # `draw_under_opacity` mirror the existing
+    # `clip_descendants` / `draw_under_clip` shape so opacity wraps
+    # everything (own paint + descendants), matching v1's
+    # `BlockPageable::draw` recursion under
+    # `draw_with_opacity(self.opacity, ..)`.
+    "examples://svg",
+    # PR follow-up (anonymous-block layout walk, fulgur-bq6i:review_card)
+    # — Stylo synthesizes anonymous block wrappers around inline-level
+    # siblings of block-level siblings (CSS 2.1 §9.2.1.1). Those
+    # wrappers carry their own `node_id` and live in
+    # `Node.layout_children` but NOT in `Node.children`. The fragmenter's
+    # `record_subtree_descendants` walked `children`, missing the
+    # synthesized anonymous block, so geometry never recorded its
+    # fragment and v2 dispatch silently dropped its inline-root
+    # paragraph. Switching to `layout_children` (when `Some`) lights up
+    # `vrt://layout/review_card_inline_block.html` and any future
+    # mixed-block-and-inline content.
+    "vrt://layout/review_card_inline_block.html",
+    # PR follow-up (per-slice block height, fulgur-bq6i:break-inside) —
+    # split blocks (one fragment per page) were painting the FULL
+    # `layout_size.height` on every slice, so a `break-inside: avoid`
+    # callout that doesn't fit on page 1 painted overflowing-the-page-
+    # bottom on page 1 AND repeated full-size on page 2. v2 now passes
+    # `is_split = geom.fragments.len() > 1` from `dispatch_fragment` to
+    # `draw_block_inner_paint`, which uses `frag.height` per slice when
+    # split — mirroring v1's `BlockPageable::slice_for_page` which
+    # adjusts `layout_size.height` per sliced pageable.
+    "examples://break-inside",
 ]
+
+# Known-divergent fixtures (fulgur-g7a1, 2026-04-30)
+# ----------------------------------------------------------------------
+# These produce 1 ULP differences in numeric `Tm` operands and CANNOT
+# be made byte-equivalent without deliberately degrading v2's accuracy
+# to match v1's per-step rounding pattern. They are intentionally NOT
+# allowlisted, and will become moot when PR 8 (fulgur-9t3z.5) deletes
+# the v1 path entirely.
+#
+# Root cause: f32 addition non-associativity between v1 and v2 chains.
+#
+# - v1 (`BlockPageable::draw`): each `PositionedChild.y` is set during
+#   convert as `px_to_pt(taffy_loc.y)` (per-level f32 conversion), and
+#   the draw chain accumulates `y + pc0.y + pc1.y + ...` in pt — every
+#   intermediate sum gets rounded.
+# - v2 (`dispatch_fragment`): `Fragment.y` is the cumulative absolute
+#   y in CSS px from the fragmenter, converted in a single
+#   `margin_top_pt + px_to_pt(frag.y)` step at draw time — only one
+#   rounding occurs.
+#
+# Empirical example (examples/box-shadow, page 0, node_id=34):
+#
+#   v1: ((56.692913 + 132.750) + 70.500) = 189.442917 + 70.500
+#       = 259.942932 (bits=4381f8b2)
+#   v2: 56.692913 + 203.250 = 259.942902 (bits=4381f8b1)
+#   true: 259.94291305...
+#
+# v2 is closer to the true mathematical result; v1's chain accumulates
+# intermediate rounding error. Making v2 byte-eq with v1 means
+# replicating v1's two-step rounding — pure regression in accuracy
+# for transitional benefit only.
+#
+# Affected fixtures (3) — diff is exactly one Tm operand off by 1 ULP:
+# - examples/multicol      (v1 hex b2f88743 / v2 hex b1f88743)
+# - examples/multicol-span-all  (v1 b2789543 / v2 b1789543)
+# - examples/box-shadow    (v1 585c0644 / v2 595c0644 — note reversed
+#                           direction confirming order-of-operations,
+#                           not a unidirectional offset)
+#
+# Resolution: defer to PR 8 v1 deletion. Once v1 is gone, the parity
+# test compares v2 vs v2 (trivially byte-eq) and these fixtures need
+# no special handling.
+
+# Known-divergent v1 quirk: off-page slice y (fulgur-bq6i:grid-row-promote)
+# ----------------------------------------------------------------------
+# `vrt://bugs/grid-row-promote-background.html` is intentionally NOT
+# allowlisted because v1 emits an off-page card slice at a different
+# numeric y than v2. The visual output is identical (both clipped by
+# the page MediaBox) — only the numeric Tm operand differs.
+#
+# Root cause: a v1 quirk in `BlockPageable::slice_for_page` when an
+# ancestor (here `.grid`) has NO fragment on the current page but its
+# descendants (cards) do. The ancestor's `self_page_y` falls back to
+# `0.0`, and the child's slice computes
+# `new_y = px_to_pt(child_frag.y - 0)` treating body-content-relative
+# `child_frag.y` as parent-relative. The Pageable draw chain then
+# double-adds the ancestor's `pc.y` (from convert) AND the child's
+# new_y (which is also body-relative), producing y = 1681pt — far
+# off the page bottom.
+#
+#   v1: body.draw(y=56.69) → grid.draw(y=56.69 + 812 = 868.69) →
+#       card_1_slice.draw(y=868.69 + 812.25 = 1680.94pt)
+#   v2: dispatch_fragment uses frag.y_page_local =
+#       56.69 + px_to_pt(1083) = 868.94pt
+#
+# v2 is correct (page-local from fragmenter); v1's value is the sum
+# of two body-relative offsets due to the slice-coord bug.
+#
+# Both renders emit the slice off-page (anywhere past 822pt is past
+# the page bottom for an A4 with 20mm margin). The slice gets clipped
+# by the MediaBox so neither is visible; the difference is purely in
+# the numeric operand the renderer emits before the clip.
+#
+# Resolution: defer to PR 8 v1 deletion. Fixing v1 in flight would
+# touch `slice_for_page` for a quirk that disappears with the path.
+
+# Known-divergent: v2 renders content v1 silently drops (fulgur-bq6i:wasm-demo)
+# ----------------------------------------------------------------------
+# `examples/wasm-demo` is intentionally NOT allowlisted because v2's
+# `fragment_pagination_root` now walks `body.layout_children` (when
+# present) for the same reason `record_subtree_descendants` does:
+# Stylo synthesizes anonymous block wrappers around inline-level
+# siblings of block-level body children, and those wrappers carry
+# the inline content's `node_id`.
+#
+# After the body-level layout_children fix, v2 picks up
+# `<label>` / `<legend>` / `<select>` / `<option>` / `<input>` /
+# `<button>` paint that v1 silently drops because v1's body
+# iteration only saw the raw children list (which omits the
+# anonymous wrappers Stylo creates for the form-element row).
+#
+# Net delta: v2 is 53 bytes longer than v1 on this fixture because
+# v2 also paints the `<button id="render" disabled>Loading WASM…
+# </button>` text that v1 omits. v2 is the more visually correct
+# output — Phase 4's whole point is that the geometry-driven path
+# fixes coverage gaps in the Pageable path, and this is one such
+# gap that becomes the canonical behavior after PR 8 v1 deletion.
+#
+# Resolution: defer to PR 8 v1 deletion. Once the v1 path is gone,
+# the parity test compares v2 vs v2 (trivially byte-eq). For users
+# rendering form-heavy HTML to PDF, this is a v2 improvement.

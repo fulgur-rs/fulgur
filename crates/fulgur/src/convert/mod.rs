@@ -200,7 +200,65 @@ pub fn dom_to_drawables(
     let mut drawables = crate::drawables::Drawables::new();
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
+    drawables.body_offset_pt = extract_body_offset_pt(doc);
+    drawables.root_id = Some(doc.root_element().id);
+    drawables.body_id = find_body_id_in_dom(doc);
     drawables
+}
+
+/// Locate the `<body>` element id by walking the html root's children.
+/// Mirrors `pagination_layout::find_body_id` but operates on the
+/// `HtmlDocument` API (the latter is private to that module).
+fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let root = doc.root_element();
+    let root_node = base.get_node(root.id)?;
+    for &child_id in &root_node.children {
+        // `?` would early-return `None` if any sibling lookup fails,
+        // hiding `<body>` past an unfindable `<head>` etc. — `let Some
+        // ... else { continue; }` matches the sibling helpers
+        // (`extract_body_offset_pt`, `pagination_layout::find_body_id`)
+        // and keeps continuation-page `<body>` background paint alive
+        // when one of the html root's earlier children can't be looked
+        // up (PR #305 Devin).
+        let Some(child) = base.get_node(child_id) else {
+            continue;
+        };
+        if let blitz_dom::NodeData::Element(elem) = &child.data
+            && elem.name.local.as_ref() == "body"
+        {
+            return Some(child_id);
+        }
+    }
+    None
+}
+
+/// Phase 4 PR 5: walk the DOM looking for `<body>` and return its
+/// `(location.x, location.y)` in pt. The fragmenter records body's
+/// own fragment at `(body_x, 0)` (body-content-area relative) and
+/// slicing depends on that frame; the html → body offset that CSS
+/// margin collapsing puts onto `body.location` lives separately so
+/// `render_v2` can add it to per-fragment draw positions.
+fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let root = doc.root_element();
+    let Some(root_node) = base.get_node(root.id) else {
+        return (0.0, 0.0);
+    };
+    for &child_id in &root_node.children {
+        let Some(child) = base.get_node(child_id) else {
+            continue;
+        };
+        if let blitz_dom::NodeData::Element(elem) = &child.data
+            && elem.name.local.as_ref() == "body"
+        {
+            let (x, y, _, _) = layout_in_pt(&child.final_layout);
+            return (x, y);
+        }
+    }
+    (0.0, 0.0)
 }
 
 /// Walk a Pageable tree and populate each `Drawables` map by
@@ -210,13 +268,17 @@ fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
     out: &mut crate::drawables::Drawables,
 ) {
-    use crate::drawables::{ImageEntry, SvgEntry};
+    use crate::drawables::{
+        BlockEntry, ImageEntry, ListItemEntry, MulticolRuleEntry, ParagraphEntry, SvgEntry,
+        TableEntry, TransformEntry,
+    };
     use crate::image::ImagePageable;
     use crate::pageable::{
         BlockPageable, BookmarkMarkerWrapperPageable, CounterOpWrapperPageable, ListItemPageable,
         MulticolRulePageable, RunningElementWrapperPageable, StringSetWrapperPageable,
         TablePageable, TransformWrapperPageable,
     };
+    use crate::paragraph::ParagraphPageable;
     use crate::svg::SvgPageable;
 
     let any = pageable.as_any();
@@ -254,16 +316,110 @@ fn extract_drawables_from_pageable(
         }
         return;
     }
-    // Block / List / Table / wrappers — recurse into children. PR 4+
-    // will record their own draw payload (BlockEntry, etc.); for PR 2
-    // we only walk past them to reach the leaves.
+    // Paragraph leaf — record the shaped lines verbatim. The lines
+    // already carry per-glyph positions, link spans, decoration spans,
+    // and inline-image / inline-box items, so no re-shaping at render
+    // time. Inline content (LineItem::InlineBox) is intentionally NOT
+    // recursed into — see the comment inside the arm for rationale.
+    if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
+        if let Some(node_id) = para.node_id {
+            out.paragraphs.insert(
+                node_id,
+                ParagraphEntry {
+                    lines: para.lines.clone(),
+                    opacity: para.opacity,
+                    visible: para.visible,
+                    id: para.id.clone(),
+                },
+            );
+        }
+        // Inline-box content (e.g. inline `<svg>`, inline-block
+        // `<span>`) is painted via `paragraph::draw_shaped_lines`
+        // which calls `ib.content.draw(...)` directly (line ~820 of
+        // paragraph.rs). Recursing here and registering the inner
+        // content in `block_styles` / `svgs` / `images` would
+        // double-paint at render time — once via the paragraph's
+        // inline call, once via the v2 dispatcher's per-NodeId loop.
+        // Skip recursion entirely so inline content stays a v1-style
+        // draw rooted in the paragraph's own dispatch.
+        return;
+    }
+    // Block / List / Table / wrappers — recurse into children. Block
+    // also records its own paint payload (PR 4).
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
+        let clipping = block.style.has_overflow_clip();
+        // Track an opacity scope only when the block has fractional
+        // opacity AND does NOT also clip — the clip path arm already
+        // wraps descendants in `draw_with_opacity` (see
+        // `draw_under_clip`), so the dual case is covered there and
+        // recording it here would double-track.
+        let opacity_scope = !clipping && block.opacity < 1.0;
+        if let Some(node_id) = block.node_id {
+            out.block_styles.insert(
+                node_id,
+                BlockEntry {
+                    style: block.style.clone(),
+                    opacity: block.opacity,
+                    visible: block.visible,
+                    id: block.id.clone(),
+                    layout_size: block.layout_size.or(block.cached_size),
+                    clip_descendants: Vec::new(),
+                    opacity_descendants: Vec::new(),
+                },
+            );
+        }
+        // Snapshot the per-NodeId map keys before recursing so we can
+        // identify which descendants belong inside this block's
+        // `push_clip / pop` scope when the block carries
+        // `overflow: hidden | clip`, OR inside its `draw_with_opacity`
+        // group when the block carries fractional opacity. Mirrors the
+        // `TransformWrapperPageable` arm exactly.
+        let before = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
+        }
+        if let (Some(before), Some(node_id)) = (before, block.node_id) {
+            let after = collect_drawables_node_ids(out);
+            // Strict descendants only — exclude the wrapper's own key
+            // because the dispatcher emits its bg / border / shadow
+            // OUTSIDE the clip (matching v1's
+            // `BlockPageable::draw` ordering at
+            // `pageable.rs:1796-1827`). Inner content sharing the
+            // wrapper's `node_id` (inline-root paragraph, replaced
+            // image / svg from `convert::replaced` /
+            // `convert::inline_root`) is dispatched as part of the
+            // wrapper's own painting path, not via descendant
+            // iteration.
+            let descendants: Vec<usize> = after
+                .difference(&before)
+                .copied()
+                .filter(|&id| id != node_id)
+                .collect();
+            if let Some(entry) = out.block_styles.get_mut(&node_id) {
+                if clipping {
+                    entry.clip_descendants = descendants;
+                } else {
+                    entry.opacity_descendants = descendants;
+                }
+            }
         }
         return;
     }
     if let Some(table) = any.downcast_ref::<TablePageable>() {
+        if let Some(node_id) = table.node_id {
+            out.tables.insert(
+                node_id,
+                TableEntry {
+                    style: table.style.clone(),
+                    opacity: table.opacity,
+                    visible: table.visible,
+                    id: table.id.clone(),
+                    layout_size: table.layout_size,
+                    width: table.width,
+                    cached_height: table.cached_height,
+                },
+            );
+        }
         for pc in &table.header_cells {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
@@ -273,12 +429,55 @@ fn extract_drawables_from_pageable(
         return;
     }
     if let Some(list_item) = any.downcast_ref::<ListItemPageable>() {
+        if let Some(node_id) = list_item.node_id {
+            out.list_items.insert(
+                node_id,
+                ListItemEntry {
+                    marker: list_item.marker.clone(),
+                    marker_line_height: list_item.marker_line_height,
+                    opacity: list_item.opacity,
+                    visible: list_item.visible,
+                },
+            );
+        }
         extract_drawables_from_pageable(list_item.body.as_ref(), out);
         return;
     }
     // Wrappers delegate.
+    //
+    // Transform wrapper: record `TransformEntry` keyed by the inner's
+    // `node_id` (the wrapper has no node_id of its own — it inherits
+    // from inner). After recursing, every NodeId added by the inner
+    // subtree is captured into the entry's `descendants` list so the
+    // render dispatcher can paint them all inside one
+    // `push_transform / pop` group, mirroring v1's
+    // `TransformWrapperPageable::draw`.
     if let Some(w) = any.downcast_ref::<TransformWrapperPageable>() {
+        let before_block = collect_drawables_node_ids(out);
         extract_drawables_from_pageable(w.inner.as_ref(), out);
+        if let Some(inner_id) = w.inner.node_id() {
+            let after_block = collect_drawables_node_ids(out);
+            // Exclude `inner_id` from `descendants` — it's the key the
+            // entry is filed under, and it is dispatched as the
+            // transform parent (`draw_under_transform` calls
+            // `dispatch_fragment(node_id, ..)` for it before iterating
+            // descendants). Without this filter, the render loop's
+            // skip set would contain `inner_id` itself and the parent
+            // node would never paint.
+            let descendants: Vec<usize> = after_block
+                .difference(&before_block)
+                .copied()
+                .filter(|&id| id != inner_id)
+                .collect();
+            out.transforms.insert(
+                inner_id,
+                TransformEntry {
+                    matrix: w.matrix,
+                    origin: w.origin,
+                    descendants,
+                },
+            );
+        }
         return;
     }
     if let Some(w) = any.downcast_ref::<BookmarkMarkerWrapperPageable>() {
@@ -297,18 +496,44 @@ fn extract_drawables_from_pageable(
         extract_drawables_from_pageable(w.child.as_ref(), out);
         return;
     }
-    // PR #301 Devin: MulticolRulePageable is a wrapper carrying a
-    // `child: Box<dyn Pageable>` produced by `maybe_wrap_multicol_rule`
-    // around any multicol container. Without this arm, images / SVGs
-    // nested inside a multicol container fall through to "Other" and
-    // never enter `Drawables.images` / `.svgs`. Multicol's own
-    // column-rule painting still lands in PR 6 (`drawables.multicol_rules`).
+    // MulticolRulePageable: record `MulticolRuleEntry` keyed by the
+    // multicol container (child) node_id, then recurse so the
+    // container's own block / paragraph / image payload land in their
+    // respective maps. Render-side post-pass paints rules per page
+    // using the container's fragments to partition `groups`.
     if let Some(w) = any.downcast_ref::<MulticolRulePageable>() {
+        if let Some(child_id) = w.child.node_id() {
+            out.multicol_rules.insert(
+                child_id,
+                MulticolRuleEntry {
+                    rule: w.rule,
+                    groups: w.groups.clone(),
+                },
+            );
+        }
         extract_drawables_from_pageable(w.child.as_ref(), out);
     }
-    // Other types (Spacer, ParagraphPageable, marker-only Pageables)
-    // have no PR 2 payload — markers and Spacers stay no-op in v2;
-    // Paragraph / Multicol-rule paint land in PR 3 / 6.
+    // Other types (Spacer, marker-only Pageables) have no per-NodeId
+    // payload — Spacer is invisible, and the four marker wrappers
+    // (Bookmark / StringSet / Running / CounterOp) drive their effects
+    // through fragmenter geometry rather than per-marker entries.
+}
+
+/// Snapshot the union of `NodeId` keys currently present in `out`'s
+/// per-NodeId maps. Used by `extract_drawables_from_pageable`'s
+/// transform arm to compute `descendants = after - before` so the
+/// transform can list every node added by walking its inner subtree.
+fn collect_drawables_node_ids(
+    out: &crate::drawables::Drawables,
+) -> std::collections::BTreeSet<usize> {
+    let mut ids = std::collections::BTreeSet::new();
+    ids.extend(out.block_styles.keys().copied());
+    ids.extend(out.paragraphs.keys().copied());
+    ids.extend(out.images.keys().copied());
+    ids.extend(out.svgs.keys().copied());
+    ids.extend(out.tables.keys().copied());
+    ids.extend(out.list_items.keys().copied());
+    ids
 }
 
 #[cfg(test)]
