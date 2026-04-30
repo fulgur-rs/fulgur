@@ -287,16 +287,13 @@ pub(super) fn try_convert(
                 content_box,
                 positioned_children,
             );
-            let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node_id));
-            if has_style {
-                block.layout_size = Some(Size { width, height });
-            }
+            block.layout_size = Some(Size { width, height });
             return Some(Box::new(block));
         }
     }
@@ -479,11 +476,12 @@ fn build_list_item_body(
                 content_box,
                 positioned_children,
             );
-            let block = BlockPageable::with_positioned_children(positioned_children)
+            let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node.id));
+            block.layout_size = Some(Size { width, height });
             Box::new(block)
         }
     } else {
@@ -499,11 +497,12 @@ fn build_list_item_body(
             content_box,
             positioned_children,
         );
-        let block = BlockPageable::with_positioned_children(positioned_children)
+        let mut block = BlockPageable::with_positioned_children(positioned_children)
             .with_style(style)
             .with_visible(visible)
             .with_id(extract_block_id(node))
             .with_node_id(Some(node.id));
+        block.layout_size = Some(Size { width, height });
         Box::new(block)
     }
 }

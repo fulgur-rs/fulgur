@@ -54,7 +54,6 @@ pub(super) fn convert(
     let (positioned_children, _has_pseudo) =
         pseudo::wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
 
-    let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
         .with_style(style)
@@ -62,8 +61,6 @@ pub(super) fn convert(
         .with_visible(visible)
         .with_id(extract_block_id(node))
         .with_node_id(Some(node_id));
-    if has_style {
-        block.layout_size = Some(Size { width, height });
-    }
+    block.layout_size = Some(Size { width, height });
     Box::new(block)
 }
