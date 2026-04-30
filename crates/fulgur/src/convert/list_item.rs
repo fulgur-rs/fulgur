@@ -216,16 +216,13 @@ pub(super) fn try_convert(
                     content_box,
                     paragraph_children,
                 );
-                let needs_wrapper = style.needs_block_wrapper();
                 let mut block = BlockPageable::with_positioned_children(positioned_children)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                if needs_wrapper {
-                    block.layout_size = Some(Size { width, height });
-                }
+                block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }
             // No marker resolved — fall through to normal empty-element handling
