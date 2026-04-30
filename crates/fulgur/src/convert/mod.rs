@@ -319,9 +319,8 @@ fn extract_drawables_from_pageable(
     // Paragraph leaf — record the shaped lines verbatim. The lines
     // already carry per-glyph positions, link spans, decoration spans,
     // and inline-image / inline-box items, so no re-shaping at render
-    // time. Inline content (LineItem::InlineBox) embeds whole Pageable
-    // subtrees that need their own draw payload — recurse so wrapper
-    // markers / nested blocks land in the appropriate `Drawables` map.
+    // time. Inline content (LineItem::InlineBox) is intentionally NOT
+    // recursed into — see the comment inside the arm for rationale.
     if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
         if let Some(node_id) = para.node_id {
             out.paragraphs.insert(
@@ -334,17 +333,15 @@ fn extract_drawables_from_pageable(
                 },
             );
         }
-        // Recurse into inline-box content. Each `LineItem::InlineBox`
-        // holds a `Box<dyn Pageable>` (typically a `BlockPageable` for
-        // `<span>`-style inline blocks) so its descendants can register
-        // their own payloads.
-        for line in &para.lines {
-            for item in &line.items {
-                if let crate::paragraph::LineItem::InlineBox(ib) = item {
-                    extract_drawables_from_pageable(ib.content.as_ref(), out);
-                }
-            }
-        }
+        // Inline-box content (e.g. inline `<svg>`, inline-block
+        // `<span>`) is painted via `paragraph::draw_shaped_lines`
+        // which calls `ib.content.draw(...)` directly (line ~820 of
+        // paragraph.rs). Recursing here and registering the inner
+        // content in `block_styles` / `svgs` / `images` would
+        // double-paint at render time — once via the paragraph's
+        // inline call, once via the v2 dispatcher's per-NodeId loop.
+        // Skip recursion entirely so inline content stays a v1-style
+        // draw rooted in the paragraph's own dispatch.
         return;
     }
     // Block / List / Table / wrappers — recurse into children. Block
