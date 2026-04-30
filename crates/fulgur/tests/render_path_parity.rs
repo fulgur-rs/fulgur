@@ -426,6 +426,18 @@ fn inline_byte_equality_cases() {
             "body with inline svg margin",
             r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0}</style></head><body><svg width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="margin:20px"><rect x="0" y="0" width="40" height="40" fill="#fa0"/></svg></body></html>"##,
         ),
+        // PR 6 follow-up (fulgur-rtza) — GCPM `@page` margin box
+        // rendering ported to `render_v2` via the shared
+        // `MarginBoxRenderer`. Without the port, v2 silently dropped
+        // `@top-center` / `@bottom-center` / counter() / element() /
+        // string() content on every page. v1's `render_to_pdf_with_gcpm`
+        // per-page measure / layout / render pipeline now lives in
+        // `MarginBoxRenderer::render_page`; both paths share the same
+        // implementation and per-page state caches.
+        (
+            "page counter in @bottom-center",
+            r##"<!DOCTYPE html><html><head><style>@page { @bottom-center { content: counter(page) " / " counter(pages); font-size: 8pt; } } body { margin: 0; padding: 0; } .item { height: 720px; }</style></head><body><div class="item">first</div><div class="item">second</div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

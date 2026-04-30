@@ -81,4 +81,18 @@ allowlist = [
     "vrt://layout/inline-flex-smoke.html",
     "vrt://layout/inline-grid-smoke.html",
     "vrt://svg/shapes.html",
+    # PR 6 follow-up (GCPM @page margin box port to render_v2,
+    # fulgur-rtza). v1's `render_to_pdf_with_gcpm` per-page margin box
+    # measure / layout / render pipeline was extracted into
+    # `MarginBoxRenderer` and called from `render_v2`. Both paths now
+    # share the same caches and produce byte-equivalent margin-box
+    # output, lighting up the GCPM family + cover-page-break-after +
+    # examples/header-footer{,-split}.
+    "vrt://gcpm/counter-page-numbers.html",
+    "vrt://gcpm/page-selector.html",
+    "vrt://gcpm/running-element.html",
+    "vrt://gcpm/string-set.html",
+    "vrt://bugs/cover-page-break-after.html",
+    "examples://header-footer",
+    "examples://header-footer-split",
 ]
