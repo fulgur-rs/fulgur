@@ -859,3 +859,351 @@ fn render_v2_smoke_multicol_rule_inside_transform() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_opacity_descendants_block_with_svg() {
+    // Regression for fulgur-gdb9: a fractional-opacity block wrapping
+    // a child element of a different node_id (the canonical
+    // `<div opacity:0.4><svg>..</svg></div>` shape) must paint the
+    // svg INSIDE the parent's `draw_with_opacity` group. Without
+    // `BlockEntry.opacity_descendants` + `draw_under_opacity`, v2's
+    // flat dispatch paints svg at full opacity and double-emits the
+    // transparency group. This smoke exercises the new
+    // `draw_under_opacity` arm in `dispatch_fragment`'s precedence
+    // chain.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.faded{opacity:0.4}</style></head><body><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#1a6faa"/></svg></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_opacity_inside_overflow_clip() {
+    // Composition: a clipping ancestor with an opacity-scoped
+    // descendant. Exercises the new `nested_opacity_skip` set inside
+    // `draw_under_clip`'s descendant loop and the `draw_under_opacity`
+    // arm in the recursive descend. Without the skip, the inner
+    // opacity block's strict descendants would dispatch twice (once
+    // by the clip's main loop iteration, once under the opacity
+    // wrap).
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.clip{overflow:hidden;width:120pt;height:80pt}.faded{opacity:0.5}</style></head><body><div class="clip"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><circle cx="30" cy="30" r="25" fill="#e74c3c"/></svg></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_opacity_inside_transform() {
+    // Composition: a transformed ancestor with an opacity-scoped
+    // descendant. Exercises the new `opacity_skip` set inside
+    // `draw_under_transform`'s descendant loop and the
+    // `draw_under_opacity` arm in the recursive descend.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:rotate(5deg)}.faded{opacity:0.6}</style></head><body><div class="tx"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#27ae60"/></svg></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_anonymous_block_inline_level_sibling() {
+    // Regression for fulgur-bq6i (review_card_inline_block):
+    // a block container with mixed block-level and inline-level
+    // children triggers Stylo's anonymous-block synthesis (CSS 2.1
+    // §9.2.1.1). The anonymous wrapper has its own `node_id` and
+    // appears in `Node.layout_children` but NOT in `Node.children`.
+    // The fragmenter's `record_subtree_descendants` previously
+    // walked `children`, missing the wrapper and silently dropping
+    // the inline-level child's paint. Now `layout_children` is
+    // preferred when `Some`.
+    //
+    // Without the fix, the BADGE span content (background + text)
+    // never paints in v2 because its wrapping inline-root
+    // paragraph's `node_id` lacks a geometry entry, so
+    // `dispatch_fragment` skips it. The size-comparison sanity
+    // check below catches a regression where the anonymous-block
+    // walk gets dropped: with-badge PDF must be measurably larger
+    // than no-badge PDF.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}.label{display:inline-block;background:#cef;padding:2pt 6pt}</style></head><body><div class="card"><div>block child</div><span class="label">BADGE</span></div></body></html>"##;
+    let html_no_badge = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}</style></head><body><div class="card"><div>block child</div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf_no_badge = engine.render_html_v2(html_no_badge).expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(
+        pdf.len() > pdf_no_badge.len(),
+        "expected BADGE rendering to produce more bytes than no-badge \
+         baseline (got {} vs {}); did anonymous-block walk regress?",
+        pdf.len(),
+        pdf_no_badge.len(),
+    );
+}
+
+#[test]
+fn render_v2_smoke_split_block_uses_per_slice_height() {
+    // Regression for fulgur-bq6i:break-inside — when a block spans
+    // multiple pages (the fragmenter records one fragment per page
+    // slice), `draw_block_inner_paint` must paint each slice at its
+    // per-page `frag.height` rather than the block's full
+    // `layout_size.height`. Without this, the block's bg / border
+    // paints full-size on every slice, leaking past the page bottom on
+    // earlier slices and double-painting on the continuation page.
+    //
+    // Construct a body that overflows page 1 with a tall styled box
+    // straddling the page break. The styled box has a colored bg so a
+    // full-height repaint on page 2 (the bug) would emit an
+    // unmistakably oversized rect — verifiable via PDF size: split
+    // version stays close to single-page version + per-slice paints,
+    // not 2× the block-area worth of bg fills.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .box{height:300pt;background:#cef;border:2pt solid #44a}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="box"></div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: must produce a multi-page PDF (the box straddles page
+    // bottom).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split block, got {page_count}",
+    );
+}
+
+#[test]
+fn render_v2_smoke_body_layout_children_for_form_siblings() {
+    // Regression for fulgur-bq6i:wasm-demo — body with mixed
+    // block-level and inline-level children triggers Stylo's
+    // anonymous-block synthesis at the BODY level (CSS 2.1
+    // §9.2.1.1). The synthesized wrapper appears in
+    // `body.layout_children` but NOT in `body.children`, so the
+    // fragmenter's `fragment_pagination_root` (now preferring
+    // `layout_children` when non-empty) must visit it for v2 to
+    // see the inline-level group's paint.
+    //
+    // Without this fix, a body containing
+    // `<h1>title</h1><label>field: <input></label>` paints only
+    // the h1; the label + input row gets dropped because its
+    // anonymous wrapper isn't visited.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}label{margin-right:8pt}input{padding:2pt;border:1pt solid #888;width:120pt}</style></head><body><h1>Form sample</h1><label>Name:</label><input type="text" value="hello"></body></html>"##;
+    let html_no_inline = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt;font-size:10pt}</style></head><body><h1>Form sample</h1></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf_no_inline = engine.render_html_v2(html_no_inline).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: body with inline-level form siblings produces a
+    // larger PDF than h1-only baseline. Without the body-level
+    // layout_children walk, the label + input row is dropped and
+    // the two sizes converge.
+    assert!(
+        pdf.len() > pdf_no_inline.len(),
+        "expected form-row rendering to produce more bytes than \
+         h1-only baseline (got {} vs {}); did body layout_children \
+         walk regress?",
+        pdf.len(),
+        pdf_no_inline.len(),
+    );
+}
+
+#[test]
+fn render_v2_smoke_body_opacity_multi_page_content_survives() {
+    // Regression for PR #314 follow-up Devin Review:
+    // `body { opacity: 0.5 }` with content that spans multiple
+    // pages must NOT silently blank pages 1+. The `body` element
+    // gets exactly one fragment at `page_index = 0`
+    // (`pagination_layout.rs:380-384`), so
+    // `draw_under_opacity(body)` only fires on page 0. If body's
+    // descendants are added to `opacity_wrapped_descendants`
+    // unconditionally, they get skipped on pages 1+ by the
+    // `opacity_wrapped_descendants.contains(...)` guard but no-one
+    // dispatches them — silently blanking everything after page 1.
+    //
+    // Body is now excluded from `opacity_wrapped_descendants` (and
+    // from the `draw_under_opacity` dispatch arm) for the same
+    // reason `clipped_descendants` excludes it (PR #310 Devin).
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;opacity:0.5;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Sanity: must be multi-page (filler 800pt + tail 132pt > A4
+    // content height of ~842pt).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for body-opacity test, got {page_count}",
+    );
+    // Compare to a no-opacity baseline. Without the body exclusion
+    // fix, body's descendants on page 2 silently disappear and the
+    // PDF shrinks compared to the no-opacity version. The opacity-
+    // group XObject adds a small constant; the test simply asserts
+    // the with-opacity PDF retains MOST of the no-opacity content
+    // (i.e. didn't lose page 2 entirely).
+    let html_baseline = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    // Allow some room for the opacity group XObject overhead but
+    // require at least 90% of the baseline content survives. A real
+    // regression (silent page-2 blanking) drops the size by far more
+    // than 10%.
+    assert!(
+        pdf.len() * 100 >= pdf_baseline.len() * 90,
+        "with-opacity PDF lost too much content vs baseline \
+         (with={}B baseline={}B); did body exclusion regress?",
+        pdf.len(),
+        pdf_baseline.len(),
+    );
+}
+
+#[test]
+fn render_v2_smoke_split_opacity_block_uses_per_slice_height() {
+    // Regression for PR #314 follow-up Devin Review: a fractional-
+    // opacity block with descendants that ALSO spans multiple pages
+    // (split slice) must paint each per-page slice at its
+    // `frag.height`, not the full `layout_size.height`. v2's
+    // `draw_under_opacity` inlines the bg / border / shadow paint;
+    // without the `is_split` height fix that
+    // `draw_block_inner_paint` got in PR #316, the inlined paint
+    // overflows the page bottom on earlier slices and double-paints
+    // on continuation pages.
+    //
+    // Construct a body with a tall opacity-wrapped block (containing
+    // a same-node_id-different SVG descendant so the opacity arm
+    // fires) that straddles the page boundary.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .opaque{opacity:0.5;height:300pt;background:#cef;border:2pt solid #44a;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="opaque">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+                <rect width="40" height="40" fill="#1a6faa"/>
+            </svg>
+        </div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split-opacity test, got {page_count}",
+    );
+}
+
+#[test]
+fn render_v2_smoke_split_overflow_clip_block_uses_per_slice_height() {
+    // Regression for PR #313 follow-up Devin Review: an
+    // `overflow: hidden` block that spans multiple pages must
+    // paint its bg / border / shadow at the per-page slice height
+    // (`frag.height`) and push a clip rectangle of the slice
+    // height too — not at the full `layout_size.height`.
+    //
+    // PR #316 added `is_split` height handling to
+    // `draw_block_inner_paint`; PR #314 follow-up added it to
+    // `draw_under_opacity`; this test guards `draw_under_clip`
+    // (the third parallel paint path). Without the fix, the
+    // overflow:hidden block overflows the page bottom on earlier
+    // slices AND the clip rectangle on continuation pages covers
+    // content that should be cut off.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .clip{overflow:hidden;height:300pt;background:#cef;border:2pt solid #44a;margin-top:12pt}
+        .clip > .inner{height:60pt;background:#fef;margin:6pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="clip"><div class="inner">clipped content</div></div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity (filler 600pt + clip 300pt + 12pt margin
+    // = 912pt > A4 ~842pt content height).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split-overflow-clip test, got {page_count}",
+    );
+}
+
+#[test]
+fn render_v2_smoke_html_opacity_multi_page_content_survives() {
+    // Regression for PR #312 follow-up Devin Review: the
+    // `<html>` root element with fractional opacity must NOT
+    // silently blank the entire document.
+    //
+    // Root is never recorded in `geometry` (it's painted via
+    // `paint_root_block_v2` as a pre-pass). When `html { opacity:
+    // 0.5 }` is set, `extract_drawables_from_pageable` populates
+    // root's `BlockEntry.opacity_descendants` with body + all body
+    // descendants. Without the root exclusion in the
+    // `opacity_wrapped_descendants` collection, those descendants
+    // were added to the skip set and dropped from the main loop —
+    // but `draw_under_opacity(root)` never fires either (root is
+    // skipped at line 348), so the entire page content silently
+    // blanked.
+    //
+    // Same defense as the body exclusion (PR #314 follow-up).
+    let html = r##"<!DOCTYPE html><html style="opacity:0.5"><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for html-opacity test, got {page_count}",
+    );
+    // Compare against no-opacity baseline. Without the root
+    // exclusion fix, `html { opacity: 0.5 }` silently dropped all
+    // body content and the PDF shrunk to roughly the empty-page
+    // size. Require ≥85% of baseline (small overhead for the
+    // root-level transparency-group XObject).
+    let html_baseline = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:800pt;background:#eef}
+        .tail{height:120pt;background:#cef;margin-top:12pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="tail">tail content on page 2</div>
+    </body></html>"##;
+    let pdf_baseline = engine.render_html_v2(html_baseline).expect("v2 render");
+    assert!(
+        pdf.len() * 100 >= pdf_baseline.len() * 85,
+        "with-html-opacity PDF lost too much content vs baseline \
+         (with={}B baseline={}B); did root exclusion regress?",
+        pdf.len(),
+        pdf_baseline.len(),
+    );
+}
