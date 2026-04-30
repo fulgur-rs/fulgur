@@ -348,6 +348,12 @@ fn extract_drawables_from_pageable(
     // also records its own paint payload (PR 4).
     if let Some(block) = any.downcast_ref::<BlockPageable>() {
         let clipping = block.style.has_overflow_clip();
+        // Track an opacity scope only when the block has fractional
+        // opacity AND does NOT also clip — the clip path arm already
+        // wraps descendants in `draw_with_opacity` (see
+        // `draw_under_clip`), so the dual case is covered there and
+        // recording it here would double-track.
+        let opacity_scope = !clipping && block.opacity < 1.0;
         if let Some(node_id) = block.node_id {
             out.block_styles.insert(
                 node_id,
@@ -358,15 +364,17 @@ fn extract_drawables_from_pageable(
                     id: block.id.clone(),
                     layout_size: block.layout_size.or(block.cached_size),
                     clip_descendants: Vec::new(),
+                    opacity_descendants: Vec::new(),
                 },
             );
         }
         // Snapshot the per-NodeId map keys before recursing so we can
         // identify which descendants belong inside this block's
         // `push_clip / pop` scope when the block carries
-        // `overflow: hidden | clip`. Mirrors the
+        // `overflow: hidden | clip`, OR inside its `draw_with_opacity`
+        // group when the block carries fractional opacity. Mirrors the
         // `TransformWrapperPageable` arm exactly.
-        let before = clipping.then(|| collect_drawables_node_ids(out));
+        let before = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
         for pc in &block.children {
             extract_drawables_from_pageable(pc.child.as_ref(), out);
         }
@@ -388,7 +396,11 @@ fn extract_drawables_from_pageable(
                 .filter(|&id| id != node_id)
                 .collect();
             if let Some(entry) = out.block_styles.get_mut(&node_id) {
-                entry.clip_descendants = descendants;
+                if clipping {
+                    entry.clip_descendants = descendants;
+                } else {
+                    entry.opacity_descendants = descendants;
+                }
             }
         }
         return;

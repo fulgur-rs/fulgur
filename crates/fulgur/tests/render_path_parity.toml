@@ -106,6 +106,53 @@ allowlist = [
     "vrt://layout/overflow-hidden.html",
     "vrt://layout/overflow-hidden-rounded.html",
     "examples://overflow-hidden",
+    # Phase 4 stack merge enrollment — fixtures that became
+    # byte-identical incidentally (mostly through the GCPM port,
+    # InlineBox no-recurse fix, and content-inset / clip / transform
+    # work) but had not yet been allowlisted. Enrolling them locks
+    # in v1/v2 parity and progresses PR 7 (default flip) coverage.
+    "vrt://gcpm/bookmark-outline.html",
+    "vrt://gcpm/link-annotations.html",
+    "examples://image",
+    "examples://link-media",
+    "examples://link-stylesheet",
+    "examples://list-style-image",
+    "examples://pseudo-content-url",
+    "examples://text-align",
+    "examples://text-decoration",
+    # PR follow-up (cross-node_id opacity grouping, fulgur-gdb9) —
+    # `<div style="opacity:0.4"><svg>..</svg></div>` was painting the
+    # svg outside the parent's `draw_with_opacity` wrap because v2's
+    # flat dispatch had no way to nest descendants under a parent's
+    # opacity group. `BlockEntry.opacity_descendants` + new
+    # `draw_under_opacity` mirror the existing
+    # `clip_descendants` / `draw_under_clip` shape so opacity wraps
+    # everything (own paint + descendants), matching v1's
+    # `BlockPageable::draw` recursion under
+    # `draw_with_opacity(self.opacity, ..)`.
+    "examples://svg",
+    # PR follow-up (anonymous-block layout walk, fulgur-bq6i:review_card)
+    # — Stylo synthesizes anonymous block wrappers around inline-level
+    # siblings of block-level siblings (CSS 2.1 §9.2.1.1). Those
+    # wrappers carry their own `node_id` and live in
+    # `Node.layout_children` but NOT in `Node.children`. The fragmenter's
+    # `record_subtree_descendants` walked `children`, missing the
+    # synthesized anonymous block, so geometry never recorded its
+    # fragment and v2 dispatch silently dropped its inline-root
+    # paragraph. Switching to `layout_children` (when `Some`) lights up
+    # `vrt://layout/review_card_inline_block.html` and any future
+    # mixed-block-and-inline content.
+    "vrt://layout/review_card_inline_block.html",
+    # PR follow-up (per-slice block height, fulgur-bq6i:break-inside) —
+    # split blocks (one fragment per page) were painting the FULL
+    # `layout_size.height` on every slice, so a `break-inside: avoid`
+    # callout that doesn't fit on page 1 painted overflowing-the-page-
+    # bottom on page 1 AND repeated full-size on page 2. v2 now passes
+    # `is_split = geom.fragments.len() > 1` from `dispatch_fragment` to
+    # `draw_block_inner_paint`, which uses `frag.height` per slice when
+    # split — mirroring v1's `BlockPageable::slice_for_page` which
+    # adjusts `layout_size.height` per sliced pageable.
+    "examples://break-inside",
 ]
 
 # Known-divergent fixtures (fulgur-g7a1, 2026-04-30)
@@ -149,3 +196,62 @@ allowlist = [
 # Resolution: defer to PR 8 v1 deletion. Once v1 is gone, the parity
 # test compares v2 vs v2 (trivially byte-eq) and these fixtures need
 # no special handling.
+
+# Known-divergent v1 quirk: off-page slice y (fulgur-bq6i:grid-row-promote)
+# ----------------------------------------------------------------------
+# `vrt://bugs/grid-row-promote-background.html` is intentionally NOT
+# allowlisted because v1 emits an off-page card slice at a different
+# numeric y than v2. The visual output is identical (both clipped by
+# the page MediaBox) — only the numeric Tm operand differs.
+#
+# Root cause: a v1 quirk in `BlockPageable::slice_for_page` when an
+# ancestor (here `.grid`) has NO fragment on the current page but its
+# descendants (cards) do. The ancestor's `self_page_y` falls back to
+# `0.0`, and the child's slice computes
+# `new_y = px_to_pt(child_frag.y - 0)` treating body-content-relative
+# `child_frag.y` as parent-relative. The Pageable draw chain then
+# double-adds the ancestor's `pc.y` (from convert) AND the child's
+# new_y (which is also body-relative), producing y = 1681pt — far
+# off the page bottom.
+#
+#   v1: body.draw(y=56.69) → grid.draw(y=56.69 + 812 = 868.69) →
+#       card_1_slice.draw(y=868.69 + 812.25 = 1680.94pt)
+#   v2: dispatch_fragment uses frag.y_page_local =
+#       56.69 + px_to_pt(1083) = 868.94pt
+#
+# v2 is correct (page-local from fragmenter); v1's value is the sum
+# of two body-relative offsets due to the slice-coord bug.
+#
+# Both renders emit the slice off-page (anywhere past 822pt is past
+# the page bottom for an A4 with 20mm margin). The slice gets clipped
+# by the MediaBox so neither is visible; the difference is purely in
+# the numeric operand the renderer emits before the clip.
+#
+# Resolution: defer to PR 8 v1 deletion. Fixing v1 in flight would
+# touch `slice_for_page` for a quirk that disappears with the path.
+
+# Known-divergent: v2 renders content v1 silently drops (fulgur-bq6i:wasm-demo)
+# ----------------------------------------------------------------------
+# `examples/wasm-demo` is intentionally NOT allowlisted because v2's
+# `fragment_pagination_root` now walks `body.layout_children` (when
+# present) for the same reason `record_subtree_descendants` does:
+# Stylo synthesizes anonymous block wrappers around inline-level
+# siblings of block-level body children, and those wrappers carry
+# the inline content's `node_id`.
+#
+# After the body-level layout_children fix, v2 picks up
+# `<label>` / `<legend>` / `<select>` / `<option>` / `<input>` /
+# `<button>` paint that v1 silently drops because v1's body
+# iteration only saw the raw children list (which omits the
+# anonymous wrappers Stylo creates for the form-element row).
+#
+# Net delta: v2 is 53 bytes longer than v1 on this fixture because
+# v2 also paints the `<button id="render" disabled>Loading WASM…
+# </button>` text that v1 omits. v2 is the more visually correct
+# output — Phase 4's whole point is that the geometry-driven path
+# fixes coverage gaps in the Pageable path, and this is one such
+# gap that becomes the canonical behavior after PR 8 v1 deletion.
+#
+# Resolution: defer to PR 8 v1 deletion. Once the v1 path is gone,
+# the parity test compares v2 vs v2 (trivially byte-eq). For users
+# rendering form-heavy HTML to PDF, this is a v2 improvement.
