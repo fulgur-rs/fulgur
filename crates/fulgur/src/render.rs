@@ -420,7 +420,24 @@ fn draw_v2_page(
     // so the rule lines paint on top of the column contents. The
     // post-pass placement mirrors that ordering — every per-NodeId
     // payload is already drawn by the main loop above.
+    //
+    // Skip multicol containers that live inside a transform (whether
+    // they ARE a transform key or are a descendant of one): in v1
+    // `MulticolRulePageable::draw` runs from inside
+    // `TransformWrapperPageable::draw`'s `push_transform / pop` group,
+    // so the rule lines paint under the composed matrix. The transform
+    // version is dispatched from `draw_under_transform`'s tail
+    // (`paint_transform_scoped_multicol_rules`) so the composed
+    // transform stays active. Painting them here unconditionally would
+    // emit the rules twice — once in page coords (wrong) and once
+    // inside the transform (correct) — and visually misalign the
+    // page-coord copy. (PR #305 follow-up Devin)
     for (&container_id, entry) in &drawables.multicol_rules {
+        if transformed_descendants.contains(&container_id)
+            || drawables.transforms.contains_key(&container_id)
+        {
+            continue;
+        }
         let Some(container_geom) = geometry.get(&container_id) else {
             continue;
         };
@@ -663,6 +680,45 @@ fn draw_under_transform(
                 );
             }
         }
+    }
+
+    // Paint multicol column rules for any multicol container in this
+    // transform's direct scope. Mirrors v1's
+    // `MulticolRulePageable::draw` running inside
+    // `TransformWrapperPageable::draw`'s `push_transform / pop` group
+    // (`pageable.rs:2714-2725 → 3088`) so the rule lines render under
+    // the composed matrix instead of in page coordinates.
+    //
+    // Direct scope = `tx.descendants` (or the transform key itself,
+    // covered when `node_id` is also a multicol container) MINUS any
+    // descendant that lives inside a NESTED transform — those are
+    // painted by the inner `draw_under_transform` recursion to compose
+    // both matrices. Without this filter, a multicol container nested
+    // two transforms deep would paint its rules in the outer
+    // transform's space, missing the inner matrix.
+    // (PR #305 follow-up Devin)
+    let nested_tx_desc: std::collections::BTreeSet<usize> = tx
+        .descendants
+        .iter()
+        .filter_map(|id| drawables.transforms.get(id))
+        .flat_map(|inner| inner.descendants.iter().copied())
+        .collect();
+    for (&container_id, entry) in &drawables.multicol_rules {
+        let in_my_scope = container_id == node_id || tx.descendants.contains(&container_id);
+        if !in_my_scope || nested_tx_desc.contains(&container_id) {
+            continue;
+        }
+        let Some(container_geom) = geometry.get(&container_id) else {
+            continue;
+        };
+        paint_multicol_rule_for_page(
+            canvas,
+            entry,
+            container_geom,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
     }
 
     canvas.surface.pop();

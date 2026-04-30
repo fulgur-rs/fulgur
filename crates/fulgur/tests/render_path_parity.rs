@@ -541,6 +541,19 @@ fn inline_byte_equality_cases() {
             "nested overflow:hidden blocks",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;overflow:hidden;background:#fce}.leaf{width:200px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
         ),
+        // PR #305 follow-up Devin: a multicol container with
+        // `column-rule` nested inside a `transform` ancestor used to
+        // paint its rule lines in untransformed page coordinates,
+        // because the post-pass at `draw_v2_page` ran outside any
+        // transform `push/pop` group. v1 emits rules from inside
+        // `TransformWrapperPageable::draw → MulticolRulePageable::draw`
+        // (`pageable.rs:2714-2725 → 3088`). The fix dispatches
+        // transform-scoped multicol rules from inside
+        // `draw_under_transform` and skips them in the post-pass.
+        (
+            "multicol with column-rule inside transform",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:translate(8px,4px)}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="tx"><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

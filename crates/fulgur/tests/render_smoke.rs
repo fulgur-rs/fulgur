@@ -846,3 +846,16 @@ fn render_v2_smoke_list_item_image_marker() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_multicol_rule_inside_transform() {
+    // Regression for PR #305 follow-up Devin: a multicol container
+    // with `column-rule` nested inside a `transform` ancestor needs
+    // the rule lines painted from inside `draw_under_transform`'s
+    // `push_transform / pop` group, not the page-level post-pass.
+    // Otherwise the rules render in untransformed page coordinates.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:translate(8px,4px)}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="tx"><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
