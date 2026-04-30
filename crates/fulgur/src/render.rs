@@ -263,6 +263,32 @@ fn draw_v2_page(
     for tx in drawables.transforms.values() {
         transformed_descendants.extend(tx.descendants.iter().copied());
     }
+    // Same shape as `transformed_descendants` but keyed by an ancestor
+    // block whose `style.has_overflow_clip()` is true. Strict
+    // descendants paint inside the clip's `push_clip_path / pop` group;
+    // skipping them here prevents the main loop from also dispatching
+    // them outside the clip.
+    //
+    // Body is excluded from this collection: the fragmenter records
+    // body with exactly one fragment at `page_index = 0`
+    // (`pagination_layout.rs:380-384`), so `draw_under_clip(body)`
+    // only fires on page 0. If we kept body in `clipped_descendants`,
+    // every descendant would still be skipped via the
+    // `clipped_descendants.contains(&node_id)` guard on page 1+ but
+    // nobody would dispatch them — silently blanking all content
+    // after page 1 on `<body style="overflow:hidden|auto|scroll">`
+    // (PR #310 follow-up Devin). Skipping body here means body-level
+    // overflow clip is not applied in v2, matching the pre-PR
+    // behavior; body clipping in a paged context is unusual and the
+    // pre-pass at `paint_root_block_v2` already handles body's own
+    // bg / border on continuation pages.
+    let mut clipped_descendants: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    for (&node_id, block) in &drawables.block_styles {
+        if block.style.has_overflow_clip() && Some(node_id) != drawables.body_id {
+            clipped_descendants.extend(block.clip_descendants.iter().copied());
+        }
+    }
 
     for (&node_id, geom) in geometry {
         // Bookmark anchor: emit on the page where the node's *first*
@@ -291,6 +317,11 @@ fn draw_v2_page(
             // Drawn inside an ancestor transform group elsewhere in
             // this loop. Skipping prevents double-painting. Bookmark
             // anchor recording above already ran unconditionally.
+            continue;
+        }
+        if clipped_descendants.contains(&node_id) {
+            // Drawn inside an ancestor `overflow: hidden|clip` block's
+            // `push_clip_path / pop` group elsewhere in this loop.
             continue;
         }
         // Skip the html root: its bg / border / shadow are painted
@@ -327,11 +358,60 @@ fn draw_v2_page(
                     margin_top_pt,
                     page_index,
                 );
-            } else {
-                dispatch_fragment(
-                    canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
-                );
+                continue;
             }
+            // `overflow: hidden | clip` block: bg / border / shadow
+            // paint OUTSIDE the clip (matching v1's
+            // `BlockPageable::draw` ordering at
+            // `pageable.rs:1796-1827`), then push the clip path,
+            // dispatch self's inner content + every strict descendant
+            // INSIDE the clip, then pop. Same shape as
+            // `draw_under_transform` but with `push_clip_path`.
+            //
+            // No `!clip_descendants.is_empty()` guard: shared-node_id
+            // inner content (inline-root paragraph from
+            // `convert::inline_root`, replaced image / svg from
+            // `convert::replaced`) lands at the same `node_id` as the
+            // wrapper and so produces an empty `clip_descendants`. v1
+            // pushes the clip unconditionally when
+            // `has_overflow_clip()` is true (`pageable.rs:1808-1826`),
+            // so a `<div style="overflow:hidden;width:50px">long
+            // text</div>` still needs the text clipped at the 50px
+            // box even with no separate descendant NodeIds.
+            // Body is intentionally excluded from `draw_under_clip`:
+            // body has only a page-0 fragment so the clip would only
+            // wrap page-0 content, but body's `clip_descendants`
+            // include every block in the document. Descendants on
+            // page 1+ are dispatched by the main loop via
+            // `dispatch_fragment` (they're omitted from
+            // `clipped_descendants` above). Without this skip, body's
+            // page-0 clip would also re-dispatch every descendant
+            // already painted by the main loop, causing a double
+            // paint. See the `clipped_descendants` collection block
+            // for the rest of the body-overflow rationale.
+            if let Some(block) = drawables.block_styles.get(&node_id)
+                && block.style.has_overflow_clip()
+                && Some(node_id) != drawables.body_id
+            {
+                draw_under_clip(
+                    canvas,
+                    block,
+                    node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            dispatch_fragment(
+                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+            );
         }
     }
 
@@ -548,6 +628,214 @@ fn draw_under_transform(
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
         lc.pop_transform();
     }
+}
+
+/// Push the block's overflow-clip path onto the surface, dispatch the
+/// wrapper's own bg / border / shadow + every descendant fragment that
+/// lands on `page_index`, then pop. Mirrors v1's `BlockPageable::draw`
+/// (`pageable.rs:1796-1827`):
+///
+/// ```text
+/// // bg/border/shadow paint OUTSIDE the clip
+/// draw_with_opacity(canvas, opacity, |c| {
+///     bg + border + shadow at (x, y, total_w, total_h);
+///     if let Some(clip) = compute_overflow_clip_path(...) {
+///         c.surface.push_clip_path(&clip, FillRule::default());
+///         for child in children { child.draw(c, x + child.x, y + child.y, ..); }
+///         c.surface.pop();
+///     }
+/// });
+/// ```
+///
+/// In v2 the wrapper's own inner content (paragraph / image / svg
+/// sharing the same `node_id`) is dispatched as part of the clipped
+/// region, then strict descendants iterate inside the clip. The block
+/// dispatcher's "shared node_id" combined helper
+/// (`draw_block_with_inner_content`) already handles the outer
+/// opacity wrap when used; here we replicate that ordering manually
+/// — bg/border outside clip, inner content + descendants inside clip,
+/// all wrapped in one opacity group.
+#[allow(clippy::too_many_arguments)]
+fn draw_under_clip(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    let total_width = block
+        .layout_size
+        .map(|s| s.width)
+        .unwrap_or_else(|| px_to_pt(frag.width));
+    let total_height = block
+        .layout_size
+        .map(|s| s.height)
+        .unwrap_or_else(|| px_to_pt(frag.height));
+
+    let para_for_block = drawables.paragraphs.get(&node_id);
+    let img_for_block = drawables.images.get(&node_id);
+    let svg_for_block = drawables.svgs.get(&node_id);
+    let inner_inset = block.style.content_inset();
+
+    // When this node is a list-item with overflow clip, mirror v1's
+    // `ListItemPageable::draw` ordering: outer opacity uses
+    // `list_item.opacity` (the body BlockPageable inside is built with
+    // default opacity=1.0 in `convert::list_item::build_list_item_body`,
+    // so `block.opacity` here would silently drop CSS opacity), and
+    // the marker draws before `push_clip_path` (markers sit at negative
+    // x outside the body box, so they must not be clipped). Without
+    // this, `<li style="overflow:hidden">` loses its marker entirely
+    // and any opacity set on the `<li>` is ignored. (PR #310 Devin)
+    let list_item = drawables.list_items.get(&node_id);
+    let opacity = list_item.map_or(block.opacity, |li| li.opacity);
+
+    draw_with_opacity(canvas, opacity, |canvas| {
+        // List-item marker paints first, OUTSIDE the clip — v1's
+        // `ListItemPageable::draw` emits the marker before delegating
+        // to `body.draw` (which paints bg / border / shadow). Markers
+        // sit at negative x relative to (x_pt, y_pt), so they must
+        // also stay outside the clip path pushed below.
+        if let Some(li) = list_item
+            && li.visible
+        {
+            draw_list_item_marker(canvas, li, x_pt, y_pt);
+        }
+
+        // bg / border / shadow outside the clip — same as
+        // `draw_block_inner_paint` but inlined so the opacity wrap
+        // covers the entire clipped region too.
+        if block.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+        }
+
+        // Push clip — fall through to inner content + descendants if
+        // `compute_overflow_clip_path` returns `None` (style somehow
+        // changed since extract decided this block clips).
+        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
+            &block.style,
+            x_pt,
+            y_pt,
+            total_width,
+            total_height,
+        ) {
+            canvas
+                .surface
+                .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+            true
+        } else {
+            false
+        };
+
+        // Inner content sharing `node_id` (inline-root paragraph,
+        // replaced image / svg) paints at the content-box top-left,
+        // not the border-box. Mirrors `draw_block_with_inner_content`.
+        let inner_x = x_pt + inner_inset.0;
+        let inner_y = y_pt + inner_inset.1;
+        if let Some(p) = para_for_block {
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, &geom.fragments, page_index);
+        }
+        if let Some(i) = img_for_block {
+            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+        }
+        if let Some(s) = svg_for_block {
+            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+        }
+
+        // Strict descendants — each at its own fragment's coords.
+        //
+        // Transform-aware dispatch: a descendant that has its own
+        // `TransformEntry` must enter `draw_under_transform` so the
+        // surface transform composes correctly. The main loop skips
+        // these nodes via `clipped_descendants.contains(...)` BEFORE
+        // it reaches the per-fragment transform check, so without the
+        // recursion below v2 silently drops transforms inside an
+        // `overflow: hidden` ancestor (`<div style="overflow:hidden">
+        // <div style="transform:..."/></div>` — PR #310 Devin).
+        //
+        // Pre-skip the strict descendants of those transforms so they
+        // are not dispatched twice — once via `draw_under_transform`
+        // (which iterates `tx.descendants`) and once via the loop
+        // body's `dispatch_fragment`.
+        let transform_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.transforms.get(id))
+            .flat_map(|tx| tx.descendants.iter().copied())
+            .collect();
+        for &desc_id in &block.clip_descendants {
+            if transform_skip.contains(&desc_id) {
+                continue;
+            }
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                    draw_under_transform(
+                        canvas,
+                        desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else {
+                    dispatch_fragment(
+                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        page_index,
+                    );
+                }
+            }
+        }
+
+        if clip_pushed {
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Paint multicol column-rule lines on `page_index` for one

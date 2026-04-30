@@ -462,6 +462,60 @@ fn inline_byte_equality_cases() {
             "page counter in @bottom-center",
             r##"<!DOCTYPE html><html><head><style>@page { @bottom-center { content: counter(page) " / " counter(pages); font-size: 8pt; } } body { margin: 0; padding: 0; } .item { height: 720px; }</style></head><body><div class="item">first</div><div class="item">second</div></body></html>"##,
         ),
+        // PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
+        // v1 `BlockPageable::draw` (`pageable.rs:1796-1827`) paints
+        // bg / border / shadow OUTSIDE the clip, then pushes the
+        // overflow clip path, draws children INSIDE, then pops. v2 now
+        // tracks `BlockEntry.clip_descendants` and replays the same
+        // ordering via `draw_under_clip`. Without this fix, overflow
+        // children that overshoot the parent's box paint past the
+        // clip boundary.
+        (
+            "overflow hidden block with overflowing child",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:80px;height:60px;overflow:hidden;background:#cef}.inner{width:200px;height:200px;background:#fce;margin:-20px}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #310 Devin: overflow:hidden block with shared-node_id
+        // inner content only (inline-root paragraph at the same
+        // `node_id`) — no separate descendant NodeIds. v1 pushes the
+        // clip unconditionally when `has_overflow_clip()` is true, so
+        // `<div style="overflow:hidden;width:50px">long overflowing
+        // text</div>` clips the long text at the 50px boundary. v2's
+        // dispatcher must do the same regardless of whether
+        // `clip_descendants` is empty.
+        (
+            "overflow hidden block with shared-node_id inline text",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
+        ),
+        // PR #310 follow-up Devin: a transform nested inside an
+        // `overflow:hidden` block was silently dropped because the
+        // main loop pre-skips `clipped_descendants` BEFORE the
+        // per-fragment transform check. `draw_under_clip` now
+        // dispatches transform-key descendants via
+        // `draw_under_transform` (and pre-skips their own descendants
+        // so they are not painted twice).
+        (
+            "transform inside overflow:hidden ancestor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #310 follow-up Devin: `<li style="overflow:hidden">` must
+        // (a) draw its marker (markers sit outside the body box at
+        // negative x, so `draw_under_clip` must emit the marker before
+        // pushing the clip path), and (b) honour `list_item.opacity`,
+        // not `block.opacity` — `convert::list_item::build_list_item_body`
+        // builds the body block with default opacity=1.0 because v1's
+        // `ListItemPageable::draw` carries the opacity at the outer
+        // wrap. Using `block.opacity` here silently drops any CSS
+        // opacity set on the `<li>`.
+        //
+        // The `<li>` wraps a sized `<div>` block child so the body
+        // BlockPageable's `cached_size.height` carries a non-zero
+        // value through to render — `convert::list_item::build_list_item_body`'s
+        // non-inline-root branch (line 508) doesn't set `layout_size`,
+        // and an empty body would collapse the bg paint to height=0.
+        (
+            "list item with overflow:hidden and opacity",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

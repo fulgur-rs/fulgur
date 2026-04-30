@@ -697,15 +697,58 @@ fn render_v2_smoke_bookmarks_under_transform() {
 }
 
 #[test]
-fn render_v2_smoke_triple_nested_transform_descendants() {
-    // Exercises the `nested_skip` pre-collection in
-    // `draw_under_transform` added in PR #305 follow-up Devin: the
-    // outer transform's `descendants` includes the inner transform's
-    // own descendants (e.g. a styled grandchild block), so the
-    // outer's iteration must skip them or they get painted twice —
-    // once correctly under outer*inner via the recursion, and once
-    // wrongly under outer only.
-    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
+fn render_v2_smoke_transform_inside_overflow_clip() {
+    // Exercises `draw_under_clip`'s transform-aware descendant
+    // dispatch added in PR #310 Devin fix: a `transform` nested
+    // inside `overflow:hidden` was dropped because the main loop
+    // pre-skips `clipped_descendants` before the transform check.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_body_overflow_hidden_multi_page_content_survives() {
+    // Regression for PR #310 follow-up Devin: `<body style="overflow:
+    // hidden|auto|scroll">` previously blanked every descendant on
+    // page 1+. The fragmenter records body with a single fragment at
+    // `page_index=0`, so `draw_under_clip(body)` would only fire on
+    // page 0; the main loop's `clipped_descendants.contains` guard
+    // then ate every body descendant on every page, leaving page 1+
+    // with only the body bg pre-pass and nothing else.
+    //
+    // Render with `body{overflow:hidden}` AND with a tall enough
+    // child to force multi-page output, and assert the v2 PDF size
+    // stays close to the no-overflow render (within 5%). If the bug
+    // returns, page 1's content stream collapses and the PDF shrinks
+    // dramatically.
+    let with_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}body{overflow:hidden}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let without_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf_clip = engine.render_html_v2(with_clip).expect("v2 render w/ clip");
+    let pdf_plain = engine
+        .render_html_v2(without_clip)
+        .expect("v2 render w/o clip");
+    let ratio = pdf_clip.len() as f32 / pdf_plain.len() as f32;
+    assert!(
+        ratio > 0.95 && ratio < 1.05,
+        "body overflow:hidden v2 size ({} B) diverges too much from baseline ({} B); \
+         likely indicates page 1+ content was dropped by the clipped_descendants pre-skip",
+        pdf_clip.len(),
+        pdf_plain.len(),
+    );
+}
+
+#[test]
+fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
+    // Exercises `draw_under_clip`'s list_items branch added in PR #310
+    // Devin fix: when the clipped block's NodeId also has a
+    // `ListItemEntry`, the outer opacity wrap must use
+    // `list_item.opacity` (the body block carries default opacity=1.0
+    // from `convert::list_item::build_list_item_body`) and the marker
+    // must paint before `push_clip_path`.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
