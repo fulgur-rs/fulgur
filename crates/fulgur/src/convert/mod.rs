@@ -319,9 +319,8 @@ fn extract_drawables_from_pageable(
     // Paragraph leaf — record the shaped lines verbatim. The lines
     // already carry per-glyph positions, link spans, decoration spans,
     // and inline-image / inline-box items, so no re-shaping at render
-    // time. Inline content (LineItem::InlineBox) embeds whole Pageable
-    // subtrees that need their own draw payload — recurse so wrapper
-    // markers / nested blocks land in the appropriate `Drawables` map.
+    // time. Inline content (LineItem::InlineBox) is intentionally NOT
+    // recursed into — see the comment inside the arm for rationale.
     if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
         if let Some(node_id) = para.node_id {
             out.paragraphs.insert(
