@@ -353,9 +353,19 @@ fn draw_v2_page(
             // dispatch self's inner content + every strict descendant
             // INSIDE the clip, then pop. Same shape as
             // `draw_under_transform` but with `push_clip_path`.
+            //
+            // No `!clip_descendants.is_empty()` guard: shared-node_id
+            // inner content (inline-root paragraph from
+            // `convert::inline_root`, replaced image / svg from
+            // `convert::replaced`) lands at the same `node_id` as the
+            // wrapper and so produces an empty `clip_descendants`. v1
+            // pushes the clip unconditionally when
+            // `has_overflow_clip()` is true (`pageable.rs:1808-1826`),
+            // so a `<div style="overflow:hidden;width:50px">long
+            // text</div>` still needs the text clipped at the 50px
+            // box even with no separate descendant NodeIds.
             if let Some(block) = drawables.block_styles.get(&node_id)
                 && block.style.has_overflow_clip()
-                && !block.clip_descendants.is_empty()
             {
                 draw_under_clip(
                     canvas,

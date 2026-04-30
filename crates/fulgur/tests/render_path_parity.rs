@@ -450,6 +450,18 @@ fn inline_byte_equality_cases() {
             "overflow hidden block with overflowing child",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:80px;height:60px;overflow:hidden;background:#cef}.inner{width:200px;height:200px;background:#fce;margin:-20px}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
         ),
+        // PR #310 Devin: overflow:hidden block with shared-node_id
+        // inner content only (inline-root paragraph at the same
+        // `node_id`) — no separate descendant NodeIds. v1 pushes the
+        // clip unconditionally when `has_overflow_clip()` is true, so
+        // `<div style="overflow:hidden;width:50px">long overflowing
+        // text</div>` clips the long text at the 50px boundary. v2's
+        // dispatcher must do the same regardless of whether
+        // `clip_descendants` is empty.
+        (
+            "overflow hidden block with shared-node_id inline text",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading
