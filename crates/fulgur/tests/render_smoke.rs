@@ -626,3 +626,72 @@ fn position_fixed_repeats_on_every_page() {
         "page 2 should also contain FXFXFX (per-page repetition for position:fixed)"
     );
 }
+
+// ── Phase 4 v2 render path smoke tests (fulgur-9t3z) ─────────────────
+//
+// Exercise the v2 dispatcher (`render_v2`) so the patch-coverage gate
+// sees the new draw helpers added in PR 6 (`draw_under_transform`,
+// `draw_under_clip`, `draw_under_opacity`, `paint_multicol_rule_for_page`,
+// `paint_root_block_v2`, `MarginBoxRenderer`). These run end-to-end
+// through `Engine::render_html_v2` and assert only that the bytes
+// come back non-empty — byte-eq with v1 is already covered by the
+// `render_path_parity` shadow harness.
+
+#[test]
+fn render_v2_smoke_transform_translate() {
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_nested_transforms() {
+    // Exercises the `draw_under_transform` recursion path added in
+    // PR #305 Devin fix: outer rotate wraps an inner translate, both
+    // matrices must compose.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;background:#cef;transform:rotate(10deg)}.inner{width:60px;height:40px;background:#fce;transform:translate(8px,4px)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_multicol_with_column_rule() {
+    // Exercises `paint_multicol_rule_for_page` — most fixtures don't
+    // declare `column-rule` so this path needs an explicit smoke test.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_html_body_bg_multi_page() {
+    // Exercises `paint_root_block_v2` for both `<html>` (pre-pass on
+    // every page) and `<body>` (pre-pass on continuation pages).
+    let html = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;background:#fafafa}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_block_with_inline_root_padding() {
+    // Exercises `draw_block_with_inner_content` content-inset path —
+    // the `padding: 6px` shift fix that landed in PR 6.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_bookmarks_under_transform() {
+    // Exercises the bookmark-anchor pre-skip path (`record(...)` runs
+    // before `transformed_descendants` skip) added in PR 6 Devin fix.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().bookmarks(true).build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}

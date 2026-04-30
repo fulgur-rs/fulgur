@@ -441,6 +441,14 @@ fn draw_under_transform(
     // coordinates — the surface transform applies on top, mirroring v1
     // where `inner.draw(...)` recurses through children with their
     // pre-transform layout.
+    //
+    // Descendants that have their OWN `TransformEntry` recurse into
+    // `draw_under_transform` so their matrix composes with the outer
+    // push (matches v1's nested `TransformWrapperPageable::draw` call
+    // chain at `pageable.rs:2714-2725`). Without this recursion the
+    // inner transform would be silently dropped, breaking
+    // `<div style="transform:rotate"><div style="transform:scale">`
+    // (PR #305 Devin).
     for &desc_id in &tx.descendants {
         let Some(desc_geom) = geometry.get(&desc_id) else {
             continue;
@@ -451,9 +459,26 @@ fn draw_under_transform(
             }
             let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
             let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
-            dispatch_fragment(
-                canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
-            );
+            if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                draw_under_transform(
+                    canvas,
+                    desc_tx,
+                    desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+            } else {
+                dispatch_fragment(
+                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+                );
+            }
         }
     }
 

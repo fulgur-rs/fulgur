@@ -378,6 +378,18 @@ fn inline_byte_equality_cases() {
             "block with transform rotate around center",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#fce;transform:rotate(15deg);transform-origin:center}</style></head><body><div class="box"></div></body></html>"##,
         ),
+        // PR #305 Devin: nested transforms — inner transform was
+        // silently dropped because `draw_under_transform` dispatched
+        // descendants via `dispatch_fragment` which never checks
+        // `drawables.transforms`. v1's nested
+        // `TransformWrapperPageable::draw` recursively pushes both
+        // matrices; v2 must do the same by recursing into
+        // `draw_under_transform` when a descendant has its own
+        // `TransformEntry`.
+        (
+            "nested transforms (rotate around translate)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;background:#cef;transform:translate(10px,5px)}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
         // PR 6 follow-up: shared-node_id inner content (inline-root
         // paragraph from `convert::inline_root`, replaced image/svg
         // from `convert::replaced`) must paint at the wrapping block's
