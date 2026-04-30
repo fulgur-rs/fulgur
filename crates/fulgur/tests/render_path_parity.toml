@@ -196,3 +196,36 @@ allowlist = [
 # Resolution: defer to PR 8 v1 deletion. Once v1 is gone, the parity
 # test compares v2 vs v2 (trivially byte-eq) and these fixtures need
 # no special handling.
+
+# Known-divergent v1 quirk: off-page slice y (fulgur-bq6i:grid-row-promote)
+# ----------------------------------------------------------------------
+# `vrt://bugs/grid-row-promote-background.html` is intentionally NOT
+# allowlisted because v1 emits an off-page card slice at a different
+# numeric y than v2. The visual output is identical (both clipped by
+# the page MediaBox) — only the numeric Tm operand differs.
+#
+# Root cause: a v1 quirk in `BlockPageable::slice_for_page` when an
+# ancestor (here `.grid`) has NO fragment on the current page but its
+# descendants (cards) do. The ancestor's `self_page_y` falls back to
+# `0.0`, and the child's slice computes
+# `new_y = px_to_pt(child_frag.y - 0)` treating body-content-relative
+# `child_frag.y` as parent-relative. The Pageable draw chain then
+# double-adds the ancestor's `pc.y` (from convert) AND the child's
+# new_y (which is also body-relative), producing y = 1681pt — far
+# off the page bottom.
+#
+#   v1: body.draw(y=56.69) → grid.draw(y=56.69 + 812 = 868.69) →
+#       card_1_slice.draw(y=868.69 + 812.25 = 1680.94pt)
+#   v2: dispatch_fragment uses frag.y_page_local =
+#       56.69 + px_to_pt(1083) = 868.94pt
+#
+# v2 is correct (page-local from fragmenter); v1's value is the sum
+# of two body-relative offsets due to the slice-coord bug.
+#
+# Both renders emit the slice off-page (anywhere past 822pt is past
+# the page bottom for an A4 with 20mm margin). The slice gets clipped
+# by the MediaBox so neither is visible; the difference is purely in
+# the numeric operand the renderer emits before the clip.
+#
+# Resolution: defer to PR 8 v1 deletion. Fixing v1 in flight would
+# touch `slice_for_page` for a quirk that disappears with the path.
