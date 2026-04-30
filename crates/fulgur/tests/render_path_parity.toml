@@ -131,6 +131,18 @@ allowlist = [
     # `BlockPageable::draw` recursion under
     # `draw_with_opacity(self.opacity, ..)`.
     "examples://svg",
+    # PR follow-up (anonymous-block layout walk, fulgur-bq6i:review_card)
+    # — Stylo synthesizes anonymous block wrappers around inline-level
+    # siblings of block-level siblings (CSS 2.1 §9.2.1.1). Those
+    # wrappers carry their own `node_id` and live in
+    # `Node.layout_children` but NOT in `Node.children`. The fragmenter's
+    # `record_subtree_descendants` walked `children`, missing the
+    # synthesized anonymous block, so geometry never recorded its
+    # fragment and v2 dispatch silently dropped its inline-root
+    # paragraph. Switching to `layout_children` (when `Some`) lights up
+    # `vrt://layout/review_card_inline_block.html` and any future
+    # mixed-block-and-inline content.
+    "vrt://layout/review_card_inline_block.html",
 ]
 
 # Known-divergent fixtures (fulgur-g7a1, 2026-04-30)

@@ -840,7 +840,30 @@ fn record_subtree_descendants(
     let Some(parent) = doc.get_node(parent_id) else {
         return;
     };
-    for &child_id in &parent.children {
+    // Prefer Blitz's `layout_children` over the raw DOM `children` when
+    // it's been computed: when a block container has mixed
+    // block-level and inline-level children, Stylo synthesizes
+    // anonymous block wrappers around inline-level siblings (CSS 2.1
+    // §9.2.1.1). Those wrappers are real `Node` instances with their
+    // own `node_id` and Taffy layout, but they live ONLY in
+    // `layout_children` — the original `children` list still points
+    // at the underlying inline elements (e.g. a `<span
+    // display:inline-block>`).
+    //
+    // Without this preference v2 silently drops the inline-level
+    // span: extract assigns the inner paragraph's `node_id` to the
+    // anonymous wrapper (because Blitz's `is_inline_root()` flag sits
+    // on the wrapper), but the fragmenter — walking `children` —
+    // never visits the wrapper, so geometry has no fragment for that
+    // node_id and `dispatch_fragment` skips the paragraph entirely.
+    // (fulgur-bq6i: review_card_inline_block.html lost its
+    // "OK Approved" rounded badge for this exact reason.)
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: &[usize] = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&parent.children);
+    for &child_id in walk_children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };

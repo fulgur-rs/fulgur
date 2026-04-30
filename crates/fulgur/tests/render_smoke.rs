@@ -903,3 +903,37 @@ fn render_v2_smoke_opacity_inside_transform() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_anonymous_block_inline_level_sibling() {
+    // Regression for fulgur-bq6i (review_card_inline_block):
+    // a block container with mixed block-level and inline-level
+    // children triggers Stylo's anonymous-block synthesis (CSS 2.1
+    // §9.2.1.1). The anonymous wrapper has its own `node_id` and
+    // appears in `Node.layout_children` but NOT in `Node.children`.
+    // The fragmenter's `record_subtree_descendants` previously
+    // walked `children`, missing the wrapper and silently dropping
+    // the inline-level child's paint. Now `layout_children` is
+    // preferred when `Some`.
+    //
+    // Without the fix, the BADGE span content (background + text)
+    // never paints in v2 because its wrapping inline-root
+    // paragraph's `node_id` lacks a geometry entry, so
+    // `dispatch_fragment` skips it. The size-comparison sanity
+    // check below catches a regression where the anonymous-block
+    // walk gets dropped: with-badge PDF must be measurably larger
+    // than no-badge PDF.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}.label{display:inline-block;background:#cef;padding:2pt 6pt}</style></head><body><div class="card"><div>block child</div><span class="label">BADGE</span></div></body></html>"##;
+    let html_no_badge = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.card{padding:8pt}</style></head><body><div class="card"><div>block child</div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    let pdf_no_badge = engine.render_html_v2(html_no_badge).expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(
+        pdf.len() > pdf_no_badge.len(),
+        "expected BADGE rendering to produce more bytes than no-badge \
+         baseline (got {} vs {}); did anonymous-block walk regress?",
+        pdf.len(),
+        pdf_no_badge.len(),
+    );
+}
