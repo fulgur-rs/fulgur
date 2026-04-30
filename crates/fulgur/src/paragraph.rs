@@ -5,7 +5,7 @@ use std::sync::Arc;
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt, Size};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -332,7 +332,6 @@ pub struct ShapedLine {
 #[derive(Clone)]
 pub struct ParagraphPageable {
     pub lines: Vec<ShapedLine>,
-    pub pagination: Pagination,
     pub cached_height: f32,
     pub opacity: f32,
     pub visible: bool,
@@ -351,7 +350,6 @@ impl ParagraphPageable {
         let cached_height: f32 = lines.iter().map(|l| l.height).sum();
         Self {
             lines,
-            pagination: Pagination::default(),
             cached_height,
             opacity: 1.0,
             visible: true,

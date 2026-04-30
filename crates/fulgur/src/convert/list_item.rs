@@ -220,7 +220,6 @@ pub(super) fn try_convert(
                 );
                 let needs_wrapper = style.needs_block_wrapper();
                 let mut block = BlockPageable::with_positioned_children(positioned_children)
-                    .with_pagination(extract_pagination_from_column_css(ctx, node))
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -293,7 +292,6 @@ pub(super) fn try_convert(
             );
             let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -382,10 +380,7 @@ fn build_list_item_body(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            let needs_wrapper = style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default();
+            let needs_wrapper = style.needs_block_wrapper() || has_pseudo;
             if needs_wrapper {
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
@@ -405,7 +400,6 @@ fn build_list_item_body(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
@@ -445,11 +439,7 @@ fn build_list_item_body(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            if style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default()
-            {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
@@ -466,7 +456,6 @@ fn build_list_item_body(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
@@ -497,7 +486,6 @@ fn build_list_item_body(
                 positioned_children,
             );
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_pagination(extract_pagination_from_column_css(ctx, node))
                 .with_style(style)
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
@@ -519,7 +507,6 @@ fn build_list_item_body(
             positioned_children,
         );
         let mut block = BlockPageable::with_positioned_children(positioned_children)
-            .with_pagination(extract_pagination_from_column_css(ctx, node))
             .with_style(style)
             .with_visible(visible)
             .with_id(extract_block_id(node))

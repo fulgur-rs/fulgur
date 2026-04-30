@@ -105,11 +105,7 @@ pub(super) fn try_convert(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            if style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default()
-            {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
                 // but the node's own text content, so it must respect the node's visibility.
@@ -138,7 +134,6 @@ pub(super) fn try_convert(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
@@ -186,11 +181,7 @@ pub(super) fn try_convert(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            if style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default()
-            {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
@@ -207,7 +198,6 @@ pub(super) fn try_convert(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)

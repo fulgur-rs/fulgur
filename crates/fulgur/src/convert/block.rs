@@ -31,14 +31,9 @@ pub(super) fn convert(
         // should emit the image. Without this the pseudo is silently dropped.
         let (positioned_children, has_pseudo) =
             pseudo::wrap_with_pseudo_content(doc, node, ctx, depth, content_box, Vec::new());
-        let pagination = extract_pagination_from_column_css(ctx, node);
-        if style.needs_block_wrapper()
-            || has_pseudo
-            || pagination != crate::pageable::Pagination::default()
-        {
+        if style.needs_block_wrapper() || has_pseudo {
             let (opacity, visible) = extract_opacity_visible(node);
             let mut block = BlockPageable::with_positioned_children(positioned_children)
-                .with_pagination(pagination)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
@@ -64,7 +59,6 @@ pub(super) fn convert(
     let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
-        .with_pagination(extract_pagination_from_column_css(ctx, node))
         .with_style(style)
         .with_opacity(opacity)
         .with_visible(visible)

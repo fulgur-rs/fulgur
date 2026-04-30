@@ -42,7 +42,7 @@ pub(super) fn try_convert(
 /// and the dimensions are the content-box, not the border-box. In the unstyled
 /// branch the inner receives the node's own opacity/visibility and full size.
 fn wrap_replaced_in_block_style<F>(
-    ctx: &ConvertContext<'_>,
+    _ctx: &ConvertContext<'_>,
     node: &Node,
     assets: Option<&AssetBundle>,
     build_inner: F,
@@ -51,20 +51,15 @@ where
     // `build_inner` always sets `node_id` on the inner Pageable. When
     // wrapped in a styled BlockPageable both share the DOM node's
     // geometry: the wrapping block carries `node_id` so it can locate
-    // its fragment, and the inner also carries `node_id` so its
-    // `slice_for_page` returns the per-page slice (single-fragment
-    // fast path or line range for multi-page wraps).
-    // `BlockPageable::slice_for_page` detects the shared-node_id case
-    // and uses `pc.y` (content inset = padding + border) instead of
-    // `child_frag.y - self_frag.y == 0`, so the inset is not collapsed
-    // (fulgur-frmj — restores content lost by the PR #291 attempt).
+    // its fragment, and the inner also carries `node_id` so the
+    // fragmenter records its per-page slice via `column_styles`-driven
+    // break decisions.
     F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
 {
     let (width, height) = size_in_pt(node.final_layout.size);
 
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
-    let pagination = extract_pagination_from_column_css(ctx, node);
 
     if style.has_visual_style() {
         let (cx, cy) = style.content_inset();
@@ -85,30 +80,7 @@ where
             is_fixed: false,
         };
         let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_pagination(pagination)
             .with_style(style)
-            .with_opacity(opacity)
-            .with_visible(visible)
-            .with_id(extract_block_id(node))
-            .with_node_id(Some(node.id));
-        block.wrap(width, height);
-        block.layout_size = Some(Size { width, height });
-        Box::new(block)
-    } else if pagination != crate::pageable::Pagination::default() {
-        // Replaced element with no visual style but a non-default Pagination
-        // (e.g. `<img style="break-before: page">`): wrap in a thin
-        // BlockPageable so paginate() honours the break.
-        // Match the styled branch: the wrapper owns opacity, the inner keeps visibility.
-        let inner = build_inner(width, height, 1.0, visible);
-        let child = PositionedChild {
-            child: inner,
-            x: 0.0,
-            y: 0.0,
-            out_of_flow: false,
-            is_fixed: false,
-        };
-        let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_pagination(pagination)
             .with_opacity(opacity)
             .with_visible(visible)
             .with_id(extract_block_id(node))
@@ -118,6 +90,9 @@ where
         Box::new(block)
     } else {
         // No wrapping block — inner IS the outermost Pageable for this DOM node.
+        // break-before/after on a bare replaced element still flows through
+        // `column_styles` to the fragmenter, so no thin BlockPageable wrapper
+        // is needed to carry the break decision.
         build_inner(width, height, opacity, visible)
     }
 }

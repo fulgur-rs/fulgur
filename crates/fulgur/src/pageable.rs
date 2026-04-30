@@ -256,27 +256,6 @@ pub enum BreakInside {
     Avoid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pagination {
-    pub break_before: BreakBefore,
-    pub break_after: BreakAfter,
-    pub break_inside: BreakInside,
-    pub orphans: usize,
-    pub widows: usize,
-}
-
-impl Default for Pagination {
-    fn default() -> Self {
-        Self {
-            break_before: BreakBefore::Auto,
-            break_after: BreakAfter::Auto,
-            break_inside: BreakInside::Auto,
-            orphans: 2,
-            widows: 2,
-        }
-    }
-}
-
 /// Axis-aligned rectangle used to describe PDF link activation areas.
 ///
 /// Coordinates are in PDF points in the Krilla surface coordinate space
@@ -977,7 +956,6 @@ impl PositionedChild {
 #[derive(Clone)]
 pub struct BlockPageable {
     pub children: Vec<PositionedChild>,
-    pub pagination: Pagination,
     pub cached_size: Option<Size>,
     /// Taffy-computed layout size (preserved across wrap() calls for drawing).
     pub layout_size: Option<Size>,
@@ -1018,7 +996,6 @@ impl BlockPageable {
             .collect();
         Self {
             children: positioned,
-            pagination: Pagination::default(),
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
@@ -1032,7 +1009,6 @@ impl BlockPageable {
     pub fn with_positioned_children(children: Vec<PositionedChild>) -> Self {
         Self {
             children,
-            pagination: Pagination::default(),
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
@@ -1041,11 +1017,6 @@ impl BlockPageable {
             id: None,
             node_id: None,
         }
-    }
-
-    pub fn with_pagination(mut self, pagination: Pagination) -> Self {
-        self.pagination = pagination;
-        self
     }
 
     pub fn with_style(mut self, style: BlockStyle) -> Self {
