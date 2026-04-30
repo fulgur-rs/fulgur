@@ -119,10 +119,12 @@ pub(super) fn try_convert(
                 let mut p = paragraph;
                 p.visible = visible;
                 p.node_id = Some(node_id);
+                let p_h = p.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(p),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
@@ -182,10 +184,12 @@ pub(super) fn try_convert(
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
+                let p_h = paragraph.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
