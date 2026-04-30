@@ -67,4 +67,18 @@ allowlist = [
     "vrt://paint/repeating-linear-gradient.html",
     "vrt://paint/repeating-linear-gradient-hint.html",
     "vrt://paint/repeating-radial-gradient.html",
+    # PR 6 follow-up (skip InlineBox.content recurse, fulgur-9y1a) —
+    # inline-block / inline-flex / inline-grid / inline-svg content is
+    # painted via `paragraph::draw_shaped_lines` calling
+    # `ib.content.draw(...)`. extract was recursing into
+    # `InlineBox.content` and registering the inner Pageable in
+    # `block_styles` / `svgs` / etc., so v2 dispatch double-painted
+    # everything inside an inline box. Six layout fixtures lit up at
+    # once after dropping the recurse.
+    "vrt://layout/inline-block-basic.html",
+    "vrt://layout/inline-block-nested.html",
+    "vrt://layout/inline-block-overflow-hidden.html",
+    "vrt://layout/inline-flex-smoke.html",
+    "vrt://layout/inline-grid-smoke.html",
+    "vrt://svg/shapes.html",
 ]

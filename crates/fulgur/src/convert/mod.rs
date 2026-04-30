@@ -334,17 +334,15 @@ fn extract_drawables_from_pageable(
                 },
             );
         }
-        // Recurse into inline-box content. Each `LineItem::InlineBox`
-        // holds a `Box<dyn Pageable>` (typically a `BlockPageable` for
-        // `<span>`-style inline blocks) so its descendants can register
-        // their own payloads.
-        for line in &para.lines {
-            for item in &line.items {
-                if let crate::paragraph::LineItem::InlineBox(ib) = item {
-                    extract_drawables_from_pageable(ib.content.as_ref(), out);
-                }
-            }
-        }
+        // Inline-box content (e.g. inline `<svg>`, inline-block
+        // `<span>`) is painted via `paragraph::draw_shaped_lines`
+        // which calls `ib.content.draw(...)` directly (line ~820 of
+        // paragraph.rs). Recursing here and registering the inner
+        // content in `block_styles` / `svgs` / `images` would
+        // double-paint at render time — once via the paragraph's
+        // inline call, once via the v2 dispatcher's per-NodeId loop.
+        // Skip recursion entirely so inline content stays a v1-style
+        // draw rooted in the paragraph's own dispatch.
         return;
     }
     // Block / List / Table / wrappers — recurse into children. Block
