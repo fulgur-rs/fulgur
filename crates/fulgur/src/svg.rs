@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use usvg::Tree;
 
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt, Size};
 
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
@@ -74,10 +74,6 @@ impl Pageable for SvgPageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -92,24 +88,6 @@ impl Pageable for SvgPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        let node_id = self.node_id?;
-        // Presence check only. The fragment dimensions are unreliable
-        // for the inner-of-styled-block case (fulgur-frmj): when the
-        // wrapping `BlockPageable` shares this `node_id`, the fragmenter
-        // records the wrapper's full border-box size, not the SVG's
-        // content-box size. `self.{width, height}` is the layout-time
-        // content-box value, which is correct for both standalone and
-        // wrapped SVGs since `wrap_replaced_in_block_style` already
-        // resolved the inset before constructing this `SvgPageable`.
-        crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
-        Some(Box::new(self.clone()))
     }
 }
 
@@ -179,12 +157,6 @@ mod tests {
         let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.opacity, 1.0);
         assert!(svg.visible);
-    }
-
-    #[test]
-    fn test_pagination_returns_default() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert_eq!(svg.pagination(), Pagination::default());
     }
 
     #[test]

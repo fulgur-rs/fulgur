@@ -505,11 +505,6 @@ pub trait Pageable: Send + Sync {
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
 
-    /// CSS pagination properties for this element.
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
     /// Clone this pageable into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Pageable>;
 
@@ -552,10 +547,9 @@ pub trait Pageable: Send + Sync {
         true
     }
 
-    /// fulgur-r6we (Phase 3.2.a): the DOM `usize` NodeId this
-    /// Pageable represents, if any. Used by `slice_for_page` to look
-    /// up the matching `Fragment` in `PaginationGeometryTable` (which
-    /// is keyed by NodeId). Wrappers delegate to their inner
+    /// The DOM `usize` NodeId this Pageable represents, if any. Used by
+    /// `extract_drawables_from_pageable` to key per-node draw payloads in
+    /// the `Drawables` side-channel. Wrappers delegate to their inner
     /// Pageable's `node_id` (markers do not have their own NodeId —
     /// they piggyback on the host element's geometry entry).
     ///
@@ -566,70 +560,6 @@ pub trait Pageable: Send + Sync {
     fn node_id(&self) -> Option<usize> {
         None
     }
-
-    /// fulgur-r6we (Phase 3.2.a): extract the slice of `self` that
-    /// falls on `page_index` according to `geometry`. Returns `None`
-    /// when no fragment of `self` (or its descendants) is on that
-    /// page.
-    ///
-    /// `geometry.y` is page-local in fragmenter output (see
-    /// `fragment_pagination_root` and `fragment_block_subtree` —
-    /// `cursor_y` resets at each page break, and
-    /// `record_subtree_descendants` propagates that page-local cursor
-    /// through the subtree). Implementations therefore read
-    /// `fragment.y` directly without a body→page rebase.
-    ///
-    /// Default: `unimplemented!()` — every concrete impl that
-    /// participates in `partition_pageable_by_geometry` must override.
-    /// Phase 3.2.a covers the plain types (`BlockPageable`,
-    /// `ParagraphPageable`, `SpacerPageable`, `ImagePageable`); Phase
-    /// 3.2.b covers wrappers and special split impls.
-    fn slice_for_page(
-        &self,
-        _page_index: u32,
-        _geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        unimplemented!(
-            "slice_for_page not implemented for {} — Phase 3.2.b will fill this in",
-            std::any::type_name::<Self>(),
-        )
-    }
-}
-
-/// fulgur-r6we (Phase 3.2.a): helper for `slice_for_page` impls. Look
-/// up the fragment of `node_id` on `page_index`, returning `None`
-/// when the node is absent from geometry or has no fragment on that
-/// page. Geometry can record multiple fragments for one node when the
-/// node spans pages — we pick the first match (mid-element split is
-/// not yet exposed via `slice_for_page`; that's part of Phase 3.2.b /
-/// 3.2.c).
-pub(crate) fn fragment_on_page(
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-    node_id: usize,
-    page_index: u32,
-) -> Option<&crate::pagination_layout::Fragment> {
-    geometry
-        .get(&node_id)?
-        .fragments
-        .iter()
-        .find(|f| f.page_index == page_index)
-}
-
-/// fulgur-3vwx (Phase 3.2.b): "is `page_index` the first page on which
-/// `node_id` has a fragment?" — used by wrapper `slice_for_page` impls
-/// to decide whether to keep the marker (first page) or drop it
-/// (continuation pages). Mirrors `split()`'s first-fragment-only
-/// marker semantics (`BookmarkMarkerWrapperPageable::split`,
-/// `CounterOpWrapperPageable::split`, etc.).
-pub(crate) fn is_first_page_for(
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
-    node_id: usize,
-    page_index: u32,
-) -> bool {
-    geometry
-        .get(&node_id)
-        .and_then(|g| g.fragments.iter().map(|f| f.page_index).min())
-        .is_some_and(|min_page| min_page == page_index)
 }
 
 impl Clone for Box<dyn Pageable> {
@@ -1348,11 +1278,6 @@ fn compute_padding_box_inner_radii(outer: &[[f32; 2]; 4], borders: &[f32; 4]) ->
     ]
 }
 
-/// Clone a slice of PositionedChild as-is.
-fn clone_children(children: &[PositionedChild]) -> Vec<PositionedChild> {
-    children.to_vec()
-}
-
 /// Lighten an RGBA color by a factor (0.0–1.0). Higher factor = lighter.
 fn lighten_color(c: &[u8; 4], factor: f32) -> [u8; 4] {
     [
@@ -1827,10 +1752,6 @@ impl Pageable for BlockPageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        self.pagination
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -1876,260 +1797,6 @@ impl Pageable for BlockPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Look up self's fragment on this page. The fragmenter only
-        // records geometry from `<body>` downwards
-        // (`fragment_pagination_root` walks `body.children`), so the
-        // ancestor `<html>` BlockPageable that wraps the convert tree
-        // has no entry — but its child `<body>` does, and slicing
-        // must descend into it. When `self_frag` is `None`, we treat
-        // this block as a transparent ancestor and rely solely on
-        // children's slices to decide whether the block is on this
-        // page.
-        let self_frag = self
-            .node_id
-            .and_then(|id| fragment_on_page(geometry, id, page_index));
-        let self_page_y = self_frag.map(|f| f.y).unwrap_or(0.0);
-
-        // Recursively slice each child. `child.fragment.y - self.fragment.y`
-        // gives the child's parent-relative y on this page (page-local
-        // arithmetic). For body-direct children with `Fragment.y` in
-        // CSS px and `PositionedChild.y` in PDF pt, convert before
-        // storing.
-        //
-        // Known limitation: `fragment_block_subtree` advances a
-        // sequential cursor through DOM children, which is wrong for
-        // grid / flex layouts where parallel siblings share `y`. The
-        // partition output therefore stacks grid cells that were
-        // side-by-side in `paginate()`'s output. Tracked separately —
-        // the fix is in the fragmenter, not partition.
-        // fulgur-frmj: a node has "no geometry coverage" when it has a
-        // `node_id` but no fragments in the table (e.g. the synthesized
-        // `<html>` BlockPageable, or an `inline-block` span the
-        // body-walker did not visit as a body-direct child). In this
-        // case, child slicing drives the result — children that fall
-        // back to `pc.y` produce a transparent passthrough, and we
-        // preserve clones for any leaf children whose own
-        // `slice_for_page` would return `None` (e.g. a single-page
-        // paragraph whose `node_id` is missing from geometry).
-        let self_has_any_fragment_outer = self
-            .node_id
-            .is_some_and(|id| geometry.get(&id).is_some_and(|g| !g.fragments.is_empty()));
-        // fulgur-frmj: how much of `self`'s height has been consumed by
-        // pages strictly before `page_index`. Used to rebase
-        // `position: absolute` descendants on continuation pages so
-        // they slide with their containing block.
-        let consumed_above_pt: f32 = self
-            .node_id
-            .and_then(|id| geometry.get(&id))
-            .map(|g| {
-                g.fragments
-                    .iter()
-                    .filter(|f| f.page_index < page_index)
-                    .map(|f| crate::convert::px_to_pt(f.height))
-                    .sum()
-            })
-            .unwrap_or(0.0);
-        let mut sliced_children: Vec<PositionedChild> = Vec::with_capacity(self.children.len());
-        for pc in &self.children {
-            // fulgur-frmj: out-of-flow children (`position: absolute` /
-            // `position: fixed`) are skipped by the fragmenter
-            // (`fragment_block_subtree` / `fragment_pagination_root`
-            // continue past them), so `slice_for_page` would drop them
-            // without geometry. Replicate them verbatim on every page:
-            // - `position: fixed` keeps `pc.y` (anchored to page /
-            //   viewport, not to the sliding containing block).
-            // - `position: absolute` rebases against the consumed
-            //   parent height so it slides with its containing block on
-            //   continuation pages (page 2+ of a multi-page CB sees
-            //   `pc.y - consumed_above`).
-            if pc.is_fixed {
-                sliced_children.push(PositionedChild {
-                    child: pc.child.clone_box(),
-                    x: pc.x,
-                    y: pc.y,
-                    out_of_flow: pc.out_of_flow,
-                    is_fixed: true,
-                });
-                continue;
-            }
-            if pc.out_of_flow {
-                // fulgur-frmj (Devin Review on PR #294): only replicate
-                // `position: absolute` on pages where this block is
-                // actually present. Without this gate, a relative CB
-                // that fits on page 0 alone would still emit its abs
-                // children on page 1+ — the `self_frag.is_none() &&
-                // sliced_children.is_empty()` guard below cannot fire
-                // because the cloned abs child keeps the vec
-                // non-empty, so the parent renders an empty CB on the
-                // wrong page. Allow replication when self IS on this
-                // page (`self_frag.is_some()`) or when self is a
-                // transparent ancestor (no geometry coverage at all,
-                // e.g. the synthesized `<html>` block).
-                if self_frag.is_some() || !self_has_any_fragment_outer {
-                    sliced_children.push(PositionedChild {
-                        child: pc.child.clone_box(),
-                        x: pc.x,
-                        y: pc.y - consumed_above_pt,
-                        out_of_flow: true,
-                        is_fixed: false,
-                    });
-                }
-                continue;
-            }
-            let sliced = match pc.child.slice_for_page(page_index, geometry) {
-                Some(s) => s,
-                None => {
-                    // fulgur-frmj: keep the child if (a) self has no
-                    // geometry coverage (transparent ancestor —
-                    // synthesized html block) or (b) the child has no
-                    // fragments at all (fragmenter-skipped inline
-                    // descendants like an `inline-block` span — the
-                    // body-direct walk only emits one fragment per
-                    // body child, and `record_subtree_descendants`
-                    // skips elements with `h <= 0 && w <= 0`).
-                    // Single-page reviews with styled inline-block
-                    // pills require this
-                    // (`fulgur-vrt::layout::review_card_inline_block`).
-                    let child_has_any_fragment = pc.child.node_id().is_some_and(|id| {
-                        geometry.get(&id).is_some_and(|g| !g.fragments.is_empty())
-                    });
-                    if !self_has_any_fragment_outer || !child_has_any_fragment {
-                        sliced_children.push(PositionedChild {
-                            child: pc.child.clone_box(),
-                            x: pc.x,
-                            y: pc.y,
-                            out_of_flow: pc.out_of_flow,
-                            is_fixed: pc.is_fixed,
-                        });
-                    }
-                    continue;
-                }
-            };
-            // fulgur-frmj: when the child shares this block's `node_id`
-            // (e.g. an inline root wrapped in a styled `BlockPageable`,
-            // or a replaced element wrapped because of border / padding /
-            // background), both lookups resolve to the same `Fragment`
-            // and `child_frag.y - self_frag.y == 0` would collapse the
-            // content inset (padding + border). Use `pc.y` so the inner
-            // child stays at the layout-time inset.
-            //
-            // When `self` has no entry in `geometry` at all (the
-            // synthesized `<html>` BlockPageable wrapping body — the
-            // fragmenter only walks body downward, so html is absent),
-            // children's fragment.y is recorded in body-relative space
-            // and subtracting `self_page_y == 0` would silently discard
-            // body's offset from html (e.g. `body { margin: 32px }`
-            // collapsed into `body.final_layout.location.y`). Fall back
-            // to the layout-time `pc.y`. This differs from
-            // "self has fragments but not on this page" — for body on
-            // pages 2+ the original `child_frag.y - 0` arithmetic still
-            // works because body-relative coords reset per page.
-            let self_has_any_fragment = self
-                .node_id
-                .is_some_and(|id| geometry.get(&id).is_some_and(|g| !g.fragments.is_empty()));
-            let new_y = match pc.child.node_id() {
-                Some(child_node_id) if Some(child_node_id) == self.node_id => pc.y,
-                _ if !self_has_any_fragment => pc.y,
-                Some(child_node_id) => {
-                    match fragment_on_page(geometry, child_node_id, page_index) {
-                        Some(child_frag) => crate::convert::px_to_pt(child_frag.y - self_page_y),
-                        None => pc.y,
-                    }
-                }
-                None => pc.y,
-            };
-            sliced_children.push(PositionedChild {
-                child: sliced,
-                x: pc.x,
-                y: new_y,
-                out_of_flow: pc.out_of_flow,
-                is_fixed: pc.is_fixed,
-            });
-        }
-
-        // No own fragment AND no in-flow descendant slices → not on
-        // this page. Without this, the transparent-ancestor branch
-        // would emit an empty Block placeholder for every page, which
-        // both wastes geometry and breaks `collect_*_states` page
-        // alignment.
-        //
-        // fulgur-frmj (Devin Review on PR #294): only count in-flow
-        // children when deciding whether the block should be emitted.
-        // A `position: fixed` child gets unconditionally cloned across
-        // pages (CSS paged media spec) but it should not drag its DOM
-        // parent's `layout_size` / background / border onto pages
-        // where the parent itself is absent. For body specifically —
-        // which has a single geometry entry on page 0 but spans every
-        // page — its in-flow children (h1, p, …) keep
-        // `sliced_children` non-empty on each page, so this guard
-        // does not fire spuriously.
-        let has_in_flow_descendant = sliced_children
-            .iter()
-            .any(|pc| !pc.out_of_flow && !pc.is_fixed);
-        if self_frag.is_none() && !has_in_flow_descendant {
-            return None;
-        }
-
-        let mut block = BlockPageable::with_positioned_children(sliced_children)
-            .with_pagination(self.pagination)
-            .with_style(self.style.clone())
-            .with_opacity(self.opacity)
-            .with_visible(self.visible)
-            .with_id(self.id.clone())
-            .with_node_id(self.node_id);
-        // Match `split()`'s semantics: per-fragment `cached_size`
-        // sourced from this page's fragment, but `layout_size` left
-        // as `None` so the draw path falls back to `cached_size`.
-        // Setting `layout_size = fragment_size` would discard the
-        // node's intrinsic Taffy size, which the draw path uses to
-        // size shadows / clip rects on blocks that fit one page.
-        //
-        // `Fragment` records width / height in CSS px (Taffy's
-        // native unit), but `BlockPageable::cached_size` is in PDF
-        // pt. Convert before assigning — without this, every sliced
-        // block ends up 4/3× larger than intended.
-        if let Some(frag) = self_frag {
-            block.cached_size = Some(Size {
-                width: crate::convert::px_to_pt(frag.width),
-                height: crate::convert::px_to_pt(frag.height),
-            });
-            // fulgur-frmj: when the block has a single fragment (fits
-            // on one page), prefer `self.layout_size` (Taffy's
-            // authoritative border-box size including padding /
-            // border) over `cached_size` derived from the fragment.
-            // For inline-root blocks, `fragment_inline_root` records
-            // `Fragment.height` from accumulated *line* metrics — not
-            // the block's Taffy size — so on `.box { padding: 10px }`
-            // the cached_size loses the padding band and `bg fill` /
-            // `border` shrink. Multi-fragment blocks deliberately
-            // leave `layout_size` unset so per-page `cached_size`
-            // drives clipping / shadows on each page slice.
-            let single_fragment = self
-                .node_id
-                .and_then(|id| geometry.get(&id))
-                .is_some_and(|g| g.fragments.len() == 1);
-            if single_fragment {
-                block.layout_size = self.layout_size;
-            }
-        } else {
-            // fulgur-frmj: transparent ancestor (e.g. the synthesized
-            // `<html>` BlockPageable wrapping body — fragmenter-side
-            // walk only covers body downward). Without preserving the
-            // original Taffy size, `BlockPageable::draw` falls back to
-            // `avail_width` / `avail_height` (= the full page content
-            // area), so a `body { background: white }` rule renders
-            // page-wide instead of body-wide.
-            block.layout_size = self.layout_size;
-            block.cached_size = self.cached_size;
-        }
-        Some(Box::new(block))
     }
 }
 
@@ -2184,24 +1851,6 @@ impl Pageable for SpacerPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        let node_id = self.node_id?;
-        let frag = fragment_on_page(geometry, node_id, page_index)?;
-        // Spacer adopts the fragment's height — when fragmenter spans
-        // a Spacer across pages it would split the height, but the
-        // current fragmenter emits a single fragment per Spacer (no
-        // mid-element split for atomic Pageables). `Fragment.height`
-        // is CSS px; `Spacer.height` is PDF pt.
-        Some(Box::new(SpacerPageable {
-            height: crate::convert::px_to_pt(frag.height),
-            node_id: self.node_id,
-        }))
     }
 }
 
@@ -2294,20 +1943,6 @@ impl Pageable for BookmarkMarkerPageable {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
-    fn slice_for_page(
-        &self,
-        _page_index: u32,
-        _geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Bare markers have no node_id — they cannot be located in
-        // `geometry`. In production, markers are always wrapped by
-        // their respective `*WrapperPageable` types, which clone the
-        // marker in their own `slice_for_page` (no recursion into the
-        // marker's own slice_for_page). A standalone marker here means
-        // an upstream bug; drop it rather than emit it on every page.
-        None
-    }
 }
 
 // ─── BookmarkMarkerWrapperPageable ──────────────────────────
@@ -2345,10 +1980,6 @@ impl Pageable for BookmarkMarkerWrapperPageable {
         self.child.height()
     }
 
-    fn pagination(&self) -> Pagination {
-        self.child.pagination()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2371,29 +2002,6 @@ impl Pageable for BookmarkMarkerWrapperPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // First-page-only marker semantics — same as `split()`.
-        // The bookmark anchor must land on the page where the heading
-        // visually starts; continuation pages get the unwrapped child.
-        let sliced_child = self.child.slice_for_page(page_index, geometry)?;
-        let is_first = self
-            .child
-            .node_id()
-            .is_some_and(|id| is_first_page_for(geometry, id, page_index));
-        if is_first {
-            Some(Box::new(BookmarkMarkerWrapperPageable {
-                marker: self.marker.clone(),
-                child: sliced_child,
-            }))
-        } else {
-            Some(sliced_child)
-        }
     }
 }
 
@@ -2433,17 +2041,6 @@ impl Pageable for StringSetPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn slice_for_page(
-        &self,
-        _page_index: u32,
-        _geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // See `BookmarkMarkerPageable::slice_for_page` — markers are
-        // always wrapped in production; standalone occurrences are
-        // dropped rather than duplicated across pages.
-        None
     }
 }
 
@@ -2498,17 +2095,6 @@ impl Pageable for RunningElementMarkerPageable {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
-    fn slice_for_page(
-        &self,
-        _page_index: u32,
-        _geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // See `BookmarkMarkerPageable::slice_for_page` — markers are
-        // always wrapped in production; standalone occurrences are
-        // dropped rather than duplicated across pages.
-        None
-    }
 }
 
 // ─── CounterOpMarkerPageable ──────────────────────────────
@@ -2549,17 +2135,6 @@ impl Pageable for CounterOpMarkerPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn slice_for_page(
-        &self,
-        _page_index: u32,
-        _geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // See `BookmarkMarkerPageable::slice_for_page` — markers are
-        // always wrapped in production; standalone occurrences are
-        // dropped rather than duplicated across pages.
-        None
     }
 }
 
@@ -2607,10 +2182,6 @@ impl Pageable for CounterOpWrapperPageable {
         self.child.height()
     }
 
-    fn pagination(&self) -> Pagination {
-        self.child.pagination()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2633,30 +2204,6 @@ impl Pageable for CounterOpWrapperPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // First-page-only marker semantics — same as `split()`.
-        // Counter ops must apply on the first page where the wrapped
-        // element appears; continuation pages get the unwrapped child
-        // so `collect_counter_states` doesn't double-count.
-        let sliced_child = self.child.slice_for_page(page_index, geometry)?;
-        let is_first = self
-            .child
-            .node_id()
-            .is_some_and(|id| is_first_page_for(geometry, id, page_index));
-        if is_first {
-            Some(Box::new(CounterOpWrapperPageable {
-                ops: self.ops.clone(),
-                child: sliced_child,
-            }))
-        } else {
-            Some(sliced_child)
-        }
     }
 }
 
@@ -2732,10 +2279,6 @@ impl Pageable for TransformWrapperPageable {
         self.inner.height()
     }
 
-    fn pagination(&self) -> Pagination {
-        self.inner.pagination()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2761,26 +2304,6 @@ impl Pageable for TransformWrapperPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.inner.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Transforms are atomic (`split()` always returns `None`), so
-        // the wrapped subtree appears whole on whichever page the
-        // fragmenter decided. Wrap with the same transform on every
-        // page where `inner.slice_for_page` returns `Some` —
-        // typically only one page since the transform's bounding box
-        // shouldn't be split, but partition is faithful to whatever
-        // fragmenter chose.
-        let sliced_inner = self.inner.slice_for_page(page_index, geometry)?;
-        Some(Box::new(TransformWrapperPageable {
-            inner: sliced_inner,
-            matrix: self.matrix,
-            origin: self.origin,
-        }))
     }
 }
 
@@ -2827,10 +2350,6 @@ impl Pageable for StringSetWrapperPageable {
         self.child.height()
     }
 
-    fn pagination(&self) -> Pagination {
-        self.child.pagination()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2853,31 +2372,6 @@ impl Pageable for StringSetWrapperPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // First-page-only marker semantics — same as `split()`.
-        // String-set values must be resolved on the page where the
-        // wrapped element appears; continuation pages get the
-        // unwrapped child so `collect_string_set_states` doesn't
-        // resolve a value one page too early.
-        let sliced_child = self.child.slice_for_page(page_index, geometry)?;
-        let is_first = self
-            .child
-            .node_id()
-            .is_some_and(|id| is_first_page_for(geometry, id, page_index));
-        if is_first {
-            Some(Box::new(StringSetWrapperPageable {
-                markers: self.markers.clone(),
-                child: sliced_child,
-            }))
-        } else {
-            Some(sliced_child)
-        }
     }
 }
 
@@ -2926,10 +2420,6 @@ impl Pageable for RunningElementWrapperPageable {
         self.child.height()
     }
 
-    fn pagination(&self) -> Pagination {
-        self.child.pagination()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2952,31 +2442,6 @@ impl Pageable for RunningElementWrapperPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // First-page-only marker semantics — same as `split()`.
-        // The running-element marker registers an instance on the
-        // page where the source declaration appears so per-page
-        // `@page` margin boxes can resolve `element()` references;
-        // continuation pages get the unwrapped child.
-        let sliced_child = self.child.slice_for_page(page_index, geometry)?;
-        let is_first = self
-            .child
-            .node_id()
-            .is_some_and(|id| is_first_page_for(geometry, id, page_index));
-        if is_first {
-            Some(Box::new(RunningElementWrapperPageable {
-                markers: self.markers.clone(),
-                child: sliced_child,
-            }))
-        } else {
-            Some(sliced_child)
-        }
     }
 }
 
@@ -3121,10 +2586,6 @@ impl Pageable for MulticolRulePageable {
         canvas.surface.set_stroke(None);
     }
 
-    fn pagination(&self) -> Pagination {
-        self.child.pagination()
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -3151,93 +2612,6 @@ impl Pageable for MulticolRulePageable {
 
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Partition `self.groups` across pages by accumulating the
-        // child's per-page heights as page-local cutoffs. For page p,
-        // the multicol container has consumed `sum(heights[0..p])`
-        // worth of content on prior pages — that's the offset into
-        // `self.groups`'s y-axis we strip off, then the page's own
-        // height becomes the cutoff for which groups still fit on
-        // this page. Mirrors `split()`'s `partition_groups_at_cutoff`
-        // but iterated per page rather than once.
-        let sliced_child = self.child.slice_for_page(page_index, geometry)?;
-        let groups_for_this_page = match self.child.node_id() {
-            Some(id) => {
-                let frags = geometry
-                    .get(&id)
-                    .map(|g| g.fragments.as_slice())
-                    .unwrap_or(&[]);
-                let target_pos = frags.iter().position(|f| f.page_index == page_index);
-                match target_pos {
-                    Some(pos) => {
-                        // `Fragment.height` is CSS px; multicol group
-                        // geometry uses PDF pt for y_offset / col_heights.
-                        let consumed: f32 = crate::convert::px_to_pt(
-                            frags[..pos].iter().map(|f| f.height).sum::<f32>(),
-                        );
-                        let cutoff = crate::convert::px_to_pt(frags[pos].height);
-                        // Shift groups by `-consumed` so y_offset is
-                        // page-local, then partition at `cutoff`.
-                        let shifted: Vec<_> = self
-                            .groups
-                            .iter()
-                            .filter_map(|g| {
-                                let group_top = g.y_offset - consumed;
-                                let max_h = g
-                                    .col_heights
-                                    .iter()
-                                    .copied()
-                                    .fold(0.0_f32, |acc, h| acc.max(h));
-                                let group_bottom = group_top + max_h;
-                                if group_bottom <= 0.0 || group_top >= cutoff {
-                                    None
-                                } else {
-                                    let mut shifted_g = g.clone();
-                                    shifted_g.y_offset = group_top.max(0.0);
-                                    // Clamp col_heights to the visible
-                                    // strip on this page.
-                                    let visible_top = group_top.max(0.0);
-                                    let visible_bot = group_bottom.min(cutoff);
-                                    let visible_h = (visible_bot - visible_top).max(0.0);
-                                    // Subtract the portion of each
-                                    // column already painted on
-                                    // earlier pages before clamping
-                                    // to `visible_h`. Without this
-                                    // step, a column whose content
-                                    // ended above this page (col_top +
-                                    // col_h ≤ 0) would be clamped to
-                                    // `visible_h` instead of 0, and a
-                                    // partially-visible column would
-                                    // be reported at `visible_h`
-                                    // even when its remainder is
-                                    // shorter (Devin Review on PR
-                                    // #288).
-                                    let consumed_above = (visible_top - group_top).max(0.0);
-                                    for h in &mut shifted_g.col_heights {
-                                        *h = (*h - consumed_above).max(0.0).min(visible_h);
-                                    }
-                                    Some(shifted_g)
-                                }
-                            })
-                            .collect();
-                        shifted
-                    }
-                    None => Vec::new(),
-                }
-            }
-            None => self.groups.clone(),
-        };
-        Some(Box::new(MulticolRulePageable {
-            child: sliced_child,
-            rule: self.rule,
-            groups: groups_for_this_page,
-        }))
     }
 }
 
@@ -3363,10 +2737,6 @@ impl Pageable for ListItemPageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        self.body.pagination()
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -3396,42 +2766,6 @@ impl Pageable for ListItemPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Marker on first page only (matches `split()` setting
-        // `ListItemMarker::None` on the bottom half). Body is sliced
-        // per page via the body's own `slice_for_page`. The list
-        // item's outer fragment determines self_h on this page.
-        // `Fragment.height` is CSS px; `ListItemPageable.height` is
-        // PDF pt.
-        let node_id = self.node_id?;
-        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
-        let sliced_body = self.body.slice_for_page(page_index, geometry)?;
-        let is_first = is_first_page_for(geometry, node_id, page_index);
-        Some(Box::new(ListItemPageable {
-            marker: if is_first {
-                self.marker.clone()
-            } else {
-                ListItemMarker::None
-            },
-            marker_line_height: if is_first {
-                self.marker_line_height
-            } else {
-                0.0
-            },
-            body: sliced_body,
-            style: self.style.clone(),
-            width: self.width,
-            height: crate::convert::px_to_pt(self_frag.height),
-            opacity: self.opacity,
-            visible: self.visible,
-            node_id: self.node_id,
-        }))
     }
 }
 
@@ -3536,10 +2870,6 @@ impl Pageable for TablePageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -3578,112 +2908,6 @@ impl Pageable for TablePageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // Headers repeat on every page where the table appears
-        // (matches `split()` cloning `header_cells` to both halves).
-        // Body cells are recursively sliced via `slice_for_page` so a
-        // cell that spans pages internally only contributes its
-        // page-specific content here (Devin Review on PR #288: full
-        // `clone_box()` would leak content from other pages). `pc.y`
-        // is rebased so the first kept body cell sits right after
-        // the repeated header (mirrors `split()`'s `header_height +
-        // (pc.y - split_y)` formula).
-        let node_id = self.node_id?;
-        let self_frag = fragment_on_page(geometry, node_id, page_index)?;
-
-        // First pass: recursively slice each body cell and pair the
-        // result with the original `pc.y` (needed for rebase
-        // calculation). Cells whose `slice_for_page` returns `None`
-        // are dropped from this page.
-        let sliced: Vec<(f32, PositionedChild)> = self
-            .body_cells
-            .iter()
-            .filter_map(|pc| {
-                let sliced_child = pc.child.slice_for_page(page_index, geometry)?;
-                Some((
-                    pc.y,
-                    PositionedChild {
-                        child: sliced_child,
-                        x: pc.x,
-                        // Placeholder, rebased in the second pass.
-                        y: pc.y,
-                        out_of_flow: pc.out_of_flow,
-                        is_fixed: pc.is_fixed,
-                    },
-                ))
-            })
-            .collect();
-
-        let first_kept_y = sliced
-            .iter()
-            .map(|(orig_y, _)| *orig_y)
-            .fold(f32::INFINITY, f32::min);
-        let rebase_delta = if first_kept_y.is_finite() && first_kept_y > self.header_height + 0.01 {
-            first_kept_y - self.header_height
-        } else {
-            0.0
-        };
-
-        // Second pass: apply the rebase delta to each sliced cell's
-        // `pc.y`. The first kept body cell ends up at exactly
-        // `header_height` (page 0: rebase_delta = 0; later pages:
-        // shifted up so the first kept cell sits right after the
-        // repeated header).
-        let body_cells: Vec<PositionedChild> = sliced
-            .into_iter()
-            .map(|(_, mut pc)| {
-                pc.y -= rebase_delta;
-                pc
-            })
-            .collect();
-
-        // fulgur-frmj: derive `layout_size` / `cached_height` from
-        // this page's fragment so multi-page tables draw background,
-        // border, box-shadow, and overflow clips at the correct slice
-        // height (Devin Review / coderabbit on PR #294). Mirrors the
-        // single- vs multi-fragment split in `BlockPageable::slice_for_page`:
-        // a one-fragment table prefers `self.layout_size` (Taffy's
-        // authoritative border-box size) for fields the fragmenter
-        // cannot recompute (`overflow: hidden` clip path —
-        // `tests/style_test::test_overflow_hidden_on_table_clips`);
-        // multi-fragment tables fall back to the per-page fragment
-        // height in pt so page 2+ does not redraw the entire table's
-        // decoration.
-        let single_fragment = geometry
-            .get(&node_id)
-            .is_some_and(|g| g.fragments.len() == 1);
-        let slice_height_pt = crate::convert::px_to_pt(self_frag.height);
-        let (slice_layout_size, slice_cached_height) = if single_fragment {
-            (self.layout_size, self.cached_height)
-        } else {
-            let width = self.layout_size.map(|s| s.width).unwrap_or(self.width);
-            (
-                Some(Size {
-                    width,
-                    height: slice_height_pt,
-                }),
-                slice_height_pt,
-            )
-        };
-        Some(Box::new(TablePageable {
-            header_cells: clone_children(&self.header_cells),
-            body_cells,
-            header_height: self.header_height,
-            style: self.style.clone(),
-            layout_size: slice_layout_size,
-            width: self.width,
-            cached_height: slice_cached_height,
-            opacity: self.opacity,
-            visible: self.visible,
-            id: self.id.clone(),
-            node_id: self.node_id,
-        }))
     }
 }
 
@@ -4481,19 +3705,6 @@ mod transform_wrapper_tests {
     }
 
     #[test]
-    fn bookmark_wrapper_forwards_pagination() {
-        let block = BlockPageable::with_positioned_children(vec![]).with_pagination(Pagination {
-            break_before: BreakBefore::Page,
-            ..Pagination::default()
-        });
-        let wrapper = BookmarkMarkerWrapperPageable::new(
-            BookmarkMarkerPageable::new(1, "T".into()),
-            Box::new(block),
-        );
-        assert_eq!(wrapper.pagination().break_before, BreakBefore::Page);
-    }
-
-    #[test]
     fn bookmark_collector_records_entry_on_draw() {
         use crate::pageable::BookmarkCollector;
         let mut collector = BookmarkCollector::new();
@@ -4760,7 +3971,7 @@ mod multicol_rule_tests {
     }
 
     #[test]
-    fn multicol_rule_wrapper_delegates_pagination_methods() {
+    fn multicol_rule_wrapper_delegates_wrap_and_height() {
         // wrap() and height() must pass through to the child unchanged.
         let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
         let child_size = block.wrap(200.0, 1000.0);
@@ -4773,9 +3984,6 @@ mod multicol_rule_tests {
         let w_size = wrapped.wrap(200.0, 1000.0);
         assert!((w_size.height - expected_h).abs() < 1e-3);
         assert!((wrapped.height() - expected_h).abs() < 1e-3);
-        // pagination() defaults through.
-        let pag = wrapped.pagination();
-        assert_eq!(pag.break_inside, BreakInside::Auto);
     }
 
     #[test]

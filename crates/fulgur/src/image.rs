@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt, Size};
 
 /// Image format detected from data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,10 +206,6 @@ impl Pageable for ImagePageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -224,24 +220,6 @@ impl Pageable for ImagePageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        let node_id = self.node_id?;
-        // Presence check only. The fragment dimensions are unreliable
-        // for the inner-of-styled-block case (fulgur-frmj): when the
-        // wrapping `BlockPageable` shares this `node_id`, the fragmenter
-        // records the wrapper's full border-box size, not the image's
-        // content-box size. `self.{width, height}` is the layout-time
-        // content-box value, which is correct for both standalone and
-        // wrapped images since `wrap_replaced_in_block_style` already
-        // resolved the inset before constructing this `ImagePageable`.
-        crate::pageable::fragment_on_page(geometry, node_id, page_index)?;
-        Some(Box::new(self.clone()))
     }
 }
 
