@@ -362,12 +362,135 @@ fn inline_byte_equality_cases() {
         ),
     ];
 
+    // PR 6 (Transform + MulticolRule + marker wrappers verification)
+    // exercises the new `Drawables.transforms` and
+    // `Drawables.multicol_rules` maps. Transform tests cover the
+    // shared-node_id case (block + transform same id) and the strict
+    // descendant case (block wraps a child with its own id). Multicol
+    // rule painting requires a `column-rule` style, which the example
+    // fixtures don't currently use, so we add minimal cases here.
+    let pr6_cases: &[(&str, &str)] = &[
+        (
+            "block with transform translate (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+        (
+            "block with transform rotate around center",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:80px;height:60px;background:#fce;transform:rotate(15deg);transform-origin:center}</style></head><body><div class="box"></div></body></html>"##,
+        ),
+        // PR #305 Devin: nested transforms — inner transform was
+        // silently dropped because `draw_under_transform` dispatched
+        // descendants via `dispatch_fragment` which never checks
+        // `drawables.transforms`. v1's nested
+        // `TransformWrapperPageable::draw` recursively pushes both
+        // matrices; v2 must do the same by recursing into
+        // `draw_under_transform` when a descendant has its own
+        // `TransformEntry`.
+        (
+            "nested transforms (rotate around translate)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;background:#cef;transform:translate(10px,5px)}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
+        // PR #305 follow-up Devin: nested transforms with a
+        // non-transform descendant inside the inner transform caused
+        // double-draw — `draw_under_transform` for the OUTER iterated
+        // its full `descendants` list (which includes the inner's own
+        // descendants), so the deeply nested node was painted once
+        // under outer*inner (correct, via the inner recursion) and a
+        // second time under outer only (wrong). Regression: a styled
+        // grandchild block inside two stacked transforms.
+        (
+            "triple nested transform descendant double-draw",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
+        // PR 6 follow-up: shared-node_id inner content (inline-root
+        // paragraph from `convert::inline_root`, replaced image/svg
+        // from `convert::replaced`) must paint at the wrapping block's
+        // *content-box* top-left, not its border-box top-left, when
+        // the block carries `padding` or `border`. v1 expresses this
+        // via `PositionedChild { x: content_inset.x, y:
+        // content_inset.y }`; v2 mirrors it by adding
+        // `block.style.content_inset()` inside
+        // `draw_block_with_inner_content` (and
+        // `draw_list_item_with_block`). Without that offset, every
+        // text run inside a padded block landed `padding+border`
+        // worth of px high-and-left of where it should — the bug that
+        // kept `examples/transform`'s `.box { padding: 6px }` 11
+        // bytes short.
+        (
+            "padded paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##,
+        ),
+        (
+            "bordered paragraph with background (shared node_id)",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;border:3px solid #444;background:#fce}</style></head><body><p>hello</p></body></html>"##,
+        ),
+        // PR 6 follow-up (fulgur-9y1a) — html root element's
+        // background was silently dropped because the fragmenter's
+        // `geometry` only records body + descendants, never html. v2
+        // now paints html's bg as a pre-pass at `(margin.left,
+        // margin.top)` with `block_styles[root_id].layout_size`.
+        // Without that pre-pass v2 lost 13 bytes per gradient-hint
+        // fixture (six fixtures regressed simultaneously, all sharing
+        // `html, body { background: white }`).
+        (
+            "html background distinct from body background",
+            r##"<!DOCTYPE html><html><head><style>html, body { margin:0; padding:0; background:white; } .g { width:120px; height:80px; margin:24px; background:red; }</style></head><body><div class="g"></div></body></html>"##,
+        ),
+        // PR 6 follow-up (fulgur-9y1a) — `extract_drawables_from_pageable`
+        // recurses into the Pageable tree to populate per-NodeId draw
+        // payloads. `LineItem::InlineBox` carries inner content (e.g.
+        // an inline `<svg>`) that `paragraph::draw_shaped_lines`
+        // paints via `ib.content.draw(...)` directly. Recursing into
+        // that content registered it again in `svgs` / `block_styles`
+        // and the v2 dispatcher then double-painted at the fragment's
+        // own coordinates (e.g. `body + svg_margin` for
+        // `<svg style="margin:Npx">`). Drop the recurse so inline-box
+        // content stays a pure paragraph-rooted draw.
+        (
+            "body with inline svg margin",
+            r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0}</style></head><body><svg width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="margin:20px"><rect x="0" y="0" width="40" height="40" fill="#fa0"/></svg></body></html>"##,
+        ),
+    ];
+
+    // Bookmark-inside-transform regression (PR #305 Devin): a heading
+    // nested under a `transform`-wrapped ancestor must still record a
+    // bookmark anchor in the PDF outline. v1 invokes
+    // `BookmarkMarkerWrapperPageable::draw` recursively from inside
+    // `TransformWrapperPageable::draw`; v2 records the anchor BEFORE
+    // the `transformed_descendants` skip in the dispatcher.
+    let bookmark_in_transform = (
+        "bookmark anchor inside transformed ancestor",
+        r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##,
+    );
+
     let cases = pr3_cases
         .iter()
         .chain(pr4_cases.iter())
-        .chain(pr5_cases.iter());
+        .chain(pr5_cases.iter())
+        .chain(pr6_cases.iter());
     for (label, html) in cases {
         let engine = Engine::builder().build();
+        let v1 = engine
+            .render_html(html)
+            .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));
+        let v2 = engine
+            .render_html_v2(html)
+            .unwrap_or_else(|e| panic!("v2 render `{label}`: {e}"));
+        assert_eq!(
+            v1,
+            v2,
+            "inline case `{label}` is not byte-identical (v1={}B v2={}B)",
+            v1.len(),
+            v2.len(),
+        );
+    }
+
+    // Bookmark anchors require `bookmarks(true)` on the engine —
+    // separate render so the assertion can target the
+    // bookmark-inside-transform case explicitly.
+    {
+        let (label, html) = bookmark_in_transform;
+        let engine = Engine::builder().bookmarks(true).build();
         let v1 = engine
             .render_html(html)
             .unwrap_or_else(|e| panic!("v1 render `{label}`: {e}"));

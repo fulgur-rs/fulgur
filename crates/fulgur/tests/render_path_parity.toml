@@ -43,4 +43,42 @@ allowlist = [
     "vrt://paint/radial-gradient-no-repeat-corner.html",
     "vrt://paint/radial-gradient-repeat-round.html",
     "vrt://paint/radial-gradient-tiled.html",
+    # PR 6 (Transform + MulticolRule + content-inset fix) — transform
+    # plumbing unlocks the `examples/transform` fixture, and the
+    # shared-node_id content-box offset (`block.style.content_inset()`
+    # added inside `draw_block_with_inner_content`) closes the
+    # `padding`/`border` shift that was keeping basic painted block
+    # fixtures off the allowlist.
+    "vrt://basic/box-shadow.html",
+    "examples://bookmark",
+    "examples://border-radius",
+    "examples://table-header",
+    "examples://transform",
+    # PR 6 follow-up (root `<html>` bg pre-pass, fulgur-9y1a) — html
+    # element's own `background` was silently dropped because the
+    # fragmenter's `geometry` only carries body + descendants. v2 now
+    # paints html's bg explicitly at `(margin.left, margin.top)` with
+    # `block_styles[root_id].layout_size` before the main loop runs.
+    # Six paint fixtures with `html, body { background: white }` lit up
+    # at once.
+    "vrt://paint/linear-gradient-hint-30pct.html",
+    "vrt://paint/linear-gradient-hint-70pct.html",
+    "vrt://paint/radial-gradient-hint.html",
+    "vrt://paint/repeating-linear-gradient.html",
+    "vrt://paint/repeating-linear-gradient-hint.html",
+    "vrt://paint/repeating-radial-gradient.html",
+    # PR 6 follow-up (skip InlineBox.content recurse, fulgur-9y1a) —
+    # inline-block / inline-flex / inline-grid / inline-svg content is
+    # painted via `paragraph::draw_shaped_lines` calling
+    # `ib.content.draw(...)`. extract was recursing into
+    # `InlineBox.content` and registering the inner Pageable in
+    # `block_styles` / `svgs` / etc., so v2 dispatch double-painted
+    # everything inside an inline box. Six layout fixtures lit up at
+    # once after dropping the recurse.
+    "vrt://layout/inline-block-basic.html",
+    "vrt://layout/inline-block-nested.html",
+    "vrt://layout/inline-block-overflow-hidden.html",
+    "vrt://layout/inline-flex-smoke.html",
+    "vrt://layout/inline-grid-smoke.html",
+    "vrt://svg/shapes.html",
 ]

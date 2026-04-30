@@ -140,13 +140,37 @@ impl std::fmt::Debug for ListItemEntry {
     }
 }
 
-/// PR 6 target: column-rule paint spec + per-column-group geometry.
-#[derive(Debug, Clone, Default)]
-pub struct MulticolRuleEntry;
+/// Multicol column-rule paint spec + per-column-group geometry.
+/// Mirrors the fields `MulticolRulePageable` carries — render at the
+/// container's location after children paint, partitioning `groups`
+/// per page based on the container's fragment cumulative heights.
+#[derive(Debug, Clone)]
+pub struct MulticolRuleEntry {
+    pub rule: crate::column_css::ColumnRuleSpec,
+    pub groups: Vec<crate::multicol_layout::ColumnGroupGeometry>,
+}
 
-/// PR 6 target: CSS transform matrix + origin.
-#[derive(Debug, Clone, Default)]
-pub struct TransformEntry;
+/// CSS transform matrix + origin for a node (and its descendants).
+///
+/// Mirrors `TransformWrapperPageable`. v1 pushes the surface transform
+/// before drawing `inner.draw(...)` and pops after; v2's flat dispatch
+/// emulates this by recording every descendant `node_id` of the wrapper
+/// at convert time so the render loop can dispatch the wrapper's own
+/// payload + every descendant inside one push/pop pair.
+#[derive(Debug, Clone)]
+pub struct TransformEntry {
+    pub matrix: crate::pageable::Affine2D,
+    pub origin: crate::pageable::Point2,
+    /// Every strict descendant `NodeId` whose fragment must paint
+    /// inside this transform's `push_transform`/`pop` group. Does NOT
+    /// include the wrapper's own `node_id` (the entry's key) — the
+    /// render loop dispatches the wrapper node separately before
+    /// iterating descendants (see
+    /// `render::draw_under_transform`). Stored as a `Vec` for
+    /// deterministic iteration — order matches the depth-first walk
+    /// produced by `extract_drawables_from_pageable`.
+    pub descendants: Vec<NodeId>,
+}
 
 /// Bookmark anchor (level + label) keyed by source node. First-fragment-only
 /// emission is enforced at render time by reading `geometry.fragments[0]`.
@@ -181,6 +205,29 @@ pub struct Drawables {
     /// in geometry but absolute on Drawables avoids touching the
     /// fragmenter contract.
     pub body_offset_pt: (f32, f32),
+    /// NodeId of the `<html>` root element when present.
+    ///
+    /// v1 paints html's own `background` BEFORE recursing into body
+    /// via `BlockPageable::draw`'s recursive children walk. v2's flat
+    /// dispatch never visits html — the fragmenter only records body
+    /// and its descendants in `geometry` — so `render_v2` paints html
+    /// as a pre-pass at the page's top-left margin using
+    /// `block_styles[root_id].layout_size` as the rect dimensions.
+    /// That mirrors v1's `total_width / total_height` derivation in
+    /// `BlockPageable::draw` (`pageable.rs:1771-1778`).
+    pub root_id: Option<NodeId>,
+    /// NodeId of the `<body>` element when present.
+    ///
+    /// v1 paints body's `background` on EVERY page because each
+    /// page's sliced root pageable still calls body's draw method.
+    /// v2's main dispatch sees body via the fragmenter's single
+    /// fragment on page 0 only, so multi-page documents would lose
+    /// body's bg fill on continuation pages. `render_v2` mirrors v1
+    /// by painting body as a pre-pass on every page (using
+    /// `block_styles[body_id].layout_size` for the rect dimensions
+    /// and `body_offset_pt` for the margin offset), then skipping
+    /// body in the main dispatch loop to avoid double-painting.
+    pub body_id: Option<NodeId>,
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,

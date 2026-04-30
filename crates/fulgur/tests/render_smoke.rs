@@ -626,3 +626,154 @@ fn position_fixed_repeats_on_every_page() {
         "page 2 should also contain FXFXFX (per-page repetition for position:fixed)"
     );
 }
+
+// ── Phase 4 v2 render path smoke tests (fulgur-9t3z) ─────────────────
+//
+// Exercise the v2 dispatcher (`render_v2`) so the patch-coverage gate
+// sees the new draw helpers added in PR 6 (`draw_under_transform`,
+// `draw_under_clip`, `draw_under_opacity`, `paint_multicol_rule_for_page`,
+// `paint_root_block_v2`, `MarginBoxRenderer`). These run end-to-end
+// through `Engine::render_html_v2` and assert only that the bytes
+// come back non-empty — byte-eq with v1 is already covered by the
+// `render_path_parity` shadow harness.
+
+#[test]
+fn render_v2_smoke_transform_translate() {
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.box{width:80px;height:60px;background:#cef;transform:translate(10px,5px)}</style></head><body><div class="box"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_nested_transforms() {
+    // Exercises the `draw_under_transform` recursion path added in
+    // PR #305 Devin fix: outer rotate wraps an inner translate, both
+    // matrices must compose.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;background:#cef;transform:rotate(10deg)}.inner{width:60px;height:40px;background:#fce;transform:translate(8px,4px)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_multicol_with_column_rule() {
+    // Exercises `paint_multicol_rule_for_page` — most fixtures don't
+    // declare `column-rule` so this path needs an explicit smoke test.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt solid #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_html_body_bg_multi_page() {
+    // Exercises `paint_root_block_v2` for both `<html>` (pre-pass on
+    // every page) and `<body>` (pre-pass on continuation pages).
+    let html = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;background:#fafafa}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_block_with_inline_root_padding() {
+    // Exercises `draw_block_with_inner_content` content-inset path —
+    // the `padding: 6px` shift fix that landed in PR 6.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}p{margin:0;padding:6px;background:#cef}</style></head><body><p>hello</p></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_bookmarks_under_transform() {
+    // Exercises the bookmark-anchor pre-skip path (`record(...)` runs
+    // before `transformed_descendants` skip) added in PR 6 Devin fix.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}div{transform:rotate(5deg)}h1{margin:0;font-size:14px}</style></head><body><div><h1>Heading</h1></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().bookmarks(true).build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_triple_nested_transform_descendants() {
+    // Exercises the `nested_skip` pre-collection in
+    // `draw_under_transform` added in PR #305 follow-up Devin: the
+    // outer transform's `descendants` includes the inner transform's
+    // own descendants (e.g. a styled grandchild block), so the
+    // outer's iteration must skip them or they get painted twice —
+    // once correctly under outer*inner via the recursion, and once
+    // wrongly under outer only.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_multicol_dashed_and_dotted_column_rule() {
+    // Exercises the `ColumnRuleStyle::Dashed` and `Dotted` arms of
+    // `build_multicol_stroke` (`render.rs:613-627` from PR #305).
+    // Solid is already covered by the `multicol-2` VRT fixture but
+    // dashed/dotted patterns weren't on any byte-eq path.
+    let html_dashed = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt dashed #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
+    let html_dotted = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:8pt}.cols{column-count:2;column-rule:1pt dotted #888;column-gap:12pt;height:80pt}.cell{height:30pt;background:#cef;margin-bottom:6pt}</style></head><body><div class="cols"><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf_dashed = engine.render_html_v2(html_dashed).expect("dashed render");
+    let pdf_dotted = engine.render_html_v2(html_dotted).expect("dotted render");
+    assert!(!pdf_dashed.is_empty());
+    assert!(!pdf_dotted.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_paragraph_multi_fragment_slice() {
+    // Exercises `paragraph_lines_for_page` (`render.rs:1075-1138`
+    // from PR #305): a paragraph that splits across multiple pages
+    // requires the slice / rebase logic. Most fixtures keep
+    // paragraphs on one page, so this branch needs an explicit
+    // multi-page paragraph.
+    let mut paragraph_text = String::new();
+    for i in 0..400 {
+        use std::fmt::Write;
+        write!(&mut paragraph_text, "Sentence {i} with some words. ").unwrap();
+    }
+    let html = format!(
+        r##"<!DOCTYPE html><html><head><style>html,body{{margin:0;padding:0}}p{{margin:0;font-size:14pt;line-height:1.4}}</style></head><body><p>{paragraph_text}</p></body></html>"##
+    );
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(&html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity check: multiple `Type /Page` entries (one per
+    // page object) — without slicing, only the first fragment would
+    // emit any glyphs.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output, got {page_count} pages"
+    );
+}
+
+#[test]
+fn render_v2_smoke_list_item_image_marker() {
+    // Exercises `draw_list_item_marker`'s `ListItemMarker::Image` arm
+    // (`render.rs:1004-1019` from PR #305): a `<li>` rendered with a
+    // raster `list-style-image` so the marker takes the
+    // `ImageMarker::Raster` branch instead of the text/glyph default.
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_css(r#"li { list-style-image: url("bullet.png"); }"#);
+    bundle.add_image("bullet.png", png_data);
+    let html =
+        r##"<!doctype html><html><body><ul><li>Item 1</li><li>Item 2</li></ul></body></html>"##;
+    let engine = Engine::builder().assets(bundle).build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
