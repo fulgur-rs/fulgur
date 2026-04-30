@@ -966,40 +966,6 @@ impl Pageable for ParagraphPageable {
         self.visible
     }
 
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-        registry: &mut crate::pageable::DestinationRegistry,
-    ) {
-        if let Some(id) = &self.id
-            && !id.is_empty()
-        {
-            registry.record(id, x, y);
-        }
-        // Recurse into inline-box content so nested `id`s (e.g. an
-        // `<a id="target">` inside `<span style="display:inline-block">`)
-        // still reach the destination registry for `href="#target"`
-        // resolution. The coordinate arithmetic mirrors `draw_shaped_lines`
-        // (see paragraph.rs:614): `line_top` starts at 0, advances by
-        // `line.height` after each line, so `oy = y + line_top + computed_y`
-        // matches the draw-path's `line_top_abs + computed_y`.
-        let mut line_top: f32 = 0.0;
-        for line in &self.lines {
-            for item in &line.items {
-                if let LineItem::InlineBox(ib) = item {
-                    let child_x = x + ib.x_offset;
-                    let child_y = y + line_top + ib.computed_y;
-                    ib.content
-                        .collect_ids(child_x, child_y, ib.width, ib.height, registry);
-                }
-            }
-            line_top += line.height;
-        }
-    }
-
     fn node_id(&self) -> Option<usize> {
         self.node_id
     }
@@ -1349,25 +1315,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_ids_records_paragraph_id() {
-        use crate::pageable::DestinationRegistry;
-        let p = ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("anchor".to_string())));
-        let mut reg = DestinationRegistry::default();
-        reg.set_current_page(3);
-        p.collect_ids(10.0, 42.0, 400.0, 600.0, &mut reg);
-        assert_eq!(reg.get("anchor"), Some((3, 10.0, 42.0)));
-    }
-
-    #[test]
-    fn collect_ids_is_noop_without_id() {
-        use crate::pageable::DestinationRegistry;
-        let p = ParagraphPageable::new(Vec::new());
-        let mut reg = DestinationRegistry::default();
-        p.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
-        assert!(reg.get("anything").is_none());
-    }
-
-    #[test]
     fn line_item_inline_box_variant_can_be_constructed() {
         use crate::pageable::BlockPageable;
         // BlockPageable::new takes Vec<Box<dyn Pageable>>; an empty vec is
@@ -1511,40 +1458,6 @@ mod tests {
             }
             _ => panic!("expected InlineBox at index 1"),
         }
-    }
-
-    // ---------- collect_ids recursion into inline-box Paragraph content ----------
-
-    /// Covers the `ib.content.collect_ids(..)` path in
-    /// `ParagraphPageable::collect_ids` when the inline-box hosts a
-    /// `ParagraphPageable`. Existing integration tests use Block content
-    /// exclusively, so this branch stays otherwise untested.
-    #[test]
-    fn collect_ids_recurses_into_inline_box_paragraph_content() {
-        use crate::pageable::DestinationRegistry;
-        let inner =
-            ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("inner-id".to_string())));
-        let outer_line = ShapedLine {
-            height: 20.0,
-            baseline: 15.0,
-            items: vec![LineItem::InlineBox(InlineBoxItem {
-                content: Box::new(inner) as InlineBoxContent,
-                width: 30.0,
-                height: 20.0,
-                x_offset: 5.0,
-                computed_y: 0.0,
-                link: None,
-                opacity: 1.0,
-                visible: true,
-            })],
-        };
-        let outer = ParagraphPageable::new(vec![outer_line]);
-        let mut reg = DestinationRegistry::default();
-        reg.set_current_page(2);
-        outer.collect_ids(10.0, 20.0, 400.0, 600.0, &mut reg);
-        // Recorded at (x + ib.x_offset, y + line_top + computed_y) =
-        // (10+5, 20+0+0) = (15, 20) on page 2.
-        assert_eq!(reg.get("inner-id"), Some((2, 15.0, 20.0)));
     }
 
     // ---------- pageable_last_baseline walks wrappers ----------

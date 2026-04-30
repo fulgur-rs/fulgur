@@ -870,24 +870,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inline_block_inner_id_is_registered_with_destination_registry() {
-        use crate::pageable::DestinationRegistry;
-        // A `<span id="target">` placed as an inline-block inside a paragraph
-        // must still register with the destination registry so that
-        // `href="#target"` links can resolve. Before Fix 2 to
-        // `ParagraphPageable::collect_ids`, the registry walk stopped at the
-        // paragraph and ignored nested inline-box content.
-        let html = r#"<!DOCTYPE html><html><body><div>before <span id="target" style="display:inline-block;width:40px;height:20px;background:red">x</span> after</div></body></html>"#;
-        let tree = build_tree(html);
-        let mut reg = DestinationRegistry::default();
-        tree.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
-        assert!(
-            reg.get("target").is_some(),
-            "inline-block inner id should be registered with DestinationRegistry"
-        );
-    }
-
     // ---- metrics_from_line tests ----
 
     /// Default fallback metrics returned by `metrics_from_line` when no
