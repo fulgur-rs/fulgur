@@ -106,6 +106,20 @@ allowlist = [
     "vrt://layout/overflow-hidden.html",
     "vrt://layout/overflow-hidden-rounded.html",
     "examples://overflow-hidden",
+    # Phase 4 stack merge enrollment — fixtures that became
+    # byte-identical incidentally (mostly through the GCPM port,
+    # InlineBox no-recurse fix, and content-inset / clip / transform
+    # work) but had not yet been allowlisted. Enrolling them locks
+    # in v1/v2 parity and progresses PR 7 (default flip) coverage.
+    "vrt://gcpm/bookmark-outline.html",
+    "vrt://gcpm/link-annotations.html",
+    "examples://image",
+    "examples://link-media",
+    "examples://link-stylesheet",
+    "examples://list-style-image",
+    "examples://pseudo-content-url",
+    "examples://text-align",
+    "examples://text-decoration",
 ]
 
 # Known-divergent fixtures (fulgur-g7a1, 2026-04-30)
