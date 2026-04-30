@@ -76,6 +76,7 @@ where
             child: inner,
             x: cx,
             y: cy,
+            height: content_height,
             out_of_flow: false,
             is_fixed: false,
         };

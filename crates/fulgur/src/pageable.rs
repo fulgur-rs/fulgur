@@ -486,8 +486,6 @@ pub trait Pageable: Send + Sync {
     fn clone_box(&self) -> Box<dyn Pageable>;
 
     /// Measured height from last wrap() call.
-    fn height(&self) -> Pt;
-
     /// Downcast support for tests.
     fn as_any(&self) -> &dyn std::any::Any;
 
@@ -874,6 +872,14 @@ pub struct PositionedChild {
     pub child: Box<dyn Pageable>,
     pub x: Pt,
     pub y: Pt,
+    /// Phase 4 PR 8f: child's measured height in PDF pt, captured at
+    /// convert time from Taffy. Replaces the runtime
+    /// `pc.height` trait dispatch that previously sourced this
+    /// value via `Pageable::height`. Set to `0.0` by default so legacy
+    /// tests that build `PositionedChild` directly without sizing
+    /// information remain valid; production constructors always
+    /// populate it from `size_in_pt(node.final_layout.size)`.
+    pub height: Pt,
     pub out_of_flow: bool,
     /// fulgur-jkl5: subset of `out_of_flow` where the child is
     /// `position: fixed`. The element appears on every page at the same
@@ -891,6 +897,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: false,
             is_fixed: false,
         }
@@ -905,6 +912,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: true,
             is_fixed: false,
         }
@@ -920,6 +928,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: true,
             is_fixed: true,
         }
@@ -955,20 +964,21 @@ pub struct BlockPageable {
 
 impl BlockPageable {
     pub fn new(children: Vec<Box<dyn Pageable>>) -> Self {
-        // Legacy constructor: stack children vertically
-        let mut y = 0.0;
+        // Legacy test-only constructor: stacks children vertically with zero
+        // heights. After Phase 4 PR 8f's `Pageable::height` removal, the
+        // y-advance per child can no longer source the height through trait
+        // dispatch — production builds always use
+        // `with_positioned_children` with explicit heights from Taffy, and
+        // tests using this helper do not assert on per-child y positions.
         let positioned: Vec<PositionedChild> = children
             .into_iter()
-            .map(|child| {
-                let child_y = y;
-                y += child.height();
-                PositionedChild {
-                    child,
-                    x: 0.0,
-                    y: child_y,
-                    out_of_flow: false,
-                    is_fixed: false,
-                }
+            .map(|child| PositionedChild {
+                child,
+                x: 0.0,
+                y: 0.0,
+                height: 0.0,
+                out_of_flow: false,
+                is_fixed: false,
             })
             .collect();
         Self {
@@ -1666,7 +1676,7 @@ impl Pageable for BlockPageable {
 
             for pc in &self.children {
                 pc.child
-                    .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+                    .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.height);
             }
 
             if clip_pushed {
@@ -1677,13 +1687,6 @@ impl Pageable for BlockPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.layout_size
-            .or(self.cached_size)
-            .map(|s| s.height)
-            .unwrap_or(0.0)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1731,10 +1734,6 @@ impl Pageable for SpacerPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.height
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1821,10 +1820,6 @@ impl Pageable for BookmarkMarkerPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        0.0
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -1855,10 +1850,6 @@ impl Pageable for BookmarkMarkerWrapperPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.child.height()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1895,10 +1886,6 @@ impl Pageable for StringSetPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1943,10 +1930,6 @@ impl Pageable for RunningElementMarkerPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        0.0
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -1975,10 +1958,6 @@ impl Pageable for CounterOpMarkerPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2020,10 +1999,6 @@ impl Pageable for CounterOpWrapperPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.child.height()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2103,10 +2078,6 @@ impl Pageable for TransformWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.inner.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2153,10 +2124,6 @@ impl Pageable for StringSetWrapperPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.child.height()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2207,10 +2174,6 @@ impl Pageable for RunningElementWrapperPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.child.height()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2367,10 +2330,6 @@ impl Pageable for MulticolRulePageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2497,10 +2456,6 @@ impl Pageable for ListItemPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.height
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2585,7 +2540,7 @@ impl Pageable for TablePageable {
 
             for pc in self.header_cells.iter().chain(self.body_cells.iter()) {
                 pc.child
-                    .draw(canvas, x + pc.x, y + pc.y, total_width, pc.child.height());
+                    .draw(canvas, x + pc.x, y + pc.y, total_width, pc.height);
             }
 
             if clip_pushed {
@@ -2596,12 +2551,6 @@ impl Pageable for TablePageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.layout_size
-            .map(|s| s.height)
-            .unwrap_or(self.cached_height)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2645,12 +2594,6 @@ mod tests {
         let (w, h) = clamp_marker_size(10.0, 0.0, 12.0);
         assert_eq!(w, 0.0);
         assert_eq!(h, 0.0);
-    }
-
-    #[test]
-    fn test_string_set_pageable_zero_size() {
-        let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
-        assert_eq!(p.height(), 0.0);
     }
 
     #[test]
@@ -3130,17 +3073,12 @@ mod transform_wrapper_tests {
     use std::f32::consts::FRAC_PI_2;
 
     #[derive(Clone)]
-    struct StubPageable {
-        h: Pt,
-    }
+    struct StubPageable;
 
     impl Pageable for StubPageable {
         fn draw(&self, _: &mut Canvas<'_, '_>, _: Pt, _: Pt, _: Pt, _: Pt) {}
         fn clone_box(&self) -> Box<dyn Pageable> {
             Box::new(self.clone())
-        }
-        fn height(&self) -> Pt {
-            self.h
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -3148,7 +3086,7 @@ mod transform_wrapper_tests {
     }
 
     fn make_wrapper(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
-        TransformWrapperPageable::new(Box::new(StubPageable { h: 100.0 }), matrix, origin)
+        TransformWrapperPageable::new(Box::new(StubPageable), matrix, origin)
     }
 
     #[test]
@@ -3205,15 +3143,8 @@ mod transform_wrapper_tests {
     }
 
     #[test]
-    fn wrapper_height_delegates_to_inner() {
-        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
-        assert!(approx(w.height(), 100.0));
-    }
-
-    #[test]
-    fn bookmark_marker_is_zero_sized_and_draws_nothing() {
+    fn bookmark_marker_has_no_geometry_payload() {
         let m = BookmarkMarkerPageable::new(1, "Chapter 1".to_string());
-        assert_eq!(m.height(), 0.0);
         assert_eq!(m.level, 1);
         assert_eq!(m.label, "Chapter 1");
     }
@@ -3481,23 +3412,6 @@ mod multicol_rule_tests {
             n,
             col_heights,
         }
-    }
-
-    #[test]
-    fn multicol_rule_wrapper_delegates_height() {
-        // height() must pass through to the child unchanged.
-        let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
-        block.cached_size = Some(Size {
-            width: 200.0,
-            height: 200.0,
-        });
-        let expected_h = block.height();
-        let wrapped = MulticolRulePageable::new(
-            Box::new(block),
-            make_rule_spec(ColumnRuleStyle::Solid),
-            vec![make_group(0.0, vec![100.0, 80.0])],
-        );
-        assert!((wrapped.height() - expected_h).abs() < 1e-3);
     }
 
     #[test]

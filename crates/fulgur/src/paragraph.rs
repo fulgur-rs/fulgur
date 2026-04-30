@@ -954,10 +954,6 @@ impl Pageable for ParagraphPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.cached_height
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

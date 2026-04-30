@@ -912,6 +912,7 @@ fn emit_orphan_string_set_markers(
                 child: Box::new(StringSetPageable::new(name, value)),
                 x,
                 y,
+                height: 0.0,
                 out_of_flow: false,
                 is_fixed: false,
             });
@@ -935,6 +936,7 @@ fn emit_counter_op_markers(
             child: Box::new(CounterOpMarkerPageable::new(ops)),
             x,
             y,
+            height: 0.0,
             out_of_flow: false,
             is_fixed: false,
         });
@@ -971,6 +973,7 @@ fn emit_orphan_bookmark_marker(
             child: Box::new(BookmarkMarkerPageable::new(info.level, info.label)),
             x,
             y,
+            height: 0.0,
             out_of_flow: false,
             is_fixed: false,
         });

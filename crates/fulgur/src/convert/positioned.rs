@@ -153,6 +153,7 @@ pub(super) fn collect_positioned_children(
             child: child_pageable,
             x: cx,
             y: cy,
+            height: ch,
             out_of_flow: false,
             is_fixed: false,
         });
@@ -166,6 +167,7 @@ pub(super) fn collect_positioned_children(
             child: Box::new(marker),
             x: 0.0,
             y: 0.0,
+            height: 0.0,
             out_of_flow: false,
             is_fixed: false,
         });
@@ -499,10 +501,12 @@ pub(super) fn build_absolute_pseudo_children(
         // anchored to their CB. fulgur-jkl5: a `::before { position: fixed }`
         // pseudo needs the same is_fixed flag so its y stays viewport-
         // anchored on every page.
+        let pseudo_h_pt = px_to_pt(pseudo.final_layout.size.height);
         out.push(PositionedChild {
             child,
             x: x_pt,
             y: y_pt,
+            height: pseudo_h_pt,
             out_of_flow: true,
             is_fixed: is_position_fixed(pseudo),
         });
@@ -626,10 +630,12 @@ pub(super) fn build_absolute_non_pseudo_children(
         // fulgur-jkl5: position: fixed children must repeat on every
         // page at the same viewport coordinates, so we suppress the
         // y-shift applied to position: absolute on page splits.
+        let child_h_pt = px_to_pt(child_node.final_layout.size.height);
         out.push(PositionedChild {
             child,
             x: x_pt,
             y: y_pt,
+            height: child_h_pt,
             out_of_flow: true,
             is_fixed: is_position_fixed(child_node),
         });

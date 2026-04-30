@@ -71,10 +71,6 @@ impl Pageable for SvgPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.height
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -122,7 +118,7 @@ mod tests {
     #[test]
     fn test_height_returns_configured_height() {
         let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert_eq!(svg.height(), 50.0);
+        assert_eq!(svg.height, 50.0);
     }
 
     #[test]

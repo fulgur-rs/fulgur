@@ -201,10 +201,12 @@ pub(super) fn try_convert(
                     items: vec![item],
                 }]);
                 let (child_x, child_y) = style.content_inset();
+                let p_h = paragraph.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
@@ -263,12 +265,14 @@ pub(super) fn try_convert(
                         baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
                         items: vec![item],
                     }]);
+                    let p_h = paragraph.cached_height;
                     positioned_children.insert(
                         0,
                         PositionedChild {
                             child: Box::new(paragraph),
                             x: 0.0,
                             y: 0.0,
+                            height: p_h,
                             out_of_flow: false,
                             is_fixed: false,
                         },
@@ -375,10 +379,12 @@ fn build_list_item_body(
                 let (child_x, child_y) = style.content_inset();
                 let mut p = paragraph;
                 p.visible = visible;
+                let p_h = p.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(p),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
@@ -430,10 +436,12 @@ fn build_list_item_body(
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
             if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
+                let p_h = paragraph.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
