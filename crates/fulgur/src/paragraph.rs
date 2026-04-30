@@ -960,10 +960,6 @@ impl Pageable for ParagraphPageable {
         });
     }
 
-    fn pagination(&self) -> Pagination {
-        self.pagination
-    }
-
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
     }
@@ -1016,112 +1012,6 @@ impl Pageable for ParagraphPageable {
 
     fn node_id(&self) -> Option<usize> {
         self.node_id
-    }
-
-    fn slice_for_page(
-        &self,
-        page_index: u32,
-        geometry: &crate::pagination_layout::PaginationGeometryTable,
-    ) -> Option<Box<dyn Pageable>> {
-        // fulgur-r6we (Phase 3.2.a): paragraph slicing maps each
-        // page's `Fragment` back to a contiguous run of `self.lines`.
-        //
-        // The fragmenter (`fragment_inline_root` at
-        // `pagination_layout.rs:1424`) pre-computes per-page line
-        // ranges and emits one `Fragment` per page with `height =
-        // last_line_bottom - first_line_top`. To recover the line
-        // range from a fragment alone we sum line heights within the
-        // paragraph, advancing past lines that belong to earlier
-        // pages until we reach the target page's fragment, then
-        // take lines whose cumulative height fits the fragment.
-        //
-        // Tolerance `0.01` absorbs `f32` rounding when summing
-        // line.height values.
-        let node_id = self.node_id?;
-        let frags = &geometry.get(&node_id)?.fragments;
-        let target_pos = frags.iter().position(|f| f.page_index == page_index)?;
-
-        // Single-fragment fast path: paragraph fits on one page
-        // (`frags.len() == 1`), no splitting needed — clone every
-        // line verbatim. Skipping the height-based line filter here
-        // matters for paragraphs whose `Fragment.height`
-        // (`final_layout.size.height` from Taffy) and accumulated
-        // `line.height` (Parley line metrics) differ by more than
-        // the `eps` tolerance the multi-fragment loop below uses
-        // (`<h2>` with `::before` content was returning `None` here
-        // because the measured h2 height was 0.5pt under the line
-        // height, dropping the wrapping `CounterOpWrapper` and
-        // breaking `assert_counter_states_parity`).
-        if frags.len() == 1 && target_pos == 0 {
-            let mut sliced = ParagraphPageable::new(self.lines.clone());
-            sliced.opacity = self.opacity;
-            sliced.visible = self.visible;
-            sliced.pagination = self.pagination;
-            sliced.id = self.id.clone();
-            sliced.node_id = self.node_id;
-            return Some(Box::new(sliced));
-        }
-
-        // Multi-fragment case: paragraph spans multiple pages, so
-        // recover each page's line range from cumulative fragment
-        // heights. `Fragment.height` is CSS px; line metrics in
-        // `self.lines` are PDF pt — convert before comparing.
-        let target_h = crate::convert::px_to_pt(frags[target_pos].height);
-        let consumed: f32 =
-            crate::convert::px_to_pt(frags[..target_pos].iter().map(|f| f.height).sum::<f32>());
-
-        let eps = 0.01_f32;
-        let mut line_top: f32 = 0.0;
-        let mut start_idx = 0usize;
-        while start_idx < self.lines.len() {
-            let next_top = line_top + self.lines[start_idx].height;
-            if next_top > consumed + eps {
-                break;
-            }
-            line_top = next_top;
-            start_idx += 1;
-        }
-
-        let mut end_idx = start_idx;
-        let mut accum = 0.0_f32;
-        while end_idx < self.lines.len() {
-            let line_h = self.lines[end_idx].height;
-            if accum + line_h > target_h + eps {
-                break;
-            }
-            accum += line_h;
-            end_idx += 1;
-        }
-
-        if end_idx <= start_idx {
-            return None;
-        }
-
-        let sliced_lines: Vec<ShapedLine> = self.lines[start_idx..end_idx]
-            .iter()
-            .cloned()
-            .map(|mut line| {
-                // Mirror existing `split()` rebase: baseline and
-                // inline-image `computed_y` are paragraph-absolute,
-                // shift by `consumed` so they become local to the
-                // sliced fragment.
-                line.baseline -= consumed;
-                for item in &mut line.items {
-                    if let LineItem::Image(img) = item {
-                        img.computed_y -= consumed;
-                    }
-                }
-                line
-            })
-            .collect();
-
-        let mut sliced = ParagraphPageable::new(sliced_lines);
-        sliced.opacity = self.opacity;
-        sliced.visible = self.visible;
-        sliced.pagination = self.pagination;
-        sliced.id = self.id.clone();
-        sliced.node_id = self.node_id;
-        Some(Box::new(sliced))
     }
 }
 
