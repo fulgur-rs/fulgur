@@ -438,6 +438,18 @@ fn inline_byte_equality_cases() {
             "page counter in @bottom-center",
             r##"<!DOCTYPE html><html><head><style>@page { @bottom-center { content: counter(page) " / " counter(pages); font-size: 8pt; } } body { margin: 0; padding: 0; } .item { height: 720px; }</style></head><body><div class="item">first</div><div class="item">second</div></body></html>"##,
         ),
+        // PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
+        // v1 `BlockPageable::draw` (`pageable.rs:1796-1827`) paints
+        // bg / border / shadow OUTSIDE the clip, then pushes the
+        // overflow clip path, draws children INSIDE, then pops. v2 now
+        // tracks `BlockEntry.clip_descendants` and replays the same
+        // ordering via `draw_under_clip`. Without this fix, overflow
+        // children that overshoot the parent's box paint past the
+        // clip boundary.
+        (
+            "overflow hidden block with overflowing child",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:80px;height:60px;overflow:hidden;background:#cef}.inner{width:200px;height:200px;background:#fce;margin:-20px}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

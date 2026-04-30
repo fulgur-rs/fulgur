@@ -263,6 +263,18 @@ fn draw_v2_page(
     for tx in drawables.transforms.values() {
         transformed_descendants.extend(tx.descendants.iter().copied());
     }
+    // Same shape as `transformed_descendants` but keyed by an ancestor
+    // block whose `style.has_overflow_clip()` is true. Strict
+    // descendants paint inside the clip's `push_clip_path / pop` group;
+    // skipping them here prevents the main loop from also dispatching
+    // them outside the clip.
+    let mut clipped_descendants: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    for block in drawables.block_styles.values() {
+        if block.style.has_overflow_clip() {
+            clipped_descendants.extend(block.clip_descendants.iter().copied());
+        }
+    }
 
     for (&node_id, geom) in geometry {
         // Bookmark anchor: emit on the page where the node's *first*
@@ -291,6 +303,11 @@ fn draw_v2_page(
             // Drawn inside an ancestor transform group elsewhere in
             // this loop. Skipping prevents double-painting. Bookmark
             // anchor recording above already ran unconditionally.
+            continue;
+        }
+        if clipped_descendants.contains(&node_id) {
+            // Drawn inside an ancestor `overflow: hidden|clip` block's
+            // `push_clip_path / pop` group elsewhere in this loop.
             continue;
         }
         // Skip the html root: its bg / border / shadow are painted
@@ -327,11 +344,38 @@ fn draw_v2_page(
                     margin_top_pt,
                     page_index,
                 );
-            } else {
-                dispatch_fragment(
-                    canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
-                );
+                continue;
             }
+            // `overflow: hidden | clip` block: bg / border / shadow
+            // paint OUTSIDE the clip (matching v1's
+            // `BlockPageable::draw` ordering at
+            // `pageable.rs:1796-1827`), then push the clip path,
+            // dispatch self's inner content + every strict descendant
+            // INSIDE the clip, then pop. Same shape as
+            // `draw_under_transform` but with `push_clip_path`.
+            if let Some(block) = drawables.block_styles.get(&node_id)
+                && block.style.has_overflow_clip()
+                && !block.clip_descendants.is_empty()
+            {
+                draw_under_clip(
+                    canvas,
+                    block,
+                    node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            dispatch_fragment(
+                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+            );
         }
     }
 
@@ -505,6 +549,150 @@ fn draw_under_transform(
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
         lc.pop_transform();
     }
+}
+
+/// Push the block's overflow-clip path onto the surface, dispatch the
+/// wrapper's own bg / border / shadow + every descendant fragment that
+/// lands on `page_index`, then pop. Mirrors v1's `BlockPageable::draw`
+/// (`pageable.rs:1796-1827`):
+///
+/// ```text
+/// // bg/border/shadow paint OUTSIDE the clip
+/// draw_with_opacity(canvas, opacity, |c| {
+///     bg + border + shadow at (x, y, total_w, total_h);
+///     if let Some(clip) = compute_overflow_clip_path(...) {
+///         c.surface.push_clip_path(&clip, FillRule::default());
+///         for child in children { child.draw(c, x + child.x, y + child.y, ..); }
+///         c.surface.pop();
+///     }
+/// });
+/// ```
+///
+/// In v2 the wrapper's own inner content (paragraph / image / svg
+/// sharing the same `node_id`) is dispatched as part of the clipped
+/// region, then strict descendants iterate inside the clip. The block
+/// dispatcher's "shared node_id" combined helper
+/// (`draw_block_with_inner_content`) already handles the outer
+/// opacity wrap when used; here we replicate that ordering manually
+/// — bg/border outside clip, inner content + descendants inside clip,
+/// all wrapped in one opacity group.
+#[allow(clippy::too_many_arguments)]
+fn draw_under_clip(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    let total_width = block
+        .layout_size
+        .map(|s| s.width)
+        .unwrap_or_else(|| px_to_pt(frag.width));
+    let total_height = block
+        .layout_size
+        .map(|s| s.height)
+        .unwrap_or_else(|| px_to_pt(frag.height));
+
+    let para_for_block = drawables.paragraphs.get(&node_id);
+    let img_for_block = drawables.images.get(&node_id);
+    let svg_for_block = drawables.svgs.get(&node_id);
+    let inner_inset = block.style.content_inset();
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        // bg / border / shadow outside the clip — same as
+        // `draw_block_inner_paint` but inlined so the opacity wrap
+        // covers the entire clipped region too.
+        if block.visible {
+            crate::background::draw_box_shadows(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::background::draw_background(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+            crate::pageable::draw_block_border(
+                canvas,
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            );
+        }
+
+        // Push clip — fall through to inner content + descendants if
+        // `compute_overflow_clip_path` returns `None` (style somehow
+        // changed since extract decided this block clips).
+        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
+            &block.style,
+            x_pt,
+            y_pt,
+            total_width,
+            total_height,
+        ) {
+            canvas
+                .surface
+                .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+            true
+        } else {
+            false
+        };
+
+        // Inner content sharing `node_id` (inline-root paragraph,
+        // replaced image / svg) paints at the content-box top-left,
+        // not the border-box. Mirrors `draw_block_with_inner_content`.
+        let inner_x = x_pt + inner_inset.0;
+        let inner_y = y_pt + inner_inset.1;
+        if let Some(p) = para_for_block {
+            draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, &geom.fragments, page_index);
+        }
+        if let Some(i) = img_for_block {
+            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+        }
+        if let Some(s) = svg_for_block {
+            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+        }
+
+        // Strict descendants — each at its own fragment's coords.
+        for &desc_id in &block.clip_descendants {
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                dispatch_fragment(
+                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+                );
+            }
+        }
+
+        if clip_pushed {
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Paint multicol column-rule lines on `page_index` for one

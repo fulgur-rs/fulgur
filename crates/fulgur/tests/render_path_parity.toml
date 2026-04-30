@@ -95,4 +95,15 @@ allowlist = [
     "vrt://bugs/cover-page-break-after.html",
     "examples://header-footer",
     "examples://header-footer-split",
+    # PR 6 follow-up (overflow clip scope tracking, fulgur-ekz7) —
+    # `overflow: hidden | clip` blocks now record their strict
+    # descendants in `BlockEntry.clip_descendants`. v2 dispatcher
+    # paints bg / border / shadow OUTSIDE the clip, pushes the clip
+    # path, dispatches inner content + descendants INSIDE the clip,
+    # then pops — mirroring v1's `BlockPageable::draw` ordering
+    # (`pageable.rs:1796-1827`). Both VRT overflow-hidden fixtures and
+    # the examples/overflow-hidden demo lit up.
+    "vrt://layout/overflow-hidden.html",
+    "vrt://layout/overflow-hidden-rounded.html",
+    "examples://overflow-hidden",
 ]

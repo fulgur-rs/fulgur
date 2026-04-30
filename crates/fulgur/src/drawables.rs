@@ -49,6 +49,18 @@ pub struct BlockEntry {
     /// back to the fragment's width/height (CSS px → pt) at render
     /// time when absent.
     pub layout_size: Option<crate::pageable::Size>,
+    /// Strict descendant `NodeId`s that must paint INSIDE this block's
+    /// `push_clip_path` / `pop` group. Populated by
+    /// `extract_drawables_from_pageable` only when
+    /// `style.has_overflow_clip()` is true — non-clipping blocks leave
+    /// this empty so the dispatcher's main loop handles them with the
+    /// regular shared-node_id pattern.
+    ///
+    /// Mirrors the `TransformEntry.descendants` shape: render time
+    /// emits bg / border / shadow first (outside the clip, matching v1
+    /// `BlockPageable::draw` at `pageable.rs:1796-1827`), then pushes
+    /// the clip path, dispatches each descendant fragment, and pops.
+    pub clip_descendants: Vec<NodeId>,
 }
 
 /// Paragraph draw payload for v2. Holds the shaped lines that
