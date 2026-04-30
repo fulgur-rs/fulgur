@@ -859,3 +859,47 @@ fn render_v2_smoke_multicol_rule_inside_transform() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_opacity_descendants_block_with_svg() {
+    // Regression for fulgur-gdb9: a fractional-opacity block wrapping
+    // a child element of a different node_id (the canonical
+    // `<div opacity:0.4><svg>..</svg></div>` shape) must paint the
+    // svg INSIDE the parent's `draw_with_opacity` group. Without
+    // `BlockEntry.opacity_descendants` + `draw_under_opacity`, v2's
+    // flat dispatch paints svg at full opacity and double-emits the
+    // transparency group. This smoke exercises the new
+    // `draw_under_opacity` arm in `dispatch_fragment`'s precedence
+    // chain.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.faded{opacity:0.4}</style></head><body><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#1a6faa"/></svg></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_opacity_inside_overflow_clip() {
+    // Composition: a clipping ancestor with an opacity-scoped
+    // descendant. Exercises the new `nested_opacity_skip` set inside
+    // `draw_under_clip`'s descendant loop and the `draw_under_opacity`
+    // arm in the recursive descend. Without the skip, the inner
+    // opacity block's strict descendants would dispatch twice (once
+    // by the clip's main loop iteration, once under the opacity
+    // wrap).
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.clip{overflow:hidden;width:120pt;height:80pt}.faded{opacity:0.5}</style></head><body><div class="clip"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><circle cx="30" cy="30" r="25" fill="#e74c3c"/></svg></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_opacity_inside_transform() {
+    // Composition: a transformed ancestor with an opacity-scoped
+    // descendant. Exercises the new `opacity_skip` set inside
+    // `draw_under_transform`'s descendant loop and the
+    // `draw_under_opacity` arm in the recursive descend.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.tx{transform:rotate(5deg)}.faded{opacity:0.6}</style></head><body><div class="tx"><div class="faded"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#27ae60"/></svg></div></div></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}

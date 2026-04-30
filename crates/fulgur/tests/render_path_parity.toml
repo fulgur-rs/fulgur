@@ -120,6 +120,17 @@ allowlist = [
     "examples://pseudo-content-url",
     "examples://text-align",
     "examples://text-decoration",
+    # PR follow-up (cross-node_id opacity grouping, fulgur-gdb9) —
+    # `<div style="opacity:0.4"><svg>..</svg></div>` was painting the
+    # svg outside the parent's `draw_with_opacity` wrap because v2's
+    # flat dispatch had no way to nest descendants under a parent's
+    # opacity group. `BlockEntry.opacity_descendants` + new
+    # `draw_under_opacity` mirror the existing
+    # `clip_descendants` / `draw_under_clip` shape so opacity wraps
+    # everything (own paint + descendants), matching v1's
+    # `BlockPageable::draw` recursion under
+    # `draw_with_opacity(self.opacity, ..)`.
+    "examples://svg",
 ]
 
 # Known-divergent fixtures (fulgur-g7a1, 2026-04-30)

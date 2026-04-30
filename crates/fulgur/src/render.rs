@@ -289,6 +289,19 @@ fn draw_v2_page(
             clipped_descendants.extend(block.clip_descendants.iter().copied());
         }
     }
+    // Mirrors `clipped_descendants` for blocks that wrap their
+    // descendants in a `draw_with_opacity` group (fractional opacity,
+    // no clip — see `BlockEntry.opacity_descendants` and
+    // `draw_under_opacity`). Without skipping these in the main loop
+    // they'd be dispatched twice: once at full opacity here, once
+    // again under the parent's opacity wrap.
+    let mut opacity_wrapped_descendants: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    for block in drawables.block_styles.values() {
+        if !block.opacity_descendants.is_empty() {
+            opacity_wrapped_descendants.extend(block.opacity_descendants.iter().copied());
+        }
+    }
 
     for (&node_id, geom) in geometry {
         // Bookmark anchor: emit on the page where the node's *first*
@@ -322,6 +335,14 @@ fn draw_v2_page(
         if clipped_descendants.contains(&node_id) {
             // Drawn inside an ancestor `overflow: hidden|clip` block's
             // `push_clip_path / pop` group elsewhere in this loop.
+            continue;
+        }
+        if opacity_wrapped_descendants.contains(&node_id) {
+            // Drawn inside an ancestor `draw_with_opacity` group via
+            // `draw_under_opacity` elsewhere in this loop. Mirrors the
+            // `clipped_descendants` skip — without it, the descendant
+            // paints once at full opacity here and once under the
+            // parent's opacity wrap. (fulgur-gdb9)
             continue;
         }
         // Skip the html root: its bg / border / shadow are painted
@@ -394,6 +415,35 @@ fn draw_v2_page(
                 && Some(node_id) != drawables.body_id
             {
                 draw_under_clip(
+                    canvas,
+                    block,
+                    node_id,
+                    geom,
+                    frag,
+                    x_pt,
+                    y_pt,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+                continue;
+            }
+            // Fractional-opacity block with descendants: wrap own
+            // paint + descendant fragments in a single
+            // `draw_with_opacity` group. Mirrors v1's
+            // `BlockPageable::draw` recursion under
+            // `draw_with_opacity(self.opacity, ..)`. Without this,
+            // `<div opacity:0.4><svg>..</svg></div>` paints the svg
+            // outside the parent's opacity wrap, dropping the parent's
+            // opacity from the svg. (fulgur-gdb9)
+            if let Some(block) = drawables
+                .block_styles
+                .get(&node_id)
+                .filter(|b| !b.opacity_descendants.is_empty())
+            {
+                draw_under_opacity(
                     canvas,
                     block,
                     node_id,
@@ -619,8 +669,23 @@ fn draw_under_transform(
         .filter(|b| b.style.has_overflow_clip())
         .flat_map(|b| b.clip_descendants.iter().copied())
         .collect();
+    // Symmetric pre-skip for opacity-scoped descendants. When an
+    // opacity block sits inside this transform, `draw_under_opacity`
+    // (called below) iterates its own `opacity_descendants` to paint
+    // them inside the opacity wrap; iterating those nodes again here
+    // via `dispatch_fragment` would emit a second draw outside the
+    // opacity group. Mirrors `clip_skip`. (fulgur-gdb9)
+    let opacity_skip: std::collections::BTreeSet<usize> = tx
+        .descendants
+        .iter()
+        .filter_map(|id| drawables.block_styles.get(id))
+        .flat_map(|b| b.opacity_descendants.iter().copied())
+        .collect();
     for &desc_id in &tx.descendants {
-        if nested_skip.contains(&desc_id) || clip_skip.contains(&desc_id) {
+        if nested_skip.contains(&desc_id)
+            || clip_skip.contains(&desc_id)
+            || opacity_skip.contains(&desc_id)
+        {
             continue;
         }
         let Some(desc_geom) = geometry.get(&desc_id) else {
@@ -661,6 +726,32 @@ fn draw_under_transform(
                 // overflow content past the clip boundary
                 // (PR #309 follow-up Devin).
                 draw_under_clip(
+                    canvas,
+                    desc_block,
+                    desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    geometry,
+                    drawables,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+            } else if let Some(desc_block) = drawables
+                .block_styles
+                .get(&desc_id)
+                .filter(|b| !b.opacity_descendants.is_empty())
+            {
+                // Opacity-scoped descendant inside this transform.
+                // Without this branch, transforms wrapping an opacity
+                // block would dispatch the descendant's own paint via
+                // `dispatch_fragment` but skip the opacity wrap of
+                // the descendant's children, dropping the descendant
+                // block's opacity from its sub-children.
+                // (fulgur-gdb9)
+                draw_under_opacity(
                     canvas,
                     desc_block,
                     desc_id,
@@ -905,8 +996,22 @@ fn draw_under_clip(
             .filter(|b| b.style.has_overflow_clip())
             .flat_map(|b| b.clip_descendants.iter().copied())
             .collect();
+        // Symmetric pre-skip for opacity-scoped descendants nested
+        // inside this clip. Mirrors `nested_clip_skip` — without it,
+        // an opacity descendant's sub-children would be dispatched by
+        // the loop AND by `draw_under_opacity` below, double-painting
+        // them. (fulgur-gdb9)
+        let nested_opacity_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .flat_map(|b| b.opacity_descendants.iter().copied())
+            .collect();
         for &desc_id in &block.clip_descendants {
-            if transform_skip.contains(&desc_id) || nested_clip_skip.contains(&desc_id) {
+            if transform_skip.contains(&desc_id)
+                || nested_clip_skip.contains(&desc_id)
+                || nested_opacity_skip.contains(&desc_id)
+            {
                 continue;
             }
             let Some(desc_geom) = geometry.get(&desc_id) else {
@@ -961,6 +1066,28 @@ fn draw_under_clip(
                         margin_top_pt,
                         page_index,
                     );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| !b.opacity_descendants.is_empty())
+                {
+                    // Nested opacity-scoped block — recurse so its
+                    // descendants paint inside its `draw_with_opacity`
+                    // wrap. (fulgur-gdb9)
+                    draw_under_opacity(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
                 } else {
                     dispatch_fragment(
                         canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
@@ -972,6 +1099,246 @@ fn draw_under_clip(
 
         if clip_pushed {
             canvas.surface.pop();
+        }
+    });
+}
+
+/// Wrap the block's `dispatch_fragment` + every strict descendant in a
+/// single `draw_with_opacity` group. Used for blocks that have
+/// fractional opacity but no overflow clip (the clip arm,
+/// `draw_under_clip`, already handles its own opacity wrap).
+///
+/// Mirrors v1's `BlockPageable::draw` (`pageable.rs:1770-1828`):
+///
+/// ```text
+/// draw_with_opacity(canvas, self.opacity, |c| {
+///     bg + border + shadow at (x, y, total_w, total_h);
+///     for pc in self.children { pc.child.draw(c, x + pc.x, y + pc.y, ..); }
+/// });
+/// ```
+///
+/// v1 emits a single transparency-group XObject for the entire
+/// subtree. v2's flat dispatch without scope tracking would emit the
+/// block's own paint inside opacity but every descendant outside,
+/// dropping the parent's opacity on those descendants. Mirrors
+/// `draw_under_clip` minus the `push_clip_path` / `pop` calls and the
+/// list-item marker arm (a list-item with opacity uses
+/// `draw_list_item_with_block`, not this path, since list-item
+/// markers are owned by `ListItemEntry` rather than `BlockEntry`).
+#[allow(clippy::too_many_arguments)]
+fn draw_under_opacity(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    node_id: usize,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::pageable::draw_with_opacity;
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        // Block's own paint + shared-node_id inner content. We can
+        // re-use `dispatch_fragment` because it already handles the
+        // shared-node_id case via `draw_block_with_inner_content`,
+        // which itself opens a `draw_with_opacity(block.opacity, ..)`
+        // wrap. That nested wrap is harmless: krilla composes nested
+        // opacity groups by multiplication (0.4 × 1.0 = 0.4, since the
+        // inner block-with-inner-content uses the SAME opacity),
+        // matching the v1 chain `draw_with_opacity(0.4) → child draws`
+        // where the child happens to also be a block at full opacity.
+        //
+        // For pure-block-with-descendants (the case we're fixing —
+        // `<div opacity:0.4><svg>..</svg></div>`), `dispatch_fragment`
+        // calls `draw_block_v2` which wraps own paint in
+        // `draw_with_opacity(0.4)`. The outer wrap here multiplies to
+        // 0.16 — wrong! Inline the block's own paint without the inner
+        // opacity wrap to avoid this.
+        if drawables.list_items.contains_key(&node_id) {
+            // Inside an opacity-scoped block path we never reach a
+            // list-item: list-items dispatch through their own
+            // `draw_list_item_with_block` which composes the marker +
+            // body block + paragraph in one opacity group. If a
+            // list-item carries opacity, it would not have entered
+            // `draw_under_opacity` because list-item's opacity comes
+            // from `ListItemEntry`, not `BlockEntry`. Defensive guard
+            // only — should be unreachable.
+            dispatch_fragment(
+                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+            );
+        } else {
+            // Block bg / border / shadow without the inner opacity
+            // wrap. The shared-node_id (`paragraph` / `image` / `svg`
+            // at the same node_id) inner content paints at the
+            // content-box top-left; mirrors
+            // `draw_block_with_inner_content`'s body but without its
+            // own `draw_with_opacity` since the outer wrap already
+            // covers it.
+            let para_for_block = drawables.paragraphs.get(&node_id);
+            let img_for_block = drawables.images.get(&node_id);
+            let svg_for_block = drawables.svgs.get(&node_id);
+            let total_width = block
+                .layout_size
+                .map(|s| s.width)
+                .unwrap_or_else(|| px_to_pt(frag.width));
+            let total_height = block
+                .layout_size
+                .map(|s| s.height)
+                .unwrap_or_else(|| px_to_pt(frag.height));
+            if block.visible {
+                crate::background::draw_box_shadows(
+                    canvas,
+                    &block.style,
+                    x_pt,
+                    y_pt,
+                    total_width,
+                    total_height,
+                );
+                crate::background::draw_background(
+                    canvas,
+                    &block.style,
+                    x_pt,
+                    y_pt,
+                    total_width,
+                    total_height,
+                );
+                crate::pageable::draw_block_border(
+                    canvas,
+                    &block.style,
+                    x_pt,
+                    y_pt,
+                    total_width,
+                    total_height,
+                );
+            }
+            let inner_inset = block.style.content_inset();
+            let inner_x = x_pt + inner_inset.0;
+            let inner_y = y_pt + inner_inset.1;
+            if let Some(p) = para_for_block {
+                draw_paragraph_inner_paint(
+                    canvas,
+                    p,
+                    inner_x,
+                    inner_y,
+                    &geom.fragments,
+                    page_index,
+                );
+            }
+            if let Some(i) = img_for_block {
+                draw_image_inner_paint(canvas, i, inner_x, inner_y);
+            }
+            if let Some(s) = svg_for_block {
+                draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+            }
+        }
+
+        // Descendants — same dispatch tree as `draw_under_clip` minus
+        // the nested-clip recursion (an opacity-scoped block by
+        // construction has `clipping == false`, so its descendants
+        // can still individually have clip / transform / opacity, and
+        // those need their own scope helpers).
+        let transform_skip: std::collections::BTreeSet<usize> = block
+            .opacity_descendants
+            .iter()
+            .filter_map(|id| drawables.transforms.get(id))
+            .flat_map(|tx| tx.descendants.iter().copied())
+            .collect();
+        let nested_clip_skip: std::collections::BTreeSet<usize> = block
+            .opacity_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .filter(|b| b.style.has_overflow_clip())
+            .flat_map(|b| b.clip_descendants.iter().copied())
+            .collect();
+        let nested_opacity_skip: std::collections::BTreeSet<usize> = block
+            .opacity_descendants
+            .iter()
+            .filter_map(|id| drawables.block_styles.get(id))
+            .flat_map(|b| b.opacity_descendants.iter().copied())
+            .collect();
+        for &desc_id in &block.opacity_descendants {
+            if transform_skip.contains(&desc_id)
+                || nested_clip_skip.contains(&desc_id)
+                || nested_opacity_skip.contains(&desc_id)
+            {
+                continue;
+            }
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            for desc_frag in &desc_geom.fragments {
+                if desc_frag.page_index != page_index {
+                    continue;
+                }
+                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
+                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                    draw_under_transform(
+                        canvas,
+                        desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| b.style.has_overflow_clip())
+                    .filter(|_| Some(desc_id) != drawables.body_id)
+                {
+                    draw_under_clip(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else if let Some(desc_block) = drawables
+                    .block_styles
+                    .get(&desc_id)
+                    .filter(|b| !b.opacity_descendants.is_empty())
+                {
+                    draw_under_opacity(
+                        canvas,
+                        desc_block,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else {
+                    dispatch_fragment(
+                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        page_index,
+                    );
+                }
+            }
         }
     });
 }

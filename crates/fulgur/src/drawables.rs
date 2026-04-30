@@ -61,6 +61,20 @@ pub struct BlockEntry {
     /// `BlockPageable::draw` at `pageable.rs:1796-1827`), then pushes
     /// the clip path, dispatches each descendant fragment, and pops.
     pub clip_descendants: Vec<NodeId>,
+    /// Strict descendant `NodeId`s that must paint INSIDE this block's
+    /// `draw_with_opacity` group. Populated by
+    /// `extract_drawables_from_pageable` only when `opacity < 1.0`
+    /// AND the block does NOT have overflow clip (clip's
+    /// `draw_under_clip` already wraps its descendants in
+    /// `draw_with_opacity` so the dual case is covered there).
+    ///
+    /// Mirrors v1's `BlockPageable::draw` ordering: opacity wraps
+    /// EVERYTHING — bg/border/shadow + descendants — so a
+    /// `<div style="opacity:0.4"><svg>..</svg></div>` produces a
+    /// single transparency group. v2's flat dispatch without this
+    /// scope tracking would emit the svg outside the parent's
+    /// opacity wrap, dropping the parent's opacity from the svg.
+    pub opacity_descendants: Vec<NodeId>,
 }
 
 /// Paragraph draw payload for v2. Holds the shaped lines that
