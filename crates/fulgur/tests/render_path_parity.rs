@@ -390,6 +390,18 @@ fn inline_byte_equality_cases() {
             "nested transforms (rotate around translate)",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;background:#cef;transform:translate(10px,5px)}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
         ),
+        // PR #305 follow-up Devin: nested transforms with a
+        // non-transform descendant inside the inner transform caused
+        // double-draw — `draw_under_transform` for the OUTER iterated
+        // its full `descendants` list (which includes the inner's own
+        // descendants), so the deeply nested node was painted once
+        // under outer*inner (correct, via the inner recursion) and a
+        // second time under outer only (wrong). Regression: a styled
+        // grandchild block inside two stacked transforms.
+        (
+            "triple nested transform descendant double-draw",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##,
+        ),
         // PR 6 follow-up: shared-node_id inner content (inline-root
         // paragraph from `convert::inline_root`, replaced image/svg
         // from `convert::replaced`) must paint at the wrapping block's

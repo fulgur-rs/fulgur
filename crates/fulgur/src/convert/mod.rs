@@ -215,7 +215,16 @@ fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
     let root = doc.root_element();
     let root_node = base.get_node(root.id)?;
     for &child_id in &root_node.children {
-        let child = base.get_node(child_id)?;
+        // `?` would early-return `None` if any sibling lookup fails,
+        // hiding `<body>` past an unfindable `<head>` etc. — `let Some
+        // ... else { continue; }` matches the sibling helpers
+        // (`extract_body_offset_pt`, `pagination_layout::find_body_id`)
+        // and keeps continuation-page `<body>` background paint alive
+        // when one of the html root's earlier children can't be looked
+        // up (PR #305 Devin).
+        let Some(child) = base.get_node(child_id) else {
+            continue;
+        };
         if let blitz_dom::NodeData::Element(elem) = &child.data
             && elem.name.local.as_ref() == "body"
         {

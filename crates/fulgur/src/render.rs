@@ -449,7 +449,25 @@ fn draw_under_transform(
     // inner transform would be silently dropped, breaking
     // `<div style="transform:rotate"><div style="transform:scale">`
     // (PR #305 Devin).
+    //
+    // Pre-skip the strict descendants of any nested transform so they
+    // are not dispatched twice — the nested `draw_under_transform`
+    // already iterates `desc_tx.descendants` and paints them under
+    // the composed matrix; iterating them again here via
+    // `dispatch_fragment` would emit a SECOND draw under the outer
+    // transform only (missing the inner matrix). Bug confirmed by
+    // PR #305 follow-up Devin trace for
+    // `<div transform:A><div transform:B><p>text</p></div></div>`.
+    let nested_skip: std::collections::BTreeSet<usize> = tx
+        .descendants
+        .iter()
+        .filter_map(|id| drawables.transforms.get(id))
+        .flat_map(|inner_tx| inner_tx.descendants.iter().copied())
+        .collect();
     for &desc_id in &tx.descendants {
+        if nested_skip.contains(&desc_id) {
+            continue;
+        }
         let Some(desc_geom) = geometry.get(&desc_id) else {
             continue;
         };
