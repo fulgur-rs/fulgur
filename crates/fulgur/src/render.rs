@@ -895,9 +895,26 @@ fn draw_under_clip(
         .layout_size
         .map(|s| s.width)
         .unwrap_or_else(|| px_to_pt(frag.width));
+    // Mirror `draw_block_inner_paint` / `draw_under_opacity`'s
+    // `is_split` height fix. When this `overflow: hidden | clip`
+    // block spans multiple pages (one fragment per page slice), use
+    // `frag.height` so each slice paints its per-page bg / border /
+    // shadow at the slice height — and pushes a clip rectangle of
+    // the slice height too. Without this the bg / border overflows
+    // the page bottom on earlier slices, double-paints on
+    // continuation pages, AND the clip rect on continuation pages
+    // covers content that should be cut off.
+    // (PR #313 follow-up Devin Review — completes the PR #316 fix.)
+    let is_split = geom.fragments.len() > 1;
     let total_height = block
         .layout_size
-        .map(|s| s.height)
+        .map(|s| {
+            if is_split && frag.height > 0.0 {
+                px_to_pt(frag.height)
+            } else {
+                s.height
+            }
+        })
         .unwrap_or_else(|| px_to_pt(frag.height));
 
     let para_for_block = drawables.paragraphs.get(&node_id);

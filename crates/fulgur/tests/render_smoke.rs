@@ -1111,3 +1111,40 @@ fn render_v2_smoke_split_opacity_block_uses_per_slice_height() {
         "expected multi-page output for split-opacity test, got {page_count}",
     );
 }
+
+#[test]
+fn render_v2_smoke_split_overflow_clip_block_uses_per_slice_height() {
+    // Regression for PR #313 follow-up Devin Review: an
+    // `overflow: hidden` block that spans multiple pages must
+    // paint its bg / border / shadow at the per-page slice height
+    // (`frag.height`) and push a clip rectangle of the slice
+    // height too — not at the full `layout_size.height`.
+    //
+    // PR #316 added `is_split` height handling to
+    // `draw_block_inner_paint`; PR #314 follow-up added it to
+    // `draw_under_opacity`; this test guards `draw_under_clip`
+    // (the third parallel paint path). Without the fix, the
+    // overflow:hidden block overflows the page bottom on earlier
+    // slices AND the clip rectangle on continuation pages covers
+    // content that should be cut off.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        body{margin:0;padding:0;font-size:10pt}
+        .filler{height:600pt;background:#eef}
+        .clip{overflow:hidden;height:300pt;background:#cef;border:2pt solid #44a;margin-top:12pt}
+        .clip > .inner{height:60pt;background:#fef;margin:6pt}
+    </style></head><body>
+        <div class="filler"></div>
+        <div class="clip"><div class="inner">clipped content</div></div>
+    </body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+    // Multi-page sanity (filler 600pt + clip 300pt + 12pt margin
+    // = 912pt > A4 ~842pt content height).
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page output for split-overflow-clip test, got {page_count}",
+    );
+}
