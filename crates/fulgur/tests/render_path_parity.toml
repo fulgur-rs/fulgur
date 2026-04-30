@@ -1,0 +1,26 @@
+# Phase 4 (fulgur-9t3z) shadow harness allowlist.
+#
+# Each fixture path listed here MUST produce byte-identical PDFs when
+# rendered via `Engine::render_html` (v1 = Pageable trait path) and
+# `Engine::render_html_v2` (v2 = geometry + Drawables path).
+#
+# As Phase 4 progresses, each PR migrates one Pageable type and adds the
+# fixtures it covers to this allowlist. PR 7 (default flip) requires
+# this file to cover every fixture in:
+#
+# - `crates/fulgur-vrt/manifest.toml` (currently 39 fixtures)
+# - `crates/fulgur-cli/tests/examples_determinism.rs` (currently 11)
+# - GCPM fixtures under `crates/fulgur-vrt/fixtures/gcpm/` (already
+#   covered by the VRT manifest above)
+#
+# PR 1 ships with an empty allowlist — the harness still runs both
+# paths against every fixture and reports coverage, but no byte-eq
+# assertions fire.
+
+# Format: TOML array of relative paths. Paths are resolved against the
+# fixture roots in `render_path_parity.rs::FIXTURE_ROOTS`.
+
+allowlist = [
+    # PR 2 will add: vrt://basic/solid-box, vrt://basic/borders,
+    # examples://image, etc.
+]
