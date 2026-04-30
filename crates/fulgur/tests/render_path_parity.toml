@@ -229,3 +229,29 @@ allowlist = [
 #
 # Resolution: defer to PR 8 v1 deletion. Fixing v1 in flight would
 # touch `slice_for_page` for a quirk that disappears with the path.
+
+# Known-divergent: v2 renders content v1 silently drops (fulgur-bq6i:wasm-demo)
+# ----------------------------------------------------------------------
+# `examples/wasm-demo` is intentionally NOT allowlisted because v2's
+# `fragment_pagination_root` now walks `body.layout_children` (when
+# present) for the same reason `record_subtree_descendants` does:
+# Stylo synthesizes anonymous block wrappers around inline-level
+# siblings of block-level body children, and those wrappers carry
+# the inline content's `node_id`.
+#
+# After the body-level layout_children fix, v2 picks up
+# `<label>` / `<legend>` / `<select>` / `<option>` / `<input>` /
+# `<button>` paint that v1 silently drops because v1's body
+# iteration only saw the raw children list (which omits the
+# anonymous wrappers Stylo creates for the form-element row).
+#
+# Net delta: v2 is 53 bytes longer than v1 on this fixture because
+# v2 also paints the `<button id="render" disabled>Loading WASM…
+# </button>` text that v1 omits. v2 is the more visually correct
+# output — Phase 4's whole point is that the geometry-driven path
+# fixes coverage gaps in the Pageable path, and this is one such
+# gap that becomes the canonical behavior after PR 8 v1 deletion.
+#
+# Resolution: defer to PR 8 v1 deletion. Once the v1 path is gone,
+# the parity test compares v2 vs v2 (trivially byte-eq). For users
+# rendering form-heavy HTML to PDF, this is a v2 improvement.
