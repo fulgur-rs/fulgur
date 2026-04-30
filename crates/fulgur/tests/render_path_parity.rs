@@ -412,6 +412,20 @@ fn inline_byte_equality_cases() {
             "html background distinct from body background",
             r##"<!DOCTYPE html><html><head><style>html, body { margin:0; padding:0; background:white; } .g { width:120px; height:80px; margin:24px; background:red; }</style></head><body><div class="g"></div></body></html>"##,
         ),
+        // PR 6 follow-up (fulgur-9y1a) — `extract_drawables_from_pageable`
+        // recurses into the Pageable tree to populate per-NodeId draw
+        // payloads. `LineItem::InlineBox` carries inner content (e.g.
+        // an inline `<svg>`) that `paragraph::draw_shaped_lines`
+        // paints via `ib.content.draw(...)` directly. Recursing into
+        // that content registered it again in `svgs` / `block_styles`
+        // and the v2 dispatcher then double-painted at the fragment's
+        // own coordinates (e.g. `body + svg_margin` for
+        // `<svg style="margin:Npx">`). Drop the recurse so inline-box
+        // content stays a pure paragraph-rooted draw.
+        (
+            "body with inline svg margin",
+            r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0}</style></head><body><svg width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="margin:20px"><rect x="0" y="0" width="40" height="40" fill="#fa0"/></svg></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading
