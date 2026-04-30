@@ -1,32 +1,14 @@
-//! fulgur-9t3z: v2 path support for `<table style="overflow:hidden">`
-//! cell clipping. Mirrors `style_test.rs::test_overflow_hidden_on_table_clips`
-//! but routes explicitly through `render_html_v2`.
+//! fulgur-9t3z: nested-scope coverage for table `overflow:hidden|clip`
+//! in the v2 render path. Cases that aren't directly covered by
+//! `style_test.rs::test_overflow_hidden_on_table_clips` (which only
+//! exercises the simple case): table-clip inside a transform scope,
+//! and inner cell `overflow:hidden` inside an outer clipping table.
 
 use fulgur::{Engine, PageSize};
 
-#[test]
-fn v2_table_overflow_hidden_emits_clip_path() {
-    let engine = Engine::builder().page_size(PageSize::A4).build();
-    let html_hidden = r#"<html><body>
-        <table style="width:100px;height:60px;overflow:hidden">
-            <tr><td style="width:300px;height:300px;background:orange">cell</td></tr>
-        </table>
-    </body></html>"#;
-    let pdf_hidden = engine.render_html_v2(html_hidden).expect("render v2");
-    assert!(pdf_hidden.starts_with(b"%PDF"));
-
-    let html_visible = r#"<html><body>
-        <table style="width:100px;height:60px">
-            <tr><td style="width:300px;height:300px;background:orange">cell</td></tr>
-        </table>
-    </body></html>"#;
-    let pdf_visible = engine.render_html_v2(html_visible).expect("render v2");
-
-    assert_ne!(
-        pdf_hidden, pdf_visible,
-        "v2: overflow:hidden on a table should emit a clip path different from default"
-    );
-}
+// Simple-case coverage (`<table overflow:hidden>` with one cell) lives
+// in `style_test.rs::test_overflow_hidden_on_table_clips`; this file
+// only adds the cases that file does not exercise.
 
 /// PR #320 Devin: an `overflow:hidden` table inside a `transform`
 /// scope must still push its clip path. Without the table-clip arm
@@ -42,7 +24,7 @@ fn v2_overflow_hidden_table_inside_transform_keeps_clip() {
             </table>
         </div>
     </body></html>"#;
-    let pdf_hidden = engine.render_html_v2(html_hidden).expect("render v2");
+    let pdf_hidden = engine.render_html(html_hidden).expect("render v2");
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -52,7 +34,7 @@ fn v2_overflow_hidden_table_inside_transform_keeps_clip() {
             </table>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html_v2(html_visible).expect("render v2");
+    let pdf_visible = engine.render_html(html_visible).expect("render v2");
 
     assert_ne!(
         pdf_hidden, pdf_visible,
@@ -74,7 +56,7 @@ fn v2_table_clip_with_inner_cell_clip_keeps_inner_boundary() {
             </td></tr>
         </table>
     </body></html>"#;
-    let pdf_inner_hidden = engine.render_html_v2(html_inner_hidden).expect("render v2");
+    let pdf_inner_hidden = engine.render_html(html_inner_hidden).expect("render v2");
     assert!(pdf_inner_hidden.starts_with(b"%PDF"));
 
     let html_inner_visible = r#"<html><body>
@@ -84,9 +66,7 @@ fn v2_table_clip_with_inner_cell_clip_keeps_inner_boundary() {
             </td></tr>
         </table>
     </body></html>"#;
-    let pdf_inner_visible = engine
-        .render_html_v2(html_inner_visible)
-        .expect("render v2");
+    let pdf_inner_visible = engine.render_html(html_inner_visible).expect("render v2");
 
     assert_ne!(
         pdf_inner_hidden, pdf_inner_visible,

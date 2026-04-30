@@ -652,9 +652,9 @@ mod extract_drawables_tests {
     /// **before** calling `dom_to_pageable`. `convert_node` drains the
     /// map via `.remove(&node_id)` for every visited node, so a naive
     /// post-call read sees an empty map (PR #301 Devin). End-to-end
-    /// test through `Engine::render_html_v2` with `bookmarks(true)`:
-    /// the rendered PDF must contain `/Outlines` even though the v2
-    /// path is the one that builds the outline.
+    /// test through `Engine::render_html` (defaulted to v2 in PR 7)
+    /// with `bookmarks(true)`: the rendered PDF must contain
+    /// `/Outlines` because the v2 path builds the outline.
     #[test]
     fn dom_to_drawables_preserves_bookmark_anchors_for_outline() {
         use crate::config::PageSize;
@@ -665,7 +665,7 @@ mod extract_drawables_tests {
             .page_size(PageSize::A4)
             .bookmarks(true)
             .build();
-        let pdf = engine.render_html_v2(html).expect("render v2");
+        let pdf = engine.render_html(html).expect("render v2");
         let pdf_str = String::from_utf8_lossy(&pdf);
         assert!(
             pdf_str.contains("/Outlines"),
