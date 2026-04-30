@@ -491,17 +491,6 @@ pub trait Pageable: Send + Sync {
     /// Downcast support for tests.
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Walk this Pageable and record any block-level `id` anchors into
-    /// `registry`, in page-local coordinates.
-    ///
-    /// `(x, y)` is the top-left of this element in the current page's
-    /// content area. Containers must recurse into their children using the
-    /// same positional arithmetic that `draw()` uses so anchor positions
-    /// match the rendered output.
-    ///
-    /// Default: no-op. Overridden on block-like Pageables (`BlockPageable`)
-    /// and containers that hold children (pagination wrappers, `ListItemPageable`,
-    /// `TablePageable`, etc.).
     /// Whether this pageable should be drawn. Defaults to `true`.
     ///
     /// Concrete types that track a `visibility: hidden` style (Block,
