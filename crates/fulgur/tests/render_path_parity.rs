@@ -675,3 +675,52 @@ fn known_divergent_fixtures_stay_within_f32_ulp_bound() {
         );
     }
 }
+
+/// Bounded-divergence regression for `vrt://bugs/grid-row-promote-background.html`
+/// (fulgur-bq6i). v1 paints an off-page card slice at a different
+/// numeric y than v2 because of a `BlockPageable::slice_for_page`
+/// quirk: when an ancestor (`.grid`) has no fragment on the current
+/// page but its descendants do, `self_page_y` falls back to 0 and
+/// the child's `new_y` is computed against that fallback while the
+/// ancestor's own `pc.y` (body-relative) is also added by the draw
+/// chain — producing y = 1681pt vs v2's correct 868.94pt. Both are
+/// off-page (page bottom is 822pt); only the numeric Tm operand
+/// differs and the renderer clips both via the page MediaBox.
+///
+/// See the "Known-divergent v1 quirk" comment block in
+/// `render_path_parity.toml` for the full chain.
+///
+/// Resolution: defer to PR 8 v1 deletion. This test asserts the
+/// divergence stays within the v1-quirk-only bound; if some future
+/// change grows it past that, this fires.
+#[test]
+fn grid_row_promote_v1_quirk_stays_within_quirk_bound() {
+    use fulgur::Engine;
+
+    let root = repo_root();
+    let html_path = root.join("crates/fulgur-vrt/fixtures/bugs/grid-row-promote-background.html");
+    let html = std::fs::read_to_string(&html_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", html_path.display()));
+
+    let engine = Engine::builder().build();
+    let v1 = engine
+        .render_html(&html)
+        .unwrap_or_else(|e| panic!("v1 render: {e}"));
+    let v2 = engine
+        .render_html_v2(&html)
+        .unwrap_or_else(|e| panic!("v2 render: {e}"));
+
+    // Empirically the diff is 15 bytes — single off-page slice y plus
+    // matching border-edge y. ≤32 leaves margin for xref re-flow
+    // without masking real layout regressions.
+    let len_diff = (v1.len() as isize - v2.len() as isize).unsigned_abs();
+    assert!(
+        len_diff <= 32,
+        "grid-row-promote: byte-length divergence ballooned \
+         (v1={}B v2={}B, |diff|={len_diff}B). Expected ≤32B for the \
+         v1 slice-y quirk. A larger diff means real visible layout \
+         has changed — investigate before raising the bound.",
+        v1.len(),
+        v2.len(),
+    );
+}

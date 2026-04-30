@@ -522,6 +522,13 @@ fn dispatch_fragment(
         draw_table_v2(canvas, table, x_pt, y_pt, frag);
         return;
     }
+    // True when this block / list-item / paragraph spans multiple
+    // pages (the fragmenter recorded one fragment per page slice).
+    // Passed down so `draw_block_inner_paint` can use the per-page
+    // slice height (`frag.height`) instead of `layout_size.height`
+    // — without it, every slice paints the FULL block, which
+    // doubled the callout in `examples/break-inside` (fulgur-bq6i).
+    let is_split = geom.fragments.len() > 1;
     // ListItem case: marker + body block + inline-root paragraph
     // share a single opacity group. See `draw_list_item_with_block`
     // for the v1 mirror.
@@ -538,6 +545,7 @@ fn dispatch_fragment(
             frag,
             &geom.fragments,
             page_index,
+            is_split,
         );
         return;
     }
@@ -560,10 +568,11 @@ fn dispatch_fragment(
                 frag,
                 &geom.fragments,
                 page_index,
+                is_split,
             );
             return;
         }
-        draw_block_v2(canvas, block, x_pt, y_pt, frag);
+        draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
     }
     if let Some(img) = drawables.images.get(&node_id) {
         draw_image_v2(canvas, img, x_pt, y_pt);
@@ -1574,11 +1583,12 @@ fn draw_block_v2(
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
+    is_split: bool,
 ) {
     use crate::pageable::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        draw_block_inner_paint(canvas, entry, x, y, frag);
+        draw_block_inner_paint(canvas, entry, x, y, frag, is_split);
     });
 }
 
@@ -1645,14 +1655,39 @@ fn draw_block_inner_paint(
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
+    is_split: bool,
 ) {
     let total_width = entry
         .layout_size
         .map(|s| s.width)
         .unwrap_or_else(|| crate::convert::px_to_pt(frag.width));
+    // For split blocks (one fragment per page), `frag.height` reports
+    // the per-page slice height. `entry.layout_size.height` always
+    // carries Taffy's full block height, so painting bg / border with
+    // `layout_size` would draw the FULL block on every slice — visible
+    // as a callout-box overflowing page bottom on page 1 AND repeating
+    // full-size on page 2 (fulgur-bq6i: `examples/break-inside`).
+    //
+    // Mirror v1: `BlockPageable::slice_for_page` returns a sliced
+    // pageable whose `layout_size.height` already equals the slice
+    // height, so v1's draw uses the slice-correct height naturally.
+    // v2 has a single `BlockEntry` per node_id holding the full
+    // layout, so we recover the slice-correct height from
+    // `frag.height` only when the dispatcher tells us this is a
+    // split fragment (`is_split = geom.fragments.len() > 1`). Using
+    // a multi-fragment signal — not a `frag_h < layout_h` comparison
+    // — avoids spurious flips for single-page blocks where the two
+    // values may differ by 1 ULP after CSS-px → pt conversion
+    // rounding.
     let total_height = entry
         .layout_size
-        .map(|s| s.height)
+        .map(|s| {
+            if is_split && frag.height > 0.0 {
+                crate::convert::px_to_pt(frag.height)
+            } else {
+                s.height
+            }
+        })
         .unwrap_or_else(|| crate::convert::px_to_pt(frag.height));
 
     if entry.visible {
@@ -1743,6 +1778,7 @@ fn draw_block_with_inner_content(
     frag: &crate::pagination_layout::Fragment,
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
+    is_split: bool,
 ) {
     use crate::pageable::draw_with_opacity;
 
@@ -1762,7 +1798,7 @@ fn draw_block_with_inner_content(
     let inner_y = y + iy;
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
-        draw_block_inner_paint(canvas, block, x, y, frag);
+        draw_block_inner_paint(canvas, block, x, y, frag, is_split);
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
         }
@@ -1799,6 +1835,7 @@ fn draw_list_item_with_block(
     frag: &crate::pagination_layout::Fragment,
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
+    is_split: bool,
 ) {
     use crate::pageable::draw_with_opacity;
 
@@ -1815,7 +1852,7 @@ fn draw_list_item_with_block(
             draw_list_item_marker(canvas, list_item, x, y);
         }
         if let Some(b) = block {
-            draw_block_inner_paint(canvas, b, x, y, frag);
+            draw_block_inner_paint(canvas, b, x, y, frag, is_split);
         }
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(canvas, p, inner_x, inner_y, fragments, page_index);
