@@ -697,15 +697,12 @@ fn render_v2_smoke_bookmarks_under_transform() {
 }
 
 #[test]
-fn render_v2_smoke_triple_nested_transform_descendants() {
-    // Exercises the `nested_skip` pre-collection in
-    // `draw_under_transform` added in PR #305 follow-up Devin: the
-    // outer transform's `descendants` includes the inner transform's
-    // own descendants (e.g. a styled grandchild block), so the
-    // outer's iteration must skip them or they get painted twice —
-    // once correctly under outer*inner via the recursion, and once
-    // wrongly under outer only.
-    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:200px;height:120px;background:#cef;transform:translate(8px,4px)}.inner{width:120px;height:80px;background:#fce;transform:rotate(5deg)}.leaf{width:40px;height:20px;background:#ffd}</style></head><body><div class="outer"><div class="inner"><div class="leaf"></div></div></div></body></html>"##;
+fn render_v2_smoke_transform_inside_overflow_clip() {
+    // Exercises `draw_under_clip`'s transform-aware descendant
+    // dispatch added in PR #310 Devin fix: a `transform` nested
+    // inside `overflow:hidden` was dropped because the main loop
+    // pre-skips `clipped_descendants` before the transform check.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());

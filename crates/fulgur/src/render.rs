@@ -749,7 +749,30 @@ fn draw_under_clip(
         }
 
         // Strict descendants — each at its own fragment's coords.
+        //
+        // Transform-aware dispatch: a descendant that has its own
+        // `TransformEntry` must enter `draw_under_transform` so the
+        // surface transform composes correctly. The main loop skips
+        // these nodes via `clipped_descendants.contains(...)` BEFORE
+        // it reaches the per-fragment transform check, so without the
+        // recursion below v2 silently drops transforms inside an
+        // `overflow: hidden` ancestor (`<div style="overflow:hidden">
+        // <div style="transform:..."/></div>` — PR #310 Devin).
+        //
+        // Pre-skip the strict descendants of those transforms so they
+        // are not dispatched twice — once via `draw_under_transform`
+        // (which iterates `tx.descendants`) and once via the loop
+        // body's `dispatch_fragment`.
+        let transform_skip: std::collections::BTreeSet<usize> = block
+            .clip_descendants
+            .iter()
+            .filter_map(|id| drawables.transforms.get(id))
+            .flat_map(|tx| tx.descendants.iter().copied())
+            .collect();
         for &desc_id in &block.clip_descendants {
+            if transform_skip.contains(&desc_id) {
+                continue;
+            }
             let Some(desc_geom) = geometry.get(&desc_id) else {
                 continue;
             };
@@ -759,9 +782,27 @@ fn draw_under_clip(
                 }
                 let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
                 let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
-                dispatch_fragment(
-                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
-                );
+                if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
+                    draw_under_transform(
+                        canvas,
+                        desc_tx,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        geometry,
+                        drawables,
+                        margin_left_pt,
+                        margin_top_pt,
+                        page_index,
+                    );
+                } else {
+                    dispatch_fragment(
+                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        page_index,
+                    );
+                }
             }
         }
 

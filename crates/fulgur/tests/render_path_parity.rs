@@ -486,6 +486,17 @@ fn inline_byte_equality_cases() {
             "overflow hidden block with shared-node_id inline text",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
         ),
+        // PR #310 follow-up Devin: a transform nested inside an
+        // `overflow:hidden` block was silently dropped because the
+        // main loop pre-skips `clipped_descendants` BEFORE the
+        // per-fragment transform check. `draw_under_clip` now
+        // dispatches transform-key descendants via
+        // `draw_under_transform` (and pre-skips their own descendants
+        // so they are not painted twice).
+        (
+            "transform inside overflow:hidden ancestor",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.outer{width:120px;height:80px;overflow:hidden;background:#cef}.inner{width:60px;height:40px;background:#fce;transform:rotate(10deg)}</style></head><body><div class="outer"><div class="inner"></div></div></body></html>"##,
+        ),
         // PR #310 follow-up Devin: `<li style="overflow:hidden">` must
         // (a) draw its marker (markers sit outside the body box at
         // negative x, so `draw_under_clip` must emit the marker before
