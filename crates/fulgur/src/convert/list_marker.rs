@@ -424,3 +424,436 @@ pub(super) fn inject_inside_marker_item_into_children(
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blitz_adapter::Marker;
+    use crate::image::ImageFormat;
+    use crate::pageable::{BlockPageable, PositionedChild, SpacerPageable};
+    use crate::paragraph::{
+        InlineBoxItem, InlineImage, ParagraphPageable, ShapedGlyph, ShapedGlyphRun, ShapedLine,
+        TextDecoration, VerticalAlign,
+    };
+    use std::sync::Arc;
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    fn dummy_arc() -> Arc<Vec<u8>> {
+        Arc::new(vec![])
+    }
+
+    fn text_run(font_size: f32, x_offset: f32, text: &str) -> ShapedGlyphRun {
+        ShapedGlyphRun {
+            font_data: dummy_arc(),
+            font_index: 0,
+            font_size,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 1,
+                x_advance: 0.5,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..text.len(),
+            }],
+            text: text.to_string(),
+            x_offset,
+            link: None,
+        }
+    }
+
+    fn text_run_with_two_glyphs(font_size: f32) -> ShapedGlyphRun {
+        ShapedGlyphRun {
+            font_data: dummy_arc(),
+            font_index: 0,
+            font_size,
+            color: [255, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![
+                ShapedGlyph {
+                    id: 1,
+                    x_advance: 0.5,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 0..1,
+                },
+                ShapedGlyph {
+                    id: 2,
+                    x_advance: 0.5,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 1..2,
+                },
+            ],
+            text: "\u{2022} ".to_string(),
+            x_offset: 0.0,
+            link: None,
+        }
+    }
+
+    fn paragraph_with_items(items: Vec<LineItem>) -> ParagraphPageable {
+        ParagraphPageable::new(vec![ShapedLine {
+            height: 12.0,
+            baseline: 10.0,
+            items,
+        }])
+    }
+
+    fn in_flow(child: Box<dyn crate::pageable::Pageable>) -> PositionedChild {
+        PositionedChild::in_flow(child, 0.0, 0.0)
+    }
+
+    fn noto_sans_bytes() -> Arc<Vec<u8>> {
+        let bytes = std::fs::read("../../examples/.fonts/NotoSans-Regular.ttf")
+            .expect("NotoSans-Regular.ttf not found; run from crates/fulgur/");
+        Arc::new(bytes)
+    }
+
+    // ─── inject_inside_marker_item_into_children ──────────────────────────────
+
+    #[test]
+    fn inject_empty_children_returns_false() {
+        let marker = LineItem::Text(text_run(12.0, 0.0, "•"));
+        assert!(!inject_inside_marker_item_into_children(&mut [], marker));
+    }
+
+    #[test]
+    fn inject_no_paragraph_descendant_returns_false() {
+        let mut children = vec![in_flow(Box::new(SpacerPageable::new(10.0)))];
+        let marker = LineItem::Text(text_run(12.0, 0.0, "•"));
+        assert!(!inject_inside_marker_item_into_children(
+            &mut children,
+            marker
+        ));
+    }
+
+    #[test]
+    fn inject_text_marker_prepended_and_existing_items_shifted() {
+        let existing = LineItem::Text(text_run(12.0, 5.0, "Hello"));
+        let para = paragraph_with_items(vec![existing]);
+        let mut children = vec![in_flow(Box::new(para))];
+
+        // Two glyphs of x_advance 0.5 at font_size 12 → marker_width = 2 × 0.5 × 12 = 12 pt
+        let marker = LineItem::Text(text_run_with_two_glyphs(12.0));
+        let result = inject_inside_marker_item_into_children(&mut children, marker);
+        assert!(result);
+
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        let line = &para.lines[0];
+        assert_eq!(line.items.len(), 2, "marker + original");
+        // marker text is the first item
+        if let LineItem::Text(r) = &line.items[0] {
+            assert_eq!(r.text, "\u{2022} ");
+        } else {
+            panic!("expected Text at index 0");
+        }
+        // original item's x_offset shifted by marker_width (12)
+        if let LineItem::Text(r) = &line.items[1] {
+            assert!(
+                (r.x_offset - 17.0).abs() < 0.01,
+                "x_offset should be 5+12=17, got {}",
+                r.x_offset
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn inject_image_marker_shifts_existing_items_by_image_width() {
+        let existing = LineItem::Text(text_run(12.0, 3.0, "A"));
+        let para = paragraph_with_items(vec![existing]);
+        let mut children = vec![in_flow(Box::new(para))];
+
+        let img = InlineImage {
+            data: dummy_arc(),
+            format: ImageFormat::Png,
+            width: 20.0,
+            height: 10.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        };
+        let result = inject_inside_marker_item_into_children(&mut children, LineItem::Image(img));
+        assert!(result);
+
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        // original Text item shifted by img.width = 20
+        if let LineItem::Text(r) = &para.lines[0].items[1] {
+            assert!(
+                (r.x_offset - 23.0).abs() < 0.01,
+                "x_offset should be 3+20=23, got {}",
+                r.x_offset
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn inject_inline_box_marker_shifts_by_box_width() {
+        let existing = LineItem::Text(text_run(12.0, 0.0, "Z"));
+        let para = paragraph_with_items(vec![existing]);
+        let mut children = vec![in_flow(Box::new(para))];
+
+        let ib = InlineBoxItem {
+            content: Box::new(SpacerPageable::new(0.0)),
+            width: 15.0,
+            height: 12.0,
+            x_offset: 0.0,
+            computed_y: 0.0,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        };
+        let result =
+            inject_inside_marker_item_into_children(&mut children, LineItem::InlineBox(ib));
+        assert!(result);
+
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        if let LineItem::Text(r) = &para.lines[0].items[1] {
+            assert!(
+                (r.x_offset - 15.0).abs() < 0.01,
+                "x_offset should be 0+15=15, got {}",
+                r.x_offset
+            );
+        } else {
+            panic!("expected Text at index 1");
+        }
+    }
+
+    #[test]
+    fn inject_text_marker_into_empty_paragraph_creates_line() {
+        let para = ParagraphPageable::new(vec![]);
+        let mut children = vec![in_flow(Box::new(para))];
+
+        let run = text_run(10.0, 0.0, "•");
+        let result = inject_inside_marker_item_into_children(&mut children, LineItem::Text(run));
+        assert!(result);
+
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(
+            para.lines.len(),
+            1,
+            "a line should be created for the marker"
+        );
+        assert_eq!(para.lines[0].items.len(), 1);
+        // line_height = font_size × DEFAULT_LINE_HEIGHT_RATIO = 10 × 1.2 = 12
+        assert!((para.lines[0].height - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn inject_image_marker_into_empty_paragraph_uses_image_height() {
+        let para = ParagraphPageable::new(vec![]);
+        let mut children = vec![in_flow(Box::new(para))];
+
+        let img = InlineImage {
+            data: dummy_arc(),
+            format: ImageFormat::Png,
+            width: 8.0,
+            height: 18.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        };
+        let result = inject_inside_marker_item_into_children(&mut children, LineItem::Image(img));
+        assert!(result);
+
+        let para = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(para.lines.len(), 1);
+        assert!(
+            (para.lines[0].height - 18.0).abs() < 0.01,
+            "line height should match image height"
+        );
+    }
+
+    #[test]
+    fn inject_paragraph_nested_in_block_succeeds() {
+        let para = paragraph_with_items(vec![LineItem::Text(text_run(12.0, 0.0, "Hi"))]);
+        let block = BlockPageable::new(vec![Box::new(para)]);
+        let mut children = vec![in_flow(Box::new(block))];
+
+        let marker = LineItem::Text(text_run(12.0, 0.0, "•"));
+        assert!(inject_inside_marker_item_into_children(
+            &mut children,
+            marker
+        ));
+
+        // Verify the block child was replaced and contains the updated paragraph
+        let block = children[0]
+            .child
+            .as_any()
+            .downcast_ref::<BlockPageable>()
+            .unwrap();
+        let para = block.children[0]
+            .child
+            .as_any()
+            .downcast_ref::<ParagraphPageable>()
+            .unwrap();
+        assert_eq!(para.lines[0].items.len(), 2, "marker + original item");
+    }
+
+    // ─── shape_marker_with_skrifa ──────────────────────────────────────────────
+
+    #[test]
+    fn shape_marker_invalid_font_bytes_returns_none() {
+        let bad_font = Arc::new(b"not a font".to_vec());
+        assert!(
+            shape_marker_with_skrifa(
+                &Marker::Char('\u{2022}'),
+                &bad_font,
+                0,
+                12.0,
+                [0, 0, 0, 255]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn shape_marker_char_appends_trailing_space() {
+        let font_data = noto_sans_bytes();
+        let run = shape_marker_with_skrifa(&Marker::Char('A'), &font_data, 0, 12.0, [0, 0, 0, 255])
+            .expect("valid font should succeed");
+        // Marker::Char appends a space → "A "
+        assert_eq!(run.text, "A ");
+        assert_eq!(run.glyphs.len(), 2, "two chars → two glyphs");
+        // glyph advances normalised by font_size
+        for g in &run.glyphs {
+            assert!(g.x_advance >= 0.0, "x_advance must be non-negative");
+        }
+        assert_eq!(run.font_size, 12.0);
+        assert_eq!(run.color, [0, 0, 0, 255]);
+        assert_eq!(run.x_offset, 0.0);
+    }
+
+    #[test]
+    fn shape_marker_string_uses_text_verbatim() {
+        let font_data = noto_sans_bytes();
+        let run = shape_marker_with_skrifa(
+            &Marker::String("1. ".to_string()),
+            &font_data,
+            0,
+            10.0,
+            [255, 0, 0, 255],
+        )
+        .expect("valid font should succeed");
+        // Marker::String → text unchanged, no extra space
+        assert_eq!(run.text, "1. ");
+        assert_eq!(run.glyphs.len(), 3, "'1', '.', ' ' → three glyphs");
+        assert_eq!(run.color, [255, 0, 0, 255]);
+        assert_eq!(run.font_size, 10.0);
+    }
+
+    #[test]
+    fn shape_marker_glyph_byte_offsets_cover_text() {
+        let font_data = noto_sans_bytes();
+        let run = shape_marker_with_skrifa(&Marker::Char('A'), &font_data, 0, 12.0, [0, 0, 0, 255])
+            .unwrap();
+        // text_range of last glyph should end at text.len()
+        let last = run.glyphs.last().unwrap();
+        assert_eq!(last.text_range.end, run.text.len());
+    }
+
+    // ─── find_marker_font ──────────────────────────────────────────────────────
+
+    #[test]
+    fn find_marker_font_no_assets_no_children_returns_none() {
+        assert!(find_marker_font(&Marker::Char('\u{2022}'), None, &[]).is_none());
+    }
+
+    #[test]
+    fn find_marker_font_from_paragraph_child() {
+        let font_data = noto_sans_bytes();
+        let run = ShapedGlyphRun {
+            font_data: Arc::clone(&font_data),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: "A".to_string(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let para = paragraph_with_items(vec![LineItem::Text(run)]);
+        let children = vec![in_flow(Box::new(para))];
+
+        let result = find_marker_font(&Marker::Char('A'), None, &children);
+        assert!(result.is_some(), "should find font that covers 'A'");
+        let (found, idx) = result.unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(found.len(), font_data.len());
+    }
+
+    #[test]
+    fn find_marker_font_from_block_wrapping_paragraph() {
+        let font_data = noto_sans_bytes();
+        let run = ShapedGlyphRun {
+            font_data: Arc::clone(&font_data),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: "B".to_string(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let para = paragraph_with_items(vec![LineItem::Text(run)]);
+        let block = BlockPageable::new(vec![Box::new(para)]);
+        let children = vec![in_flow(Box::new(block))];
+
+        let result = find_marker_font(&Marker::Char('B'), None, &children);
+        assert!(
+            result.is_some(),
+            "should find font recursively through BlockPageable"
+        );
+    }
+
+    #[test]
+    fn find_marker_font_invalid_font_bytes_skipped() {
+        // A ShapedGlyphRun with bytes that skrifa cannot parse → skipped, returns None.
+        let run = ShapedGlyphRun {
+            font_data: Arc::new(b"garbage".to_vec()),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: "X".to_string(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let para = paragraph_with_items(vec![LineItem::Text(run)]);
+        let children = vec![in_flow(Box::new(para))];
+        assert!(find_marker_font(&Marker::Char('X'), None, &children).is_none());
+    }
+}
