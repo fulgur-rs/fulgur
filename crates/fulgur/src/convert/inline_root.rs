@@ -139,7 +139,6 @@ pub(super) fn try_convert(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, height);
                 // Use Taffy's computed height (includes padding + border) instead of children-only height
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
@@ -203,7 +202,6 @@ pub(super) fn try_convert(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }

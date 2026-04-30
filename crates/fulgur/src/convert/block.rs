@@ -39,13 +39,11 @@ pub(super) fn convert(
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node_id));
-            block.wrap(width, height);
             block.layout_size = Some(Size { width, height });
             return Box::new(block);
         }
         // Plain leaf node — create a spacer with the computed height
-        let mut spacer = SpacerPageable::new(height).with_node_id(Some(node_id));
-        spacer.wrap(width, height);
+        let spacer = SpacerPageable::new(height).with_node_id(Some(node_id));
         return Box::new(spacer);
     }
 
@@ -56,7 +54,6 @@ pub(super) fn convert(
     let (positioned_children, _has_pseudo) =
         pseudo::wrap_with_pseudo_content(doc, node, ctx, depth, content_box, positioned_children);
 
-    let has_style = style.needs_block_wrapper();
     let (opacity, visible) = extract_opacity_visible(node);
     let mut block = BlockPageable::with_positioned_children(positioned_children)
         .with_style(style)
@@ -64,9 +61,6 @@ pub(super) fn convert(
         .with_visible(visible)
         .with_id(extract_block_id(node))
         .with_node_id(Some(node_id));
-    block.wrap(width, 10000.0);
-    if has_style {
-        block.layout_size = Some(Size { width, height });
-    }
+    block.layout_size = Some(Size { width, height });
     Box::new(block)
 }

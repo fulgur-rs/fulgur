@@ -415,8 +415,9 @@ pub(super) fn inject_inside_marker_item_into_children(
     if let Some(block) = pc.child.as_any().downcast_ref::<BlockPageable>() {
         let mut block_clone = block.clone();
         if inject_inside_marker_item_into_children(&mut block_clone.children, marker_item) {
-            let wrap_w = block_clone.layout_size.map(|s| s.width).unwrap_or(10000.0);
-            block_clone.wrap(wrap_w, 10000.0);
+            // Marker injection only mutates an inline child paragraph's lines;
+            // the block's outer Taffy-derived `layout_size` is unchanged so we
+            // do not recompute it here.
             pc.child = Box::new(block_clone);
             return true;
         }

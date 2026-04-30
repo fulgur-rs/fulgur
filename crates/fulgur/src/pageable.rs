@@ -479,8 +479,6 @@ pub fn draw_with_opacity(
 /// Core pagination-aware layout trait.
 pub trait Pageable: Send + Sync {
     /// Measure size within available area.
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size;
-
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
 
@@ -1638,31 +1636,6 @@ pub(crate) fn draw_block_border(
 }
 
 impl Pageable for BlockPageable {
-    fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
-        // Ensure children have been wrapped (split() creates unwrapped children)
-        for pc in &mut self.children {
-            if pc.child.height() == 0.0 {
-                pc.child.wrap(avail_width, 10000.0);
-            }
-        }
-        // Use max of children's (y + height) for total height. Out-of-flow
-        // children (`position: absolute|fixed`) are excluded per CSS 2.1
-        // §10.6.4 — they do not contribute to the parent's flow height.
-        let total_height = self.children.iter_mut().fold(0.0f32, |max_h, pc| {
-            if pc.out_of_flow {
-                return max_h;
-            }
-            let child_h = pc.child.height();
-            max_h.max(pc.y + child_h)
-        });
-        let size = Size {
-            width: avail_width,
-            height: total_height,
-        };
-        self.cached_size = Some(size);
-        size
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
@@ -1797,13 +1770,6 @@ impl SpacerPageable {
 }
 
 impl Pageable for SpacerPageable {
-    fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: avail_width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {
         // Spacers are invisible
     }
@@ -1892,13 +1858,6 @@ impl BookmarkMarkerPageable {
 }
 
 impl Pageable for BookmarkMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, _x: Pt, y: Pt, _aw: Pt, _ah: Pt) {
         self.record_if_collecting(y, canvas.bookmark_collector.as_deref_mut());
     }
@@ -1934,10 +1893,6 @@ impl BookmarkMarkerWrapperPageable {
 }
 
 impl Pageable for BookmarkMarkerWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, aw: Pt, ah: Pt) {
         self.marker.draw(canvas, x, y, aw, ah);
         self.child.draw(canvas, x, y, aw, ah);
@@ -1993,13 +1948,6 @@ impl StringSetPageable {
 }
 
 impl Pageable for StringSetPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
@@ -2046,13 +1994,6 @@ impl RunningElementMarkerPageable {
 }
 
 impl Pageable for RunningElementMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
@@ -2087,13 +2028,6 @@ impl CounterOpMarkerPageable {
 }
 
 impl Pageable for CounterOpMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
@@ -2137,10 +2071,6 @@ impl CounterOpWrapperPageable {
 }
 
 impl Pageable for CounterOpWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2225,10 +2155,6 @@ impl TransformWrapperPageable {
 }
 
 impl Pageable for TransformWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.inner.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         let full = self.effective_matrix(x, y);
         if let Some(lc) = canvas.link_collector.as_deref_mut() {
@@ -2305,10 +2231,6 @@ impl StringSetWrapperPageable {
 }
 
 impl Pageable for StringSetWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2375,10 +2297,6 @@ impl RunningElementWrapperPageable {
 }
 
 impl Pageable for RunningElementWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2517,10 +2435,6 @@ impl MulticolRulePageable {
 }
 
 impl Pageable for MulticolRulePageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         // Columns paint their own contents first.
         self.child.draw(canvas, x, y, avail_width, avail_height);
@@ -2668,15 +2582,6 @@ pub struct ListItemPageable {
 }
 
 impl Pageable for ListItemPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        let body_size = self.body.wrap(avail_width, avail_height);
-        self.height = body_size.height;
-        Size {
-            width: avail_width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             if self.visible {
@@ -2771,23 +2676,6 @@ pub struct TablePageable {
 }
 
 impl Pageable for TablePageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        if let Some(ls) = self.layout_size {
-            self.cached_height = ls.height;
-            return ls;
-        }
-        let max_h = self
-            .header_cells
-            .iter()
-            .chain(self.body_cells.iter())
-            .fold(0.0f32, |acc, pc| acc.max(pc.y + pc.child.height()));
-        self.cached_height = max_h;
-        Size {
-            width: self.width,
-            height: max_h,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             let total_width = self.width;
@@ -2886,33 +2774,6 @@ impl Pageable for TablePageable {
 mod tests {
     use super::*;
 
-    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
-        let mut s = SpacerPageable::new(h);
-        s.wrap(100.0, 1000.0);
-        Box::new(s)
-    }
-
-    #[test]
-    fn test_list_item_delegates_to_body() {
-        let body = make_spacer(100.0);
-        let mut item = ListItemPageable {
-            marker: ListItemMarker::Text {
-                lines: Vec::new(),
-                width: 20.0,
-            },
-            marker_line_height: 0.0,
-            body,
-            style: BlockStyle::default(),
-            width: 200.0,
-            height: 100.0,
-            opacity: 1.0,
-            visible: true,
-            node_id: None,
-        };
-        let size = item.wrap(200.0, 1000.0);
-        assert!((size.height - 100.0).abs() < 0.01);
-    }
-
     #[test]
     fn test_clamp_marker_size_below_line_height() {
         // 16x16 px image (= 12x12 pt) with line-height 24 pt → stays intrinsic
@@ -2945,10 +2806,7 @@ mod tests {
 
     #[test]
     fn test_string_set_pageable_zero_size() {
-        let mut p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
-        let size = p.wrap(100.0, 100.0);
-        assert_eq!(size.width, 0.0);
-        assert_eq!(size.height, 0.0);
+        let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
         assert_eq!(p.height(), 0.0);
     }
 
@@ -3005,8 +2863,7 @@ mod tests {
     #[test]
     fn destination_registry_ignores_blocks_without_id() {
         // A BlockPageable with `id: None` should not register anything.
-        let mut block = BlockPageable::with_positioned_children(vec![]);
-        block.wrap(100.0, 100.0);
+        let block = BlockPageable::with_positioned_children(vec![]);
         let mut registry = DestinationRegistry::default();
         registry.set_current_page(0);
         block.collect_ids(0.0, 0.0, 100.0, 100.0, &mut registry);
@@ -3569,17 +3426,10 @@ mod transform_wrapper_tests {
 
     #[derive(Clone)]
     struct StubPageable {
-        w: Pt,
         h: Pt,
     }
 
     impl Pageable for StubPageable {
-        fn wrap(&mut self, _: Pt, _: Pt) -> Size {
-            Size {
-                width: self.w,
-                height: self.h,
-            }
-        }
         fn draw(&self, _: &mut Canvas<'_, '_>, _: Pt, _: Pt, _: Pt, _: Pt) {}
         fn clone_box(&self) -> Box<dyn Pageable> {
             Box::new(self.clone())
@@ -3592,17 +3442,13 @@ mod transform_wrapper_tests {
         }
     }
 
-    fn wrap(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
-        TransformWrapperPageable::new(
-            Box::new(StubPageable { w: 100.0, h: 100.0 }),
-            matrix,
-            origin,
-        )
+    fn make_wrapper(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
+        TransformWrapperPageable::new(Box::new(StubPageable { h: 100.0 }), matrix, origin)
     }
 
     #[test]
     fn translate_only_matrix() {
-        let w = wrap(Affine2D::translation(10.0, 20.0), Point2::new(0.0, 0.0));
+        let w = make_wrapper(Affine2D::translation(10.0, 20.0), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         assert!(approx(m.e, 10.0));
         assert!(approx(m.f, 20.0));
@@ -3612,7 +3458,7 @@ mod transform_wrapper_tests {
 
     #[test]
     fn rotate_90_maps_unit_vector_at_origin_zero() {
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 1.0 + m.c * 0.0 + m.e;
         let y = m.b * 1.0 + m.d * 0.0 + m.f;
@@ -3625,7 +3471,7 @@ mod transform_wrapper_tests {
         // A 100×100 box rotated 90° around its center must leave the center
         // point fixed — verified through the composed matrix rather than
         // any intermediate step.
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 50.0 + m.c * 50.0 + m.e;
         let y = m.b * 50.0 + m.d * 50.0 + m.f;
@@ -3639,7 +3485,7 @@ mod transform_wrapper_tests {
         // where effective_matrix() drops the (draw_x, draw_y) addition: the
         // absolute fixed point in canvas coordinates must be (10+50, 20+50)
         // = (60, 70).
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
         let m = w.effective_matrix(10.0, 20.0);
         let x = m.a * 60.0 + m.c * 70.0 + m.e;
         let y = m.b * 60.0 + m.d * 70.0 + m.f;
@@ -3654,22 +3500,14 @@ mod transform_wrapper_tests {
     }
 
     #[test]
-    fn wrap_delegates_to_inner_size() {
-        let mut w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
-        let size = w.wrap(1000.0, 1000.0);
-        assert!(approx(size.width, 100.0));
-        assert!(approx(size.height, 100.0));
+    fn wrapper_height_delegates_to_inner() {
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
+        assert!(approx(w.height(), 100.0));
     }
 
     #[test]
     fn bookmark_marker_is_zero_sized_and_draws_nothing() {
         let m = BookmarkMarkerPageable::new(1, "Chapter 1".to_string());
-        let size = {
-            let mut c = m.clone();
-            c.wrap(100.0, 100.0)
-        };
-        assert_eq!(size.width, 0.0);
-        assert_eq!(size.height, 0.0);
         assert_eq!(m.height(), 0.0);
         assert_eq!(m.level, 1);
         assert_eq!(m.label, "Chapter 1");
@@ -3916,8 +3754,7 @@ mod multicol_rule_tests {
     use crate::multicol_layout::ColumnGroupGeometry;
 
     fn make_spacer(h: Pt) -> Box<dyn Pageable> {
-        let mut s = SpacerPageable::new(h);
-        s.wrap(100.0, 1000.0);
+        let s = SpacerPageable::new(h);
         Box::new(s)
     }
 
@@ -3942,18 +3779,19 @@ mod multicol_rule_tests {
     }
 
     #[test]
-    fn multicol_rule_wrapper_delegates_wrap_and_height() {
-        // wrap() and height() must pass through to the child unchanged.
+    fn multicol_rule_wrapper_delegates_height() {
+        // height() must pass through to the child unchanged.
         let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
-        let child_size = block.wrap(200.0, 1000.0);
-        let expected_h = child_size.height;
-        let mut wrapped = MulticolRulePageable::new(
+        block.cached_size = Some(Size {
+            width: 200.0,
+            height: 200.0,
+        });
+        let expected_h = block.height();
+        let wrapped = MulticolRulePageable::new(
             Box::new(block),
             make_rule_spec(ColumnRuleStyle::Solid),
             vec![make_group(0.0, vec![100.0, 80.0])],
         );
-        let w_size = wrapped.wrap(200.0, 1000.0);
-        assert!((w_size.height - expected_h).abs() < 1e-3);
         assert!((wrapped.height() - expected_h).abs() < 1e-3);
     }
 

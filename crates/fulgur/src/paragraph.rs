@@ -5,7 +5,7 @@ use std::sync::Arc;
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pageable, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -941,14 +941,6 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
 }
 
 impl Pageable for ParagraphPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        self.cached_height = self.lines.iter().map(|l| l.height).sum();
-        Size {
-            width: _avail_width,
-            height: self.cached_height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         if !self.visible {
             return;

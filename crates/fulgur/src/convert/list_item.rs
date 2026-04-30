@@ -69,18 +69,17 @@ pub(super) fn try_convert(
             ctx,
             depth,
         );
-        let mut item = ListItemPageable {
+        let item = ListItemPageable {
             marker,
             marker_line_height,
             body,
             style: BlockStyle::default(),
             width,
-            height: 0.0,
+            height,
             opacity,
             visible,
             node_id: Some(node_id),
         };
-        item.wrap(width, 10000.0);
         return Some(Box::new(item));
     }
 
@@ -127,18 +126,17 @@ pub(super) fn try_convert(
                 ctx,
                 depth,
             );
-            let mut item = ListItemPageable {
+            let item = ListItemPageable {
                 marker,
                 marker_line_height: line_height,
                 body,
                 style: BlockStyle::default(),
                 width,
-                height: 0.0,
+                height,
                 opacity,
                 visible,
                 node_id: Some(node_id),
             };
-            item.wrap(width, 10000.0);
             return Some(Box::new(item));
         }
     }
@@ -218,17 +216,13 @@ pub(super) fn try_convert(
                     content_box,
                     paragraph_children,
                 );
-                let needs_wrapper = style.needs_block_wrapper();
                 let mut block = BlockPageable::with_positioned_children(positioned_children)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, 10000.0);
-                if needs_wrapper {
-                    block.layout_size = Some(Size { width, height });
-                }
+                block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }
             // No marker resolved — fall through to normal empty-element handling
@@ -290,17 +284,13 @@ pub(super) fn try_convert(
                 content_box,
                 positioned_children,
             );
-            let has_style = style.needs_block_wrapper();
             let mut block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_opacity(opacity)
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node_id));
-            block.wrap(width, 10000.0);
-            if has_style {
-                block.layout_size = Some(Size { width, height });
-            }
+            block.layout_size = Some(Size { width, height });
             return Some(Box::new(block));
         }
     }
@@ -404,7 +394,6 @@ fn build_list_item_body(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node.id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
@@ -460,7 +449,6 @@ fn build_list_item_body(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node.id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
@@ -490,7 +478,7 @@ fn build_list_item_body(
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node.id));
-            block.wrap(width, 10000.0);
+            block.layout_size = Some(Size { width, height });
             Box::new(block)
         }
     } else {
@@ -511,7 +499,7 @@ fn build_list_item_body(
             .with_visible(visible)
             .with_id(extract_block_id(node))
             .with_node_id(Some(node.id));
-        block.wrap(width, 10000.0);
+        block.layout_size = Some(Size { width, height });
         Box::new(block)
     }
 }
