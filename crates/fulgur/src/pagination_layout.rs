@@ -53,15 +53,13 @@
 //! - `break-before` / `break-after` / `break-inside: avoid` from the
 //!   shared [`crate::column_css::ColumnStyleTable`] side-table.
 //!
-//! # Test-gated experimental surface
+//! # Production extension points
 //!
-//! [`collect_string_set_states`], [`append_position_fixed_fragments`],
-//! and [`implied_page_count`] are gated `#[cfg(test)]` because they
-//! describe extension points (Pageable's string-set walk replacement,
-//! geometry-driven fixed repetition) that have no production consumer
-//! yet. They stay visible to the in-file test module so the fragmenter's
-//! comparison harness can exercise them; future PRs un-gate them when
-//! a real consumer lands.
+//! [`collect_string_set_states`] and [`implied_page_count`] are `pub`
+//! for use by `render_v2` and friends. [`append_position_fixed_fragments`]
+//! is wired into `engine.rs` so v2's geometry-driven dispatch can
+//! repeat `position: fixed` elements on every page (`is_repeat=true`
+//! on the resulting `PaginationGeometry`).
 
 use blitz_dom::BaseDocument;
 use std::collections::BTreeMap;
@@ -92,9 +90,35 @@ pub struct Fragment {
 /// fragments — but in the current measurement-only implementation we
 /// emit it as a single oversized fragment on the page where its top
 /// edge lands, because we have no inline / break point information yet.
+///
+/// # Repeat vs. split semantics
+///
+/// `is_repeat = false` (default): the vector represents a *split* —
+/// each fragment is one slice of the same content, so consumers
+/// accumulate `frag.height` to recover where to slice paragraph lines
+/// or block content.
+///
+/// `is_repeat = true`: the vector represents *per-page repetition* —
+/// every fragment carries the full content (`width` / `height` ==
+/// the full element size). Consumers must NOT slice; each fragment
+/// is a complete redraw at the same coordinates. Used by
+/// [`append_position_fixed_fragments`] for `position: fixed` elements
+/// that repeat on every page.
 #[derive(Clone, Debug, Default)]
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
+    pub is_repeat: bool,
+}
+
+impl PaginationGeometry {
+    /// Whether this node's content was *split* across multiple pages —
+    /// i.e. each fragment is a slice of the same content. Returns
+    /// `false` when the geometry represents per-page repetition
+    /// (`is_repeat == true`), because in that case every fragment
+    /// carries the full content and slicers must NOT subdivide it.
+    pub fn is_split(&self) -> bool {
+        !self.is_repeat && self.fragments.len() > 1
+    }
 }
 
 /// Side-table mapping DOM `usize` NodeIds to their pagination geometry.
@@ -1889,14 +1913,17 @@ pub fn collect_counter_states(
 /// page (Chrome-compatible behaviour for paged media — see WPT
 /// fixedpos-* family).
 ///
-/// Production currently achieves per-page fixed-element repetition via
-/// `pageable::PositionedChild::is_fixed` (the slice path replicates
-/// fixed children at their viewport-relative coordinates on every
-/// page). The geometry-table approach this function provides is kept
-/// under `#[cfg(test)]` as scaffolding for a future architecture where
-/// convert / render consume the fragmenter's geometry directly. Both
-/// paths produce equivalent observable output today.
-#[cfg(test)]
+/// fulgur-rpvu: wired into the v2 production path. v2's
+/// `dispatch_fragment` loop iterates `Fragment`s per (node_id, page),
+/// so emitting one Fragment per page for each `position: fixed`
+/// element produces the expected per-page repetition naturally. The
+/// resulting `PaginationGeometry.is_repeat` is set to `true` so
+/// consumers know each fragment carries the *full* content rather
+/// than a slice (paragraph-line / block-height slicing must be
+/// suppressed for repeat fragments). v1's
+/// `pageable::PositionedChild::is_fixed` slice path remains in place
+/// while v1 is compiled; both paths produce equivalent output for
+/// fixed elements until PR 8 deletes v1.
 ///
 /// `total_pages` is the document's resolved page count, typically
 /// computed from `PaginationGeometryTable`'s max `page_index + 1` after
@@ -1954,6 +1981,7 @@ pub fn append_position_fixed_fragments(
         // single fragment). Per-page repetition is the canonical
         // representation for fixed content.
         entry.fragments.clear();
+        entry.is_repeat = true;
         for page_index in 0..pages {
             entry.fragments.push(Fragment {
                 page_index,
@@ -1976,9 +2004,7 @@ pub fn append_position_fixed_fragments(
 /// by the time this runs, and pseudo-elements (`::before` / `::after`)
 /// live in `node.before` / `node.after` outside the children vec.
 ///
-/// Test-only — only [`append_position_fixed_fragments`] uses it, and
-/// that function is `#[cfg(test)]`.
-#[cfg(test)]
+/// Used by [`append_position_fixed_fragments`].
 fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usize>, depth: usize) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 

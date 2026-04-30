@@ -281,11 +281,29 @@ impl Engine {
         };
         let resolved_content_height_pt =
             resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
-        let pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
+        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
             doc.deref_mut(),
             crate::convert::pt_to_px(resolved_content_height_pt),
             &column_styles,
             &running_store,
+        );
+
+        // fulgur-rpvu: append per-page fragments for every `position:
+        // fixed` element so v2's geometry-driven dispatch repeats them
+        // on every page. The fragmenter itself skips out-of-flow nodes
+        // (`fragment_pagination_root` `continue` for `Pos::Fixed`), so
+        // without this pass `position: fixed` elements never reach
+        // `dispatch_fragment` under v2. v1's `PositionedChild::is_fixed`
+        // slice path provides the same per-page repetition until PR 8
+        // deletes v1; both paths produce equivalent observable output.
+        // The added geometry entries set `is_repeat = true` so paragraph
+        // / block slicers know each fragment carries the *full* content
+        // rather than a slice (see `PaginationGeometry::is_split`).
+        let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
+        crate::pagination_layout::append_position_fixed_fragments(
+            &mut pagination_geometry,
+            doc.deref_mut(),
+            total_pages,
         );
 
         // --- Convert DOM to Pageable and render ---
