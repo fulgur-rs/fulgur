@@ -85,7 +85,6 @@ where
             .with_visible(visible)
             .with_id(extract_block_id(node))
             .with_node_id(Some(node.id));
-        block.wrap(width, height);
         block.layout_size = Some(Size { width, height });
         Box::new(block)
     } else {

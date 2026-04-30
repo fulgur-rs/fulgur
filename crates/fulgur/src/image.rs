@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::pageable::{Canvas, Pageable, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt};
 
 /// Image format detected from data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,13 +170,6 @@ impl ImagePageable {
 }
 
 impl Pageable for ImagePageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: self.width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         use crate::pageable::draw_with_opacity;
 

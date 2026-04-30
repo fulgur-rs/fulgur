@@ -69,18 +69,17 @@ pub(super) fn try_convert(
             ctx,
             depth,
         );
-        let mut item = ListItemPageable {
+        let item = ListItemPageable {
             marker,
             marker_line_height,
             body,
             style: BlockStyle::default(),
             width,
-            height: 0.0,
+            height,
             opacity,
             visible,
             node_id: Some(node_id),
         };
-        item.wrap(width, 10000.0);
         return Some(Box::new(item));
     }
 
@@ -127,18 +126,17 @@ pub(super) fn try_convert(
                 ctx,
                 depth,
             );
-            let mut item = ListItemPageable {
+            let item = ListItemPageable {
                 marker,
                 marker_line_height: line_height,
                 body,
                 style: BlockStyle::default(),
                 width,
-                height: 0.0,
+                height,
                 opacity,
                 visible,
                 node_id: Some(node_id),
             };
-            item.wrap(width, 10000.0);
             return Some(Box::new(item));
         }
     }
@@ -225,7 +223,6 @@ pub(super) fn try_convert(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, 10000.0);
                 if needs_wrapper {
                     block.layout_size = Some(Size { width, height });
                 }
@@ -297,7 +294,6 @@ pub(super) fn try_convert(
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node_id));
-            block.wrap(width, 10000.0);
             if has_style {
                 block.layout_size = Some(Size { width, height });
             }
@@ -404,7 +400,6 @@ fn build_list_item_body(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node.id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
@@ -460,7 +455,6 @@ fn build_list_item_body(
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node.id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 Box::new(block)
             } else {
@@ -485,12 +479,11 @@ fn build_list_item_body(
                 content_box,
                 positioned_children,
             );
-            let mut block = BlockPageable::with_positioned_children(positioned_children)
+            let block = BlockPageable::with_positioned_children(positioned_children)
                 .with_style(style)
                 .with_visible(visible)
                 .with_id(extract_block_id(node))
                 .with_node_id(Some(node.id));
-            block.wrap(width, 10000.0);
             Box::new(block)
         }
     } else {
@@ -506,12 +499,11 @@ fn build_list_item_body(
             content_box,
             positioned_children,
         );
-        let mut block = BlockPageable::with_positioned_children(positioned_children)
+        let block = BlockPageable::with_positioned_children(positioned_children)
             .with_style(style)
             .with_visible(visible)
             .with_id(extract_block_id(node))
             .with_node_id(Some(node.id));
-        block.wrap(width, 10000.0);
         Box::new(block)
     }
 }
