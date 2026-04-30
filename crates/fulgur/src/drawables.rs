@@ -205,6 +205,29 @@ pub struct Drawables {
     /// in geometry but absolute on Drawables avoids touching the
     /// fragmenter contract.
     pub body_offset_pt: (f32, f32),
+    /// NodeId of the `<html>` root element when present.
+    ///
+    /// v1 paints html's own `background` BEFORE recursing into body
+    /// via `BlockPageable::draw`'s recursive children walk. v2's flat
+    /// dispatch never visits html — the fragmenter only records body
+    /// and its descendants in `geometry` — so `render_v2` paints html
+    /// as a pre-pass at the page's top-left margin using
+    /// `block_styles[root_id].layout_size` as the rect dimensions.
+    /// That mirrors v1's `total_width / total_height` derivation in
+    /// `BlockPageable::draw` (`pageable.rs:1771-1778`).
+    pub root_id: Option<NodeId>,
+    /// NodeId of the `<body>` element when present.
+    ///
+    /// v1 paints body's `background` on EVERY page because each
+    /// page's sliced root pageable still calls body's draw method.
+    /// v2's main dispatch sees body via the fragmenter's single
+    /// fragment on page 0 only, so multi-page documents would lose
+    /// body's bg fill on continuation pages. `render_v2` mirrors v1
+    /// by painting body as a pre-pass on every page (using
+    /// `block_styles[body_id].layout_size` for the rect dimensions
+    /// and `body_offset_pt` for the margin offset), then skipping
+    /// body in the main dispatch loop to avoid double-painting.
+    pub body_id: Option<NodeId>,
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,

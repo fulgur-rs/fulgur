@@ -201,7 +201,28 @@ pub fn dom_to_drawables(
     extract_drawables_from_pageable(root_pageable.as_ref(), &mut drawables);
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
     drawables.body_offset_pt = extract_body_offset_pt(doc);
+    drawables.root_id = Some(doc.root_element().id);
+    drawables.body_id = find_body_id_in_dom(doc);
     drawables
+}
+
+/// Locate the `<body>` element id by walking the html root's children.
+/// Mirrors `pagination_layout::find_body_id` but operates on the
+/// `HtmlDocument` API (the latter is private to that module).
+fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let root = doc.root_element();
+    let root_node = base.get_node(root.id)?;
+    for &child_id in &root_node.children {
+        let child = base.get_node(child_id)?;
+        if let blitz_dom::NodeData::Element(elem) = &child.data
+            && elem.name.local.as_ref() == "body"
+        {
+            return Some(child_id);
+        }
+    }
+    None
 }
 
 /// Phase 4 PR 5: walk the DOM looking for `<body>` and return its
