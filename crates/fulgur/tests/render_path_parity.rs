@@ -486,6 +486,25 @@ fn inline_byte_equality_cases() {
             "overflow hidden block with shared-node_id inline text",
             r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}.box{width:50px;height:30px;overflow:hidden;background:#cef;font-size:8pt;line-height:1.2;white-space:nowrap}</style></head><body><div class="box">long overflowing text content</div></body></html>"##,
         ),
+        // PR #310 follow-up Devin: `<li style="overflow:hidden">` must
+        // (a) draw its marker (markers sit outside the body box at
+        // negative x, so `draw_under_clip` must emit the marker before
+        // pushing the clip path), and (b) honour `list_item.opacity`,
+        // not `block.opacity` — `convert::list_item::build_list_item_body`
+        // builds the body block with default opacity=1.0 because v1's
+        // `ListItemPageable::draw` carries the opacity at the outer
+        // wrap. Using `block.opacity` here silently drops any CSS
+        // opacity set on the `<li>`.
+        //
+        // The `<li>` wraps a sized `<div>` block child so the body
+        // BlockPageable's `cached_size.height` carries a non-zero
+        // value through to render — `convert::list_item::build_list_item_body`'s
+        // non-inline-root branch (line 508) doesn't set `layout_size`,
+        // and an empty body would collapse the bg paint to height=0.
+        (
+            "list item with overflow:hidden and opacity",
+            r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##,
+        ),
     ];
 
     // Bookmark-inside-transform regression (PR #305 Devin): a heading

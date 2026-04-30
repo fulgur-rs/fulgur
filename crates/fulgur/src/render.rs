@@ -661,7 +661,30 @@ fn draw_under_clip(
     let svg_for_block = drawables.svgs.get(&node_id);
     let inner_inset = block.style.content_inset();
 
-    draw_with_opacity(canvas, block.opacity, |canvas| {
+    // When this node is a list-item with overflow clip, mirror v1's
+    // `ListItemPageable::draw` ordering: outer opacity uses
+    // `list_item.opacity` (the body BlockPageable inside is built with
+    // default opacity=1.0 in `convert::list_item::build_list_item_body`,
+    // so `block.opacity` here would silently drop CSS opacity), and
+    // the marker draws before `push_clip_path` (markers sit at negative
+    // x outside the body box, so they must not be clipped). Without
+    // this, `<li style="overflow:hidden">` loses its marker entirely
+    // and any opacity set on the `<li>` is ignored. (PR #310 Devin)
+    let list_item = drawables.list_items.get(&node_id);
+    let opacity = list_item.map_or(block.opacity, |li| li.opacity);
+
+    draw_with_opacity(canvas, opacity, |canvas| {
+        // List-item marker paints first, OUTSIDE the clip — v1's
+        // `ListItemPageable::draw` emits the marker before delegating
+        // to `body.draw` (which paints bg / border / shadow). Markers
+        // sit at negative x relative to (x_pt, y_pt), so they must
+        // also stay outside the clip path pushed below.
+        if let Some(li) = list_item
+            && li.visible
+        {
+            draw_list_item_marker(canvas, li, x_pt, y_pt);
+        }
+
         // bg / border / shadow outside the clip — same as
         // `draw_block_inner_paint` but inlined so the opacity wrap
         // covers the entire clipped region too.

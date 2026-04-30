@@ -710,3 +710,17 @@ fn render_v2_smoke_triple_nested_transform_descendants() {
     let pdf = engine.render_html_v2(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
+    // Exercises `draw_under_clip`'s list_items branch added in PR #310
+    // Devin fix: when the clipped block's NodeId also has a
+    // `ListItemEntry`, the outer opacity wrap must use
+    // `list_item.opacity` (the body block carries default opacity=1.0
+    // from `convert::list_item::build_list_item_body`) and the marker
+    // must paint before `push_clip_path`.
+    let html = r##"<!DOCTYPE html><html><head><style>body{margin:0;padding:0}ul{margin:0;padding:0 0 0 24px}li{background:#cef;overflow:hidden;opacity:0.5}.inner{height:30px;background:#fce}</style></head><body><ul><li><div class="inner"></div></li></ul></body></html>"##;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html_v2(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
