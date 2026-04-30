@@ -2774,11 +2774,6 @@ impl Pageable for TablePageable {
 mod tests {
     use super::*;
 
-    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
-        let s = SpacerPageable::new(h);
-        Box::new(s)
-    }
-
     #[test]
     fn test_clamp_marker_size_below_line_height() {
         // 16x16 px image (= 12x12 pt) with line-height 24 pt → stays intrinsic
@@ -3431,7 +3426,6 @@ mod transform_wrapper_tests {
 
     #[derive(Clone)]
     struct StubPageable {
-        w: Pt,
         h: Pt,
     }
 
@@ -3450,7 +3444,7 @@ mod transform_wrapper_tests {
 
     fn make_wrapper(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
         TransformWrapperPageable::new(
-            Box::new(StubPageable { w: 100.0, h: 100.0 }),
+            Box::new(StubPageable { h: 100.0 }),
             matrix,
             origin,
         )
