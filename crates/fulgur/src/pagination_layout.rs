@@ -2064,6 +2064,13 @@ pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
 /// total). Pages whose subtree slice is empty (every node returned
 /// `None` from `slice_for_page`) get an empty `BlockPageable`
 /// placeholder so page count is preserved.
+///
+/// Phase 4 PR 8a: scoped to `#[cfg(test)]` because the production
+/// path (`render_v2`) iterates `PaginationGeometryTable` directly
+/// without slicing the Pageable tree. The in-file test module still
+/// uses this helper as a fragmentation harness; future v1-deletion
+/// PRs will retire both this helper and those tests.
+#[cfg(test)]
 pub fn partition_pageable_by_geometry(
     root: &dyn crate::pageable::Pageable,
     geometry: &PaginationGeometryTable,
@@ -2077,7 +2084,7 @@ pub fn partition_pageable_by_geometry(
         .collect()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn empty_page_placeholder() -> Box<dyn crate::pageable::Pageable> {
     Box::new(crate::pageable::BlockPageable::new(Vec::new()))
 }
