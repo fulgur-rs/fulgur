@@ -3443,11 +3443,7 @@ mod transform_wrapper_tests {
     }
 
     fn make_wrapper(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
-        TransformWrapperPageable::new(
-            Box::new(StubPageable { h: 100.0 }),
-            matrix,
-            origin,
-        )
+        TransformWrapperPageable::new(Box::new(StubPageable { h: 100.0 }), matrix, origin)
     }
 
     #[test]
