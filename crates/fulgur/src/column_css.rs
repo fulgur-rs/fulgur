@@ -94,11 +94,22 @@ pub enum ColumnFill {
     Auto,
 }
 
+/// `page` value (CSS Page 3, fulgur-uebl). `None` means the author did not
+/// declare the property; `Some(PageName::Auto)` means the author wrote
+/// `page: auto` explicitly (which is also the initial value, but we
+/// distinguish "set" from "absent" for the cascade); `Some(PageName::Named(_))`
+/// names a specific page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageName {
+    Auto,
+    Named(String),
+}
+
 /// Resolved properties for a single element. Fields remain `None` when the
 /// author did not set them, so the consumer can tell "absent" from "set to
 /// default" (important for the cascade — a later rule overrides only the
 /// fields it declares).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnStyleProps {
     pub rule: Option<ColumnRuleSpec>,
     pub fill: Option<ColumnFill>,
@@ -112,6 +123,11 @@ pub struct ColumnStyleProps {
     pub break_after: Option<BreakAfter>,
     /// `break-before` / `page-break-before` resolved by the sniffer.
     pub break_before: Option<BreakBefore>,
+    /// `page: auto | <custom-ident>` (CSS Page 3). Drives implicit forced
+    /// page breaks where adjacent boxes have different used page-names —
+    /// resolution happens later in `compute_used_page_names`, this field
+    /// stores only the author's declared value.
+    pub page: Option<PageName>,
 }
 
 impl ColumnStyleProps {
@@ -133,6 +149,9 @@ impl ColumnStyleProps {
         if other.break_before.is_some() {
             self.break_before = other.break_before;
         }
+        if other.page.is_some() {
+            self.page = other.page;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -141,6 +160,7 @@ impl ColumnStyleProps {
             && self.break_inside.is_none()
             && self.break_after.is_none()
             && self.break_before.is_none()
+            && self.page.is_none()
     }
 }
 
@@ -471,6 +491,31 @@ fn parse_break_before_value<'i>(
     }
 }
 
+/// Parse a `page: auto | <custom-ident>` value. CSS Page 3 §5.3 defines
+/// the page-name grammar; we match `auto` (case-insensitive) as the
+/// "unnamed" sentinel and accept any other ident as a named page.
+/// Anything else (numbers, function calls, multiple tokens) drops the
+/// declaration silently per the project-wide "no panic on bad CSS"
+/// invariant.
+fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    let s = ident.as_ref();
+    if s.eq_ignore_ascii_case("auto") {
+        Ok(PageName::Auto)
+    } else {
+        // Reserved CSS-wide keywords (`inherit`, `initial`, `unset`,
+        // `revert`) are dropped — we don't model the cascade richness
+        // they imply. Numeric idents are also rejected by `expect_ident`
+        // before reaching here.
+        let lower = s.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+        } else {
+            Ok(PageName::Named(s.to_string()))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Declaration block parser
 // ---------------------------------------------------------------------------
@@ -565,6 +610,10 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         {
             if let Ok(v) = input.parse_entirely(parse_break_before_value) {
                 self.props.break_before = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("page") {
+            if let Ok(v) = input.parse_entirely(parse_page_value) {
+                self.props.page = Some(v);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -954,7 +1003,7 @@ fn walk(
                 .iter()
                 .any(|sel| matches_complex(sel, node, doc))
             {
-                props.merge(rule.props);
+                props.merge(rule.props.clone());
             }
         }
         if let Some(elem) = node.element_data() {
@@ -1754,5 +1803,80 @@ mod tests {
             rules[0].props.break_before,
             Some(crate::draw_primitives::BreakBefore::Page)
         );
+    }
+
+    // -------- page (CSS Page 3 §5.3, fulgur-uebl) --------
+
+    #[test]
+    fn parses_page_named_ident() {
+        let props = parse_declaration_block("page: chapter;");
+        assert_eq!(props.page, Some(PageName::Named("chapter".into())));
+    }
+
+    #[test]
+    fn parses_page_auto() {
+        let props = parse_declaration_block("page: auto;");
+        assert_eq!(props.page, Some(PageName::Auto));
+    }
+
+    #[test]
+    fn page_is_case_sensitive_for_named_idents() {
+        // CSS custom-idents are case-sensitive — `Chapter` and `chapter`
+        // are distinct page names.
+        let lower = parse_declaration_block("page: chapter;");
+        let upper = parse_declaration_block("page: Chapter;");
+        assert_ne!(lower.page, upper.page);
+    }
+
+    #[test]
+    fn page_auto_keyword_is_case_insensitive() {
+        // CSS keywords are ASCII case-insensitive — `AUTO` resolves to
+        // the same `PageName::Auto` as `auto`.
+        let lower = parse_declaration_block("page: auto;");
+        let upper = parse_declaration_block("page: AUTO;");
+        assert_eq!(lower.page, upper.page);
+    }
+
+    #[test]
+    fn page_rejects_css_wide_keywords() {
+        // `inherit` / `initial` / `unset` / `revert` should drop the
+        // declaration entirely — we don't model the cascade richness
+        // they imply, and accepting them as named pages would silently
+        // create pages named "inherit" etc.
+        for kw in ["inherit", "initial", "unset", "revert"] {
+            let css = format!("page: {kw};");
+            let props = parse_declaration_block(&css);
+            assert_eq!(props.page, None, "{kw} should be rejected");
+        }
+    }
+
+    #[test]
+    fn page_rejects_invalid_value_types() {
+        // Numbers, percentages, strings — none of these are valid
+        // <custom-ident> grammar, so the declaration drops silently
+        // (matching the project-wide "no panic on bad CSS" invariant).
+        for v in ["123", "10%", "\"chapter\""] {
+            let css = format!("page: {v};");
+            let props = parse_declaration_block(&css);
+            assert_eq!(props.page, None, "{v} should be rejected");
+        }
+    }
+
+    #[test]
+    fn page_in_stylesheet_via_selector() {
+        let rules = parse_stylesheet(".chapter { page: chapter; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].props.page, Some(PageName::Named("chapter".into())));
+    }
+
+    #[test]
+    fn page_in_inline_style_overrides_stylesheet() {
+        // Cascade rule: inline style applies last, so it beats a
+        // matching stylesheet rule — same as for `column-rule-*` and
+        // `break-*` props.
+        let mut a = parse_declaration_block("page: a;");
+        let b = parse_declaration_block("page: b;");
+        a.merge(b);
+        assert_eq!(a.page, Some(PageName::Named("b".into())));
     }
 }

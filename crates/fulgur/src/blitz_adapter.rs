@@ -510,6 +510,232 @@ pub fn extract_column_style_table(doc: &HtmlDocument) -> crate::column_css::Colu
     crate::column_css::build_column_style_table(doc, &rules)
 }
 
+/// Per-element used page-name endpoints (CSS Page 3 §5.3, fulgur-uebl).
+///
+/// Each entry is `(start, end)`:
+/// - `start` is the page name the element exposes at its **first** in-flow
+///   leaf — what the previous sibling compares against to decide whether
+///   to break before this element.
+/// - `end` is the page name at its **last** in-flow leaf — what the next
+///   sibling compares against.
+///
+/// For a leaf element (no in-flow block children) `start == end`. For a
+/// container with descendants whose `page` differs, `start` and `end`
+/// can differ — that's how propagated-008-style "page name changes inside
+/// a subtree" surface to the parent's sibling comparison.
+///
+/// `None` means the unnamed/auto page. The table covers every element
+/// node in the document so consumers can index unconditionally; non-
+/// element nodes are absent.
+pub type UsedPageNameTable = std::collections::BTreeMap<usize, (Option<String>, Option<String>)>;
+
+/// Compute the start/end used page-names for every element in `doc`.
+///
+/// Per CSS Page 3 §5.3, a forced break is induced between two adjacent
+/// boxes whose used page-names differ. To detect "page name changes
+/// inside a subtree" (e.g. `<div page:b><div page:c><div page:a>...`)
+/// we record two values per element:
+///
+/// - `start`: the used page-name of the element's **first** in-flow
+///   block-level descendant — propagated upward so a parent sees the
+///   "first leaf's name" of each child subtree. Falls back to own
+///   page (when applicable) and then to the inherited space name.
+/// - `end`: the used page-name of the element's **last** in-flow
+///   block-level descendant. Same fallback chain.
+///
+/// The fragmenter compares `prev_sibling.end` against `curr_sibling.start`
+/// to decide whether to induce a forced break — that's the "adjacent
+/// boxes with different page names" rule applied at every level.
+///
+/// **Block-level gate.** `page` only applies to elements with
+/// `display.outside == Block` (CSS Page 3 §5.3 / CSS Fragmentation 3
+/// class A break points). Inline-level elements (`<canvas>`, `<img>`
+/// with default `display: inline`) ignore their own `page` and inherit
+/// from the parent. This is what makes the WPT `page-name-canvas-001`
+/// and `page-name-img-002` references work without breaking inline
+/// usage.
+///
+/// **Flex / grid containers.** Children of a flex or grid container are
+/// flex / grid items, not class A break points. The spec excludes them
+/// from page-name propagation, so when the container is a flex / grid
+/// container we treat it as opaque from the parent's perspective:
+/// `start` and `end` revert to the container's own / inherited name,
+/// independent of the items' names. Sibling comparison among the items
+/// is suppressed by the fragmenter (see `fragment_block_subtree`).
+///
+/// **Out-of-flow children** (`position: absolute / fixed`, `float`) do
+/// not contribute to the in-flow first/last child computation — same
+/// filter the fragmenter applies when walking siblings.
+pub fn compute_used_page_names(
+    doc: &BaseDocument,
+    table: &crate::column_css::ColumnStyleTable,
+) -> UsedPageNameTable {
+    let mut out = UsedPageNameTable::new();
+    let root_id = doc.root_element().id;
+    walk_used_page_names(doc, table, root_id, None, &mut out, 0);
+    out
+}
+
+fn walk_used_page_names(
+    doc: &BaseDocument,
+    table: &crate::column_css::ColumnStyleTable,
+    node_id: usize,
+    parent_space: Option<&str>,
+    out: &mut UsedPageNameTable,
+    depth: usize,
+) -> (Option<String>, Option<String>) {
+    let inherit = || parent_space.map(|s| s.to_string());
+    if depth >= MAX_DOM_DEPTH {
+        return (inherit(), inherit());
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return (inherit(), inherit());
+    };
+    if node.element_data().is_none() {
+        return (inherit(), inherit());
+    }
+
+    // Constraint-space page name for this element's children: own
+    // (when applicable) overrides parent's, otherwise inherit.
+    let own_named: Option<String> = if is_block_level_outside(node) {
+        table
+            .get(&node_id)
+            .and_then(|props| props.page.as_ref())
+            .and_then(|p| match p {
+                crate::column_css::PageName::Named(s) => Some(s.clone()),
+                crate::column_css::PageName::Auto => None,
+            })
+    } else {
+        None
+    };
+    let space_name: Option<String> = own_named.clone().or_else(inherit);
+
+    // Walk children, tracking first and last in-flow block-level
+    // child's start / end pair. Suppress propagation for flex / grid
+    // containers (CSS Page 3 / CSS Fragmentation 3 — children are not
+    // class A break points) and for atomic inline boxes
+    // (`inline-block` etc. — internal block flow does not paginate
+    // independently from the parent line box).
+    let suppress_propagation =
+        is_flex_or_grid_container(node) || is_atomic_inline_container_node(node);
+    let mut first_child_start: Option<Option<String>> = None;
+    let mut last_child_end: Option<Option<String>> = None;
+    for &child_id in &node.children {
+        let (child_start, child_end) =
+            walk_used_page_names(doc, table, child_id, space_name.as_deref(), out, depth + 1);
+        if suppress_propagation {
+            continue;
+        }
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        if child.element_data().is_none() || !is_block_level_outside(child) {
+            continue;
+        }
+        if child_is_out_of_flow(child) {
+            continue;
+        }
+        // Orthogonal-flow child: treat as atomic from this parent's
+        // perspective — its internal page-name propagation does not
+        // surface here (CSS Writing Modes 4 §9 / WPT
+        // `page-name-orthogonal-writing-001`). Use the child's own /
+        // inherited space name instead of its propagated `(start, end)`
+        // pair.
+        let (effective_start, effective_end) = if is_orthogonal_to_parent(node, child) {
+            (space_name.clone(), space_name.clone())
+        } else {
+            (child_start, child_end)
+        };
+        if first_child_start.is_none() {
+            first_child_start = Some(effective_start);
+        }
+        last_child_end = Some(effective_end);
+    }
+
+    let start = first_child_start.unwrap_or_else(|| space_name.clone());
+    let end = last_child_end.unwrap_or_else(|| space_name.clone());
+    out.insert(node_id, (start.clone(), end.clone()));
+    (start, end)
+}
+
+fn is_flex_or_grid_container(node: &Node) -> bool {
+    is_flex_or_grid_container_node(node)
+}
+
+/// fulgur-uebl: true if `node` establishes a flex / grid formatting
+/// context (its inside display is `Flex` or `Grid`). Children of such
+/// containers are flex / grid items, which the spec excludes from
+/// class A break points — the `page` property does not apply to them
+/// and implicit page-name forced breaks should not fire among them.
+pub fn is_flex_or_grid_container_node(node: &Node) -> bool {
+    use ::style::values::specified::box_::DisplayInside;
+    node.primary_styles().is_some_and(|s| {
+        let inside = s.clone_display().inside();
+        matches!(inside, DisplayInside::Flex | DisplayInside::Grid)
+    })
+}
+
+/// fulgur-uebl: true if `node` establishes an atomic inline-level box
+/// (`display: inline-block`, `inline-flex`, `inline-grid`, …). Atomic
+/// inlines participate in their parent's line-box layout but their
+/// internal block flow does not paginate independently — break
+/// opportunities inside them are not class A break points from the
+/// parent's perspective. The implicit page-name forced-break rule
+/// must therefore be suppressed when descending through an atomic
+/// inline (matching the WPT `page-name-inline-block-001` reference
+/// which produces a single page despite differing page names inside).
+pub fn is_atomic_inline_container_node(node: &Node) -> bool {
+    use ::style::values::specified::box_::DisplayOutside;
+    node.primary_styles()
+        .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Inline)
+}
+
+/// fulgur-uebl: true if `child` has a writing-mode that differs from
+/// `parent`'s — i.e. they form an orthogonal flow (CSS Writing Modes 4
+/// §9). An orthogonal block child is laid out perpendicular to the
+/// parent's main axis and is sized atomically inside the parent's flow
+/// (browsers treat it like an inline-block-shaped atomic for
+/// pagination purposes). Page-name forced breaks must therefore be
+/// suppressed when crossing the orthogonal boundary, matching the WPT
+/// `page-name-orthogonal-writing-001/003` references which produce a
+/// single page despite differing page names inside the orthogonal
+/// child.
+pub fn is_orthogonal_to_parent(parent: &Node, child: &Node) -> bool {
+    let Some(parent_styles) = parent.primary_styles() else {
+        return false;
+    };
+    let Some(child_styles) = child.primary_styles() else {
+        return false;
+    };
+    parent_styles.get_inherited_box().clone_writing_mode()
+        != child_styles.get_inherited_box().clone_writing_mode()
+}
+
+fn child_is_out_of_flow(node: &Node) -> bool {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles().is_some_and(|s| {
+        matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            || s.get_box().clone_float().is_floating()
+    })
+}
+
+/// fulgur-uebl: true if `node` is floated (`float: left | right | inline-start
+/// | inline-end`). Floated children are removed from their containing
+/// block's normal flow, so they are not adjacent siblings in the
+/// page-name break sense — same logical exclusion as `position:
+/// absolute / fixed`. Re-exposed publicly for `pagination_layout` to
+/// share the filter.
+pub fn node_is_floating(node: &Node) -> bool {
+    node.primary_styles()
+        .is_some_and(|s| s.get_box().clone_float().is_floating())
+}
+
+fn is_block_level_outside(node: &Node) -> bool {
+    use ::style::values::specified::box_::DisplayOutside;
+    node.primary_styles()
+        .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Block)
+}
+
 // TODO(phase-b): unify with walk_for_inline_styles — both are "find every
 // top-level <style>, concatenate children text, stop recursing past the
 // <style>". A shared `fn visit_style_blocks<F>(doc, F)` closure-based visitor

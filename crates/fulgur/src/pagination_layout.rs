@@ -164,6 +164,15 @@ pub struct PaginationLayoutTree<'a> {
     /// for unit-test entry points) means "no running mappings"; the
     /// fragmenter treats every body child as in-flow.
     pub(crate) running_store: Option<&'a crate::gcpm::running::RunningElementStore>,
+    /// fulgur-uebl: per-element used page-name (CSS Page 3 §5.3),
+    /// resolved from the same author-facing `page` declarations the
+    /// `column_styles` table carries. The fragmenter consults this when
+    /// a child is iterated: if its used page-name differs from the
+    /// previously-placed sibling's, an implicit forced page break is
+    /// induced before the child. `None` means the document has no
+    /// `page` declarations and the fragmenter skips the comparison
+    /// entirely.
+    pub(crate) used_page_names: Option<crate::blitz_adapter::UsedPageNameTable>,
 }
 
 /// One-shot entry: run the block-level fragmenter for `doc` against a
@@ -232,9 +241,16 @@ fn run_pass_inner<'a>(
     column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
     running_store: Option<&'a crate::gcpm::running::RunningElementStore>,
 ) -> PaginationGeometryTable {
+    // fulgur-uebl: pre-compute the used page-name table when column
+    // styles are available. The walk takes one DOM pass and produces a
+    // `BTreeMap` keyed by node id, matching the determinism convention
+    // used by the rest of the side-tables.
+    let used_page_names =
+        column_styles.map(|cs| crate::blitz_adapter::compute_used_page_names(doc, cs));
     let mut tree = PaginationLayoutTree::new(doc, page_height_px);
     tree.column_styles = column_styles;
     tree.running_store = running_store;
+    tree.used_page_names = used_page_names;
     if tree.body_id.is_some() && page_height_px > 0.0 {
         // Read body's children's existing `final_layout` (populated by
         // Blitz's `resolve()` and `multicol_layout::run_pass`) and
@@ -268,7 +284,21 @@ impl<'a> PaginationLayoutTree<'a> {
             body_id,
             column_styles: None,
             running_store: None,
+            used_page_names: None,
         }
+    }
+
+    /// fulgur-uebl: lookup helper for the per-element start / end used
+    /// page-names (CSS Page 3 §5.3). Returns `(start, end)` where each
+    /// is `None` for the unnamed/auto page or `Some(name)` for a named
+    /// page. When the document has no `page` declarations at all the
+    /// table is absent; we return `(None, None)` so the comparison `==`
+    /// always succeeds and no implicit breaks fire.
+    fn used_page_endpoints_of(&self, node_id: usize) -> (Option<String>, Option<String>) {
+        self.used_page_names
+            .as_ref()
+            .and_then(|t| t.get(&node_id).cloned())
+            .unwrap_or((None, None))
     }
 
     /// Drain the accumulated per-node geometry table.
@@ -459,6 +489,12 @@ impl<'a> PaginationLayoutTree<'a> {
         // from `final_layout.location.y` during convert, so margin gaps
         // are present in the Pageable side; the fragmenter must match.
         let mut prev_bottom_y_in_body: f32 = 0.0;
+        // fulgur-uebl: tracks the used page-name of the previously
+        // placed in-flow sibling (`Some(Some(name))` named, `Some(None)`
+        // auto/unnamed, `None` no previous). When the next sibling's
+        // used page-name differs, we induce a forced break before it
+        // (CSS Page 3 §5.3, "Using Named Pages").
+        let mut prev_used_page: Option<Option<String>> = None;
 
         for child_id in children {
             let Some(child) = self.doc.get_node(child_id) else {
@@ -559,13 +595,26 @@ impl<'a> PaginationLayoutTree<'a> {
                 let zero_break_props = self
                     .column_styles
                     .and_then(|t| t.get(&child_id))
-                    .copied()
+                    .cloned()
                     .unwrap_or_default();
-                if matches!(
+                // fulgur-uebl: floats are out of normal flow for the
+                // sibling page-name comparison (CSS Page 3 / CSS 2.1
+                // §9.5). Skip the comparison and the `prev_used_page`
+                // update entirely for floated zero-height children;
+                // they do not establish class A break points and should
+                // not influence break decisions on adjacent in-flow
+                // boxes.
+                let zero_is_float = crate::blitz_adapter::node_is_floating(child);
+                let (zero_used_start, zero_used_end) = self.used_page_endpoints_of(child_id);
+                let zero_page_name_changed = !zero_is_float
+                    && prev_used_page
+                        .as_ref()
+                        .is_some_and(|p| *p != zero_used_start);
+                let zero_force_break = matches!(
                     zero_break_props.break_before,
                     Some(crate::draw_primitives::BreakBefore::Page)
-                ) && cursor_y > 0.0
-                {
+                ) || zero_page_name_changed;
+                if zero_force_break && cursor_y > 0.0 {
                     page_index += 1;
                     cursor_y = 0.0;
                 }
@@ -582,6 +631,9 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: 0.0,
                         });
                     emitted += 1;
+                }
+                if !zero_is_float {
+                    prev_used_page = Some(zero_used_end);
                 }
                 if matches!(
                     zero_break_props.break_after,
@@ -608,17 +660,35 @@ impl<'a> PaginationLayoutTree<'a> {
             let break_props = self
                 .column_styles
                 .and_then(|t| t.get(&child_id))
-                .copied()
+                .cloned()
                 .unwrap_or_default();
+
+            // fulgur-uebl: page-name change between adjacent siblings
+            // induces an implicit forced break (CSS Page 3 §5.3).
+            // Treated identically to an authored `break-before: page`
+            // so the existing leading-break-on-fresh-page collapse
+            // applies (CSS 3 Fragmentation §3). Compare the previous
+            // sibling's `end` against this child's `start` — that's how
+            // a page-name change buried inside a subtree (e.g.
+            // `propagated-008`) surfaces to the body-level walk.
+            //
+            // Floats are out of normal flow (CSS 2.1 §9.5) and do not
+            // establish class A break points, so they're skipped from
+            // both the comparison and the `prev_used_page` update.
+            let is_float = crate::blitz_adapter::node_is_floating(child);
+            let (used_start, used_end) = self.used_page_endpoints_of(child_id);
+            let page_name_changed =
+                !is_float && prev_used_page.as_ref().is_some_and(|p| *p != used_start);
 
             // `break-before: page` forces a page boundary before the
             // child whenever there is in-flow content already placed on
             // the current page. A leading break-before on a fresh page
             // is a no-op (CSS 3 Fragmentation §3 collapses it).
-            if matches!(
+            if (matches!(
                 break_props.break_before,
                 Some(crate::draw_primitives::BreakBefore::Page)
-            ) && cursor_y > 0.0
+            ) || page_name_changed)
+                && cursor_y > 0.0
             {
                 page_index += 1;
                 cursor_y = 0.0;
@@ -676,6 +746,9 @@ impl<'a> PaginationLayoutTree<'a> {
                 cursor_y = new_cursor_y;
                 emitted += frag_count;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
+                if !is_float {
+                    prev_used_page = Some(used_end.clone());
+                }
                 if matches!(
                     break_props.break_after,
                     Some(crate::draw_primitives::BreakAfter::Page)
@@ -744,6 +817,12 @@ impl<'a> PaginationLayoutTree<'a> {
             let needs_recursion = has_splittable_children
                 && (!is_multicol || multicol_has_span_all)
                 && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
+                    || has_page_name_change_below(
+                        self.doc,
+                        child_id,
+                        self.used_page_names.as_ref(),
+                        0,
+                    )
                     || would_split_block_subtree(
                         self.doc,
                         child_id,
@@ -757,6 +836,7 @@ impl<'a> PaginationLayoutTree<'a> {
                     &mut self.geometry,
                     self.doc,
                     self.column_styles,
+                    self.used_page_names.as_ref(),
                     child_id,
                     child_w,
                     child_x_in_body,
@@ -769,6 +849,9 @@ impl<'a> PaginationLayoutTree<'a> {
                 cursor_y = new_cursor;
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
+                if !is_float {
+                    prev_used_page = Some(used_end.clone());
+                }
                 if matches!(
                     break_props.break_after,
                     Some(crate::draw_primitives::BreakAfter::Page)
@@ -839,6 +922,9 @@ impl<'a> PaginationLayoutTree<'a> {
             cursor_y += child_h;
             emitted += 1;
             prev_bottom_y_in_body = this_top_in_body + child_h;
+            if !is_float {
+                prev_used_page = Some(used_end.clone());
+            }
 
             // `break-after: page` forces a page boundary after the
             // child. A trailing break on the last in-flow child does
@@ -1082,6 +1168,104 @@ fn has_forced_break_below(
     false
 }
 
+/// fulgur-uebl: true if any sibling pair inside `node_id`'s subtree
+/// has different used page-names. Used as a recursion gate so that
+/// `fragment_block_subtree` is entered for subtrees that fit the page
+/// strip but contain implicit page-name forced breaks (CSS Page 3
+/// §5.3). Walking the whole subtree is acceptable here — the
+/// `column_styles` / `used_page_names` tables are sparse, and the bail
+/// at [`crate::MAX_DOM_DEPTH`] matches `has_forced_break_below`.
+fn has_page_name_change_below(
+    doc: &BaseDocument,
+    node_id: usize,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
+    depth: usize,
+) -> bool {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(table) = used_page_names else {
+        return false;
+    };
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
+    // Atomic inline containers (`inline-block`, `inline-flex`, etc.)
+    // are fully opaque: their internal block flow does not paginate
+    // independently from the parent line box. Skip the entire subtree
+    // so the recursion gate doesn't fire on them.
+    if crate::blitz_adapter::is_atomic_inline_container_node(node) {
+        return false;
+    }
+    // Orthogonal-flow nodes (writing-mode different from their own
+    // parent) are also atomic from the outer flow's perspective (CSS
+    // Writing Modes 4 §9). Even when called directly with the
+    // orthogonal node as the target, treat its subtree as opaque so
+    // the recursion gate doesn't trigger a `fragment_block_subtree`
+    // entry that would interact with Taffy's orthogonal-flow sizing
+    // and produce layout drift not present in the whole-emit baseline.
+    if let Some(gp_id) = node.parent
+        && let Some(gp) = doc.get_node(gp_id)
+        && crate::blitz_adapter::is_orthogonal_to_parent(gp, node)
+    {
+        return false;
+    }
+    // Flex / grid containers suppress sibling comparison among their
+    // direct items (CSS Page 3 / CSS Fragmentation 3 — flex / grid
+    // items are not class A break points). But page-name forced breaks
+    // inside an item's own BFC still apply, so we must keep recursing
+    // into each item — only the direct-children comparison is gated.
+    let suppress_direct_compare = crate::blitz_adapter::is_flex_or_grid_container_node(node);
+    let mut prev_used: Option<Option<String>> = None;
+    for &child_id in &node.children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        // Skip whitespace-only text and out-of-flow children — same
+        // filters as the fragmenter loop, so the predicate matches
+        // exactly what `fragment_block_subtree` would compare.
+        if let Some(text) = child.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
+            continue;
+        }
+        if child.element_data().is_none() {
+            continue;
+        }
+        // Orthogonal-to-this-node child: fully atomic from this node's
+        // perspective (CSS Writing Modes 4 §9). Skip the entire
+        // subtree — no comparison, no recursion.
+        if crate::blitz_adapter::is_orthogonal_to_parent(node, child) {
+            continue;
+        }
+        {
+            use ::style::properties::longhands::position::computed_value::T as Pos;
+            let is_out_of_flow = child.primary_styles().is_some_and(|s| {
+                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            });
+            if is_out_of_flow {
+                continue;
+            }
+        }
+        let (child_start, child_end) = table.get(&child_id).cloned().unwrap_or((None, None));
+        if !suppress_direct_compare
+            && prev_used.as_ref().is_some_and(|p| *p != child_start)
+        {
+            return true;
+        }
+        if !suppress_direct_compare {
+            prev_used = Some(child_end);
+        }
+        // Always recurse: even when direct sibling comparison is
+        // suppressed (flex / grid container), descendants in their
+        // own BFC may still trigger an internal page-name break.
+        if has_page_name_change_below(doc, child_id, used_page_names, depth + 1) {
+            return true;
+        }
+    }
+    false
+}
+
 /// fulgur-g9e3.1: split a block element across pages by walking its DOM
 /// children and emitting per-page fragments for both the block itself
 /// and its children.
@@ -1148,6 +1332,7 @@ fn fragment_block_subtree(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
     column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
     parent_id: usize,
     parent_w: f32,
     parent_x_in_body: f32,
@@ -1205,6 +1390,30 @@ fn fragment_block_subtree(
     // `page_start_y` regardless of what its absolute Taffy y is.
     let mut page_taffy_origin: f32 = 0.0;
     let mut origin_pending: bool = false;
+    // fulgur-uebl: tracks the previous in-flow sibling's used page-name
+    // for implicit forced-break detection; see `fragment_pagination_root`
+    // for the rationale and the outer-Option semantics.
+    let mut prev_used_page: Option<Option<String>> = None;
+    // fulgur-uebl: flex / grid containers establish a flex/grid
+    // formatting context where children are not class A break points
+    // (CSS Fragmentation 3 §3.2). The `page` property doesn't apply to
+    // flex / grid items, so we suppress the implicit-forced-break
+    // comparison among them. Atomic inline containers (`inline-block`,
+    // `inline-flex`, `inline-grid`) are similarly opaque from a
+    // pagination perspective — their internal block flow does not
+    // paginate independently, so sibling comparison among their
+    // children would just produce spurious breaks. Orthogonal-flow
+    // containers (writing-mode different from their own parent) are
+    // also treated atomically per CSS Writing Modes 4 §9. Inner
+    // block-level descendants in their own BFC still get the
+    // comparison via deeper recursion.
+    let parent_is_orthogonal = parent
+        .parent
+        .and_then(|gp_id| doc.get_node(gp_id))
+        .is_some_and(|gp| crate::blitz_adapter::is_orthogonal_to_parent(gp, parent));
+    let suppress_page_check = crate::blitz_adapter::is_flex_or_grid_container_node(parent)
+        || crate::blitz_adapter::is_atomic_inline_container_node(parent)
+        || parent_is_orthogonal;
 
     for &child_id in &parent.children {
         let Some(child) = doc.get_node(child_id) else {
@@ -1239,12 +1448,23 @@ fn fragment_block_subtree(
         // the zero-height and non-zero paths honour them.
         let break_props = column_styles
             .and_then(|t| t.get(&child_id))
-            .copied()
+            .cloned()
             .unwrap_or_default();
+        // fulgur-uebl: detect page-name change against the previous
+        // in-flow sibling and treat it as an implicit forced break.
+        // Compare prev's `end` against this child's `start`. Floats are
+        // out of normal flow (CSS 2.1 §9.5) and skipped here too.
+        let is_float = crate::blitz_adapter::node_is_floating(child);
+        let (used_start, used_end) = used_page_names
+            .and_then(|t| t.get(&child_id).cloned())
+            .unwrap_or((None, None));
+        let page_name_changed = !suppress_page_check
+            && !is_float
+            && prev_used_page.as_ref().is_some_and(|p| *p != used_start);
         let break_before_page = matches!(
             break_props.break_before,
             Some(crate::draw_primitives::BreakBefore::Page)
-        );
+        ) || page_name_changed;
         let break_after_page = matches!(
             break_props.break_after,
             Some(crate::draw_primitives::BreakAfter::Page)
@@ -1327,6 +1547,9 @@ fn fragment_block_subtree(
                 // on the new page — defer origin rebase.
                 origin_pending = true;
             }
+            if !is_float {
+                prev_used_page = Some(used_end.clone());
+            }
             continue;
         }
 
@@ -1403,6 +1626,7 @@ fn fragment_block_subtree(
         let needs_recursion = !child.children.is_empty()
             && !is_multicol
             && (has_forced_break_below(doc, child_id, column_styles, 0)
+                || has_page_name_change_below(doc, child_id, used_page_names, 0)
                 || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
         if needs_recursion {
             let pre_recursion_page = page_index;
@@ -1410,6 +1634,7 @@ fn fragment_block_subtree(
                 geometry,
                 doc,
                 column_styles,
+                used_page_names,
                 child_id,
                 child_w,
                 child_x_in_body,
@@ -1452,6 +1677,9 @@ fn fragment_block_subtree(
                 // Break-after: NEXT child starts the new page —
                 // defer origin rebase to its arrival.
                 origin_pending = true;
+            }
+            if !is_float {
+                prev_used_page = Some(used_end.clone());
             }
             continue;
         }
@@ -1537,6 +1765,9 @@ fn fragment_block_subtree(
             // Break-after: NEXT child starts the new page — defer
             // origin rebase to its arrival.
             origin_pending = true;
+        }
+        if !is_float {
+            prev_used_page = Some(used_end.clone());
         }
     }
 

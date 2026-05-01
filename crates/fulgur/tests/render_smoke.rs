@@ -1708,3 +1708,82 @@ fn render_v2_smoke_content_url_on_replaced_with_visual_style() {
         .expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn page_property_induces_implicit_break_between_named_siblings() {
+    // fulgur-uebl: end-to-end coverage for the `page` property's
+    // implicit forced-break behaviour. Two block-level siblings with
+    // differing named pages should produce a non-empty PDF without
+    // any author `break-before:page` declaration. Page-count semantics
+    // are validated separately by the `fulgur-wpt` reftests
+    // (`page-name-siblings-001` and friends).
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="page: a">a</div>
+        <div style="page: b">b</div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("page-named siblings render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn page_property_propagates_through_block_subtree() {
+    // fulgur-uebl: when a container has no own `page` declaration but
+    // its first block descendant does, the propagated name reaches the
+    // sibling-comparison level. Drives `compute_used_page_names`
+    // propagation walk and the (start, end) table lookups. WPT
+    // `page-name-propagated-001` covers the visual semantics; this is
+    // the lib-coverage entry.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="page: a">a</div>
+        <div style="page: b">
+            <div style="page: c">
+                <div style="page: a">b</div>
+            </div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("page-propagation render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn page_property_on_inline_canvas_is_ignored() {
+    // fulgur-uebl: `page` only applies to block-level boxes (CSS Page 3
+    // §5.3). An inline `<canvas>` with `page: b` inherits its parent's
+    // `page: a` — covers the `is_block_level_outside` false branch.
+    let html = r#"<!DOCTYPE html><html><body style="page: a">
+        <canvas height="1" style="page: b"></canvas>
+        <div style="page: b">b</div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("inline-canvas page render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn page_property_inside_flex_container_does_not_propagate_outward() {
+    // fulgur-uebl: flex containers establish a flex formatting context
+    // where children are not class A break points. `page` on flex items
+    // must not surface as forced breaks. Drives the
+    // `is_flex_or_grid_container_node` suppression branch.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div>a</div>
+        <div style="display: flex; flex-direction: column">
+            <div style="page: b">b</div>
+            <div style="page: c">c</div>
+        </div>
+        <div>d</div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("flex page render");
+    assert!(!pdf.is_empty());
+}
