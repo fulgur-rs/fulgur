@@ -1927,10 +1927,8 @@ pub fn collect_counter_states(
 /// resulting `PaginationGeometry.is_repeat` is set to `true` so
 /// consumers know each fragment carries the *full* content rather
 /// than a slice (paragraph-line / block-height slicing must be
-/// suppressed for repeat fragments). v1's
-/// `pageable::PositionedChild::is_fixed` slice path remains in place
-/// while v1 is compiled; both paths produce equivalent output for
-/// fixed elements until PR 8 deletes v1.
+/// suppressed for repeat fragments). Both fixed-element paths
+/// (v1 and v2) produce equivalent output.
 ///
 /// `total_pages` is the document's resolved page count, typically
 /// computed from `PaginationGeometryTable`'s max `page_index + 1` after
@@ -2043,9 +2041,8 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
 
 /// fulgur-jkl5: total page count implied by a geometry table.
 ///
-/// Convention matches `compare_with_pageable::fragmenter_page_count`:
-/// returns `max(page_index) + 1` if the table has any fragments, else
-/// `1` (Pageable's "always at least one page" guarantee).
+/// Returns `max(page_index) + 1` if the table has any fragments, else
+/// `1` (at least one page is always implied).
 ///
 /// Used by fulgur-cj6u Phase 1.2 as the fragmenter-side input to a
 /// `paginate(...).len() == implied_page_count(&geometry)` parity

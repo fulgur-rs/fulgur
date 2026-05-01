@@ -71,7 +71,7 @@ pub struct ColumnRuleSpec {
     pub width: f32,
     pub style: ColumnRuleStyle,
     /// RGBA colour, matching the `[u8; 4]` convention used by
-    /// `paragraph::TextRun` and `pageable::BlockPageable::border_color`.
+    /// `paragraph::TextRun` and `draw_primitives::BlockStyle::border_color`.
     pub color: [u8; 4],
 }
 
