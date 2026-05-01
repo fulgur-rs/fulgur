@@ -41,14 +41,14 @@ pub type NodeId = usize;
 /// `DestinationRegistry`.
 #[derive(Debug, Clone)]
 pub struct BlockEntry {
-    pub style: crate::pageable::BlockStyle,
+    pub style: crate::draw_primitives::BlockStyle,
     pub opacity: f32,
     pub visible: bool,
     pub id: Option<std::sync::Arc<String>>,
     /// Taffy-computed border-box size (pt). Preferred when set; falls
     /// back to the fragment's width/height (CSS px → pt) at render
     /// time when absent.
-    pub layout_size: Option<crate::pageable::Size>,
+    pub layout_size: Option<crate::draw_primitives::Size>,
     /// Strict descendant `NodeId`s that must paint INSIDE this block's
     /// `push_clip_path` / `pop` group. Populated by
     /// `extract_drawables_from_pageable` only when
@@ -57,8 +57,7 @@ pub struct BlockEntry {
     /// regular shared-node_id pattern.
     ///
     /// Mirrors the `TransformEntry.descendants` shape: render time
-    /// emits bg / border / shadow first (outside the clip, matching v1
-    /// `BlockPageable::draw` at `pageable.rs:1796-1827`), then pushes
+    /// emits bg / border / shadow first (outside the clip), then pushes
     /// the clip path, dispatches each descendant fragment, and pops.
     pub clip_descendants: Vec<NodeId>,
     /// Strict descendant `NodeId`s that must paint INSIDE this block's
@@ -134,11 +133,11 @@ pub struct SvgEntry {
 /// already, multi-page tables follow in a later PR.
 #[derive(Debug, Clone)]
 pub struct TableEntry {
-    pub style: crate::pageable::BlockStyle,
+    pub style: crate::draw_primitives::BlockStyle,
     pub opacity: f32,
     pub visible: bool,
     pub id: Option<std::sync::Arc<String>>,
-    pub layout_size: Option<crate::pageable::Size>,
+    pub layout_size: Option<crate::draw_primitives::Size>,
     pub width: f32,
     pub cached_height: f32,
     /// Strict descendant `node_id`s (cell blocks + their children) when
@@ -219,8 +218,8 @@ pub struct MulticolRuleEntry {
 /// payload + every descendant inside one push/pop pair.
 #[derive(Debug, Clone)]
 pub struct TransformEntry {
-    pub matrix: crate::pageable::Affine2D,
-    pub origin: crate::pageable::Point2,
+    pub matrix: crate::draw_primitives::Affine2D,
+    pub origin: crate::draw_primitives::Point2,
     /// Every strict descendant `NodeId` whose fragment must paint
     /// inside this transform's `push_transform`/`pop` group. Does NOT
     /// include the wrapper's own `node_id` (the entry's key) — the
@@ -267,14 +266,11 @@ pub struct Drawables {
     pub body_offset_pt: (f32, f32),
     /// NodeId of the `<html>` root element when present.
     ///
-    /// v1 paints html's own `background` BEFORE recursing into body
-    /// via `BlockPageable::draw`'s recursive children walk. v2's flat
-    /// dispatch never visits html — the fragmenter only records body
-    /// and its descendants in `geometry` — so `render_v2` paints html
+    /// v1 painted html's own `background` BEFORE recursing into body.
+    /// v2's flat dispatch never visits html — the fragmenter only records
+    /// body and its descendants in `geometry` — so `render_v2` paints html
     /// as a pre-pass at the page's top-left margin using
     /// `block_styles[root_id].layout_size` as the rect dimensions.
-    /// That mirrors v1's `total_width / total_height` derivation in
-    /// `BlockPageable::draw` (`pageable.rs:1771-1778`).
     pub root_id: Option<NodeId>,
     /// NodeId of the `<body>` element when present.
     ///

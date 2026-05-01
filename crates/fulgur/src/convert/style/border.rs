@@ -5,7 +5,7 @@
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::px_to_pt;
-use crate::pageable::{BlockStyle, BorderStyleValue};
+use crate::draw_primitives::{BlockStyle, BorderStyleValue};
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Border color (use top border color for all sides for simplicity)
@@ -78,7 +78,7 @@ fn map_border_style(bs: style::values::specified::BorderStyle) -> BorderStyleVal
 #[cfg(test)]
 mod tests {
     use super::map_border_style;
-    use crate::pageable::BorderStyleValue;
+    use crate::draw_primitives::BorderStyleValue;
     use style::values::specified::BorderStyle as BS;
 
     #[test]

@@ -1565,7 +1565,7 @@ fn resolve_string_set_values(
 
 // ─── transform support ────────────────────────────────────
 
-use crate::pageable::{Affine2D, Point2};
+use crate::draw_primitives::{Affine2D, Point2};
 
 /// Read the computed `transform` and `transform-origin` from `styles` and
 /// fold the `TransformOperation` list into a single pre-resolved affine
@@ -2935,7 +2935,7 @@ mod tests {
         let props = table.get(&k).expect("k in table");
         assert_eq!(
             props.break_inside,
-            Some(crate::pageable::BreakInside::Avoid)
+            Some(crate::draw_primitives::BreakInside::Avoid)
         );
     }
 }
@@ -2943,7 +2943,8 @@ mod tests {
 #[cfg(test)]
 mod transform_tests {
     use super::*;
-    use crate::pageable::{Affine2D, Point2, matrix_test_util::approx};
+    use crate::draw_primitives::matrix_test_util::approx;
+    use crate::draw_primitives::{Affine2D, Point2};
 
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.

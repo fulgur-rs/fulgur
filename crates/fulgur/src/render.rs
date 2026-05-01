@@ -1,11 +1,11 @@
 use crate::config::Config;
+use crate::draw_primitives::Canvas;
 use crate::drawables::Drawables;
 use crate::error::{Error, Result};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
-use crate::pageable::Canvas;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub fn render_v2(
     let mut document = krilla::Document::new();
 
     let mut bookmark_collector = if config.bookmarks {
-        Some(crate::pageable::BookmarkCollector::new())
+        Some(crate::draw_primitives::BookmarkCollector::new())
     } else {
         None
     };
@@ -47,7 +47,7 @@ pub fn render_v2(
     // `block_styles` (shared node_id case — see `convert::replaced` /
     // `convert::inline_root`); paragraph wins so the chain mirrors the
     // priority v1 establishes via the Pageable tree walk.
-    let mut dest_registry = crate::pageable::DestinationRegistry::new();
+    let mut dest_registry = crate::draw_primitives::DestinationRegistry::new();
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
             continue;
@@ -90,7 +90,7 @@ pub fn render_v2(
         }
     }
 
-    let mut link_collector = crate::pageable::LinkCollector::new();
+    let mut link_collector = crate::draw_primitives::LinkCollector::new();
 
     // Build the GCPM margin-box renderer once. Reused across pages so
     // measure / layout / render caches survive between pages and the
@@ -140,7 +140,7 @@ pub fn render_v2(
             // shouldn't re-record bookmarks every page; we mirror that
             // here.
             {
-                let mut margin_canvas = crate::pageable::Canvas {
+                let mut margin_canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
                     bookmark_collector: None,
                     link_collector: None,
@@ -157,7 +157,7 @@ pub fn render_v2(
                     page_content_width,
                 );
             }
-            let mut canvas = crate::pageable::Canvas {
+            let mut canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
                 bookmark_collector: bookmark_collector.as_mut(),
                 link_collector: Some(&mut link_collector),
@@ -244,7 +244,7 @@ pub fn render_v2(
 /// (first-fragment-only). Subsequent PRs add match arms for the
 /// other maps.
 fn draw_v2_page(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     page_index: u32,
     margin_left_pt: f32,
     margin_top_pt: f32,
@@ -616,7 +616,7 @@ fn draw_v2_page(
 /// position computed by the paragraph render path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_inline_box_content(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     content_id: usize,
     content_geom: &crate::pagination_layout::PaginationGeometry,
     content_frag: &crate::pagination_layout::Fragment,
@@ -736,7 +736,7 @@ pub(crate) fn dispatch_inline_box_content(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_fragment(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
@@ -853,7 +853,7 @@ pub(crate) fn dispatch_fragment(
 /// v1 uses (`pageable.rs:2716-2724`).
 #[allow(clippy::too_many_arguments)]
 fn draw_under_transform(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     tx: &crate::drawables::TransformEntry,
     node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
@@ -872,7 +872,7 @@ fn draw_under_transform(
     //   T(x + ox, y + oy) · M · T(-(x + ox), -(y + oy))
     let ox = x_pt + tx.origin.x;
     let oy = y_pt + tx.origin.y;
-    use crate::pageable::Affine2D;
+    use crate::draw_primitives::Affine2D;
     let full = Affine2D::translation(ox, oy) * tx.matrix * Affine2D::translation(-ox, -oy);
 
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
@@ -1160,7 +1160,7 @@ fn draw_under_transform(
 /// all wrapped in one opacity group.
 #[allow(clippy::too_many_arguments)]
 fn draw_under_clip(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     block: &crate::drawables::BlockEntry,
     node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
@@ -1174,7 +1174,7 @@ fn draw_under_clip(
     page_index: u32,
 ) {
     use crate::convert::px_to_pt;
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     let total_width = block
         .layout_size
@@ -1251,7 +1251,7 @@ fn draw_under_clip(
                 total_width,
                 total_height,
             );
-            crate::pageable::draw_block_border(
+            crate::draw_primitives::draw_block_border(
                 canvas,
                 &block.style,
                 x_pt,
@@ -1264,13 +1264,14 @@ fn draw_under_clip(
         // Push clip — fall through to inner content + descendants if
         // `compute_overflow_clip_path` returns `None` (style somehow
         // changed since extract decided this block clips).
-        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
-            &block.style,
-            x_pt,
-            y_pt,
-            total_width,
-            total_height,
-        ) {
+        let clip_pushed = if let Some(clip_path) =
+            crate::draw_primitives::compute_overflow_clip_path(
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            ) {
             canvas
                 .surface
                 .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
@@ -1515,7 +1516,7 @@ fn draw_under_clip(
 /// markers are owned by `ListItemEntry` rather than `BlockEntry`).
 #[allow(clippy::too_many_arguments)]
 fn draw_under_opacity(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     block: &crate::drawables::BlockEntry,
     node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
@@ -1529,7 +1530,7 @@ fn draw_under_opacity(
     page_index: u32,
 ) {
     use crate::convert::px_to_pt;
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
         // Block's own paint + shared-node_id inner content. We can
@@ -1622,7 +1623,7 @@ fn draw_under_opacity(
                     total_width,
                     total_height,
                 );
-                crate::pageable::draw_block_border(
+                crate::draw_primitives::draw_block_border(
                     canvas,
                     &block.style,
                     x_pt,
@@ -1809,7 +1810,7 @@ fn draw_under_opacity(
 /// `MulticolRulePageable::slice_for_page` + `draw` so each page only
 /// emits the rule segments that fit on it.
 fn paint_multicol_rule_for_page(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::MulticolRuleEntry,
     container_geom: &crate::pagination_layout::PaginationGeometry,
     margin_left_pt: f32,
@@ -1817,7 +1818,7 @@ fn paint_multicol_rule_for_page(
     page_index: u32,
 ) {
     use crate::convert::px_to_pt;
-    use crate::pageable::stroke_line;
+    use crate::draw_primitives::stroke_line;
 
     let Some(stroke) = build_multicol_stroke(&entry.rule) else {
         return;
@@ -1896,7 +1897,7 @@ fn build_multicol_stroke(
     rule: &crate::column_css::ColumnRuleSpec,
 ) -> Option<krilla::paint::Stroke> {
     use crate::column_css::ColumnRuleStyle;
-    use crate::pageable::{alpha_to_opacity, colored_stroke};
+    use crate::draw_primitives::{alpha_to_opacity, colored_stroke};
 
     if rule.width <= 0.0 || rule.style == ColumnRuleStyle::None {
         return None;
@@ -1931,12 +1932,12 @@ fn build_multicol_stroke(
 /// CSS-resolved size in pt that fulgur stores on the original
 /// `ImageRender`.
 fn draw_image_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ImageEntry,
     x: f32,
     y: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         draw_image_inner_paint(canvas, entry, x, y);
     });
@@ -1948,7 +1949,7 @@ fn draw_image_v2(
 /// with the block bg/border under one opacity group, mirroring v1's
 /// `BlockPageable::draw` (`pageable.rs:1771`).
 fn draw_image_inner_paint(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ImageEntry,
     x: f32,
     y: f32,
@@ -1982,12 +1983,12 @@ fn decode_image_for_v2(entry: &crate::drawables::ImageEntry) -> Option<krilla::i
 
 /// v2 SVG draw. Mirrors `svg::SvgRender::draw`.
 fn draw_svg_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::SvgEntry,
     x: f32,
     y: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         draw_svg_inner_paint(canvas, entry, x, y);
     });
@@ -1997,7 +1998,7 @@ fn draw_svg_v2(
 /// `draw_image_inner_paint` for the rationale (inline-root `<svg>`
 /// shares node_id with the wrapping block).
 fn draw_svg_inner_paint(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::SvgEntry,
     x: f32,
     y: f32,
@@ -2029,14 +2030,14 @@ fn draw_svg_inner_paint(
 /// fragments. Documents that rely on `overflow: hidden` won't
 /// byte-eq until then; the inline test cases avoid that property.
 fn draw_block_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::BlockEntry,
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
     is_split: bool,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         draw_block_inner_paint(canvas, entry, x, y, frag, is_split);
@@ -2056,12 +2057,12 @@ fn draw_block_v2(
 /// because html's bg paints at the page's margin top, not at body's
 /// content origin.
 fn paint_root_block_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::BlockEntry,
     margin_left_pt: f32,
     margin_top_pt: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
     let Some(size) = entry.layout_size else {
         return;
     };
@@ -2084,7 +2085,7 @@ fn paint_root_block_v2(
                 size.width,
                 size.height,
             );
-            crate::pageable::draw_block_border(
+            crate::draw_primitives::draw_block_border(
                 canvas,
                 &entry.style,
                 margin_left_pt,
@@ -2101,7 +2102,7 @@ fn paint_root_block_v2(
 /// and body block share a single opacity group (matches v1's
 /// `ListItemPageable::draw` byte output exactly).
 fn draw_block_inner_paint(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::BlockEntry,
     x: f32,
     y: f32,
@@ -2144,7 +2145,14 @@ fn draw_block_inner_paint(
     if entry.visible {
         crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
         crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
-        crate::pageable::draw_block_border(canvas, &entry.style, x, y, total_width, total_height);
+        crate::draw_primitives::draw_block_border(
+            canvas,
+            &entry.style,
+            x,
+            y,
+            total_width,
+            total_height,
+        );
     }
 }
 
@@ -2158,13 +2166,13 @@ fn draw_block_inner_paint(
 /// dispatched in the same scope. Multi-page table header repetition
 /// (`<thead>` cloned on continuation pages) is deferred to a later PR.
 fn draw_table_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::TableEntry,
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         let (total_width, total_height) = table_box_size(entry, frag);
@@ -2198,7 +2206,7 @@ fn table_box_size(
 /// ([`draw_table_v2`]) and the clip path ([`draw_under_clip_table`])
 /// so the two emit identical PDF operators for the same input.
 fn paint_table_outer_frame(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::TableEntry,
     x: f32,
     y: f32,
@@ -2207,7 +2215,14 @@ fn paint_table_outer_frame(
 ) {
     crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
     crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
-    crate::pageable::draw_block_border(canvas, &entry.style, x, y, total_width, total_height);
+    crate::draw_primitives::draw_block_border(
+        canvas,
+        &entry.style,
+        x,
+        y,
+        total_width,
+        total_height,
+    );
 }
 
 /// Push a `compute_overflow_clip_path` clip around the table's outer
@@ -2216,7 +2231,7 @@ fn paint_table_outer_frame(
 /// tables (no list-item marker, no shared-node_id inner content).
 #[allow(clippy::too_many_arguments)]
 fn draw_under_clip_table(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     table: &crate::drawables::TableEntry,
     geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
@@ -2229,7 +2244,7 @@ fn draw_under_clip_table(
     page_index: u32,
 ) {
     use crate::convert::px_to_pt;
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     let _ = geom;
     let (total_width, total_height) = table_box_size(table, frag);
@@ -2244,13 +2259,14 @@ fn draw_under_clip_table(
         // Push clip — fall through to descendant dispatch even if
         // `compute_overflow_clip_path` returns `None` so the cells
         // still paint (defensive, mirrors `draw_under_clip`).
-        let clip_pushed = if let Some(clip_path) = crate::pageable::compute_overflow_clip_path(
-            &table.style,
-            x_pt,
-            y_pt,
-            total_width,
-            total_height,
-        ) {
+        let clip_pushed = if let Some(clip_path) =
+            crate::draw_primitives::compute_overflow_clip_path(
+                &table.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            ) {
             canvas
                 .surface
                 .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
@@ -2419,7 +2435,7 @@ fn draw_under_clip_table(
 /// `<p style="opacity:0.5; background:red">text</p>` and friends.
 #[allow(clippy::too_many_arguments)]
 fn draw_block_with_inner_content(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     block: &crate::drawables::BlockEntry,
     paragraph: Option<&crate::drawables::ParagraphEntry>,
     image: Option<&crate::drawables::ImageEntry>,
@@ -2435,7 +2451,7 @@ fn draw_block_with_inner_content(
     margin_left_pt: f32,
     margin_top_pt: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     // Inner content (inline-root paragraph from `convert::inline_root`
     // or replaced image / svg from `convert::replaced`) is positioned
@@ -2493,7 +2509,7 @@ fn draw_block_with_inner_content(
 /// pairs and diverge.
 #[allow(clippy::too_many_arguments)]
 fn draw_list_item_with_block(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     list_item: &crate::drawables::ListItemEntry,
     block: Option<&crate::drawables::BlockEntry>,
     paragraph: Option<&crate::drawables::ParagraphEntry>,
@@ -2508,7 +2524,7 @@ fn draw_list_item_with_block(
     margin_left_pt: f32,
     margin_top_pt: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
 
     // Same content-box offset trick as `draw_block_with_inner_content`
     // — when the body block carries `padding` / `border`, the
@@ -2547,7 +2563,7 @@ fn draw_list_item_with_block(
 /// — caller (`draw_list_item_with_block`) handles both so the marker
 /// and the body block share one compositing group.
 fn draw_list_item_marker(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ListItemEntry,
     x: f32,
     y: f32,
@@ -2582,7 +2598,7 @@ fn draw_list_item_marker(
 /// byte-identical between v1 and v2.
 #[allow(clippy::too_many_arguments)]
 fn draw_paragraph_v2(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ParagraphEntry,
     x: f32,
     y: f32,
@@ -2594,7 +2610,7 @@ fn draw_paragraph_v2(
     margin_left_pt: f32,
     margin_top_pt: f32,
 ) {
-    use crate::pageable::draw_with_opacity;
+    use crate::draw_primitives::draw_with_opacity;
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         draw_paragraph_inner_paint(
             canvas,
@@ -2620,7 +2636,7 @@ fn draw_paragraph_v2(
 /// `ListItemPageable::draw → body.draw → paragraph.draw` chain.
 #[allow(clippy::too_many_arguments)]
 fn draw_paragraph_inner_paint(
-    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ParagraphEntry,
     x: f32,
     y: f32,
