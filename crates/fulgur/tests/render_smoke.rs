@@ -1338,3 +1338,31 @@ fn render_v2_smoke_inline_block_image_child_via_dispatch_fragment() {
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+#[test]
+fn render_v2_smoke_list_item_svg_marker() {
+    // Exercises `draw_list_item_marker`'s `ImageMarker::Svg` branch
+    // (render.rs: svg.draw call) — a `<li>` with an SVG list-style-image.
+    let svg_data = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><circle cx="5" cy="5" r="4" fill="blue"/></svg>"#;
+    let mut bundle = AssetBundle::default();
+    bundle.add_css(r#"li { list-style-image: url("bullet.svg"); }"#);
+    bundle.add_image("bullet.svg", svg_data.to_vec());
+    let html = r##"<!doctype html><html><body><ul><li>Alpha</li><li>Beta</li></ul></body></html>"##;
+    let engine = Engine::builder().assets(bundle).build();
+    let pdf = engine.render_html(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_margin_box_renderer() {
+    // Exercises `MarginBoxRenderer`'s Stage 3 draw path
+    // (render.rs: pageable.draw call) — a simple @top-center counter.
+    let html = r##"<!DOCTYPE html><html><head><style>
+        @page { margin: 36pt; @top-center { content: counter(page); } }
+        body { margin: 0; }
+        p { height: 500pt; background: #eee; }
+    </style></head><body><p>Page 1</p><p>Page 2</p></body></html>"##;
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
