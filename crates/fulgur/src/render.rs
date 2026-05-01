@@ -5,7 +5,7 @@ use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
-use crate::pageable::{Canvas, Pageable};
+use crate::pageable::Canvas;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -2823,7 +2823,13 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 /// Measure cache: (html, page_height as bits) → max-content width.
 /// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
 type MeasureCache = HashMap<(String, u32, u32), f32>;
-type RenderCache = HashMap<(String, u32, u32), Box<dyn Pageable>>;
+type RenderCache = HashMap<
+    (String, u32, u32),
+    (
+        crate::drawables::Drawables,
+        crate::pagination_layout::PaginationGeometryTable,
+    ),
+>;
 
 fn width_key(w: f32) -> u32 {
     w.to_bits()
@@ -3109,11 +3115,17 @@ impl<'a> MarginBoxRenderer<'a> {
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
                     self.margin_css, html
                 );
-                let render_doc = crate::blitz_adapter::parse_and_layout(
+                let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
                     crate::convert::pt_to_px(rect.width),
                     crate::convert::pt_to_px(rect.height),
                     self.font_data,
+                );
+                let empty_column_styles = crate::column_css::ColumnStyleTable::new();
+                let geometry = crate::pagination_layout::run_pass_with_break_styles(
+                    &mut *render_doc,
+                    crate::convert::pt_to_px(rect.height),
+                    &empty_column_styles,
                 );
                 let dummy_store = RunningElementStore::new();
                 let mut dummy_ctx = crate::convert::ConvertContext {
@@ -3125,16 +3137,23 @@ impl<'a> MarginBoxRenderer<'a> {
                     bookmark_by_node: HashMap::new(),
                     column_styles: crate::column_css::ColumnStyleTable::new(),
                     multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-                    pagination_geometry: crate::pagination_layout::PaginationGeometryTable::new(),
+                    pagination_geometry: geometry,
                     link_cache: Default::default(),
                     viewport_size_px: None,
                 };
-                let pageable = crate::convert::dom_to_pageable(&render_doc, &mut dummy_ctx);
-                self.render_cache.insert(cache_key.clone(), pageable);
+                let drawables = crate::convert::dom_to_drawables(&render_doc, &mut dummy_ctx);
+                let geometry = dummy_ctx.pagination_geometry;
+                self.render_cache
+                    .insert(cache_key.clone(), (drawables, geometry));
             }
 
-            if let Some(pageable) = self.render_cache.get(&cache_key) {
-                pageable.draw(canvas, rect.x, rect.y, rect.width, rect.height);
+            if let Some((drawables, geometry)) = self.render_cache.get(&cache_key) {
+                if let Some(root_id) = drawables.root_id {
+                    if let Some(root_block) = drawables.block_styles.get(&root_id) {
+                        paint_root_block_v2(canvas, root_block, rect.x, rect.y);
+                    }
+                }
+                draw_v2_page(canvas, 0, rect.x, rect.y, geometry, drawables);
             }
         }
     }
