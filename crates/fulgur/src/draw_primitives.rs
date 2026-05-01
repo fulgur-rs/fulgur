@@ -780,13 +780,12 @@ impl BlockStyle {
         self.overflow_x == Overflow::Clip || self.overflow_y == Overflow::Clip
     }
 
-    /// Whether a node with this style must be wrapped in a `BlockPageable`.
+    /// Whether a node with this style requires its own draw entry.
     ///
-    /// Wrapping is required when the node has any visual effect that must be
-    /// rendered on its own surface — backgrounds/borders/padding
-    /// (`has_visual_style`), a non-zero `border-radius` (`has_radius`), or
-    /// overflow clipping (`has_overflow_clip`, which uses the node's box as
-    /// the clip region).
+    /// True when the node has any visual effect that must be rendered on its
+    /// own surface — backgrounds/borders/padding (`has_visual_style`), a
+    /// non-zero `border-radius` (`has_radius`), or overflow clipping
+    /// (`has_overflow_clip`, which uses the node's box as the clip region).
     pub fn needs_block_wrapper(&self) -> bool {
         self.has_visual_style() || self.has_radius() || self.has_overflow_clip()
     }
@@ -805,7 +804,7 @@ pub struct BookmarkEntry {
 
 /// Shared, mutable collector threaded through `Canvas` during page
 /// rendering. `render.rs` sets `current_page_idx` before drawing each page;
-/// `BookmarkMarkerPageable::draw` pushes an entry for each marker it sees.
+/// bookmark draw logic pushes an entry for each `<h1>`–`<h6>` marker.
 #[derive(Debug, Default)]
 pub struct BookmarkCollector {
     current_page_idx: usize,
