@@ -4,7 +4,7 @@ use krilla::destination::XyzDestination;
 use krilla::geom::Point;
 use krilla::outline::{Outline, OutlineNode};
 
-use crate::pageable::{BookmarkEntry, Pt};
+use crate::draw_primitives::{BookmarkEntry, Pt};
 
 /// Intermediate, testable tree node. Converted to `OutlineNode` by
 /// `to_krilla_node` before being attached to an `Outline`.

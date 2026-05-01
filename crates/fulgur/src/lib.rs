@@ -8,17 +8,21 @@ pub mod blitz_adapter;
 pub(crate) mod column_css;
 pub mod config;
 pub mod convert;
+pub mod draw_primitives;
+#[doc(hidden)]
+pub mod drawables;
 pub mod engine;
 pub mod error;
 pub mod gcpm;
 pub mod image;
 pub mod inspect;
 pub(crate) mod link;
-pub(crate) mod multicol_layout;
+#[doc(hidden)]
+pub mod multicol_layout;
 pub(crate) mod net;
 pub mod outline;
-pub mod pageable;
-pub mod paginate;
+#[doc(hidden)]
+pub mod pagination_layout;
 pub mod paragraph;
 pub mod render;
 pub mod schema;

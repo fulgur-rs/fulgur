@@ -34,7 +34,7 @@ cargo run --bin fulgur -- render input.html --size A4 --landscape -o output.pdf
 The processing pipeline flows:
 
 ```text
-HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting → Krilla PDF
+HTML string → Blitz (parse/style/layout) → Drawables / PaginationGeometryTable → Page splitting → Krilla PDF
 ```
 
 ### Workspace Structure
@@ -44,12 +44,13 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 
 ### Key Modules (fulgur)
 
-- **engine.rs** — `Engine` builder: configures and executes `render_html()` / `render_pageable()`
+- **engine.rs** — `Engine` builder: configures and executes `render_html()`
 - **blitz_adapter.rs** — Thin adapter isolating Blitz API changes from the rest of the codebase
-- **convert.rs** — Transforms Blitz DOM nodes into `Pageable` trait objects
-- **pageable.rs** — Core `Pageable` trait with `wrap()` (measure), `split()` (page break), `draw()` (render). Concrete types: `BlockPageable`, `ParagraphPageable`, `SpacerPageable`, `ImagePageable`
-- **paginate.rs** — Page splitting algorithm that walks the Pageable tree
-- **render.rs** — Draws paginated fragments onto Krilla surfaces
+- **convert.rs** — Transforms Blitz DOM nodes into `Drawables` and geometry records
+- **draw_primitives.rs** — Primitive geometry, canvas, style, and drawing-helper types (`Pt`, `Size`, `Rect`, `Canvas`, `BlockStyle`, background/gradient types, etc.)
+- **drawables.rs** — `Drawables` struct: flat per-node draw payloads (`BlockDraw`, `ParagraphDraw`, `ImageDraw`, etc.) used by the v2 render path
+- **paginate.rs** — Page splitting algorithm that walks the `PaginationGeometryTable`
+- **render.rs** — Draws paginated fragments onto Krilla surfaces via `render_v2`
 - **config.rs** — Page size, margins, orientation, metadata
 - **asset.rs** — `AssetBundle` manages CSS, fonts, and images (offline-first, all assets explicitly registered)
 - **paragraph.rs** — Text line layout and drawing
@@ -59,7 +60,7 @@ HTML string → Blitz (parse/style/layout) → Pageable tree → Page splitting 
 
 - **Offline-first**: No network access; all assets must be explicitly bundled
 - **Deterministic**: Same input always produces same output — see the font caveat below
-- **Hybrid layout**: Taffy pre-computes sizes, Pageable reuses them during pagination (no re-layout after splitting)
+- **Hybrid layout**: Taffy pre-computes sizes; geometry is recorded in `PaginationGeometryTable` once and reused during pagination — no re-layout after splitting
 - **Adapter isolation**: Blitz API surface is contained in `blitz_adapter.rs`
 
 **Font determinism caveat**: `blitz-dom` 0.2.4 hardcodes

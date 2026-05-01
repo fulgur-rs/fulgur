@@ -5,7 +5,6 @@
 //! CSS 2.1 §10.6.4: the height of an absolutely-positioned element does not
 //! contribute to the height of its containing block's normal flow.
 
-use fulgur::pageable::{BlockPageable, Pageable, PositionedChild};
 use fulgur::{Engine, Margin, PageSize};
 
 fn page_count(pdf: &[u8]) -> usize {
@@ -58,53 +57,29 @@ fn abs_positioned_div_is_out_of_flow_in_pagination() {
     );
 }
 
-/// Walk the Pageable tree and count `BlockPageable` instances whose
-/// border-box (via `cached_size` or `layout_size`) approximately matches
-/// `(target_w, target_h)` and whose `out_of_flow` flag matches `is_oof`.
+/// Count `BlockEntry` instances in `Drawables.block_styles` whose
+/// `layout_size` approximately matches `(target_w, target_h)` (in pt).
 /// Used by the flatten-zero-size-container regression test below to
-/// verify the abs child reached the Pageable tree (rather than being
-/// silently dropped by the flatten path).
-fn count_blocks_with_size_and_flow(
-    root: &dyn Pageable,
+/// verify the abs child reached the Drawables map (rather than being
+/// silently dropped by the convert path's flatten branch).
+///
+/// PR 8i: the v2 Drawables surface is flat — there is no `out_of_flow`
+/// flag to discriminate against. Presence in `block_styles` with the
+/// expected `layout_size` is the structural invariant we pin here.
+fn count_blocks_with_size(
+    drawables: &fulgur::drawables::Drawables,
     target_w: f32,
     target_h: f32,
-    is_oof: bool,
 ) -> usize {
-    let mut count = 0;
-    fn walk(
-        node: &dyn Pageable,
-        target_w: f32,
-        target_h: f32,
-        is_oof: bool,
-        count: &mut usize,
-        own_oof: bool,
-    ) {
-        if let Some(block) = node.as_any().downcast_ref::<BlockPageable>() {
-            let size = block.layout_size.or(block.cached_size);
-            if let Some(s) = size
-                && (s.width - target_w).abs() < 0.5
-                && (s.height - target_h).abs() < 0.5
-                && own_oof == is_oof
-            {
-                *count += 1;
-            }
-            for PositionedChild {
-                child, out_of_flow, ..
-            } in &block.children
-            {
-                walk(
-                    child.as_ref(),
-                    target_w,
-                    target_h,
-                    is_oof,
-                    count,
-                    *out_of_flow,
-                );
-            }
-        }
-    }
-    walk(root, target_w, target_h, is_oof, &mut count, false);
-    count
+    drawables
+        .block_styles
+        .values()
+        .filter(|entry| {
+            entry.layout_size.is_some_and(|s| {
+                (s.width - target_w).abs() < 0.5 && (s.height - target_h).abs() < 0.5
+            })
+        })
+        .count()
 }
 
 /// Regression for the coderabbit thread on fulgur-aijf: a zero-size
@@ -146,12 +121,12 @@ fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let tree = engine.build_pageable_for_testing_no_gcpm(html);
-    let abs_blocks = count_blocks_with_size_and_flow(tree.as_ref(), 30.0, 30.0, true);
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    let abs_blocks = count_blocks_with_size(&drawables, 30.0, 30.0);
     assert!(
         abs_blocks >= 1,
-        "expected at least one out-of-flow 30×30 pt BlockPageable for the abs <div>; \
-         the flatten guard must not drop it. Found {abs_blocks}."
+        "expected at least one 30x30 pt BlockEntry in Drawables for the abs <div>; \
+         the convert flatten guard must not drop it. Found {abs_blocks}."
     );
 }
 

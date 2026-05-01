@@ -138,7 +138,7 @@ fn link_works_through_gcpm_render_path() {
 //      silently dropped. No `LineItem::Image` is produced, no image data is
 //      embedded, the content stream is empty — `/Link` annotations are moot
 //      because there is nothing to click through to.
-//   3. The ImagePageable path in `convert::convert_image` only fires when
+//   3. The ImageRender path in `convert::convert_image` only fires when
 //      `<img>` is visited as its own node (i.e. block-level, such as
 //      `<div><img style="display:block"/></div>` in `image_test.rs`), and
 //      that path currently has no link support either.

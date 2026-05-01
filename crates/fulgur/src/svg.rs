@@ -1,15 +1,15 @@
-//! SvgPageable — renders inline <svg> elements to PDF as vector graphics
+//! SvgRender — renders inline <svg> elements to PDF as vector graphics
 //! via krilla-svg's SurfaceExt::draw_svg.
 
 use std::sync::Arc;
 
 use usvg::Tree;
 
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::draw_primitives::{Canvas, Pt};
 
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
-pub struct SvgPageable {
+pub struct SvgRender {
     /// Parsed SVG tree, shared via Arc for cheap cloning during pagination.
     pub tree: Arc<Tree>,
     /// Display width in PDF points — CSS-resolved by Blitz/Taffy, NOT the
@@ -20,9 +20,12 @@ pub struct SvgPageable {
     pub height: f32,
     pub opacity: f32,
     pub visible: bool,
+    /// fulgur-3vwx (Phase 3.2.b): DOM NodeId for `slice_for_page`
+    /// geometry lookup. See `BlockPageable::node_id`.
+    pub node_id: Option<usize>,
 }
 
-impl SvgPageable {
+impl SvgRender {
     pub fn new(tree: Arc<Tree>, width: f32, height: f32) -> Self {
         Self {
             tree,
@@ -30,29 +33,24 @@ impl SvgPageable {
             height,
             opacity: 1.0,
             visible: true,
-        }
-    }
-}
-
-impl Pageable for SvgPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: self.width,
-            height: self.height,
+            node_id: None,
         }
     }
 
-    fn split(
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
+        self
+    }
+
+    pub fn draw(
         &self,
+        canvas: &mut Canvas<'_, '_>,
+        x: Pt,
+        y: Pt,
         _avail_width: Pt,
         _avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // SVGs are atomic — cannot be split across pages
-        None
-    }
-
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        use crate::pageable::draw_with_opacity;
+    ) {
+        use crate::draw_primitives::draw_with_opacity;
         use krilla_svg::{SurfaceExt, SvgSettings};
 
         if !self.visible {
@@ -65,7 +63,7 @@ impl Pageable for SvgPageable {
             let transform = krilla::geom::Transform::from_translate(x, y);
             canvas.surface.push_transform(&transform);
             // draw_svg returns Option<()>; None means the tree was malformed.
-            // We silently skip rather than panic, matching ImagePageable's behavior
+            // We silently skip rather than panic, matching ImageRender's behavior
             // when krilla::image::Image::from_* returns Err.
             let _ = canvas
                 .surface
@@ -73,28 +71,10 @@ impl Pageable for SvgPageable {
             canvas.surface.pop();
         });
     }
-
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
-    fn clone_box(&self) -> Box<dyn Pageable> {
-        Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.height
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pageable::Canvas;
 
     // Minimal valid SVG: 100x50 red rectangle
     const MINIMAL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
@@ -107,7 +87,7 @@ mod tests {
 
     /// Draw `svg` onto a freshly-created krilla Document and discard the output.
     /// Used to exercise `draw()` without asserting on surface state.
-    fn draw_onto_surface(svg: &SvgPageable) {
+    fn draw_onto_surface(svg: &SvgRender) {
         let mut doc = krilla::Document::new();
         {
             let settings = krilla::page::PageSettings::from_wh(400.0, 400.0)
@@ -127,28 +107,14 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_returns_configured_size() {
-        let mut svg = SvgPageable::new(parse_tree(), 120.0, 60.0);
-        let size = svg.wrap(1000.0, 1000.0);
-        assert_eq!(size.width, 120.0);
-        assert_eq!(size.height, 60.0);
-    }
-
-    #[test]
-    fn test_split_returns_none() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert!(svg.split(1000.0, 1000.0).is_none());
-    }
-
-    #[test]
     fn test_height_returns_configured_height() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert_eq!(svg.height(), 50.0);
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        assert_eq!(svg.height, 50.0);
     }
 
     #[test]
-    fn test_clone_box_shares_tree_via_arc() {
-        let original = SvgPageable::new(parse_tree(), 100.0, 50.0);
+    fn test_clone_shares_tree_via_arc() {
+        let original = SvgRender::new(parse_tree(), 100.0, 50.0);
         let original_ptr = Arc::as_ptr(&original.tree);
         let cloned = original.clone();
         let cloned_ptr = Arc::as_ptr(&cloned.tree);
@@ -160,32 +126,20 @@ mod tests {
 
     #[test]
     fn test_default_opacity_and_visible() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.opacity, 1.0);
         assert!(svg.visible);
     }
 
     #[test]
-    fn test_pagination_returns_default() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert_eq!(svg.pagination(), Pagination::default());
-    }
-
-    #[test]
-    fn test_as_any_downcasts_to_svg_pageable() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert!(svg.as_any().downcast_ref::<SvgPageable>().is_some());
-    }
-
-    #[test]
     fn test_draw_visible_does_not_panic() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         draw_onto_surface(&svg);
     }
 
     #[test]
     fn test_draw_not_visible_returns_early() {
-        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         svg.visible = false;
         draw_onto_surface(&svg);
     }
@@ -194,13 +148,13 @@ mod tests {
     fn test_draw_zero_size_skips_draw() {
         // Size::from_wh(0.0, …) returns None (NonZeroPositiveF32 rejects zero);
         // this exercises the `let Some(size) = … else { return; }` branch.
-        let svg = SvgPageable::new(parse_tree(), 0.0, 50.0);
+        let svg = SvgRender::new(parse_tree(), 0.0, 50.0);
         draw_onto_surface(&svg);
     }
 
     #[test]
     fn test_draw_partial_opacity() {
-        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         svg.opacity = 0.5;
         draw_onto_surface(&svg);
     }
@@ -208,7 +162,7 @@ mod tests {
     #[test]
     fn test_draw_zero_opacity_returns_early() {
         // draw_with_opacity short-circuits when opacity == 0.0.
-        let mut svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         svg.opacity = 0.0;
         draw_onto_surface(&svg);
     }

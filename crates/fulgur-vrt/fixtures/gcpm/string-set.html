@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page {
+  size: A4;
+  margin: 60pt;
+  @top-left {
+    content: string(chapter-title);
+    font-size: 9pt;
+    color: #555;
+  }
+  @bottom-center {
+    content: counter(page);
+    font-size: 9pt;
+  }
+}
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.6; margin: 0; }
+h2 { string-set: chapter-title content(text); margin-top: 18pt; }
+p { margin: 8pt 0; }
+.box { border: 1pt solid #ddd; padding: 10pt; margin: 8pt 0; background: #fafafa; }
+</style>
+</head>
+<body>
+<h2>Introduction</h2>
+<p>The <code>string-set: chapter-title content()</code> declaration captures the heading text into a named string. <code>@top-left { content: string(chapter-title); }</code> then displays the most recent value on each page.</p>
+<div class="box"><p>Page 1 top-left should read "Introduction".</p></div>
+<div class="box"><p>Filler 1 to overflow page 1.</p></div>
+<div class="box"><p>Filler 2 — additional<br>multi-line content<br>to push the chapter<br>onto a second page<br>so the carry semantic<br>is exercised.</p></div>
+<div class="box"><p>Filler 3 — page 2 of "Introduction" should still show "Introduction" in the top-left because no new <code>h2</code> has appeared yet (carry from previous page's last assignment).</p></div>
+<div class="box"><p>Filler 4 — the carry semantic is the part that broke silently in Phase 3.4. If <code>collect_running_element_states</code> / <code>collect_string_set_states</code> regress, page 2's top-left will be empty.</p></div>
+<div class="box"><p>Filler 5.</p></div>
+<div class="box"><p>Filler 6.</p></div>
+<div class="box"><p>Filler 7.</p></div>
+<h2 style="page-break-before: always">Background</h2>
+<p>A new chapter begins on this page. The top-left should now read "Background" because the new <code>h2</code> updates the named string before the page header is resolved.</p>
+<div class="box"><p>Top-left here should read "Background".</p></div>
+</body>
+</html>

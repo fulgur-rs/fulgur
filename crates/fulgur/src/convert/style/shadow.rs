@@ -6,7 +6,7 @@
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::px_to_pt;
-use crate::pageable::BlockStyle;
+use crate::draw_primitives::BlockStyle;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     let shadow_list = ctx.styles.clone_box_shadow();
@@ -27,7 +27,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
         if rgba[3] == 0 {
             continue; // fully transparent — skip
         }
-        style.box_shadows.push(crate::pageable::BoxShadow {
+        style.box_shadows.push(crate::draw_primitives::BoxShadow {
             offset_x: px_to_pt(shadow.base.horizontal.px()),
             offset_y: px_to_pt(shadow.base.vertical.px()),
             blur: px_to_pt(blur_px),

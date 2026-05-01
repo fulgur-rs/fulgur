@@ -17,7 +17,7 @@ use krilla::destination::{Destination, XyzDestination};
 use krilla::geom::{Point, Quadrilateral};
 use krilla::page::Page;
 
-use crate::pageable::{DestinationRegistry, LinkOccurrence};
+use crate::draw_primitives::{DestinationRegistry, LinkOccurrence};
 use crate::paragraph::LinkTarget;
 
 /// Emit PDF link annotations for every occurrence on the given page.
@@ -64,7 +64,7 @@ pub(crate) fn emit_link_annotations(
 mod tests {
     use std::sync::Arc;
 
-    use crate::pageable::{DestinationRegistry, LinkOccurrence, Quad};
+    use crate::draw_primitives::{DestinationRegistry, LinkOccurrence, Quad};
     use crate::paragraph::LinkTarget;
 
     use super::emit_link_annotations;

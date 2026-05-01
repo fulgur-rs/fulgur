@@ -100,6 +100,7 @@ fn radial_gradient_circular_matches_ring_reference() {
         page_size: "A4",
         margin_pt: Some(0.0),
         dpi: 150,
+        bookmarks: false,
     };
 
     let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");
@@ -196,6 +197,7 @@ fn radial_gradient_out_of_range_matches_ring_reference() {
         page_size: "A4",
         margin_pt: Some(0.0),
         dpi: 150,
+        bookmarks: false,
     };
 
     let test_pdf = render_html_to_pdf(&test_html, spec).expect("render test pdf");

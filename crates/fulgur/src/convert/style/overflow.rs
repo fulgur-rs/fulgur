@@ -4,7 +4,7 @@
 //! `hidden` / `clip` / `scroll` / `auto` all collapse to [`Overflow::Clip`].
 
 use super::StyleContext;
-use crate::pageable::{BlockStyle, Overflow};
+use crate::draw_primitives::{BlockStyle, Overflow};
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     style.overflow_x = map(ctx.styles.clone_overflow_x());
@@ -23,7 +23,7 @@ fn map(o: style::values::computed::Overflow) -> Overflow {
 #[cfg(test)]
 mod tests {
     use super::map;
-    use crate::pageable::Overflow;
+    use crate::draw_primitives::Overflow;
     use style::values::computed::Overflow as S;
 
     #[test]

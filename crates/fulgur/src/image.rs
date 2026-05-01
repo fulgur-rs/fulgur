@@ -1,8 +1,6 @@
-//! ImagePageable — renders images in PDF via Krilla's Image API.
+//! ImageRender — renders images in PDF via Krilla's Image API.
 
 use std::sync::Arc;
-
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
 
 /// Image format detected from data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,9 +25,9 @@ impl ImageFormat {
 /// Classification of an asset's bytes for rendering path selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
-    /// Raster image (PNG/JPEG/GIF) → renders via `ImagePageable`.
+    /// Raster image (PNG/JPEG/GIF) → renders via `ImageRender`.
     Raster(ImageFormat),
-    /// SVG vector image → renders via `SvgPageable`.
+    /// SVG vector image → renders via `SvgRender`.
     Svg,
     /// Unrecognized / unsupported.
     Unknown,
@@ -40,9 +38,9 @@ impl AssetKind {
     ///
     /// Accepts SVG via the `<svg` element start or `<?xml` prolog, tolerant
     /// of an optional leading UTF-8 BOM and ASCII whitespace. Falls through
-    /// to `ImagePageable::detect_format` for raster magic bytes.
+    /// to `ImageRender::detect_format` for raster magic bytes.
     pub fn detect(data: &[u8]) -> AssetKind {
-        if let Some(format) = ImagePageable::detect_format(data) {
+        if let Some(format) = ImageRender::detect_format(data) {
             return AssetKind::Raster(format);
         }
         let mut slice = data;
@@ -67,16 +65,19 @@ impl AssetKind {
 
 /// An image element that renders an image at its computed size.
 #[derive(Clone)]
-pub struct ImagePageable {
+pub struct ImageRender {
     pub image_data: Arc<Vec<u8>>,
     pub format: ImageFormat,
     pub width: f32,
     pub height: f32,
     pub opacity: f32,
     pub visible: bool,
+    /// fulgur-r6we (Phase 3.2.a): DOM NodeId for `slice_for_page`
+    /// geometry lookup. See `BlockPageable::node_id`.
+    pub node_id: Option<usize>,
 }
 
-impl ImagePageable {
+impl ImageRender {
     pub fn new(data: Arc<Vec<u8>>, format: ImageFormat, width: f32, height: f32) -> Self {
         Self {
             image_data: data,
@@ -85,7 +86,13 @@ impl ImagePageable {
             height,
             opacity: 1.0,
             visible: true,
+            node_id: None,
         }
+    }
+
+    pub fn with_node_id(mut self, node_id: Option<usize>) -> Self {
+        self.node_id = node_id;
+        self
     }
 
     /// Decode image dimensions (width, height) from header bytes.
@@ -160,69 +167,6 @@ impl ImagePageable {
     }
 }
 
-impl Pageable for ImagePageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: self.width,
-            height: self.height,
-        }
-    }
-
-    fn split(
-        &self,
-        _avail_width: Pt,
-        _avail_height: Pt,
-    ) -> Option<(Box<dyn Pageable>, Box<dyn Pageable>)> {
-        // Images cannot be split
-        None
-    }
-
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        use crate::pageable::draw_with_opacity;
-
-        if !self.visible {
-            return;
-        }
-        draw_with_opacity(canvas, self.opacity, |canvas| {
-            let data: krilla::Data = Arc::clone(&self.image_data).into();
-            let image_result = match self.format {
-                ImageFormat::Png => krilla::image::Image::from_png(data, true),
-                ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true),
-                ImageFormat::Gif => krilla::image::Image::from_gif(data, true),
-            };
-
-            let Ok(image) = image_result else {
-                return;
-            };
-
-            let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
-                return;
-            };
-
-            let transform = krilla::geom::Transform::from_translate(x, y);
-            canvas.surface.push_transform(&transform);
-            canvas.surface.draw_image(image, size);
-            canvas.surface.pop();
-        });
-    }
-
-    fn pagination(&self) -> Pagination {
-        Pagination::default()
-    }
-
-    fn clone_box(&self) -> Box<dyn Pageable> {
-        Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.height
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,13 +187,13 @@ mod tests {
 
     #[test]
     fn test_png_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_PNG, ImageFormat::Png);
+        let dims = ImageRender::decode_dimensions(MINIMAL_PNG, ImageFormat::Png);
         assert_eq!(dims, Some((1, 1)));
     }
 
     #[test]
     fn test_gif_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_GIF, ImageFormat::Gif);
+        let dims = ImageRender::decode_dimensions(MINIMAL_GIF, ImageFormat::Gif);
         assert_eq!(dims, Some((1, 1)));
     }
 
@@ -276,13 +220,13 @@ mod tests {
 
     #[test]
     fn test_jpeg_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_JPEG, ImageFormat::Jpeg);
+        let dims = ImageRender::decode_dimensions(MINIMAL_JPEG, ImageFormat::Jpeg);
         assert_eq!(dims, Some((1, 1)));
     }
 
     #[test]
     fn test_truncated_data_returns_none() {
-        let dims = ImagePageable::decode_dimensions(&[0x89, 0x50], ImageFormat::Png);
+        let dims = ImageRender::decode_dimensions(&[0x89, 0x50], ImageFormat::Png);
         assert_eq!(dims, None);
     }
 
@@ -339,5 +283,20 @@ mod tests {
             AssetKind::detect(b"not an image"),
             AssetKind::Unknown
         ));
+    }
+
+    #[test]
+    fn image_render_new_initialises_defaults_and_with_node_id_overrides() {
+        let data = Arc::new(MINIMAL_PNG.to_vec());
+        let img = ImageRender::new(data.clone(), ImageFormat::Png, 100.0, 50.0);
+        assert_eq!(img.width, 100.0);
+        assert_eq!(img.height, 50.0);
+        assert_eq!(img.opacity, 1.0);
+        assert!(img.visible);
+        assert!(img.node_id.is_none());
+        let img2 = img.with_node_id(Some(42));
+        assert_eq!(img2.node_id, Some(42));
+        let img3 = img2.with_node_id(None);
+        assert!(img3.node_id.is_none());
     }
 }

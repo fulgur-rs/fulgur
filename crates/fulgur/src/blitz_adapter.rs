@@ -360,7 +360,8 @@ pub fn resolve(doc: &mut HtmlDocument) {
 ///
 /// Page-repetition of fixed content (Chrome's "should repeat on every page"
 /// behavior in WPT fixedpos-* tests) is intentionally **not** done here —
-/// that's a paginate-time concern owned by `crate::paginate`.
+/// the slice path replicates `is_fixed` children at their viewport-relative
+/// coordinates on every page.
 pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewport_h_px: f32) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     use std::ops::DerefMut;
@@ -708,7 +709,7 @@ pub fn extract_inline_svg_tree(
 /// into a child image node — the match arm in
 /// `blitz-dom/src/layout/construct.rs` for non-`String` ContentItem variants is
 /// a TODO. fulgur bypasses that by reading the stylo computed value directly
-/// and constructing an `ImagePageable` itself (see `convert::build_pseudo_image`
+/// and constructing an `ImageRender` itself (see `convert::build_pseudo_image`
 /// and the normal-element `content: url()` path in `convert::convert_node_inner`).
 ///
 /// Scope: only single-item content is matched (per the fulgur-ai3 design scope
@@ -1564,7 +1565,7 @@ fn resolve_string_set_values(
 
 // ─── transform support ────────────────────────────────────
 
-use crate::pageable::{Affine2D, Point2};
+use crate::draw_primitives::{Affine2D, Point2};
 
 /// Read the computed `transform` and `transform-origin` from `styles` and
 /// fold the `TransformOperation` list into a single pre-resolved affine
@@ -2934,7 +2935,7 @@ mod tests {
         let props = table.get(&k).expect("k in table");
         assert_eq!(
             props.break_inside,
-            Some(crate::pageable::BreakInside::Avoid)
+            Some(crate::draw_primitives::BreakInside::Avoid)
         );
     }
 }
@@ -2942,7 +2943,8 @@ mod tests {
 #[cfg(test)]
 mod transform_tests {
     use super::*;
-    use crate::pageable::{Affine2D, Point2, matrix_test_util::approx};
+    use crate::draw_primitives::matrix_test_util::approx;
+    use crate::draw_primitives::{Affine2D, Point2};
 
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.
