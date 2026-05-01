@@ -343,6 +343,17 @@ impl<'a> PaginationLayoutTree<'a> {
     /// restore body's location across the call — same approach as
     /// [`crate::multicol_layout::FulgurLayoutTree::layout_multicol_subtrees`].
     fn drive_taffy_root_layout(&mut self) {
+        // fulgur-uebl: production `run_pass_inner` populates
+        // `used_page_names` once `column_styles` is available; the
+        // test-only Taffy parity path still needs the same table or
+        // any future fixture using `page:` would silently skip the
+        // implicit-break logic. Lazy-fill so call sites that want the
+        // baseline behaviour can still leave both `None`.
+        if self.used_page_names.is_none() {
+            self.used_page_names = self
+                .column_styles
+                .map(|cs| crate::blitz_adapter::compute_used_page_names(self.doc, cs));
+        }
         let Some(body_id) = self.body_id else {
             return;
         };

@@ -508,7 +508,10 @@ fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseErr
         // they imply. Numeric idents are also rejected by `expect_ident`
         // before reaching here.
         let lower = s.to_ascii_lowercase();
-        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+        if matches!(
+            lower.as_str(),
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+        ) {
             Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
         } else {
             Ok(PageName::Named(s.to_string()))
@@ -1839,11 +1842,12 @@ mod tests {
 
     #[test]
     fn page_rejects_css_wide_keywords() {
-        // `inherit` / `initial` / `unset` / `revert` should drop the
+        // `inherit` / `initial` / `unset` / `revert` / `revert-layer`
+        // should drop the
         // declaration entirely — we don't model the cascade richness
         // they imply, and accepting them as named pages would silently
         // create pages named "inherit" etc.
-        for kw in ["inherit", "initial", "unset", "revert"] {
+        for kw in ["inherit", "initial", "unset", "revert", "revert-layer"] {
             let css = format!("page: {kw};");
             let props = parse_declaration_block(&css);
             assert_eq!(props.page, None, "{kw} should be rejected");
