@@ -479,7 +479,6 @@ pub fn draw_with_opacity(
 
 /// Core pagination-aware layout trait.
 pub trait Pageable: Send + Sync {
-    /// Measure size within available area.
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
 
