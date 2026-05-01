@@ -2839,7 +2839,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
 impl<'a> MarginBoxRenderer<'a> {
     /// Build a renderer from raw inputs. `string_set_by_node` /
     /// `counter_ops_by_node` are the per-node maps drained out of
-    /// `ConvertContext` before `dom_to_pageable` consumed them.
+    /// `ConvertContext` before `dom_to_drawables` consumed them.
     pub(crate) fn new(
         gcpm: &'a GcpmContext,
         running_store: &'a RunningElementStore,
@@ -2901,7 +2901,7 @@ impl<'a> MarginBoxRenderer<'a> {
     /// 3. Measure max-content width (top/bottom) or height (left/right).
     /// 4. Distribute boxes along each edge with `compute_edge_layout`.
     /// 5. Render each box at its final rect via Blitz parse + layout +
-    ///    `dom_to_pageable`, then `pageable.draw(canvas, rect)`.
+    ///    `dom_to_drawables`, then dispatched through the v2 paint path.
     ///
     /// `content_width` is the page content area width in pt — used as
     /// the available width during measure passes for top/bottom boxes.
