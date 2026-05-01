@@ -3153,6 +3153,10 @@ impl<'a> MarginBoxRenderer<'a> {
                         paint_root_block_v2(canvas, root_block, rect.x, rect.y);
                     }
                 }
+                // `body_offset_pt` is (0, 0) here because the wrapper HTML fixes
+                // `body { margin: 0; padding: 0; }` via an inline style, which
+                // takes higher specificity than `self.margin_css`. No adjustment
+                // needed unlike `render_v2`.
                 draw_v2_page(canvas, 0, rect.x, rect.y, geometry, drawables);
             }
         }
