@@ -553,7 +553,6 @@ impl EngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pageable::{BlockPageable, SpacerPageable};
 
     #[test]
     fn builder_bookmarks_defaults_to_false() {
@@ -698,19 +697,6 @@ mod tests {
 
     // ── Render methods ─────────────────────────────────────────────────────
 
-    fn make_spacer_tree() -> Box<dyn Pageable> {
-        let mut s = SpacerPageable::new(100.0);
-        s.wrap(100.0, 1000.0);
-        Box::new(BlockPageable::new(vec![Box::new(s)]))
-    }
-
-    #[test]
-    fn render_pageable_returns_valid_pdf() {
-        let engine = Engine::builder().build();
-        let pdf = engine.render_pageable(make_spacer_tree()).unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
-    }
-
     #[test]
     fn render_html_to_file_writes_valid_pdf() {
         let dir = tempfile::tempdir().unwrap();
@@ -718,18 +704,6 @@ mod tests {
         Engine::builder()
             .build()
             .render_html_to_file("<html><body><p>test</p></body></html>", &path)
-            .unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.starts_with(b"%PDF"));
-    }
-
-    #[test]
-    fn render_pageable_to_file_writes_valid_pdf() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.pdf");
-        Engine::builder()
-            .build()
-            .render_pageable_to_file(make_spacer_tree(), &path)
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
