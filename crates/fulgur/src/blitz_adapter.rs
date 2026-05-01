@@ -638,11 +638,27 @@ fn walk_used_page_names(
         // Orthogonal-flow child: treat as atomic from this parent's
         // perspective — its internal page-name propagation does not
         // surface here (CSS Writing Modes 4 §9 / WPT
-        // `page-name-orthogonal-writing-001`). Use the child's own /
-        // inherited space name instead of its propagated `(start, end)`
-        // pair.
+        // `page-name-orthogonal-writing-001`). The child's *internal*
+        // start/end pair is hidden, but the child's own declared
+        // `page` (when block-level) must still drive a forced break
+        // around the orthogonal box itself — collapsing every
+        // orthogonal child to the parent's space would silently
+        // suppress that. Resolve the child's own / inherited space
+        // name and use that uniformly for both endpoints.
         let (effective_start, effective_end) = if is_orthogonal_to_parent(node, child) {
-            (space_name.clone(), space_name.clone())
+            let child_space = if is_block_level_outside(child) {
+                table
+                    .get(&child_id)
+                    .and_then(|props| props.page.as_ref())
+                    .and_then(|p| match p {
+                        crate::column_css::PageName::Named(s) => Some(s.clone()),
+                        crate::column_css::PageName::Auto => None,
+                    })
+                    .or_else(|| space_name.clone())
+            } else {
+                space_name.clone()
+            };
+            (child_space.clone(), child_space)
         } else {
             (child_start, child_end)
         };

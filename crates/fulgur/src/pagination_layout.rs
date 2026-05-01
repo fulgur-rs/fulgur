@@ -1248,9 +1248,7 @@ fn has_page_name_change_below(
             }
         }
         let (child_start, child_end) = table.get(&child_id).cloned().unwrap_or((None, None));
-        if !suppress_direct_compare
-            && prev_used.as_ref().is_some_and(|p| *p != child_start)
-        {
+        if !suppress_direct_compare && prev_used.as_ref().is_some_and(|p| *p != child_start) {
             return true;
         }
         if !suppress_direct_compare {

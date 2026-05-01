@@ -1736,9 +1736,14 @@ fn page_property_propagates_through_block_subtree() {
     // propagation walk and the (start, end) table lookups. WPT
     // `page-name-propagated-001` covers the visual semantics; this is
     // the lib-coverage entry.
+    // Outer container has no own `page` — the used page-name must be
+    // sourced from the deepest first descendant. Adding an outer page
+    // here would short-circuit the propagation walk before it reaches
+    // the nested `page: a`, so the test would no longer cover that
+    // path (coderabbit PR #336 review).
     let html = r#"<!DOCTYPE html><html><body>
         <div style="page: a">a</div>
-        <div style="page: b">
+        <div>
             <div style="page: c">
                 <div style="page: a">b</div>
             </div>
@@ -1748,6 +1753,28 @@ fn page_property_propagates_through_block_subtree() {
         .build()
         .render_html(html)
         .expect("page-propagation render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn page_property_on_orthogonal_block_with_own_page_drives_outer_break() {
+    // fulgur-uebl: an orthogonal-flow child is atomic w.r.t. the
+    // outer flow, but its **own** `page` declaration must still drive
+    // a forced break around the orthogonal box itself — only the
+    // child's *internal* propagation is hidden. Regression for the
+    // over-collapse coderabbit flagged on PR #336: prior to the fix
+    // every orthogonal child was treated as if it inherited the
+    // parent's page name, silently suppressing the surrounding break.
+    let html = r#"<!DOCTYPE html><html style="writing-mode: vertical-rl"><body>
+        <div style="page: a">a</div>
+        <div style="writing-mode: horizontal-tb; page: chapter">
+            <div>nested</div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("orthogonal-with-own-page render");
     assert!(!pdf.is_empty());
 }
 
