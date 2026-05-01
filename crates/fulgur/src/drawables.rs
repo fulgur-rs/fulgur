@@ -356,4 +356,38 @@ mod tests {
         let b = Drawables::default();
         assert_eq!(a.is_empty(), b.is_empty());
     }
+
+    #[test]
+    fn paragraph_entry_debug_formats_summary_fields() {
+        let entry = ParagraphEntry {
+            lines: Vec::new(),
+            opacity: 0.5,
+            visible: true,
+            id: Some(std::sync::Arc::new("anchor".to_string())),
+        };
+        let s = format!("{:?}", entry);
+        assert!(s.contains("ParagraphEntry"));
+        assert!(s.contains("lines"));
+        assert!(s.contains("opacity"));
+        assert!(s.contains("visible"));
+        assert!(s.contains("id"));
+    }
+
+    #[test]
+    fn list_item_entry_debug_formats_summary_fields() {
+        let entry = ListItemEntry {
+            marker: ListItemMarker::Text {
+                lines: Vec::new(),
+                width: 0.0,
+            },
+            marker_line_height: 12.0,
+            opacity: 1.0,
+            visible: true,
+        };
+        let s = format!("{:?}", entry);
+        assert!(s.contains("ListItemEntry"));
+        assert!(s.contains("marker_line_height"));
+        assert!(s.contains("opacity"));
+        assert!(s.contains("visible"));
+    }
 }

@@ -284,4 +284,19 @@ mod tests {
             AssetKind::Unknown
         ));
     }
+
+    #[test]
+    fn image_render_new_initialises_defaults_and_with_node_id_overrides() {
+        let data = Arc::new(MINIMAL_PNG.to_vec());
+        let img = ImageRender::new(data.clone(), ImageFormat::Png, 100.0, 50.0);
+        assert_eq!(img.width, 100.0);
+        assert_eq!(img.height, 50.0);
+        assert_eq!(img.opacity, 1.0);
+        assert!(img.visible);
+        assert!(img.node_id.is_none());
+        let img2 = img.with_node_id(Some(42));
+        assert_eq!(img2.node_id, Some(42));
+        let img3 = img2.with_node_id(None);
+        assert!(img3.node_id.is_none());
+    }
 }

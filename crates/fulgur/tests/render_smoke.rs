@@ -1373,3 +1373,338 @@ fn render_v2_smoke_margin_box_renderer() {
     let pdf = engine.render_html(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+// ── PR #290 codecov patch coverage uplift ─────────────────────────────────
+
+#[test]
+fn render_v2_smoke_border_groove_and_ridge() {
+    // Exercises `border_3d_colors` + `draw_border_line` Groove/Ridge arm
+    // (`draw_primitives.rs:1245-1274`). Width must be ≥ 3pt because the
+    // groove/ridge codepath subdivides the stroke into half-width strips.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .grv { border: 8pt groove #888; padding: 4pt; }
+        .rdg { border: 8pt ridge #888; padding: 4pt; }
+    </style></head><body>
+        <div class="grv">grooved box</div>
+        <div class="rdg">ridge box</div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn render_v2_smoke_border_inset_and_outset() {
+    // Exercises `border_3d_colors` + `draw_border_line` Inset/Outset arm
+    // (`draw_primitives.rs:1276-1286`).
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .ins { border: 6pt inset #888; padding: 4pt; }
+        .ots { border: 6pt outset #888; padding: 4pt; }
+    </style></head><body>
+        <div class="ins">inset box</div>
+        <div class="ots">outset box</div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_border_radius_with_style_rounded_path() {
+    // Exercises the rounded-path branch in `draw_block_border`
+    // (`draw_primitives.rs:~1337`): when a non-uniform radius forces the
+    // border to be drawn as a stroked path rather than 4 line segments.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .rnd { border: 4pt solid #444; border-radius: 12pt; padding: 8pt; }
+    </style></head><body><div class="rnd">rounded</div></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_overflow_hidden_with_border_radius() {
+    // Exercises `compute_overflow_clip_path` both-axes + has_radius branch
+    // through Engine rendering (covers `draw_primitives.rs:999-1000` plus
+    // the overflow-clip dispatch in `render.rs`).
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .clipped { overflow: hidden; border-radius: 16pt; width: 100pt; height: 60pt; background: #cef; }
+        .inner { width: 200pt; height: 80pt; background: #fce; }
+    </style></head><body>
+        <div class="clipped"><div class="inner">overflow content</div></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_inline_block_with_background_and_text() {
+    // Targets `convert/inline_root.rs:185-212` — the `if needs_block`
+    // branch for an inline root with `needs_block_wrapper()` true and a
+    // populated paragraph. An inline-block span with a background plus
+    // direct text content satisfies both conditions.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>before <span style="display:inline-block; background:#fce; padding:4pt; border:1pt solid #888;">inline-block with background</span> after</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_inline_block_with_overflow_clip_and_text() {
+    // Same `if needs_block` branch as above but exercising the
+    // `clipping = true` arm (`inline_root.rs:207-209`) so
+    // `clip_descendants` records the inline-block subtree.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>x <span style="display:inline-block; overflow:hidden; width:60pt; height:20pt; background:#cef;">overflow inline-block text</span> y</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_empty_li_inside_position_marker_paragraph() {
+    // Targets `convert/list_item.rs:172-202` — the `children.is_empty()`
+    // branch with an inside-positioned marker that synthesises a marker-only
+    // paragraph for the empty `<li>`.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        ul { list-style-position: inside; list-style-type: disc; }
+    </style></head><body>
+        <ul><li></li><li>second</li></ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_li_inside_with_block_child_synthesizes_marker_paragraph() {
+    // Targets `convert/list_item.rs:229-242` — the non-empty <li> path
+    // where `inject_marker_into_first_paragraph` returns false because
+    // the only descendant is a block (no paragraph in `out` to inject
+    // into), so the caller synthesises a marker-only paragraph.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        ul { list-style-position: inside; list-style-type: disc; }
+        .blk { display: block; height: 12pt; background: #cef; }
+    </style></head><body>
+        <ul><li><div class="blk"></div></li></ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_content_url_on_non_replaced_element() {
+    // Targets `convert/replaced.rs:135-159` — `convert_content_url` on a
+    // non-`<img>` / non-`<svg>` element with `content: url(...)` resolved
+    // against the asset bundle.
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", png_data);
+    bundle.add_css(r#".replaced { content: url("dot.png"); width: 24pt; height: 24pt; }"#);
+    let html = r#"<!DOCTYPE html><html><body><div class="replaced"></div></body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+// PNG bytes used by the pseudo / list-marker tests below.
+const PR290_PSEUDO_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+    0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+    0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+#[test]
+fn render_v2_smoke_inline_root_after_pseudo_image_with_link() {
+    // Targets `convert/inline_root.rs:73-75` — the `after_inline` map
+    // closure that calls `attach_link_to_inline_image`. Existing tests
+    // exercise the `before` arm but not `after`. An `<a>` ancestor wraps
+    // the inline so `attach_link_to_inline_image` has a link to attach.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .with-after::after { content: url("dot.png"); }
+    </style></head><body>
+        <a href="https://example.com"><span class="with-after">linked</span></a>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_inline_root_pseudo_only_with_background() {
+    // Targets `convert/inline_root.rs:185-213` — the second `if needs_block`
+    // block, reached when `paragraph_opt` is None (no direct text) but the
+    // element has an inline pseudo image and visual styling that requires
+    // a block wrapper. Covers both clipping and opacity-scope arms by
+    // including variants below.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .pseudo-bg::before { content: url("dot.png"); }
+        .pseudo-bg { background: #fce; padding: 4pt; border: 1pt solid #888; }
+        .pseudo-clip::after { content: url("dot.png"); }
+        .pseudo-clip { overflow: hidden; width: 30pt; }
+    </style></head><body>
+        <p>x<span class="pseudo-bg"></span>y<span class="pseudo-clip"></span>z</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_li_pseudo_image_outside_marker_no_text() {
+    // Targets `convert/list_item.rs:387-396` — `build_list_item_body`'s
+    // inline-root `<li>` with no text content but a `::before` pseudo
+    // image.  The marker stays in `out.list_items`; this branch
+    // synthesizes a marker-less paragraph from the pseudo image.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        li::before { content: url("dot.png"); }
+    </style></head><body>
+        <ul><li></li></ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_li_with_opacity_records_opacity_descendants() {
+    // Targets `convert/list_item.rs:434-435` — the `opacity_descendants`
+    // arm of `record_li_clip_opacity_descendants`. The `<li>` has opacity
+    // < 1.0 (so opacity_scope is true) but no overflow clip, so the
+    // descendants are recorded into `opacity_descendants` rather than
+    // `clip_descendants`.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        ul li { opacity: 0.5; }
+        .blk { display: block; height: 12pt; background: #cef; }
+    </style></head><body>
+        <ul><li><div class="blk">child</div></li></ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_inside_list_style_image_with_image_child() {
+    // Targets `inject_marker_into_first_paragraph` shift arms for
+    // `LineItem::Image` and `LineItem::InlineBox`
+    // (`convert/list_item.rs:287-288, 293-294`).
+    // The list uses `list-style-image` with `inside` positioning so the
+    // marker is injected as a `LineItem::Image` and the child contents
+    // contain an image and an inline-block to exercise both shift arms.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    bundle.add_image("dot2.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        ul { list-style-position: inside; list-style-image: url("dot.png"); }
+        .ib { display: inline-block; width: 12pt; height: 8pt; background: #cef; }
+    </style></head><body>
+        <ul>
+            <li>txt <img src="dot2.png" width="8" height="8"> end</li>
+            <li>before<span class="ib"></span>after</li>
+        </ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_li_inside_marker_with_inline_box_in_line() {
+    // Targets `convert/inline_root.rs:97` — the `LineItem::InlineBox`
+    // shift arm in the inside list-style-image marker injection inside
+    // `try_convert` (the inline-root path, not the inject helper).
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        ul { list-style-position: inside; list-style-image: url("dot.png"); }
+        .ib { display: inline-block; width: 16pt; height: 10pt; background: #cef; }
+    </style></head><body>
+        <ul><li><span class="ib"></span> text</li></ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn render_v2_smoke_content_url_on_replaced_with_visual_style() {
+    // Same `convert_content_url` path, but with a styled wrapper so
+    // `maybe_insert_block_for_replaced` inserts a BlockEntry too.
+    let png_data: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", png_data);
+    bundle.add_css(
+        r#".replaced { content: url("dot.png"); width: 24pt; height: 24pt;
+                       padding: 4pt; background: #fce; border: 1pt solid #888; }"#,
+    );
+    let html = r#"<!DOCTYPE html><html><body><div class="replaced"></div></body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}

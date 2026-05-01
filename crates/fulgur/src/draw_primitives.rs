@@ -1447,6 +1447,303 @@ pub(crate) fn clamp_marker_size(
     }
 }
 
+#[cfg(test)]
+mod dp_unit_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // ── DestinationRegistry transform stack ─────────────────
+
+    #[test]
+    fn destination_registry_push_pop_transform_affects_record() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(3);
+        reg.push_transform(Affine2D::translation(10.0, 20.0));
+        reg.record("anchor", 5.0, 7.0);
+        let (page, x, y) = reg.get("anchor").expect("recorded");
+        assert_eq!(page, 3);
+        assert!((x - 15.0).abs() < 1e-4);
+        assert!((y - 27.0).abs() < 1e-4);
+        reg.pop_transform();
+        // After pop, subsequent records use identity.
+        reg.record("anchor2", 1.0, 2.0);
+        let (_, x2, y2) = reg.get("anchor2").expect("recorded");
+        assert!((x2 - 1.0).abs() < 1e-4);
+        assert!((y2 - 2.0).abs() < 1e-4);
+    }
+
+    // ── LinkCollector ──────────────────────────────────────
+
+    fn make_test_link() -> Arc<crate::paragraph::LinkSpan> {
+        Arc::new(crate::paragraph::LinkSpan {
+            target: crate::paragraph::LinkTarget::External(Arc::new(
+                "https://example.com".to_string(),
+            )),
+            alt_text: None,
+        })
+    }
+
+    #[test]
+    fn link_collector_into_occurrences_and_occurrences() {
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        collector.set_current_page(0);
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+
+        let occ_borrowed = collector.occurrences();
+        assert_eq!(occ_borrowed.len(), 1);
+        assert_eq!(occ_borrowed[0].page_idx, 0);
+        assert_eq!(occ_borrowed[0].quads.len(), 1);
+
+        let occ_owned = collector.into_occurrences();
+        assert_eq!(occ_owned.len(), 1);
+    }
+
+    #[test]
+    fn link_collector_push_rect_skips_zero_width_rect() {
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 10.0,
+            },
+        );
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 0.0,
+            },
+        );
+        assert!(collector.occurrences().is_empty());
+    }
+
+    #[test]
+    fn link_collector_push_rect_skips_degenerate_quad_after_transform() {
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        // scaleX(0) collapses width to zero → degenerate quad.
+        collector.push_transform(Affine2D::scale(0.0, 1.0));
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        collector.pop_transform();
+        assert!(collector.occurrences().is_empty());
+    }
+
+    // ── compute_overflow_clip_path branches ─────────────────
+
+    #[test]
+    fn compute_overflow_clip_visible_visible_returns_none() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
+            ..Default::default()
+        };
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn compute_overflow_clip_x_clip_y_visible_returns_path() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Visible,
+            border_widths: [1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        // y axis non-clip → expanded to ±INFINITE (line 988).
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
+
+    #[test]
+    fn compute_overflow_clip_both_axes_with_radius_uses_rounded_path() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_widths: [2.0, 2.0, 2.0, 2.0],
+            border_radii: [[8.0, 8.0]; 4],
+            ..Default::default()
+        };
+        // both axes clipped + has_radius → rounded path branch (lines 999-1000).
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
+
+    #[test]
+    fn compute_overflow_clip_zero_size_axis_returns_none() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_widths: [50.0, 50.0, 50.0, 50.0],
+            ..Default::default()
+        };
+        // border-widths exceed the box → cw / ch ≤ 0 → returns None.
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 80.0, 80.0).is_none());
+    }
+
+    // ── compute_padding_box_inner_radii (private) ───────────
+
+    #[test]
+    fn padding_box_inner_radii_subtracts_borders_with_floor_zero() {
+        let outer = [[10.0, 12.0], [8.0, 6.0], [4.0, 4.0], [20.0, 14.0]];
+        let borders = [3.0, 5.0, 2.0, 7.0]; // top, right, bottom, left
+        let inner = compute_padding_box_inner_radii(&outer, &borders);
+        // top-left: outer[0] - [bl, bt] = [10-7=3, 12-3=9]
+        assert!((inner[0][0] - 3.0).abs() < 1e-5);
+        assert!((inner[0][1] - 9.0).abs() < 1e-5);
+        // top-right: outer[1] - [br, bt] = [8-5=3, 6-3=3]
+        assert!((inner[1][0] - 3.0).abs() < 1e-5);
+        assert!((inner[1][1] - 3.0).abs() < 1e-5);
+        // bottom-right: outer[2] - [br, bb] = [4-5=-1→0, 4-2=2]
+        assert!(inner[2][0].abs() < 1e-5);
+        assert!((inner[2][1] - 2.0).abs() < 1e-5);
+        // bottom-left: outer[3] - [bl, bb] = [20-7=13, 14-2=12]
+        assert!((inner[3][0] - 13.0).abs() < 1e-5);
+        assert!((inner[3][1] - 12.0).abs() < 1e-5);
+    }
+
+    // ── lighten_color / darken_color (private) ──────────────
+
+    #[test]
+    fn lighten_color_blends_toward_white_alpha_preserved() {
+        let lightened = lighten_color(&[100, 200, 50, 128], 0.5);
+        // blend_to_white(c, 0.5) = c + (255-c)*0.5
+        assert_eq!(lightened, [(100 + (255 - 100) / 2) as u8, 227, 152, 128]);
+    }
+
+    #[test]
+    fn darken_color_blends_toward_black_alpha_preserved() {
+        let darkened = darken_color(&[100, 200, 50, 200], 0.5);
+        assert_eq!(darkened, [50, 100, 25, 200]);
+    }
+
+    // ── border_3d_colors (private) — all 4 styles, both sides ──
+
+    #[test]
+    fn border_3d_colors_groove_top_left_dark_outer_light_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Groove, true);
+        let dark = darken_color(&base, 0.5);
+        let light = lighten_color(&base, 0.5);
+        assert_eq!(outer, dark);
+        assert_eq!(inner, Some(light));
+    }
+
+    #[test]
+    fn border_3d_colors_groove_bottom_right_light_outer_dark_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Groove, false);
+        let dark = darken_color(&base, 0.5);
+        let light = lighten_color(&base, 0.5);
+        assert_eq!(outer, light);
+        assert_eq!(inner, Some(dark));
+    }
+
+    #[test]
+    fn border_3d_colors_ridge_inverts_groove() {
+        let base = [128, 128, 128, 255];
+        let (outer_tl, inner_tl) = border_3d_colors(&base, BorderStyleValue::Ridge, true);
+        let dark = darken_color(&base, 0.5);
+        let light = lighten_color(&base, 0.5);
+        assert_eq!(outer_tl, light);
+        assert_eq!(inner_tl, Some(dark));
+
+        let (outer_br, inner_br) = border_3d_colors(&base, BorderStyleValue::Ridge, false);
+        assert_eq!(outer_br, dark);
+        assert_eq!(inner_br, Some(light));
+    }
+
+    #[test]
+    fn border_3d_colors_inset_top_left_dark_no_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Inset, true);
+        assert_eq!(outer, darken_color(&base, 0.5));
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn border_3d_colors_inset_bottom_right_light_no_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Inset, false);
+        assert_eq!(outer, lighten_color(&base, 0.5));
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn border_3d_colors_outset_top_left_light_no_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Outset, true);
+        assert_eq!(outer, lighten_color(&base, 0.5));
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn border_3d_colors_outset_bottom_right_dark_no_inner() {
+        let base = [128, 128, 128, 255];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Outset, false);
+        assert_eq!(outer, darken_color(&base, 0.5));
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn border_3d_colors_solid_returns_base_no_inner() {
+        let base = [50, 60, 70, 200];
+        let (outer, inner) = border_3d_colors(&base, BorderStyleValue::Solid, true);
+        assert_eq!(outer, base);
+        assert!(inner.is_none());
+    }
+
+    // ── clamp_marker_size edge cases ─────────────────────────
+
+    #[test]
+    fn clamp_marker_size_zero_height_returns_zero_zero() {
+        let (w, h) = clamp_marker_size(20.0, 0.0, 12.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    #[test]
+    fn clamp_marker_size_negative_height_returns_zero_zero() {
+        let (w, h) = clamp_marker_size(20.0, -5.0, 12.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    #[test]
+    fn clamp_marker_size_within_line_height_passes_through() {
+        let (w, h) = clamp_marker_size(20.0, 10.0, 12.0);
+        assert_eq!(w, 20.0);
+        assert_eq!(h, 10.0);
+    }
+
+    #[test]
+    fn clamp_marker_size_oversized_scales_down_preserving_aspect() {
+        // intrinsic 40×20, line_height 10 → scale = 0.5 → (20, 10).
+        let (w, h) = clamp_marker_size(40.0, 20.0, 10.0);
+        assert!((w - 20.0).abs() < 1e-5);
+        assert!((h - 10.0).abs() < 1e-5);
+    }
+}
+
 /// Float-tolerance helpers shared across the in-crate transform test
 /// modules (`affine_tests`, `transform_wrapper_tests`, and the
 /// `transform_tests` module in `blitz_adapter.rs`).
