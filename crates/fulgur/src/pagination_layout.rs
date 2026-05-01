@@ -2202,7 +2202,7 @@ fn compute_pagination_layout(
 ) -> taffy::LayoutOutput {
     // Delegate the actual layout work to BaseDocument so children get
     // their normal natural sizes. The output is body's full natural
-    // height — that height is what `convert::dom_to_pageable` already
+    // height — that height is what `convert::dom_to_drawables` already
     // expects to read from `final_layout`.
     let output = tree.doc.compute_child_layout(body_id, inputs);
 

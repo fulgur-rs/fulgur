@@ -526,8 +526,13 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     // produces multiple wrapped lines; with the relayout, the fixed
     // subtree is reshaped against the page area and the sentence fits
     // on one line.
-    use fulgur::pageable::{BlockPageable, Pageable, PositionedChild};
-    use fulgur::paragraph::ParagraphPageable;
+    use fulgur::paragraph::LineItem;
+
+    // The fixed paragraph carries a unique sentence so we can identify
+    // it in the flat `Drawables.paragraphs` map by text content. The
+    // outer abs box's "outer" text is short enough not to wrap so it
+    // never inflates the line count we want to pin.
+    const FIXED_TEXT: &str = "This text is much wider than fifty pixels";
 
     let html = r#"<html><body style="margin:0">
 <div style="position:absolute; width:50px; height:300vh">
@@ -539,34 +544,36 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     let pdf = engine.render_html(html).expect("render");
     assert!(pdf.starts_with(b"%PDF"));
 
-    fn max_oof_paragraph_lines(node: &dyn Pageable, own_oof: bool) -> usize {
-        let any = node.as_any();
-        if own_oof && let Some(p) = any.downcast_ref::<ParagraphPageable>() {
-            return p.lines.len();
-        }
-        if let Some(block) = any.downcast_ref::<BlockPageable>() {
-            let mut max = 0;
-            for PositionedChild {
-                child, out_of_flow, ..
-            } in &block.children
-            {
-                let n = max_oof_paragraph_lines(child.as_ref(), *out_of_flow);
-                if n > max {
-                    max = n;
-                }
-            }
-            return max;
-        }
-        0
-    }
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
 
-    let tree = engine.build_pageable_for_testing_no_gcpm(html);
-    let lines = max_oof_paragraph_lines(tree.as_ref(), false);
+    // Find the paragraph whose shaped text matches the fixed sentence.
+    // Concatenating every glyph-run text within the paragraph is enough
+    // to distinguish it (the abs box's "outer" text lives in a
+    // different paragraph entry).
+    let fixed_para = drawables
+        .paragraphs
+        .values()
+        .find(|p| {
+            let combined: String = p
+                .lines
+                .iter()
+                .flat_map(|l| l.items.iter())
+                .filter_map(|it| match it {
+                    LineItem::Text(run) => Some(run.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            combined.contains(FIXED_TEXT)
+        })
+        .expect("fixed paragraph must appear in Drawables.paragraphs");
+
     assert_eq!(
-        lines, 1,
+        fixed_para.lines.len(),
+        1,
         "expected the inner position:fixed paragraph to be relayouted \
-         wide enough to hold the sentence on a single line; got {lines} lines, \
-         meaning it kept the 37.5pt parent-abs width and Parley wrapped"
+         wide enough to hold the sentence on a single line; got {} lines, \
+         meaning it kept the 37.5pt parent-abs width and Parley wrapped",
+        fixed_para.lines.len(),
     );
 }
 

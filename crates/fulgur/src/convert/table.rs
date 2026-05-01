@@ -1,80 +1,77 @@
 use super::*;
 
-/// Dispatcher entry for `<table>` elements. Returns `Some(Pageable)` if the
-/// node is an HTML `<table>` element; returns `None` otherwise so the caller
-/// falls through to the next dispatch stage.
-///
-/// Note: signature includes `depth` (deviating from the plan template) because
-/// `convert_table` recurses into child rows/cells and must propagate the
-/// `MAX_DOM_DEPTH` budget.
+/// Dispatcher entry for `<table>` elements. Returns `true` when an entry
+/// was inserted into `out.tables` (and any cell descendants registered).
 pub(super) fn try_convert(
     doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
     depth: usize,
-) -> Option<Box<dyn crate::pageable::Pageable>> {
-    let node = doc.get_node(node_id)?;
-    let elem_data = node.element_data()?;
-    if elem_data.name.local.as_ref() == "table" {
-        return Some(convert_table(doc, node, ctx, depth));
+    out: &mut crate::drawables::Drawables,
+) -> bool {
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
+    let Some(elem_data) = node.element_data() else {
+        return false;
+    };
+    if elem_data.name.local.as_ref() != "table" {
+        return false;
     }
-    None
+    convert_table(doc, node, ctx, depth, out);
+    true
 }
 
-/// Convert a table element into a TablePageable with header/body cell groups.
 fn convert_table(
     doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
-) -> Box<dyn Pageable> {
+    out: &mut crate::drawables::Drawables,
+) {
     let (width, height) = size_in_pt(node.final_layout.size);
     let style = extract_block_style(node, ctx.assets);
+    let clipping = style.has_overflow_clip();
+    let (opacity, visible) = extract_opacity_visible(node);
 
-    let mut header_cells: Vec<PositionedChild> = Vec::new();
-    let mut body_cells: Vec<PositionedChild> = Vec::new();
+    out.tables.insert(
+        node.id,
+        crate::drawables::TableEntry {
+            style: style.clone(),
+            opacity,
+            visible,
+            id: extract_block_id(node),
+            layout_size: Some(Size { width, height }),
+            width,
+            cached_height: height,
+            clip_descendants: Vec::new(),
+        },
+    );
 
-    // Walk table children to separate thead from tbody
+    let snapshot = clipping.then(|| collect_drawables_node_ids(out));
+
+    // Walk table children to recurse cells.
     for &child_id in &node.children {
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
         };
         let is_thead = is_table_section(child_node, "thead");
-
-        collect_table_cells(
-            doc,
-            child_id,
-            is_thead,
-            &mut header_cells,
-            &mut body_cells,
-            ctx,
-            depth,
-        );
+        collect_table_cells(doc, child_id, is_thead, ctx, depth, out);
     }
 
-    // Calculate header height from header cells
-    let header_height = header_cells
-        .iter()
-        .fold(0.0f32, |max_h, pc| max_h.max(pc.y + pc.height));
-
-    let (opacity, visible) = extract_opacity_visible(node);
-    let table = TablePageable {
-        header_cells,
-        body_cells,
-        header_height,
-        style,
-        layout_size: Some(Size { width, height }),
-        width,
-        cached_height: height,
-        opacity,
-        visible,
-        id: extract_block_id(node),
-        node_id: Some(node.id),
-    };
-    Box::new(table)
+    if let Some(before) = snapshot {
+        let after = collect_drawables_node_ids(out);
+        let descendants: Vec<usize> = after
+            .difference(&before)
+            .copied()
+            .filter(|&id| id != node.id)
+            .collect();
+        if let Some(entry) = out.tables.get_mut(&node.id) {
+            entry.clip_descendants = descendants;
+        }
+    }
 }
 
-/// Check if a node is a specific table section element.
 fn is_table_section(node: &Node, section_name: &str) -> bool {
     if let Some(elem) = node.element_data() {
         elem.name.local.as_ref() == section_name
@@ -83,15 +80,13 @@ fn is_table_section(node: &Node, section_name: &str) -> bool {
     }
 }
 
-/// Recursively collect table cells (td/th) from a table subtree.
 fn collect_table_cells(
     doc: &BaseDocument,
     node_id: usize,
     is_header: bool,
-    header_cells: &mut Vec<PositionedChild>,
-    body_cells: &mut Vec<PositionedChild>,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
+    out: &mut crate::drawables::Drawables,
 ) {
     if depth >= MAX_DOM_DEPTH {
         return;
@@ -99,18 +94,6 @@ fn collect_table_cells(
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
-
-    // Drain counter ops on the current section/row node itself so that
-    // counter-reset / counter-increment / counter-set declared on
-    // <thead>/<tbody>/<tr> reach `collect_counter_states()` for margin boxes.
-    // Without this, ops on these intermediate nodes stay in
-    // `ctx.counter_ops_by_node` forever and never propagate.
-    {
-        let (x, y, _, _) = layout_in_pt(&node.final_layout);
-        let out: &mut Vec<PositionedChild> = if is_header { header_cells } else { body_cells };
-        emit_counter_op_markers(node_id, x, y, ctx, out);
-        emit_orphan_bookmark_marker(node_id, x, y, ctx, out);
-    }
 
     let layout_children_guard = node.layout_children.borrow();
     let effective_children = layout_children_guard.as_deref().unwrap_or(&node.children);
@@ -125,9 +108,9 @@ fn collect_table_cells(
             continue;
         }
 
-        let (cx, cy, cw, ch) = layout_in_pt(&child_node.final_layout);
+        let cw = px_to_pt(child_node.final_layout.size.width);
+        let ch = px_to_pt(child_node.final_layout.size.height);
 
-        // Zero-size container (tr, thead, tbody) — recurse into children
         let child_effective_is_empty = child_node
             .layout_children
             .borrow()
@@ -136,38 +119,16 @@ fn collect_table_cells(
             .is_empty();
         if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
-            collect_table_cells(
-                doc,
-                child_id,
-                child_is_header,
-                header_cells,
-                body_cells,
-                ctx,
-                depth + 1,
-            );
+            collect_table_cells(doc, child_id, child_is_header, ctx, depth + 1, out);
             continue;
         }
 
-        // Skip zero-size leaves
         if ch == 0.0 && cw == 0.0 {
             continue;
         }
 
-        // Actual cell (td/th) — convert and add to appropriate group
-        let cell_pageable = convert_node(doc, child_id, ctx, depth + 1);
-        let positioned = PositionedChild {
-            child: cell_pageable,
-            x: cx,
-            y: cy,
-            height: ch,
-            out_of_flow: false,
-            is_fixed: false,
-        };
-
-        if is_header {
-            header_cells.push(positioned);
-        } else {
-            body_cells.push(positioned);
-        }
+        // Actual cell — recurse via convert_node so its block / paragraph
+        // entries land in the standard maps.
+        convert_node(doc, child_id, ctx, depth + 1, out);
     }
 }

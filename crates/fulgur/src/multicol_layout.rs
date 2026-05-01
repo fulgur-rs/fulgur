@@ -2102,42 +2102,15 @@ mod tests {
         );
     }
 
-    // ── convert.rs integration: MulticolRulePageable wrapping (Task 5 Part C) ──
-
-    /// Recursively search a `Pageable` tree for the first
-    /// `MulticolRulePageable`, returning a cloned copy when found. We clone
-    /// because the tree is owned by the caller and `Pageable` is object-safe
-    /// but not `Any` by default; we go through the concrete type's `Clone`
-    /// via `as_any` + downcast.
-    fn find_multicol_rule(
-        pageable: &dyn crate::pageable::Pageable,
-    ) -> Option<crate::pageable::MulticolRulePageable> {
-        if let Some(w) = pageable
-            .as_any()
-            .downcast_ref::<crate::pageable::MulticolRulePageable>()
-        {
-            return Some(w.clone());
-        }
-        if let Some(block) = pageable
-            .as_any()
-            .downcast_ref::<crate::pageable::BlockPageable>()
-        {
-            for pc in &block.children {
-                if let Some(hit) = find_multicol_rule(pc.child.as_ref()) {
-                    return Some(hit);
-                }
-            }
-        }
-        None
-    }
+    // ── convert.rs integration: MulticolRule entry emission (Task 5 Part C) ──
 
     #[test]
-    fn convert_wraps_multicol_container_in_rule_pageable_when_rule_defined() {
-        // End-to-end wiring probe: HTML with `column-rule` must produce a
-        // `MulticolRulePageable` somewhere in the converted tree. Drives the
+    fn convert_emits_multicol_rule_entry_when_rule_defined() {
+        // End-to-end wiring probe: HTML with `column-rule` must populate a
+        // `MulticolRuleEntry` in `Drawables.multicol_rules`. Drives the
         // full render pipeline (Engine → parse → column_css harvest →
         // multicol hook → convert) minus GCPM — which is irrelevant here —
-        // via `build_pageable_for_testing_no_gcpm`.
+        // via `build_drawables_for_testing_no_gcpm`.
         let html = r#"<!doctype html><html><head><style>
             .mc {
                 column-count: 2;
@@ -2159,32 +2132,35 @@ mod tests {
                 height: 600.0,
             })
             .build();
-        let root = engine.build_pageable_for_testing_no_gcpm(html);
+        let drawables = engine.build_drawables_for_testing_no_gcpm(html);
 
-        let wrapper = find_multicol_rule(root.as_ref()).expect(
-            "convert must wrap the multicol container in MulticolRulePageable when column-rule is defined",
-        );
-        assert_eq!(
-            wrapper.rule.style,
-            crate::column_css::ColumnRuleStyle::Solid
-        );
         assert!(
-            (wrapper.rule.width - 2.0).abs() < 1e-3,
+            !drawables.multicol_rules.is_empty(),
+            "convert must emit a MulticolRuleEntry when column-rule is defined"
+        );
+        let (_, entry) = drawables
+            .multicol_rules
+            .iter()
+            .next()
+            .expect("at least one multicol rule entry");
+        assert_eq!(entry.rule.style, crate::column_css::ColumnRuleStyle::Solid);
+        assert!(
+            (entry.rule.width - 2.0).abs() < 1e-3,
             "width should be 2pt, got {}",
-            wrapper.rule.width
+            entry.rule.width
         );
-        assert_eq!(wrapper.rule.color, [255, 0, 0, 255]);
+        assert_eq!(entry.rule.color, [255, 0, 0, 255]);
         assert!(
-            !wrapper.groups.is_empty(),
+            !entry.groups.is_empty(),
             "geometry must have at least one ColumnGroup"
         );
     }
 
     #[test]
-    fn convert_does_not_wrap_multicol_without_rule() {
-        // Multicol container with no `column-rule` must pass through
-        // unchanged — no `MulticolRulePageable` wrapper inserted. Guards
-        // against the wrapper leaking into every multicol render.
+    fn convert_does_not_emit_multicol_rule_without_rule() {
+        // Multicol container with no `column-rule` must not register a
+        // `MulticolRuleEntry`. Guards against the entry leaking into every
+        // multicol render.
         let html = r#"<!doctype html><html><body>
           <div style="column-count: 2; column-gap: 0;">
             <p>alpha alpha alpha alpha</p>
@@ -2198,10 +2174,10 @@ mod tests {
                 height: 600.0,
             })
             .build();
-        let root = engine.build_pageable_for_testing_no_gcpm(html);
+        let drawables = engine.build_drawables_for_testing_no_gcpm(html);
         assert!(
-            find_multicol_rule(root.as_ref()).is_none(),
-            "multicol without column-rule must not be wrapped"
+            drawables.multicol_rules.is_empty(),
+            "multicol without column-rule must not produce a MulticolRuleEntry"
         );
     }
 }

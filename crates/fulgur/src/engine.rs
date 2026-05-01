@@ -2,7 +2,6 @@ use crate::asset::AssetBundle;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
-use crate::pageable::Pageable;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
@@ -297,13 +296,12 @@ impl Engine {
             map
         };
 
-        // `convert::dom_to_drawables` (via `dom_to_pageable`) drains
-        // `string_set_by_node` and `counter_ops_by_node` via
-        // `.remove(&node_id)` as it wraps content with the
-        // corresponding marker types, so we keep copies for the
-        // fragmenter-driven `collect_*_states` calls in `render_v2`
-        // (which need the data after convert has run). Each clone is
-        // small (one `Vec` per node that declares the property).
+        // PR 8i: `convert::dom_to_drawables` no longer drains
+        // `string_set_by_node` / `counter_ops_by_node`, but we keep the
+        // pre-convert clones for the fragmenter-driven `collect_*_states`
+        // calls in `render_v2` so those side-channel maps remain
+        // explicitly readable after convert returns. Each clone is small
+        // (one `Vec` per node that declares the property).
         let string_set_for_render = string_set_by_node.clone();
         let counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = counter_ops_map
             .iter()
@@ -363,28 +361,18 @@ impl Engine {
         self.render_html(&html)
     }
 
-    /// Build a Pageable tree from HTML for integration tests.
+    /// Build a `Drawables` map from HTML for integration tests.
     ///
     /// This helper **skips** all GCPM passes (CSS Generated Content for
     /// Paged Media — running elements, counters, string-set, `content:`
     /// resolution). It is only appropriate for tests that do not depend on
-    /// GCPM-rendered content. For transform tests in particular, no GCPM
-    /// state is needed because `transform` is independent of content
-    /// generation.
-    ///
-    /// Concretely, the following are skipped relative to `render_html`:
-    ///
-    /// - `InjectCssPass` for CSS produced by the GCPM parser
-    /// - `RunningElementPass` / `StringSetPass` / `CounterPass`
-    /// - `content:` (`::before` / `::after`) resolution via
-    ///   counter-generated CSS injection
-    ///
-    /// The resulting tree can therefore **diverge from the production
-    /// tree** whenever the HTML uses counters, running elements, or
-    /// `content:` in a `<style>` block. Use this helper only for geometric
-    /// / structural assertions on constructs that do not touch GCPM.
+    /// GCPM-rendered content. The resulting drawables can therefore
+    /// **diverge from the production output** whenever the HTML uses
+    /// counters, running elements, or `content:` in a `<style>` block.
+    /// Use this helper only for geometric / structural assertions on
+    /// constructs that do not touch GCPM.
     #[doc(hidden)]
-    pub fn build_pageable_for_testing_no_gcpm(&self, html: &str) -> Box<dyn Pageable> {
+    pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
         let fonts = self
             .assets
             .as_ref()
@@ -404,11 +392,6 @@ impl Engine {
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
 
         crate::blitz_adapter::resolve(&mut doc);
-        // Mirror the production pipeline so structural tests of the
-        // Pageable tree see the same layout as `render_html` produces.
-        // Without this, position:fixed subtrees keep their first-pass
-        // (Absolute-flattened) sizes and any test asserting fixed
-        // geometry would diverge from what the renderer outputs.
         crate::blitz_adapter::relayout_position_fixed(
             &mut doc,
             crate::convert::pt_to_px(self.config.content_width()),
@@ -416,8 +399,6 @@ impl Engine {
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        // fulgur-cj6u Phase 1.1: capture pagination geometry on
-        // ConvertContext for parity with the production path.
         let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
             crate::convert::pt_to_px(self.config.content_height()),
@@ -441,7 +422,86 @@ impl Engine {
                 crate::convert::pt_to_px(self.config.content_height()),
             )),
         };
-        crate::convert::dom_to_pageable(&doc, &mut convert_ctx)
+        crate::convert::dom_to_drawables(&doc, &mut convert_ctx)
+    }
+
+    /// Build a `Drawables` map together with the per-NodeId
+    /// `PaginationGeometryTable` for integration tests that need to
+    /// reason about both the per-node draw payload and its absolute
+    /// page-relative placement.
+    ///
+    /// Same GCPM caveat as `build_drawables_for_testing_no_gcpm` —
+    /// margin boxes / running elements / counters / `content:`
+    /// resolution are skipped.
+    #[doc(hidden)]
+    pub fn build_drawables_and_geometry_for_testing_no_gcpm(
+        &self,
+        html: &str,
+    ) -> (
+        crate::drawables::Drawables,
+        crate::pagination_layout::PaginationGeometryTable,
+    ) {
+        let fonts = self
+            .assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
+
+        let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
+            html,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            fonts,
+            self.base_path.as_deref(),
+        );
+
+        let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
+        let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
+        crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        crate::blitz_adapter::resolve(&mut doc);
+        crate::blitz_adapter::relayout_position_fixed(
+            &mut doc,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
+
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut convert_ctx = ConvertContext {
+            running_store: &running_store,
+            assets: self.assets.as_ref(),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((
+                crate::convert::pt_to_px(self.config.content_width()),
+                crate::convert::pt_to_px(self.config.content_height()),
+            )),
+        };
+        let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
+        // PR 8i regression fix: read geometry AFTER convert. Convert
+        // can write override fragments into `pagination_geometry`
+        // (textless `content: url(...)` abs pseudos with `right` /
+        // `bottom` insets), so cloning before convert would hide
+        // those corrections from tests that drive
+        // `pseudo_absolute_content_url::
+        // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
+        // The production `render_html` path already passes
+        // `&convert_ctx.pagination_geometry` to `render_v2` after
+        // convert, so this matches the production read order.
+        (drawables, convert_ctx.pagination_geometry)
     }
 }
 

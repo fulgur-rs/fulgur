@@ -1,29 +1,10 @@
-//! Integration: inline-block with overflow:hidden produces a BlockPageable
-//! with has_overflow_clip() set, reachable via a ParagraphPageable's
-//! LineItem::InlineBox. This is the structural prerequisite for fulgur-i5a's
+//! Integration: inline-block with overflow:hidden produces a `BlockEntry`
+//! in `Drawables.block_styles` with `has_overflow_clip()` set, registered as
+//! inline-box content via `Drawables.inline_box_subtree_skip`. This is the
+//! structural prerequisite for fulgur-i5a's
 //! `inline_block_with_overflow_hidden_becomes_clipped_block` ignored test.
 
 use fulgur::engine::Engine;
-use fulgur::pageable::{BlockPageable, Pageable, PositionedChild};
-use fulgur::paragraph::{LineItem, ParagraphPageable};
-
-fn build_tree(html: &str) -> Box<dyn Pageable> {
-    Engine::builder()
-        .build()
-        .build_pageable_for_testing_no_gcpm(html)
-}
-
-fn walk_paragraphs<'a>(root: &'a dyn Pageable, out: &mut Vec<&'a ParagraphPageable>) {
-    if let Some(p) = root.as_any().downcast_ref::<ParagraphPageable>() {
-        out.push(p);
-        return;
-    }
-    if let Some(block) = root.as_any().downcast_ref::<BlockPageable>() {
-        for PositionedChild { child, .. } in &block.children {
-            walk_paragraphs(child.as_ref(), out);
-        }
-    }
-}
 
 #[test]
 fn inline_block_with_overflow_hidden_is_reachable_as_clipped_block() {
@@ -36,24 +17,31 @@ fn inline_block_with_overflow_hidden_is_reachable_as_clipped_block() {
             background: #eee;
         }
     </style></head><body><div><span class="ib"><span style="display:inline-block;width:200px;height:200px;background:red"></span></span></div></body></html>"#;
-    let tree = build_tree(html);
-    let mut paras = Vec::new();
-    walk_paragraphs(tree.as_ref(), &mut paras);
 
-    let clipped = paras
-        .iter()
-        .flat_map(|p| p.lines.iter())
-        .flat_map(|l| l.items.iter())
-        .find_map(|it| match it {
-            LineItem::InlineBox(ib) => ib
-                .content
-                .as_any()
-                .downcast_ref::<BlockPageable>()
-                .filter(|b| b.style.has_overflow_clip()),
-            _ => None,
-        });
+    let drawables = Engine::builder()
+        .build()
+        .build_drawables_for_testing_no_gcpm(html);
+
+    // Find a block whose style requests overflow clipping AND that is
+    // registered as inline-box content (`inline_box_subtree_skip`
+    // membership). The outer `.ib` span matches both predicates: it is
+    // an inline-box root (skip set), and `overflow: hidden` flips
+    // `has_overflow_clip()` on its `BlockEntry`.
+    let clipped_inline_box = drawables.block_styles.iter().find(|(node_id, entry)| {
+        entry.style.has_overflow_clip() && drawables.inline_box_subtree_skip.contains(node_id)
+    });
+
     assert!(
-        clipped.is_some(),
-        "expected an inline-block with overflow:hidden to be reachable via LineItem::InlineBox with has_overflow_clip()"
+        clipped_inline_box.is_some(),
+        "expected an inline-block with overflow:hidden registered as a clipped \
+         inline-box-content block. block_styles entries with overflow_clip: {:?}; \
+         inline_box_subtree_skip: {:?}",
+        drawables
+            .block_styles
+            .iter()
+            .filter(|(_, e)| e.style.has_overflow_clip())
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        drawables.inline_box_subtree_skip,
     );
 }
