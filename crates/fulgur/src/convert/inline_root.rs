@@ -91,6 +91,8 @@ pub(super) fn try_convert(
         let block_pseudo_present = pseudo::node_has_block_pseudo_image(doc, node)
             || pseudo::node_has_absolute_pseudo(doc, node);
         let needs_block = style.needs_block_wrapper() || block_pseudo_present;
+        let clipping = needs_block && style.has_overflow_clip();
+        let opacity_scope = needs_block && !clipping && opacity < 1.0;
 
         // Always insert the paragraph entry keyed by the inline-root id.
         out.paragraphs.insert(
@@ -115,8 +117,24 @@ pub(super) fn try_convert(
                     opacity_descendants: Vec::new(),
                 },
             );
+            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
             // Register pseudo content (block-pseudo images + abs children).
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
+            if let Some(before) = snapshot {
+                let after = collect_drawables_node_ids(out);
+                let descendants: Vec<usize> = after
+                    .difference(&before)
+                    .copied()
+                    .filter(|&id| id != node_id)
+                    .collect();
+                if let Some(entry) = out.block_styles.get_mut(&node_id) {
+                    if clipping {
+                        entry.clip_descendants = descendants;
+                    } else {
+                        entry.opacity_descendants = descendants;
+                    }
+                }
+            }
         }
         return true;
     } else if before_inline.is_some() || after_inline.is_some() {
@@ -138,6 +156,8 @@ pub(super) fn try_convert(
         let block_pseudo_present = pseudo::node_has_block_pseudo_image(doc, node)
             || pseudo::node_has_absolute_pseudo(doc, node);
         let needs_block = style.needs_block_wrapper() || block_pseudo_present;
+        let clipping = needs_block && style.has_overflow_clip();
+        let opacity_scope = needs_block && !clipping && opacity < 1.0;
 
         out.paragraphs.insert(
             node_id,
@@ -161,7 +181,23 @@ pub(super) fn try_convert(
                     opacity_descendants: Vec::new(),
                 },
             );
+            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
+            if let Some(before) = snapshot {
+                let after = collect_drawables_node_ids(out);
+                let descendants: Vec<usize> = after
+                    .difference(&before)
+                    .copied()
+                    .filter(|&id| id != node_id)
+                    .collect();
+                if let Some(entry) = out.block_styles.get_mut(&node_id) {
+                    if clipping {
+                        entry.clip_descendants = descendants;
+                    } else {
+                        entry.opacity_descendants = descendants;
+                    }
+                }
+            }
         }
         return true;
     }

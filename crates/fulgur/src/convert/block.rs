@@ -45,26 +45,14 @@ pub(super) fn convert(
     // descendants in `draw_with_opacity`, so the dual case is covered
     // there and recording it again would double-track.
     let opacity_scope = !clipping && opacity < 1.0;
-    let has_pseudo_block = style.needs_block_wrapper();
     let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
 
-    // Insert the block entry up-front so descendants registered below
-    // can see this node already exists (relevant only for layered
-    // dispatch; the entry contents are filled in either way).
-    let needs_entry =
-        has_pseudo_block || clipping || opacity_scope || has_renderable_pseudo(doc, node);
-    if needs_entry {
-        insert_block_entry(node, style.clone(), width, height, out);
-    } else {
-        // Record block_styles lazily — only if this node turns out to
-        // need it after pseudo / abs walk. We register the entry now
-        // because `wrap_with_pseudo_content`'s old `has_pseudo` flag
-        // would otherwise force a wrapper unconditionally; v2 Drawables
-        // handle "no payload" by just not inserting.
-        if needs_block_entry_for_v2(node) {
-            insert_block_entry(node, style.clone(), width, height, out);
-        }
-    }
+    // Always insert the block entry — the v2 dispatcher silently no-ops
+    // when neither paint nor clip nor opacity applies, so leaving an
+    // unstyled entry costs nothing and keeps abs/fixed descendants able
+    // to look up their CB at render time. Mirrors v1's behavior of
+    // always emitting a `BlockPageable` for container nodes.
+    insert_block_entry(node, style.clone(), width, height, out);
 
     // Walk in-flow children.
     positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
@@ -111,26 +99,4 @@ fn insert_block_entry(
             opacity_descendants: Vec::new(),
         },
     );
-}
-
-/// Heuristic: should the v2 path record this node as a `BlockEntry` even
-/// when its style alone does not require a paint scope? Today this returns
-/// `true` for every container node so the v2 dispatcher can paint
-/// background / border on any author-styled element. The dispatcher
-/// silently no-ops when neither paint nor clip nor opacity applies.
-fn needs_block_entry_for_v2(_node: &Node) -> bool {
-    true
-}
-
-/// Returns `true` when the node has at least one pseudo slot whose computed
-/// content might contribute renderable Drawables (block / inline image,
-/// abs-positioned pseudo, or content url). Used by the container path to
-/// decide whether to register a wrapping `BlockEntry` so pseudo paint
-/// inherits the parent's clip / opacity scope (v1 forced a `BlockPageable`
-/// wrapper in the same situations via `wrap_with_pseudo_content`'s
-/// `has_pseudo` return).
-fn has_renderable_pseudo(doc: &BaseDocument, node: &Node) -> bool {
-    pseudo::node_has_block_pseudo_image(doc, node)
-        || pseudo::node_has_inline_pseudo_image(doc, node)
-        || pseudo::node_has_absolute_pseudo(doc, node)
 }

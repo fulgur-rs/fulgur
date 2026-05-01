@@ -86,6 +86,11 @@ pub(super) fn node_has_block_pseudo_image(doc: &BaseDocument, node: &Node) -> bo
 
 /// Cheap probe: does `node` have at least one `::before` / `::after` pseudo
 /// slot whose computed `content` resolves to an inline image URL?
+///
+/// Currently unused — kept because it mirrors `node_has_block_pseudo_image`
+/// and the v1 container path used both probes. The v2 inline-root path
+/// detects inline pseudos directly via `build_inline_pseudo_image` instead.
+#[allow(dead_code)]
 pub(super) fn node_has_inline_pseudo_image(doc: &BaseDocument, node: &Node) -> bool {
     for pseudo_id in [node.before, node.after].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)

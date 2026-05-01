@@ -58,7 +58,11 @@ pub(super) fn try_convert(
             },
         );
         let content_box = compute_content_box(node, &style);
+        let clipping = style.has_overflow_clip();
+        let opacity_scope = !clipping && opacity < 1.0;
+        let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
         build_list_item_body(doc, node, style, visible, content_box, ctx, depth, out);
+        record_li_clip_opacity_descendants(node_id, clipping, snapshot, out);
         return true;
     }
 
@@ -105,7 +109,11 @@ pub(super) fn try_convert(
                 },
             );
             let content_box = compute_content_box(node, &style);
+            let clipping = style.has_overflow_clip();
+            let opacity_scope = !clipping && opacity < 1.0;
+            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
             build_list_item_body(doc, node, style, visible, content_box, ctx, depth, out);
+            record_li_clip_opacity_descendants(node_id, clipping, snapshot, out);
             return true;
         }
     }
@@ -399,5 +407,31 @@ fn build_list_item_body(
         let children: &[usize] = layout_children_guard_2.as_deref().unwrap_or(&node.children);
         positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
         pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
+    }
+}
+
+/// Fill in `clip_descendants` / `opacity_descendants` on an already-inserted
+/// `BlockEntry` keyed by `node_id`, using the before/after snapshot diff.
+/// `snapshot` is `Some` only when the caller decided this node has a clip
+/// or opacity scope worth tracking.
+fn record_li_clip_opacity_descendants(
+    node_id: usize,
+    clipping: bool,
+    snapshot: Option<std::collections::BTreeSet<usize>>,
+    out: &mut crate::drawables::Drawables,
+) {
+    let Some(before) = snapshot else { return };
+    let after = collect_drawables_node_ids(out);
+    let descendants: Vec<usize> = after
+        .difference(&before)
+        .copied()
+        .filter(|&id| id != node_id)
+        .collect();
+    if let Some(entry) = out.block_styles.get_mut(&node_id) {
+        if clipping {
+            entry.clip_descendants = descendants;
+        } else {
+            entry.opacity_descendants = descendants;
+        }
     }
 }
