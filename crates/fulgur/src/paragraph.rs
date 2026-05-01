@@ -5,7 +5,7 @@ use std::sync::Arc;
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pageable, Pt};
+use crate::pageable::{Canvas, Pt};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -881,29 +881,6 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
         if let LineItem::Image(img) = &mut line.items[idx] {
             img.computed_y = img_top + shift;
         }
-    }
-}
-
-impl Pageable for ParagraphPageable {
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        if !self.visible {
-            return;
-        }
-        crate::pageable::draw_with_opacity(canvas, self.opacity, |canvas| {
-            draw_shaped_lines(canvas, &self.lines, x, y, None);
-        });
-    }
-
-    fn clone_box(&self) -> Box<dyn Pageable> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn node_id(&self) -> Option<usize> {
-        self.node_id
     }
 }
 

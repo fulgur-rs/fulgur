@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::pageable::{Canvas, Pageable, Pt};
-
 /// Image format detected from data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
@@ -166,49 +164,6 @@ impl ImagePageable {
         } else {
             None
         }
-    }
-}
-
-impl Pageable for ImagePageable {
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        use crate::pageable::draw_with_opacity;
-
-        if !self.visible {
-            return;
-        }
-        draw_with_opacity(canvas, self.opacity, |canvas| {
-            let data: krilla::Data = Arc::clone(&self.image_data).into();
-            let image_result = match self.format {
-                ImageFormat::Png => krilla::image::Image::from_png(data, true),
-                ImageFormat::Jpeg => krilla::image::Image::from_jpeg(data, true),
-                ImageFormat::Gif => krilla::image::Image::from_gif(data, true),
-            };
-
-            let Ok(image) = image_result else {
-                return;
-            };
-
-            let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
-                return;
-            };
-
-            let transform = krilla::geom::Transform::from_translate(x, y);
-            canvas.surface.push_transform(&transform);
-            canvas.surface.draw_image(image, size);
-            canvas.surface.pop();
-        });
-    }
-
-    fn clone_box(&self) -> Box<dyn Pageable> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn node_id(&self) -> Option<usize> {
-        self.node_id
     }
 }
 
