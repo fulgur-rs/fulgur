@@ -504,9 +504,9 @@ pub trait Pageable: Send + Sync {
     /// they piggyback on the host element's geometry entry).
     ///
     /// Default `None` for impls that have no DOM correspondence
-    /// (synthetic Pageables built by tests, etc.). Plain types
-    /// (`BlockPageable`, `ParagraphPageable`, `SpacerPageable`,
-    /// `ImagePageable`) override to return their stored `node_id`.
+    /// (synthetic Pageables built by tests, etc.). Concrete plain types
+    /// (`BlockPageable`, `SpacerPageable`) override to return their
+    /// stored `node_id`; wrappers delegate to their inner Pageable.
     fn node_id(&self) -> Option<usize> {
         None
     }

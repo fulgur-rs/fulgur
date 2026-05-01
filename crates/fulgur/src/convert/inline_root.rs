@@ -1,6 +1,6 @@
 use super::*;
 use super::{list_marker, positioned, pseudo};
-use crate::paragraph::{InlineBoxItem, InlineBoxPlaceholder, ParagraphPageable};
+use crate::paragraph::{InlineBoxItem, InlineBoxPlaceholder, ParagraphRender};
 
 /// Dispatcher entry for inline-root nodes (those with `node.flags.is_inline_root()`).
 ///
@@ -431,10 +431,10 @@ fn convert_inline_box_node(
     }
 }
 
-/// Extract a `ParagraphPageable` from an inline root node. The caller
+/// Extract a `ParagraphRender` from an inline root node. The caller
 /// (`try_convert` above, or `list_item::build_list_item_body`) consumes
 /// the returned paragraph and inserts a `ParagraphEntry` into `out`. We
-/// keep returning `Option<ParagraphPageable>` instead of writing into `out`
+/// keep returning `Option<ParagraphRender>` instead of writing into `out`
 /// here so callers can inject pseudo images / list markers BEFORE
 /// committing the entry — the pre-PR-8i interface in that respect.
 ///
@@ -449,7 +449,7 @@ pub(super) fn extract_paragraph(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
     out: &mut crate::drawables::Drawables,
-) -> Option<ParagraphPageable> {
+) -> Option<ParagraphRender> {
     let elem_data = node.element_data()?;
     let text_layout = elem_data.inline_layout_data.as_ref()?;
 
@@ -580,5 +580,5 @@ pub(super) fn extract_paragraph(
         return None;
     }
 
-    Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
+    Some(ParagraphRender::new(shaped_lines).with_id(extract_block_id(node)))
 }

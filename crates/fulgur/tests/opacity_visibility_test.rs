@@ -124,7 +124,7 @@ fn test_visibility_hidden_preserves_layout() {
 }
 
 /// Regression test: styled inline root with visibility:hidden must hide text.
-/// Exercises the convert.rs path where a ParagraphPageable is wrapped in a
+/// Exercises the convert.rs path where a ParagraphRender is wrapped in a
 /// BlockPageable for background/border — the inner paragraph must inherit visible.
 #[test]
 fn test_visibility_hidden_styled_inline_root() {

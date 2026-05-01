@@ -18,7 +18,7 @@ pub(super) fn build_pseudo_image_entry(
     let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
-    let format = ImagePageable::detect_format(&data)?;
+    let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
     let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
@@ -160,7 +160,7 @@ pub(super) fn build_inline_pseudo_image(
     let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
     let data = Arc::clone(assets.get_image(asset_name)?);
-    let format = ImagePageable::detect_format(&data)?;
+    let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
     let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);

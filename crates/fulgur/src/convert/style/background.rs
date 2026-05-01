@@ -2,7 +2,7 @@
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::{extract_asset_name, px_to_pt};
-use crate::image::ImagePageable;
+use crate::image::ImageRender;
 use crate::pageable::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle,
@@ -51,7 +51,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
                     match AssetKind::detect(data) {
                         AssetKind::Raster(format) => {
                             let (iw, ih) =
-                                ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+                                ImageRender::decode_dimensions(data, format).unwrap_or((1, 1));
                             Some((
                                 BgImageContent::Raster {
                                     data: Arc::clone(data),

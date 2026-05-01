@@ -1,4 +1,4 @@
-//! ImagePageable — renders images in PDF via Krilla's Image API.
+//! ImageRender — renders images in PDF via Krilla's Image API.
 
 use std::sync::Arc;
 
@@ -25,9 +25,9 @@ impl ImageFormat {
 /// Classification of an asset's bytes for rendering path selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
-    /// Raster image (PNG/JPEG/GIF) → renders via `ImagePageable`.
+    /// Raster image (PNG/JPEG/GIF) → renders via `ImageRender`.
     Raster(ImageFormat),
-    /// SVG vector image → renders via `SvgPageable`.
+    /// SVG vector image → renders via `SvgRender`.
     Svg,
     /// Unrecognized / unsupported.
     Unknown,
@@ -38,9 +38,9 @@ impl AssetKind {
     ///
     /// Accepts SVG via the `<svg` element start or `<?xml` prolog, tolerant
     /// of an optional leading UTF-8 BOM and ASCII whitespace. Falls through
-    /// to `ImagePageable::detect_format` for raster magic bytes.
+    /// to `ImageRender::detect_format` for raster magic bytes.
     pub fn detect(data: &[u8]) -> AssetKind {
-        if let Some(format) = ImagePageable::detect_format(data) {
+        if let Some(format) = ImageRender::detect_format(data) {
             return AssetKind::Raster(format);
         }
         let mut slice = data;
@@ -65,7 +65,7 @@ impl AssetKind {
 
 /// An image element that renders an image at its computed size.
 #[derive(Clone)]
-pub struct ImagePageable {
+pub struct ImageRender {
     pub image_data: Arc<Vec<u8>>,
     pub format: ImageFormat,
     pub width: f32,
@@ -77,7 +77,7 @@ pub struct ImagePageable {
     pub node_id: Option<usize>,
 }
 
-impl ImagePageable {
+impl ImageRender {
     pub fn new(data: Arc<Vec<u8>>, format: ImageFormat, width: f32, height: f32) -> Self {
         Self {
             image_data: data,
@@ -187,13 +187,13 @@ mod tests {
 
     #[test]
     fn test_png_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_PNG, ImageFormat::Png);
+        let dims = ImageRender::decode_dimensions(MINIMAL_PNG, ImageFormat::Png);
         assert_eq!(dims, Some((1, 1)));
     }
 
     #[test]
     fn test_gif_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_GIF, ImageFormat::Gif);
+        let dims = ImageRender::decode_dimensions(MINIMAL_GIF, ImageFormat::Gif);
         assert_eq!(dims, Some((1, 1)));
     }
 
@@ -220,13 +220,13 @@ mod tests {
 
     #[test]
     fn test_jpeg_dimensions() {
-        let dims = ImagePageable::decode_dimensions(MINIMAL_JPEG, ImageFormat::Jpeg);
+        let dims = ImageRender::decode_dimensions(MINIMAL_JPEG, ImageFormat::Jpeg);
         assert_eq!(dims, Some((1, 1)));
     }
 
     #[test]
     fn test_truncated_data_returns_none() {
-        let dims = ImagePageable::decode_dimensions(&[0x89, 0x50], ImageFormat::Png);
+        let dims = ImageRender::decode_dimensions(&[0x89, 0x50], ImageFormat::Png);
         assert_eq!(dims, None);
     }
 

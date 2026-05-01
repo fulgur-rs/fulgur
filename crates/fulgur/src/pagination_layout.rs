@@ -631,8 +631,9 @@ impl<'a> PaginationLayoutTree<'a> {
 
             // fulgur-p55h: if the child carries a Parley inline layout,
             // probe its line metrics and split at line boundaries —
-            // mirrors `paragraph::ParagraphPageable::split` (line 945)
-            // but inside the Taffy hook rather than post-conversion.
+            // mirrors the v1 paragraph-pageable split path (removed in
+            // PR 8j-1; see git history) but inside the Taffy hook rather
+            // than post-conversion.
             //
             // fulgur-k0g0: when `break-inside: avoid` is set, fall
             // through to the block path below so the paragraph emits
@@ -649,9 +650,9 @@ impl<'a> PaginationLayoutTree<'a> {
                 // advance the page boundary before calling
                 // `fragment_inline_root`. Mirrors Pageable's
                 // `BlockPageable::split` falling back to `AtIndex`
-                // (split before the child) when
-                // `ParagraphPageable::split` cannot honour widow /
-                // orphan and returns `None`.
+                // (split before the child) when the v1 paragraph-pageable
+                // split path (removed in PR 8j-1) could not honour
+                // widow / orphan and returned `None`.
                 let para_total_h = line_metrics
                     .last()
                     .map(|l| l.1 - line_metrics[0].0)
@@ -1587,10 +1588,10 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// at line edges, append one Fragment per page span to the geometry
 /// table, and return the updated `(page_index, cursor_y, fragments_emitted)`.
 ///
-/// Mirrors `paragraph::ParagraphPageable::split` (paragraph.rs:945+):
-/// walk lines, track the first line of the current fragment in
-/// `fragment_start_idx`, and split when the cumulative height in
-/// paragraph-local coords would push the bottom past
+/// Mirrors the v1 paragraph-pageable split path (removed in PR 8j-1;
+/// see git history): walk lines, track the first line of the current
+/// fragment in `fragment_start_idx`, and split when the cumulative
+/// height in paragraph-local coords would push the bottom past
 /// `page_height_px - paragraph_top_in_body`.
 ///
 /// fulgur-s67g Phase 2.1 (widow / orphan): each candidate split point
@@ -1599,11 +1600,12 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// When neither holds at the natural overflow point, the split is
 /// skipped — subsequent lines accumulate into the current fragment
 /// (overflow-tolerant) until a valid split is found or the paragraph
-/// ends. This matches the Pageable side: `ParagraphPageable::split`
-/// (paragraph.rs:973-983) returns `None` when widows/orphans cannot
-/// be honoured, which the outer `BlockPageable::split` resolves by
-/// emitting the whole paragraph at the current position (oversized
-/// or pushed to a fresh page by sibling-driven flow).
+/// ends. This matches the v1 Pageable side: the paragraph-pageable
+/// split path (removed in PR 8j-1; see git history) returned `None`
+/// when widows/orphans could not be honoured, which the outer
+/// `BlockPageable::split` resolved by emitting the whole paragraph at
+/// the current position (oversized or pushed to a fresh page by
+/// sibling-driven flow).
 ///
 /// Pageable hard-codes `orphans = widows = 2` via `Pagination::default()`
 /// (`pageable.rs:268-275`). CSS `orphans` / `widows` properties are

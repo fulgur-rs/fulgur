@@ -1,4 +1,4 @@
-//! ParagraphPageable — renders text via the Parley→Krilla glyph bridge.
+//! ParagraphRender — renders text via the Parley→Krilla glyph bridge.
 
 use std::sync::Arc;
 
@@ -190,7 +190,7 @@ pub struct ShapedLine {
 
 /// Paragraph element that renders shaped text.
 #[derive(Clone)]
-pub struct ParagraphPageable {
+pub struct ParagraphRender {
     pub lines: Vec<ShapedLine>,
     pub cached_height: f32,
     pub opacity: f32,
@@ -205,7 +205,7 @@ pub struct ParagraphPageable {
     pub node_id: Option<usize>,
 }
 
-impl ParagraphPageable {
+impl ParagraphRender {
     pub fn new(lines: Vec<ShapedLine>) -> Self {
         let cached_height: f32 = lines.iter().map(|l| l.height).sum();
         Self {
@@ -540,11 +540,11 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
 /// PR 8g: render-side context that lets `draw_shaped_lines` dispatch
 /// inline-box content (`LineItem::InlineBox`) through the v2 dispatcher.
 ///
-/// `None` is passed by:
-/// - The list-item marker text render path (markers contain only Text /
-///   Image items, never InlineBox).
-/// - Trait-method callers that exercise `draw_shaped_lines` outside the
-///   v2 render pipeline (PR 8g deletes these alongside `Pageable::draw`).
+/// `None` is passed by the list-item marker text render paths
+/// (`ListItemPageable::draw` in `pageable.rs` and
+/// `render::draw_list_item_marker`), because marker line streams only
+/// contain Text / Image items — never `LineItem::InlineBox` — and
+/// therefore have no inline-box children to dispatch.
 ///
 /// When `Some`, the InlineBox arm computes the inline-flow position
 /// `(ox, oy)` and dispatches the inline-box content directly at those
@@ -1217,13 +1217,13 @@ mod tests {
 
     #[test]
     fn paragraph_default_has_no_id() {
-        let p = ParagraphPageable::new(Vec::new());
+        let p = ParagraphRender::new(Vec::new());
         assert!(p.id.is_none());
     }
 
     #[test]
     fn paragraph_with_id_stores_value() {
-        let p = ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("section-1".to_string())));
+        let p = ParagraphRender::new(Vec::new()).with_id(Some(Arc::new("section-1".to_string())));
         assert_eq!(p.id.as_deref().map(String::as_str), Some("section-1"));
     }
 

@@ -1,4 +1,4 @@
-//! SvgPageable — renders inline <svg> elements to PDF as vector graphics
+//! SvgRender — renders inline <svg> elements to PDF as vector graphics
 //! via krilla-svg's SurfaceExt::draw_svg.
 
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use usvg::Tree;
 
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
-pub struct SvgPageable {
+pub struct SvgRender {
     /// Parsed SVG tree, shared via Arc for cheap cloning during pagination.
     pub tree: Arc<Tree>,
     /// Display width in PDF points — CSS-resolved by Blitz/Taffy, NOT the
@@ -23,7 +23,7 @@ pub struct SvgPageable {
     pub node_id: Option<usize>,
 }
 
-impl SvgPageable {
+impl SvgRender {
     pub fn new(tree: Arc<Tree>, width: f32, height: f32) -> Self {
         Self {
             tree,
@@ -56,13 +56,13 @@ mod tests {
 
     #[test]
     fn test_height_returns_configured_height() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.height, 50.0);
     }
 
     #[test]
-    fn test_clone_box_shares_tree_via_arc() {
-        let original = SvgPageable::new(parse_tree(), 100.0, 50.0);
+    fn test_clone_shares_tree_via_arc() {
+        let original = SvgRender::new(parse_tree(), 100.0, 50.0);
         let original_ptr = Arc::as_ptr(&original.tree);
         let cloned = original.clone();
         let cloned_ptr = Arc::as_ptr(&cloned.tree);
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_default_opacity_and_visible() {
-        let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.opacity, 1.0);
         assert!(svg.visible);
     }
