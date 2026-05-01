@@ -21,7 +21,6 @@ pub(crate) mod link;
 pub mod multicol_layout;
 pub(crate) mod net;
 pub mod outline;
-pub mod pageable;
 #[doc(hidden)]
 pub mod pagination_layout;
 pub mod paragraph;

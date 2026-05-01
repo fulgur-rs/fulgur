@@ -7,9 +7,9 @@
 //! converter, Drawables wiring) are checked together.
 
 use fulgur::config::{Margin, PageSize};
+use fulgur::draw_primitives::Affine2D;
 use fulgur::drawables::{Drawables, TransformEntry};
 use fulgur::engine::Engine;
-use fulgur::pageable::Affine2D;
 
 fn build_drawables(html: &str) -> Drawables {
     let engine = Engine::builder().build();
