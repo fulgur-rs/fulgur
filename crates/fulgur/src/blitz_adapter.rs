@@ -2943,7 +2943,8 @@ mod tests {
 #[cfg(test)]
 mod transform_tests {
     use super::*;
-    use crate::pageable::{Affine2D, Point2, matrix_test_util::approx};
+    use crate::pageable::{Affine2D, Point2};
+    use crate::draw_primitives::matrix_test_util::approx;
 
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.
