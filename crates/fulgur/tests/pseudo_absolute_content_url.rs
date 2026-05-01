@@ -107,13 +107,6 @@ fn absolute_pseudo_with_content_url_honours_explicit_size() {
 /// `pseudo.final_layout.size` is `(0, 0)` for textless pseudos (Blitz
 /// limitation), so reading it directly makes `cb_w - pw - r` collapse to
 /// `cb_w - r`, shifting the image off-canvas by its own width/height.
-#[ignore = "PR 8i regression: with the convert-layer rewrite to flat \
-            Drawables, the abs pseudo image's pagination_geometry fragment \
-            is now placed at the parent's outer corner instead of inside \
-            (off by image w/h). VRT does not cover this fixture so the \
-            regression slipped through. Re-enable once convert/positioned.rs \
-            re-applies the right/bottom inset for textless content-url pseudos \
-            in the geometry side-channel."]
 #[test]
 fn absolute_pseudo_with_right_bottom_offsets_by_image_size() {
     let mut assets = AssetBundle::new();

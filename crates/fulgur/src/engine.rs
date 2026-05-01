@@ -473,7 +473,6 @@ impl Engine {
             &column_styles,
         );
 
-        let geometry_clone = pagination_geometry.clone();
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
@@ -492,7 +491,17 @@ impl Engine {
             )),
         };
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
-        (drawables, geometry_clone)
+        // PR 8i regression fix: read geometry AFTER convert. Convert
+        // can write override fragments into `pagination_geometry`
+        // (textless `content: url(...)` abs pseudos with `right` /
+        // `bottom` insets), so cloning before convert would hide
+        // those corrections from tests that drive
+        // `pseudo_absolute_content_url::
+        // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
+        // The production `render_html` path already passes
+        // `&convert_ctx.pagination_geometry` to `render_v2` after
+        // convert, so this matches the production read order.
+        (drawables, convert_ctx.pagination_geometry)
     }
 }
 

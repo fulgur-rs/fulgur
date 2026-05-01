@@ -144,10 +144,155 @@ fn resolve_cb_for_absolute(
     body_fallback
 }
 
-// `resolve_inset_px` was deleted with the rest of the v1 inset math when
-// convert moved to Drawables. Inset resolution for abs/fixed elements
-// happens at render time using `pagination_geometry`. If you need to
-// re-introduce it, see git history for the v1 implementation.
+// PR 8i regression fix (`pseudo_absolute_content_url::
+// absolute_pseudo_with_right_bottom_offsets_by_image_size`):
+// `resolve_inset_px` is back, narrowly scoped to textless
+// `content: url(...)` abs pseudos whose CB is not their nearest Taffy
+// parent. Taffy alone resolves `right` / `bottom` against the pseudo's
+// `final_layout.size`, which is `(0, 0)` for textless pseudos — so the
+// inset shifts the image by its own w/h. v1 worked around this in
+// `build_absolute_pseudo_children`; v2 re-applies the correction by
+// writing into `ctx.pagination_geometry` here so the render path
+// (which consults the table verbatim) sees the corrected fragment.
+//
+// We only re-introduce the math that the test requires: explicit `right`
+// / `bottom` resolution against the CB's padding-box width/height, with
+// the pseudo's effective size taken from the already-built
+// `ImageEntry` (which honours the explicit `width`/`height` in
+// `build_pseudo_image_entry`). `left`/`top` resolution is left to
+// Taffy because it gets that case correct (CB anchor is the parent's
+// origin, no size dependence).
+fn resolve_inset_px(
+    inset: &::style::values::computed::position::Inset,
+    basis_px: f32,
+) -> Option<f32> {
+    use ::style::values::computed::Length;
+    use ::style::values::generics::position::GenericInset;
+    match inset {
+        GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
+        _ => None,
+    }
+}
+
+/// PR 8i regression fix: write a corrected fragment into
+/// `pagination_geometry` for a textless `content: url(...)` abs pseudo
+/// whose `right` or `bottom` inset was specified.
+///
+/// `pseudo_w_pt` / `pseudo_h_pt` come from the just-built `ImageEntry`,
+/// which sized the image from the pseudo's CSS `width` / `height`
+/// (via `build_pseudo_image_entry`). For pseudos that didn't set a
+/// `right` or `bottom` inset, this is a no-op — Taffy's location is
+/// already correct in those cases (CB anchor at parent's origin).
+///
+/// Coordinates flow:
+///   - CB padding-box w/h in CSS px (from `cb.padding_box_size`)
+///   - Resolve `right`/`bottom` insets against those (CSS 2.1 §10.3.7
+///     / §10.6.4 over-constrained: start-side wins, so this only
+///     fires when `left`/`top` is `auto`).
+///   - Translate from CB padding-box frame → CB border-box frame →
+///     parent's frame (subtracting the parent's body-relative offset
+///     in CB frame and the parent's body-relative position).
+///   - Fragment is written in body-relative CSS px to match every
+///     other Fragment in the table.
+fn maybe_apply_abs_pseudo_inset_correction(
+    pseudo: &Node,
+    pseudo_id: usize,
+    parent_id: usize,
+    cb: AbsCb,
+    pseudo_w_pt: f32,
+    pseudo_h_pt: f32,
+    ctx: &mut ConvertContext<'_>,
+) {
+    // Defer to `append_position_fixed_fragments` for `position: fixed`:
+    // that pass writes per-page repeated fragments (`is_repeat = true`)
+    // and our single-fragment overwrite would clobber the repetition.
+    // Production runs `append_position_fixed_fragments` BEFORE convert
+    // (engine.rs), so a fixed pseudo's geometry is already established
+    // by the time we get here. Inset correction for `position: fixed`
+    // pseudos is its own follow-up.
+    if is_position_fixed(pseudo) {
+        return;
+    }
+    let Some(styles) = pseudo.primary_styles() else {
+        return;
+    };
+    let pos = styles.get_position();
+    let (cb_w_px, cb_h_px) = cb.padding_box_size;
+    let left = resolve_inset_px(&pos.left, cb_w_px);
+    let top = resolve_inset_px(&pos.top, cb_h_px);
+    let right = resolve_inset_px(&pos.right, cb_w_px);
+    let bottom = resolve_inset_px(&pos.bottom, cb_h_px);
+
+    // Skip when neither right nor bottom is set — Taffy already
+    // produced the right answer for left/top anchors. Also skip when
+    // the start-side inset wins per §10.3.7 / §10.6.4 over-constrained
+    // resolution, because Taffy already honoured the start-side value.
+    let needs_right = right.is_some() && left.is_none();
+    let needs_bottom = bottom.is_some() && top.is_none();
+    if !needs_right && !needs_bottom {
+        return;
+    }
+
+    // The pseudo's existing fragment (written by the fragmenter from
+    // Taffy's location) gives us the parent's body-relative origin
+    // implicitly: parent.fragment.x + (pseudo's offset relative to
+    // parent in border-box frame). We rebuild from scratch using the
+    // parent's recorded fragment plus the corrected CB-padding-box →
+    // parent translation.
+    let Some(parent_geom) = ctx.pagination_geometry.get(&parent_id) else {
+        return;
+    };
+    let Some(parent_frag) = parent_geom.fragments.first().cloned() else {
+        return;
+    };
+    let parent_x_px = parent_frag.x;
+    let parent_y_px = parent_frag.y;
+
+    let pseudo_w_px = pt_to_px(pseudo_w_pt);
+    let pseudo_h_px = pt_to_px(pseudo_h_pt);
+
+    // CSS 2.1 §10.3.7 / §10.6.4: when start-side is auto, end-side
+    // determines position. Use the pseudo's effective image size
+    // (NOT Taffy's `final_layout.size`, which is `(0, 0)` for
+    // textless content:url pseudos).
+    let x_in_pp_px = if needs_right {
+        // right is Some, left is None
+        cb_w_px - pseudo_w_px - right.unwrap()
+    } else {
+        // left is Some (or both auto -> 0)
+        left.unwrap_or(0.0)
+    };
+    let y_in_pp_px = if needs_bottom {
+        cb_h_px - pseudo_h_px - bottom.unwrap()
+    } else {
+        top.unwrap_or(0.0)
+    };
+
+    // Padding-box frame → CB border-box frame → parent's frame.
+    // `cb.parent_offset_in_cb_bp` is the parent's offset within CB's
+    // border-box frame (accumulated `final_layout.location` while
+    // resolve_cb_for_absolute climbed). For the simple "parent IS the
+    // CB" case this is `(0, 0)`.
+    let (bl_px, bt_px) = cb.border_top_left;
+    let (ox_px, oy_px) = cb.parent_offset_in_cb_bp;
+    let pseudo_local_x_px = x_in_pp_px + bl_px - ox_px;
+    let pseudo_local_y_px = y_in_pp_px + bt_px - oy_px;
+
+    let new_x_px = parent_x_px + pseudo_local_x_px;
+    let new_y_px = parent_y_px + pseudo_local_y_px;
+
+    // Replace any existing fragment(s) — Taffy's geometry is wrong
+    // for this case, our correction is the source of truth.
+    let entry = ctx.pagination_geometry.entry(pseudo_id).or_default();
+    entry.fragments.clear();
+    entry.fragments.push(crate::pagination_layout::Fragment {
+        page_index: parent_frag.page_index,
+        x: new_x_px,
+        y: new_y_px,
+        width: pseudo_w_px,
+        height: pseudo_h_px,
+    });
+}
 
 /// Walk `::before` / `::after` pseudo slots whose computed `position` is
 /// `absolute` or `fixed` and recurse into them via `convert_node`.
@@ -198,7 +343,25 @@ pub(super) fn walk_absolute_pseudo_children(
         // Try the textless content:url shortcut; if it produces an image
         // entry, record it directly. Otherwise recurse via `convert_node`.
         if let Some(img) = try_build_absolute_pseudo_image(pseudo, node, _cb, ctx.assets) {
+            // PR 8i regression fix: when the pseudo specifies `right` /
+            // `bottom`, Taffy resolves them against
+            // `pseudo.final_layout.size = (0, 0)` (textless pseudos)
+            // and shifts the image off by its own w/h. Re-apply the
+            // inset against the pseudo's effective image size and
+            // overwrite the fragmenter's wrong placement.
+            let (img_w_pt, img_h_pt) = (img.width, img.height);
             out.images.insert(pseudo_id, img);
+            if let Some(cb_resolved) = _cb {
+                maybe_apply_abs_pseudo_inset_correction(
+                    pseudo,
+                    pseudo_id,
+                    node.id,
+                    cb_resolved,
+                    img_w_pt,
+                    img_h_pt,
+                    ctx,
+                );
+            }
             continue;
         }
         convert_node(doc, pseudo_id, ctx, depth + 1, out);
