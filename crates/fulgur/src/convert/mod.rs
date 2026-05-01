@@ -2,14 +2,15 @@
 
 use crate::asset::AssetBundle;
 use crate::blitz_adapter::{BaseDocument, Node, NodeData};
+use crate::drawables::{ImageMarker, ListItemMarker};
 use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImagePageable;
 use crate::pageable::{
-    BlockPageable, BlockStyle, CounterOpMarkerPageable, CounterOpWrapperPageable, ImageMarker,
-    ListItemMarker, ListItemPageable, Pageable, PositionedChild, RunningElementMarkerPageable,
-    RunningElementWrapperPageable, Size, SpacerPageable, StringSetPageable,
-    StringSetWrapperPageable, TablePageable, TransformWrapperPageable,
+    BlockPageable, BlockStyle, CounterOpMarkerPageable, CounterOpWrapperPageable, ListItemPageable,
+    Pageable, PositionedChild, RunningElementMarkerPageable, RunningElementWrapperPageable, Size,
+    SpacerPageable, StringSetPageable, StringSetWrapperPageable, TablePageable,
+    TransformWrapperPageable,
 };
 use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ParagraphPageable, ShapedGlyph,

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::drawables::ListItemMarker;
 use crate::gcpm::CounterOp;
 use crate::image::ImageFormat;
 
@@ -2335,37 +2336,6 @@ pub(crate) fn clamp_marker_size(
     }
 }
 
-/// Image marker contents — either a raster image or a parsed SVG tree.
-#[derive(Clone)]
-pub enum ImageMarker {
-    Raster(crate::image::ImagePageable),
-    Svg(crate::svg::SvgPageable),
-}
-
-/// Marker attached to a `ListItemPageable`.
-///
-/// Exactly one variant holds valid content per list item, enforced by the
-/// type system. `None` is used for the second fragment after a page-break
-/// split (the marker only appears on the first fragment).
-#[derive(Clone)]
-pub enum ListItemMarker {
-    /// Text marker with shaped glyph runs extracted from Blitz/Parley.
-    Text {
-        lines: Vec<crate::paragraph::ShapedLine>,
-        width: Pt,
-    },
-    /// Image marker (list-style-image: url(...)) — raster or SVG.
-    Image {
-        marker: ImageMarker,
-        /// Display width after clamp (pt).
-        width: Pt,
-        /// Display height after clamp (pt).
-        height: Pt,
-    },
-    /// No marker — split trailing fragment or list-style-type: none.
-    None,
-}
-
 /// A list item with an outside-positioned marker.
 #[derive(Clone)]
 pub struct ListItemPageable {
@@ -2401,21 +2371,14 @@ impl Pageable for ListItemPageable {
                         let marker_x = x - width;
                         crate::paragraph::draw_shaped_lines(canvas, lines, marker_x, y, None);
                     }
-                    ListItemMarker::Image {
-                        marker,
-                        width,
-                        height,
-                    } => {
-                        let marker_x = x - *width;
-                        let marker_y = y + (self.marker_line_height - *height) / 2.0;
-                        match marker {
-                            ImageMarker::Raster(img) => {
-                                img.draw(canvas, marker_x, marker_y, *width, *height);
-                            }
-                            ImageMarker::Svg(svg) => {
-                                svg.draw(canvas, marker_x, marker_y, *width, *height);
-                            }
-                        }
+                    ListItemMarker::Image { .. } => {
+                        // v1 dead-code path: image markers carry `ImageEntry` /
+                        // `SvgEntry` (drawables components, no draw method by
+                        // design — see ECS separation in render.rs systems).
+                        // The v2 path draws them via `render::draw_list_item_marker`
+                        // → `draw_image_v2` / `draw_svg_v2`. v1 entry points were
+                        // removed in PR 8a; this arm is kept only for compilation
+                        // and will be deleted with pageable.rs in PR 8j.
                     }
                     _ => {}
                 }

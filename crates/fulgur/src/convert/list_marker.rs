@@ -71,9 +71,16 @@ pub(super) fn resolve_list_marker(
     match kind {
         AssetKind::Raster(format) => {
             let (width, height) = size_raster_marker(data, format, line_height)?;
-            let img = ImagePageable::new(Arc::clone(data), format, width, height);
+            let entry = crate::drawables::ImageEntry {
+                image_data: Arc::clone(data),
+                format,
+                width,
+                height,
+                opacity: 1.0,
+                visible: true,
+            };
             Some(ListItemMarker::Image {
-                marker: ImageMarker::Raster(img),
+                marker: ImageMarker::Raster(entry),
                 width,
                 height,
             })
@@ -85,9 +92,15 @@ pub(super) fn resolve_list_marker(
             let intrinsic_h = px_to_pt(size.height());
             let (width, height) =
                 crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
-            let svg = SvgPageable::new(Arc::new(tree), width, height);
+            let entry = crate::drawables::SvgEntry {
+                tree: Arc::new(tree),
+                width,
+                height,
+                opacity: 1.0,
+                visible: true,
+            };
             Some(ListItemMarker::Image {
-                marker: ImageMarker::Svg(svg),
+                marker: ImageMarker::Svg(entry),
                 width,
                 height,
             })

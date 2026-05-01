@@ -148,13 +148,43 @@ pub struct TableEntry {
     pub clip_descendants: Vec<NodeId>,
 }
 
+/// Image marker contents — either a raster image or a parsed SVG tree.
+#[derive(Clone)]
+pub enum ImageMarker {
+    Raster(ImageEntry),
+    Svg(SvgEntry),
+}
+
+/// List-item marker variants. Exactly one variant holds valid content per
+/// list item, enforced by the type system. `None` is used for the second
+/// fragment after a page-break split (the marker only appears on the first
+/// fragment).
+#[derive(Clone)]
+pub enum ListItemMarker {
+    /// Text marker with shaped glyph runs extracted from Blitz/Parley.
+    Text {
+        lines: Vec<crate::paragraph::ShapedLine>,
+        width: f32,
+    },
+    /// Image marker (`list-style-image: url(...)`) — raster or SVG.
+    Image {
+        marker: ImageMarker,
+        /// Display width after clamp (pt).
+        width: f32,
+        /// Display height after clamp (pt).
+        height: f32,
+    },
+    /// No marker — split trailing fragment or `list-style-type: none`.
+    None,
+}
+
 /// List-item marker payload for v2. The body block paints itself
 /// through `BlockEntry`; `ListItemEntry` only carries the marker
 /// (text / image / svg / none) and the line-height needed to
 /// vertically centre image markers.
 #[derive(Clone)]
 pub struct ListItemEntry {
-    pub marker: crate::pageable::ListItemMarker,
+    pub marker: ListItemMarker,
     pub marker_line_height: f32,
     pub opacity: f32,
     pub visible: bool,
