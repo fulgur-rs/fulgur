@@ -84,14 +84,6 @@ fn rotate_90_at_top_left_origin() {
     approx(y1, 1.0, 1e-5, "rotate90.y");
 }
 
-#[ignore = "PR 8i regression: convert::record_transform passes CSS px to \
-            compute_transform (per the documented Stylo contract), but \
-            render::draw_under_transform numerically applies the resulting \
-            CSS-px origin as pt. For a 100px square box the rotation pivot \
-            moved from (37.5, 37.5) pt (box center) to (50, 50) pt -- a \
-            real visual regression that VRT does not cover (no fixture \
-            uses default-origin rotate). Re-enable once render converts \
-            origin px -> pt at draw time."]
 #[test]
 fn rotate_90_at_default_center_origin_fixes_center() {
     let html = make_html("transform: rotate(90deg);");

@@ -368,13 +368,26 @@ fn record_transform(
     let Some(styles) = node.primary_styles() else {
         return;
     };
-    // `compute_transform` takes border-box dimensions in CSS px (Stylo's
-    // length-percentage resolution operates in CSS px space — see
-    // .claude/rules/coordinate-system.md).
-    let border_w_px = node.final_layout.size.width;
-    let border_h_px = node.final_layout.size.height;
+    // PR 8i note: `compute_transform` is documented to take CSS px (per
+    // `.claude/rules/coordinate-system.md` and Stylo's `LengthPercentage`
+    // contract). The render path (`render::draw_under_transform`), however,
+    // treats both the resulting `origin` Point2 and any translate components
+    // baked into the matrix as PDF pt — they are added directly to pt-space
+    // fragment positions. v1 worked around this mismatch by feeding pt-valued
+    // dims to `compute_transform`, making it self-consistent at the cost of
+    // technically violating the Stylo contract (Length is unitless from
+    // Stylo's perspective, so the math still holds — only `%` resolution
+    // would behave differently against a pt basis vs px basis, and
+    // `transform-origin: 50%` round-trips identically through either basis).
+    //
+    // To keep PR 8i non-regressive, restore v1's pt feed. Plumbing px →
+    // origin → pt conversion through render is a separate cleanup tracked
+    // for a future PR (see `render::draw_under_transform`'s consumer of
+    // `tx.origin`). Re-enabled by `transform_integration::
+    // rotate_90_at_default_center_origin_fixes_center`.
+    let (width_pt, height_pt) = size_in_pt(node.final_layout.size);
     let Some((matrix, origin)) =
-        crate::blitz_adapter::compute_transform(&styles, border_w_px, border_h_px)
+        crate::blitz_adapter::compute_transform(&styles, width_pt, height_pt)
     else {
         return;
     };
