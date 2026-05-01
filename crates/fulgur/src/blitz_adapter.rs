@@ -700,22 +700,36 @@ pub fn is_flex_or_grid_container_node(node: &Node) -> bool {
 /// must therefore be suppressed when descending through an atomic
 /// inline (matching the WPT `page-name-inline-block-001` reference
 /// which produces a single page despite differing page names inside).
+///
+/// **Plain `display: inline` is NOT atomic.** It establishes no BFC
+/// of its own; its block-level descendants belong to the surrounding
+/// block flow. Suppressing propagation through an inline wrapper
+/// would silently hide page-name breaks the spec wants honoured. The
+/// inside-display check (`!= Flow`) rejects it.
 pub fn is_atomic_inline_container_node(node: &Node) -> bool {
-    use ::style::values::specified::box_::DisplayOutside;
-    node.primary_styles()
-        .is_some_and(|s| s.clone_display().outside() == DisplayOutside::Inline)
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    node.primary_styles().is_some_and(|s| {
+        let display = s.clone_display();
+        display.outside() == DisplayOutside::Inline && display.inside() != DisplayInside::Flow
+    })
 }
 
-/// fulgur-uebl: true if `child` has a writing-mode that differs from
-/// `parent`'s — i.e. they form an orthogonal flow (CSS Writing Modes 4
-/// §9). An orthogonal block child is laid out perpendicular to the
-/// parent's main axis and is sized atomically inside the parent's flow
-/// (browsers treat it like an inline-block-shaped atomic for
-/// pagination purposes). Page-name forced breaks must therefore be
-/// suppressed when crossing the orthogonal boundary, matching the WPT
-/// `page-name-orthogonal-writing-001/003` references which produce a
-/// single page despite differing page names inside the orthogonal
-/// child.
+/// fulgur-uebl: true if `child` is in an orthogonal flow with respect
+/// to `parent` — i.e. their inline / block axes are perpendicular
+/// (CSS Writing Modes 4 §7.3). An orthogonal block child is laid out
+/// on the perpendicular axis and is sized atomically inside the
+/// parent's flow (browsers treat it like an inline-block-shaped
+/// atomic for pagination purposes). Page-name forced breaks must
+/// therefore be suppressed when crossing the orthogonal boundary,
+/// matching the WPT `page-name-orthogonal-writing-001/003` references
+/// which produce a single page despite differing page names inside
+/// the orthogonal child.
+///
+/// "Orthogonal" specifically means horizontal-vs-vertical: a parent of
+/// `vertical-rl` and a child of `vertical-lr` share the vertical
+/// axis (only their block-progression direction differs) and are
+/// **not** orthogonal — comparing the raw enum would over-match those
+/// pairs.
 pub fn is_orthogonal_to_parent(parent: &Node, child: &Node) -> bool {
     let Some(parent_styles) = parent.primary_styles() else {
         return false;
@@ -723,8 +737,16 @@ pub fn is_orthogonal_to_parent(parent: &Node, child: &Node) -> bool {
     let Some(child_styles) = child.primary_styles() else {
         return false;
     };
-    parent_styles.get_inherited_box().clone_writing_mode()
-        != child_styles.get_inherited_box().clone_writing_mode()
+    let parent_mode = parent_styles.get_inherited_box().clone_writing_mode();
+    let child_mode = child_styles.get_inherited_box().clone_writing_mode();
+    is_vertical_writing_mode(parent_mode) != is_vertical_writing_mode(child_mode)
+}
+
+fn is_vertical_writing_mode(
+    mode: ::style::properties::longhands::writing_mode::computed_value::T,
+) -> bool {
+    use ::style::properties::longhands::writing_mode::computed_value::T as W;
+    !matches!(mode, W::HorizontalTb)
 }
 
 fn child_is_out_of_flow(node: &Node) -> bool {
