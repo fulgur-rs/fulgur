@@ -148,13 +148,43 @@ pub struct TableEntry {
     pub clip_descendants: Vec<NodeId>,
 }
 
+/// Image marker contents — either a raster image or a parsed SVG tree.
+#[derive(Clone)]
+pub enum ImageMarker {
+    Raster(ImageEntry),
+    Svg(SvgEntry),
+}
+
+/// List-item marker variants. Exactly one variant holds valid content per
+/// list item, enforced by the type system. `None` is used for the second
+/// fragment after a page-break split (the marker only appears on the first
+/// fragment).
+#[derive(Clone)]
+pub enum ListItemMarker {
+    /// Text marker with shaped glyph runs extracted from Blitz/Parley.
+    Text {
+        lines: Vec<crate::paragraph::ShapedLine>,
+        width: f32,
+    },
+    /// Image marker (`list-style-image: url(...)`) — raster or SVG.
+    Image {
+        marker: ImageMarker,
+        /// Display width after clamp (pt).
+        width: f32,
+        /// Display height after clamp (pt).
+        height: f32,
+    },
+    /// No marker — split trailing fragment or `list-style-type: none`.
+    None,
+}
+
 /// List-item marker payload for v2. The body block paints itself
 /// through `BlockEntry`; `ListItemEntry` only carries the marker
 /// (text / image / svg / none) and the line-height needed to
 /// vertically centre image markers.
 #[derive(Clone)]
 pub struct ListItemEntry {
-    pub marker: crate::pageable::ListItemMarker,
+    pub marker: ListItemMarker,
     pub marker_line_height: f32,
     pub opacity: f32,
     pub visible: bool,
@@ -268,6 +298,21 @@ pub struct Drawables {
     pub transforms: BTreeMap<NodeId, TransformEntry>,
     pub bookmark_anchors: BTreeMap<NodeId, BookmarkAnchorEntry>,
     pub link_spans: Vec<(NodeId, LinkSpanEntry)>,
+    /// PR 8g: NodeIds the v2 dispatcher's main loop must skip because
+    /// they belong to inline-box content (or its descendants) dispatched
+    /// explicitly by `paragraph::draw_shaped_lines` under an offset
+    /// transform. Membership in this set means "do not dispatch at the
+    /// geometry-recorded body-relative position; the paragraph render
+    /// path owns this NodeId and will translate it to inline-flow
+    /// position before invoking the standard dispatcher."
+    pub inline_box_subtree_skip: std::collections::BTreeSet<NodeId>,
+    /// PR 8g: per-inline-box-content descendant list. Keyed by the
+    /// inline-box content's root NodeId; values are the strict
+    /// descendant NodeIds the paragraph render path dispatches under
+    /// the same offset transform. Both the key and values appear in
+    /// `inline_box_subtree_skip`. `BTreeMap`/`Vec` keep iteration
+    /// deterministic for PDF byte-equality.
+    pub inline_box_subtree_descendants: BTreeMap<NodeId, Vec<NodeId>>,
 }
 
 impl Drawables {

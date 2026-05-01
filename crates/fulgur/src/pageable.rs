@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::drawables::ListItemMarker;
 use crate::gcpm::CounterOp;
 use crate::image::ImageFormat;
 
@@ -256,27 +257,6 @@ pub enum BreakInside {
     Avoid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pagination {
-    pub break_before: BreakBefore,
-    pub break_after: BreakAfter,
-    pub break_inside: BreakInside,
-    pub orphans: usize,
-    pub widows: usize,
-}
-
-impl Default for Pagination {
-    fn default() -> Self {
-        Self {
-            break_before: BreakBefore::Auto,
-            break_after: BreakAfter::Auto,
-            break_inside: BreakInside::Auto,
-            orphans: 2,
-            widows: 2,
-        }
-    }
-}
-
 /// Axis-aligned rectangle used to describe PDF link activation areas.
 ///
 /// Coordinates are in PDF points in the Krilla surface coordinate space
@@ -499,9 +479,6 @@ pub fn draw_with_opacity(
 
 /// Core pagination-aware layout trait.
 pub trait Pageable: Send + Sync {
-    /// Measure size within available area.
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size;
-
     /// Emit drawing commands.
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt);
 
@@ -509,31 +486,8 @@ pub trait Pageable: Send + Sync {
     fn clone_box(&self) -> Box<dyn Pageable>;
 
     /// Measured height from last wrap() call.
-    fn height(&self) -> Pt;
-
     /// Downcast support for tests.
     fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Walk this Pageable and record any block-level `id` anchors into
-    /// `registry`, in page-local coordinates.
-    ///
-    /// `(x, y)` is the top-left of this element in the current page's
-    /// content area. Containers must recurse into their children using the
-    /// same positional arithmetic that `draw()` uses so anchor positions
-    /// match the rendered output.
-    ///
-    /// Default: no-op. Overridden on block-like Pageables (`BlockPageable`)
-    /// and containers that hold children (pagination wrappers, `ListItemPageable`,
-    /// `TablePageable`, etc.).
-    fn collect_ids(
-        &self,
-        _x: Pt,
-        _y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-        _registry: &mut DestinationRegistry,
-    ) {
-    }
 
     /// Whether this pageable should be drawn. Defaults to `true`.
     ///
@@ -543,10 +497,6 @@ pub trait Pageable: Send + Sync {
     /// visibility of an inline-box host element propagates through
     /// `TransformWrapperPageable` / marker wrappers to the caller that
     /// needs to gate rendering (see `InlineBoxItem.visible`).
-    fn is_visible(&self) -> bool {
-        true
-    }
-
     /// The DOM `usize` NodeId this Pageable represents, if any. Used by
     /// `extract_drawables_from_pageable` to key per-node draw payloads in
     /// the `Drawables` side-channel. Wrappers delegate to their inner
@@ -918,6 +868,14 @@ pub struct PositionedChild {
     pub child: Box<dyn Pageable>,
     pub x: Pt,
     pub y: Pt,
+    /// Phase 4 PR 8f: child's measured height in PDF pt, captured at
+    /// convert time from Taffy. Replaces the runtime
+    /// `pc.height` trait dispatch that previously sourced this
+    /// value via `Pageable::height`. Set to `0.0` by default so legacy
+    /// tests that build `PositionedChild` directly without sizing
+    /// information remain valid; production constructors always
+    /// populate it from `size_in_pt(node.final_layout.size)`.
+    pub height: Pt,
     pub out_of_flow: bool,
     /// fulgur-jkl5: subset of `out_of_flow` where the child is
     /// `position: fixed`. The element appears on every page at the same
@@ -935,6 +893,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: false,
             is_fixed: false,
         }
@@ -949,6 +908,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: true,
             is_fixed: false,
         }
@@ -964,6 +924,7 @@ impl PositionedChild {
             child,
             x,
             y,
+            height: 0.0,
             out_of_flow: true,
             is_fixed: true,
         }
@@ -977,7 +938,6 @@ impl PositionedChild {
 #[derive(Clone)]
 pub struct BlockPageable {
     pub children: Vec<PositionedChild>,
-    pub pagination: Pagination,
     pub cached_size: Option<Size>,
     /// Taffy-computed layout size (preserved across wrap() calls for drawing).
     pub layout_size: Option<Size>,
@@ -1000,25 +960,25 @@ pub struct BlockPageable {
 
 impl BlockPageable {
     pub fn new(children: Vec<Box<dyn Pageable>>) -> Self {
-        // Legacy constructor: stack children vertically
-        let mut y = 0.0;
+        // Legacy test-only constructor: stacks children vertically with zero
+        // heights. After Phase 4 PR 8f's `Pageable::height` removal, the
+        // y-advance per child can no longer source the height through trait
+        // dispatch — production builds always use
+        // `with_positioned_children` with explicit heights from Taffy, and
+        // tests using this helper do not assert on per-child y positions.
         let positioned: Vec<PositionedChild> = children
             .into_iter()
-            .map(|child| {
-                let child_y = y;
-                y += child.height();
-                PositionedChild {
-                    child,
-                    x: 0.0,
-                    y: child_y,
-                    out_of_flow: false,
-                    is_fixed: false,
-                }
+            .map(|child| PositionedChild {
+                child,
+                x: 0.0,
+                y: 0.0,
+                height: 0.0,
+                out_of_flow: false,
+                is_fixed: false,
             })
             .collect();
         Self {
             children: positioned,
-            pagination: Pagination::default(),
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
@@ -1032,7 +992,6 @@ impl BlockPageable {
     pub fn with_positioned_children(children: Vec<PositionedChild>) -> Self {
         Self {
             children,
-            pagination: Pagination::default(),
             cached_size: None,
             layout_size: None,
             style: BlockStyle::default(),
@@ -1041,11 +1000,6 @@ impl BlockPageable {
             id: None,
             node_id: None,
         }
-    }
-
-    pub fn with_pagination(mut self, pagination: Pagination) -> Self {
-        self.pagination = pagination;
-        self
     }
 
     pub fn with_style(mut self, style: BlockStyle) -> Self {
@@ -1667,31 +1621,6 @@ pub(crate) fn draw_block_border(
 }
 
 impl Pageable for BlockPageable {
-    fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
-        // Ensure children have been wrapped (split() creates unwrapped children)
-        for pc in &mut self.children {
-            if pc.child.height() == 0.0 {
-                pc.child.wrap(avail_width, 10000.0);
-            }
-        }
-        // Use max of children's (y + height) for total height. Out-of-flow
-        // children (`position: absolute|fixed`) are excluded per CSS 2.1
-        // §10.6.4 — they do not contribute to the parent's flow height.
-        let total_height = self.children.iter_mut().fold(0.0f32, |max_h, pc| {
-            if pc.out_of_flow {
-                return max_h;
-            }
-            let child_h = pc.child.height();
-            max_h.max(pc.y + child_h)
-        });
-        let size = Size {
-            width: avail_width,
-            height: total_height,
-        };
-        self.cached_size = Some(size);
-        size
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             // Prefer layout_size (Taffy-computed, stable) over cached_size (may be children-only)
@@ -1743,7 +1672,7 @@ impl Pageable for BlockPageable {
 
             for pc in &self.children {
                 pc.child
-                    .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.child.height());
+                    .draw(canvas, x + pc.x, y + pc.y, avail_width, pc.height);
             }
 
             if clip_pushed {
@@ -1756,43 +1685,8 @@ impl Pageable for BlockPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.layout_size
-            .or(self.cached_size)
-            .map(|s| s.height)
-            .unwrap_or(0.0)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        _avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        // Record this block's own id at its top-left in page-local coords.
-        if let Some(id) = &self.id
-            && !id.is_empty()
-        {
-            registry.record(id, x, y);
-        }
-        // Recurse into children using the same positional arithmetic
-        // `draw()` uses (see the loop at the end of `draw`). We do NOT
-        // need to replicate clipping / opacity / background paths —
-        // anchor registration only cares about block-top coordinates.
-        for pc in &self.children {
-            pc.child
-                .collect_ids(x + pc.x, y + pc.y, avail_width, pc.child.height(), registry);
-        }
-    }
-
-    fn is_visible(&self) -> bool {
-        self.visible
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -1826,23 +1720,12 @@ impl SpacerPageable {
 }
 
 impl Pageable for SpacerPageable {
-    fn wrap(&mut self, avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: avail_width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {
         // Spacers are invisible
     }
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.height
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1921,23 +1804,12 @@ impl BookmarkMarkerPageable {
 }
 
 impl Pageable for BookmarkMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, _x: Pt, y: Pt, _aw: Pt, _ah: Pt) {
         self.record_if_collecting(y, canvas.bookmark_collector.as_deref_mut());
     }
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1963,10 +1835,6 @@ impl BookmarkMarkerWrapperPageable {
 }
 
 impl Pageable for BookmarkMarkerWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, aw: Pt, ah: Pt) {
         self.marker.draw(canvas, x, y, aw, ah);
         self.child.draw(canvas, x, y, aw, ah);
@@ -1976,28 +1844,8 @@ impl Pageable for BookmarkMarkerWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        self.child
-            .collect_ids(x, y, avail_width, avail_height, registry);
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2022,21 +1870,10 @@ impl StringSetPageable {
 }
 
 impl Pageable for StringSetPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2075,21 +1912,10 @@ impl RunningElementMarkerPageable {
 }
 
 impl Pageable for RunningElementMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2116,21 +1942,10 @@ impl CounterOpMarkerPageable {
 }
 
 impl Pageable for CounterOpMarkerPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
     fn draw(&self, _canvas: &mut Canvas, _x: Pt, _y: Pt, _avail_width: Pt, _avail_height: Pt) {}
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        0.0
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2166,10 +1981,6 @@ impl CounterOpWrapperPageable {
 }
 
 impl Pageable for CounterOpWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2178,28 +1989,8 @@ impl Pageable for CounterOpWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        self.child
-            .collect_ids(x, y, avail_width, avail_height, registry);
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2254,10 +2045,6 @@ impl TransformWrapperPageable {
 }
 
 impl Pageable for TransformWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.inner.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         let full = self.effective_matrix(x, y);
         if let Some(lc) = canvas.link_collector.as_deref_mut() {
@@ -2275,31 +2062,8 @@ impl Pageable for TransformWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.inner.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        let full = self.effective_matrix(x, y);
-        registry.push_transform(full);
-        self.inner
-            .collect_ids(x, y, avail_width, avail_height, registry);
-        registry.pop_transform();
-    }
-
-    fn is_visible(&self) -> bool {
-        self.inner.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2334,10 +2098,6 @@ impl StringSetWrapperPageable {
 }
 
 impl Pageable for StringSetWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2346,28 +2106,8 @@ impl Pageable for StringSetWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        self.child
-            .collect_ids(x, y, avail_width, avail_height, registry);
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2404,10 +2144,6 @@ impl RunningElementWrapperPageable {
 }
 
 impl Pageable for RunningElementWrapperPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         self.child.draw(canvas, x, y, avail_width, avail_height);
     }
@@ -2416,28 +2152,8 @@ impl Pageable for RunningElementWrapperPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        self.child
-            .collect_ids(x, y, avail_width, avail_height, registry);
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2546,10 +2262,6 @@ impl MulticolRulePageable {
 }
 
 impl Pageable for MulticolRulePageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        self.child.wrap(avail_width, avail_height)
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         // Columns paint their own contents first.
         self.child.draw(canvas, x, y, avail_width, avail_height);
@@ -2590,24 +2302,8 @@ impl Pageable for MulticolRulePageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.child.height()
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        self.child
-            .collect_ids(x, y, avail_width, avail_height, registry);
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2639,37 +2335,6 @@ pub(crate) fn clamp_marker_size(
     }
 }
 
-/// Image marker contents — either a raster image or a parsed SVG tree.
-#[derive(Clone)]
-pub enum ImageMarker {
-    Raster(crate::image::ImagePageable),
-    Svg(crate::svg::SvgPageable),
-}
-
-/// Marker attached to a `ListItemPageable`.
-///
-/// Exactly one variant holds valid content per list item, enforced by the
-/// type system. `None` is used for the second fragment after a page-break
-/// split (the marker only appears on the first fragment).
-#[derive(Clone)]
-pub enum ListItemMarker {
-    /// Text marker with shaped glyph runs extracted from Blitz/Parley.
-    Text {
-        lines: Vec<crate::paragraph::ShapedLine>,
-        width: Pt,
-    },
-    /// Image marker (list-style-image: url(...)) — raster or SVG.
-    Image {
-        marker: ImageMarker,
-        /// Display width after clamp (pt).
-        width: Pt,
-        /// Display height after clamp (pt).
-        height: Pt,
-    },
-    /// No marker — split trailing fragment or list-style-type: none.
-    None,
-}
-
 /// A list item with an outside-positioned marker.
 #[derive(Clone)]
 pub struct ListItemPageable {
@@ -2697,38 +2362,22 @@ pub struct ListItemPageable {
 }
 
 impl Pageable for ListItemPageable {
-    fn wrap(&mut self, avail_width: Pt, avail_height: Pt) -> Size {
-        let body_size = self.body.wrap(avail_width, avail_height);
-        self.height = body_size.height;
-        Size {
-            width: avail_width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, avail_width: Pt, avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             if self.visible {
                 match &self.marker {
                     ListItemMarker::Text { lines, width } if !lines.is_empty() => {
                         let marker_x = x - width;
-                        crate::paragraph::draw_shaped_lines(canvas, lines, marker_x, y);
+                        crate::paragraph::draw_shaped_lines(canvas, lines, marker_x, y, None);
                     }
-                    ListItemMarker::Image {
-                        marker,
-                        width,
-                        height,
-                    } => {
-                        let marker_x = x - *width;
-                        let marker_y = y + (self.marker_line_height - *height) / 2.0;
-                        match marker {
-                            ImageMarker::Raster(img) => {
-                                img.draw(canvas, marker_x, marker_y, *width, *height);
-                            }
-                            ImageMarker::Svg(svg) => {
-                                svg.draw(canvas, marker_x, marker_y, *width, *height);
-                            }
-                        }
+                    ListItemMarker::Image { .. } => {
+                        // v1 dead-code path: image markers carry `ImageEntry` /
+                        // `SvgEntry` (drawables components, no draw method by
+                        // design — see ECS separation in render.rs systems).
+                        // The v2 path draws them via `render::draw_list_item_marker`
+                        // → `draw_image_v2` / `draw_svg_v2`. v1 entry points were
+                        // removed in PR 8a; this arm is kept only for compilation
+                        // and will be deleted with pageable.rs in PR 8j.
                     }
                     _ => {}
                 }
@@ -2741,27 +2390,8 @@ impl Pageable for ListItemPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.height
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        avail_width: Pt,
-        avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        // `draw` calls `self.body.draw(canvas, x, y, ...)` (markers drawn
-        // at negative x); the body is the positional root for any nested
-        // block ids, so walk it at the same (x, y).
-        self.body
-            .collect_ids(x, y, avail_width, avail_height, registry);
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2800,23 +2430,6 @@ pub struct TablePageable {
 }
 
 impl Pageable for TablePageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        if let Some(ls) = self.layout_size {
-            self.cached_height = ls.height;
-            return ls;
-        }
-        let max_h = self
-            .header_cells
-            .iter()
-            .chain(self.body_cells.iter())
-            .fold(0.0f32, |acc, pc| acc.max(pc.y + pc.child.height()));
-        self.cached_height = max_h;
-        Size {
-            width: self.width,
-            height: max_h,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         draw_with_opacity(canvas, self.opacity, |canvas| {
             let total_width = self.width;
@@ -2861,7 +2474,7 @@ impl Pageable for TablePageable {
 
             for pc in self.header_cells.iter().chain(self.body_cells.iter()) {
                 pc.child
-                    .draw(canvas, x + pc.x, y + pc.y, total_width, pc.child.height());
+                    .draw(canvas, x + pc.x, y + pc.y, total_width, pc.height);
             }
 
             if clip_pushed {
@@ -2874,36 +2487,8 @@ impl Pageable for TablePageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.layout_size
-            .map(|s| s.height)
-            .unwrap_or(self.cached_height)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-        registry: &mut DestinationRegistry,
-    ) {
-        // Record this table's own id at its top-left (mirrors BlockPageable).
-        if let Some(id) = &self.id
-            && !id.is_empty()
-        {
-            registry.record(id, x, y);
-        }
-        // Mirror TablePageable::draw child iteration — header + body cells.
-        let total_width = self.width;
-        for pc in self.header_cells.iter().chain(self.body_cells.iter()) {
-            pc.child
-                .collect_ids(x + pc.x, y + pc.y, total_width, pc.child.height(), registry);
-        }
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2914,33 +2499,6 @@ impl Pageable for TablePageable {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_spacer(h: Pt) -> Box<dyn Pageable> {
-        let mut s = SpacerPageable::new(h);
-        s.wrap(100.0, 1000.0);
-        Box::new(s)
-    }
-
-    #[test]
-    fn test_list_item_delegates_to_body() {
-        let body = make_spacer(100.0);
-        let mut item = ListItemPageable {
-            marker: ListItemMarker::Text {
-                lines: Vec::new(),
-                width: 20.0,
-            },
-            marker_line_height: 0.0,
-            body,
-            style: BlockStyle::default(),
-            width: 200.0,
-            height: 100.0,
-            opacity: 1.0,
-            visible: true,
-            node_id: None,
-        };
-        let size = item.wrap(200.0, 1000.0);
-        assert!((size.height - 100.0).abs() < 0.01);
-    }
 
     #[test]
     fn test_clamp_marker_size_below_line_height() {
@@ -2973,158 +2531,10 @@ mod tests {
     }
 
     #[test]
-    fn test_string_set_pageable_zero_size() {
-        let mut p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
-        let size = p.wrap(100.0, 100.0);
-        assert_eq!(size.width, 0.0);
-        assert_eq!(size.height, 0.0);
-        assert_eq!(p.height(), 0.0);
-    }
-
-    #[test]
     fn test_string_set_pageable_fields() {
         let p = StringSetPageable::new("title".to_string(), "Chapter 1".to_string());
         assert_eq!(p.name, "title");
         assert_eq!(p.value, "Chapter 1");
-    }
-
-    // ─── DestinationRegistry tests ───────────────────────────
-
-    #[test]
-    fn destination_registry_collects_block_ids_from_paginated_pages() {
-        use crate::convert::{self, ConvertContext};
-        use crate::gcpm::running::RunningElementStore;
-        use std::collections::HashMap;
-
-        // Use `<div>` wrappers (container nodes, always BlockPageable) so
-        // the test does not depend on whether headings gain a block wrapper
-        // via default CSS — `<h1>` is an inline root that only becomes a
-        // BlockPageable when `needs_block_wrapper()` triggers on its style.
-        let html = r##"<html><body>
-            <div id="top" style="border:1px solid red">Top</div>
-            <div style="height:2000px"></div>
-            <div id="next" style="border:1px solid red">Next</div>
-        </body></html>"##;
-        let doc = crate::blitz_adapter::parse_and_layout(html, 400.0, 600.0, &[]);
-        let dummy_store = RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &dummy_store,
-            assets: None,
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let pageable = convert::dom_to_pageable(&doc, &mut ctx);
-        let mut registry = DestinationRegistry::default();
-        registry.set_current_page(0);
-        pageable.collect_ids(0.0, 0.0, 400.0, 600.0, &mut registry);
-        assert!(registry.get("top").is_some(), "missing top");
-        assert!(registry.get("next").is_some(), "missing next");
-        // `top` and `next` should be on different pages (or different y) since
-        // the spacer between them is 2000px tall.
-        assert_ne!(registry.get("top"), registry.get("next"));
-    }
-
-    #[test]
-    fn destination_registry_ignores_blocks_without_id() {
-        // A BlockPageable with `id: None` should not register anything.
-        let mut block = BlockPageable::with_positioned_children(vec![]);
-        block.wrap(100.0, 100.0);
-        let mut registry = DestinationRegistry::default();
-        registry.set_current_page(0);
-        block.collect_ids(0.0, 0.0, 100.0, 100.0, &mut registry);
-        assert!(registry.get("anything").is_none());
-    }
-
-    #[test]
-    fn destination_registry_captures_paragraph_id_for_headings() {
-        // Headings like `<h1 id="top">` are inline roots that typically
-        // become `ParagraphPageable`, not `BlockPageable`. Ensure their ids
-        // are still captured so `href="#top"` links resolve.
-        use crate::convert::{self, ConvertContext};
-        use crate::gcpm::running::RunningElementStore;
-        use std::collections::HashMap;
-
-        let html = r##"<html><body>
-            <h1 id="top">Top</h1>
-            <div style="height:2000px"></div>
-            <h2 id="next">Next</h2>
-        </body></html>"##;
-        let doc = crate::blitz_adapter::parse_and_layout(html, 400.0, 600.0, &[]);
-        let dummy_store = RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &dummy_store,
-            assets: None,
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let pageable = convert::dom_to_pageable(&doc, &mut ctx);
-        let mut registry = DestinationRegistry::default();
-        registry.set_current_page(0);
-        pageable.collect_ids(0.0, 0.0, 400.0, 600.0, &mut registry);
-        assert!(
-            registry.get("top").is_some(),
-            "expected <h1 id=top> to be captured"
-        );
-        assert!(
-            registry.get("next").is_some(),
-            "expected <h2 id=next> to be captured"
-        );
-        assert_ne!(
-            registry.get("top"),
-            registry.get("next"),
-            "headings separated by 2000px spacer should not share location"
-        );
-    }
-
-    #[test]
-    fn destination_registry_captures_table_id() {
-        // Regression: `<table id=...>` previously skipped BlockPageable
-        // wrapping, so TablePageable never registered its own id.
-        use crate::convert::{self, ConvertContext};
-        use crate::gcpm::running::RunningElementStore;
-        use std::collections::HashMap;
-
-        let html = r##"<html><body>
-            <table id="data"><tr><td>x</td></tr></table>
-        </body></html>"##;
-        let doc = crate::blitz_adapter::parse_and_layout(html, 400.0, 600.0, &[]);
-        let dummy_store = RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &dummy_store,
-            assets: None,
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let pageable = convert::dom_to_pageable(&doc, &mut ctx);
-        let mut registry = DestinationRegistry::default();
-        registry.set_current_page(0);
-        pageable.collect_ids(0.0, 0.0, 400.0, 600.0, &mut registry);
-        assert!(
-            registry.get("data").is_some(),
-            "table id was not captured (entries: {:?})",
-            registry
-        );
     }
 
     #[test]
@@ -3597,41 +3007,25 @@ mod transform_wrapper_tests {
     use std::f32::consts::FRAC_PI_2;
 
     #[derive(Clone)]
-    struct StubPageable {
-        w: Pt,
-        h: Pt,
-    }
+    struct StubPageable;
 
     impl Pageable for StubPageable {
-        fn wrap(&mut self, _: Pt, _: Pt) -> Size {
-            Size {
-                width: self.w,
-                height: self.h,
-            }
-        }
         fn draw(&self, _: &mut Canvas<'_, '_>, _: Pt, _: Pt, _: Pt, _: Pt) {}
         fn clone_box(&self) -> Box<dyn Pageable> {
             Box::new(self.clone())
-        }
-        fn height(&self) -> Pt {
-            self.h
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
     }
 
-    fn wrap(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
-        TransformWrapperPageable::new(
-            Box::new(StubPageable { w: 100.0, h: 100.0 }),
-            matrix,
-            origin,
-        )
+    fn make_wrapper(matrix: Affine2D, origin: Point2) -> TransformWrapperPageable {
+        TransformWrapperPageable::new(Box::new(StubPageable), matrix, origin)
     }
 
     #[test]
     fn translate_only_matrix() {
-        let w = wrap(Affine2D::translation(10.0, 20.0), Point2::new(0.0, 0.0));
+        let w = make_wrapper(Affine2D::translation(10.0, 20.0), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         assert!(approx(m.e, 10.0));
         assert!(approx(m.f, 20.0));
@@ -3641,7 +3035,7 @@ mod transform_wrapper_tests {
 
     #[test]
     fn rotate_90_maps_unit_vector_at_origin_zero() {
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 1.0 + m.c * 0.0 + m.e;
         let y = m.b * 1.0 + m.d * 0.0 + m.f;
@@ -3654,7 +3048,7 @@ mod transform_wrapper_tests {
         // A 100×100 box rotated 90° around its center must leave the center
         // point fixed — verified through the composed matrix rather than
         // any intermediate step.
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
         let m = w.effective_matrix(0.0, 0.0);
         let x = m.a * 50.0 + m.c * 50.0 + m.e;
         let y = m.b * 50.0 + m.d * 50.0 + m.f;
@@ -3668,7 +3062,7 @@ mod transform_wrapper_tests {
         // where effective_matrix() drops the (draw_x, draw_y) addition: the
         // absolute fixed point in canvas coordinates must be (10+50, 20+50)
         // = (60, 70).
-        let w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
+        let w = make_wrapper(Affine2D::rotation(FRAC_PI_2), Point2::new(50.0, 50.0));
         let m = w.effective_matrix(10.0, 20.0);
         let x = m.a * 60.0 + m.c * 70.0 + m.e;
         let y = m.b * 60.0 + m.d * 70.0 + m.f;
@@ -3683,23 +3077,8 @@ mod transform_wrapper_tests {
     }
 
     #[test]
-    fn wrap_delegates_to_inner_size() {
-        let mut w = wrap(Affine2D::rotation(FRAC_PI_2), Point2::new(0.0, 0.0));
-        let size = w.wrap(1000.0, 1000.0);
-        assert!(approx(size.width, 100.0));
-        assert!(approx(size.height, 100.0));
-    }
-
-    #[test]
-    fn bookmark_marker_is_zero_sized_and_draws_nothing() {
+    fn bookmark_marker_has_no_geometry_payload() {
         let m = BookmarkMarkerPageable::new(1, "Chapter 1".to_string());
-        let size = {
-            let mut c = m.clone();
-            c.wrap(100.0, 100.0)
-        };
-        assert_eq!(size.width, 0.0);
-        assert_eq!(size.height, 0.0);
-        assert_eq!(m.height(), 0.0);
         assert_eq!(m.level, 1);
         assert_eq!(m.label, "Chapter 1");
     }
@@ -3945,8 +3324,7 @@ mod multicol_rule_tests {
     use crate::multicol_layout::ColumnGroupGeometry;
 
     fn make_spacer(h: Pt) -> Box<dyn Pageable> {
-        let mut s = SpacerPageable::new(h);
-        s.wrap(100.0, 1000.0);
+        let s = SpacerPageable::new(h);
         Box::new(s)
     }
 
@@ -3968,22 +3346,6 @@ mod multicol_rule_tests {
             n,
             col_heights,
         }
-    }
-
-    #[test]
-    fn multicol_rule_wrapper_delegates_wrap_and_height() {
-        // wrap() and height() must pass through to the child unchanged.
-        let mut block = BlockPageable::new(vec![make_spacer(100.0), make_spacer(100.0)]);
-        let child_size = block.wrap(200.0, 1000.0);
-        let expected_h = child_size.height;
-        let mut wrapped = MulticolRulePageable::new(
-            Box::new(block),
-            make_rule_spec(ColumnRuleStyle::Solid),
-            vec![make_group(0.0, vec![100.0, 80.0])],
-        );
-        let w_size = wrapped.wrap(200.0, 1000.0);
-        assert!((w_size.height - expected_h).abs() < 1e-3);
-        assert!((wrapped.height() - expected_h).abs() < 1e-3);
     }
 
     #[test]

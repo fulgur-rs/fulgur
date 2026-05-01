@@ -55,7 +55,7 @@ fn convert_table(
     // Calculate header height from header cells
     let header_height = header_cells
         .iter()
-        .fold(0.0f32, |max_h, pc| max_h.max(pc.y + pc.child.height()));
+        .fold(0.0f32, |max_h, pc| max_h.max(pc.y + pc.height));
 
     let (opacity, visible) = extract_opacity_visible(node);
     let table = TablePageable {
@@ -159,6 +159,7 @@ fn collect_table_cells(
             child: cell_pageable,
             x: cx,
             y: cy,
+            height: ch,
             out_of_flow: false,
             is_fixed: false,
         };

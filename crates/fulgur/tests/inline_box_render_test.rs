@@ -79,3 +79,29 @@ fn hidden_inline_block_anchor_does_not_emit_link_rect() {
         "hidden inline-block anchor should not leak a /Link entry"
     );
 }
+
+#[test]
+fn inline_block_link_at_horizontal_offset_produces_link_annotation() {
+    // Regression: the v2 dispatch path (InlineBoxRenderCtx) must push/pop
+    // the offset transform on link_collector in addition to the surface,
+    // otherwise the link annotation rect is placed at the body-relative
+    // geometry position instead of the inline-flow position (ox, oy).
+    // This test verifies that a link inside an inline-block at a large
+    // horizontal offset still produces a /Link annotation (smoke test for
+    // the v2 path; full coordinate correctness is validated by VRT).
+    let html = r#"<!DOCTYPE html><html><body><p>
+        <span style="display:inline-block;margin-left:200px;width:100px;height:20px;">
+            <a href="https://offset-inline-box-link.invalid">click</a>
+        </span>
+    </p></body></html>"#;
+    let bytes = render(html);
+    let s = String::from_utf8_lossy(&bytes);
+    assert!(
+        s.contains("/Link") || s.contains("/URI"),
+        "expected a link annotation for an inline-block anchor at a horizontal offset"
+    );
+    assert!(
+        s.contains("offset-inline-box-link.invalid"),
+        "expected the href URI to appear in the PDF"
+    );
+}

@@ -105,11 +105,7 @@ pub(super) fn try_convert(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            if style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default()
-            {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
                 // Propagate visibility to the inner paragraph — it's not a real CSS child
                 // but the node's own text content, so it must respect the node's visibility.
@@ -123,10 +119,12 @@ pub(super) fn try_convert(
                 let mut p = paragraph;
                 p.visible = visible;
                 p.node_id = Some(node_id);
+                let p_h = p.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(p),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
@@ -138,13 +136,11 @@ pub(super) fn try_convert(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, height);
                 // Use Taffy's computed height (includes padding + border) instead of children-only height
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
@@ -186,16 +182,14 @@ pub(super) fn try_convert(
             let abs_pseudos = positioned::build_absolute_children(doc, node, ctx, depth);
             let has_pseudo =
                 before_pseudo.is_some() || after_pseudo.is_some() || !abs_pseudos.is_empty();
-            let pagination = extract_pagination_from_column_css(ctx, node);
-            if style.needs_block_wrapper()
-                || has_pseudo
-                || pagination != crate::pageable::Pagination::default()
-            {
+            if style.needs_block_wrapper() || has_pseudo {
                 let (child_x, child_y) = style.content_inset();
+                let p_h = paragraph.cached_height;
                 let paragraph_children = vec![PositionedChild {
                     child: Box::new(paragraph),
                     x: child_x,
                     y: child_y,
+                    height: p_h,
                     out_of_flow: false,
                     is_fixed: false,
                 }];
@@ -207,13 +201,11 @@ pub(super) fn try_convert(
                 );
                 children.extend(abs_pseudos);
                 let mut block = BlockPageable::with_positioned_children(children)
-                    .with_pagination(pagination)
                     .with_style(style)
                     .with_opacity(opacity)
                     .with_visible(visible)
                     .with_id(extract_block_id(node))
                     .with_node_id(Some(node_id));
-                block.wrap(width, height);
                 block.layout_size = Some(Size { width, height });
                 return Some(Box::new(block));
             }
@@ -503,14 +495,19 @@ pub(super) fn extract_paragraph(
                             .map(|bo| height_pt - bo)
                             .unwrap_or(0.0);
                     let computed_y = px_to_pt(positioned.y) - accumulated_line_top + baseline_shift;
-                    // Propagate `visibility: hidden` from the inner pageable
-                    // (set by `extract_block_style`) so the inline-box is
-                    // treated as invisible at draw time — link rect emission
-                    // is then also suppressed by the `!ib.visible` guard in
-                    // `draw_shaped_lines`. `Pageable::is_visible()` walks
-                    // wrappers for us so a `visibility: hidden` inline-block
-                    // keeps that state through a transform / marker chain.
-                    let visible = content.is_visible();
+                    // PR 8g: read `visibility: hidden` directly from the
+                    // inline-box's DOM node — wrapper Pageables (Transform /
+                    // BookmarkMarker / CounterOp / StringSet /
+                    // RunningElement) never alter the visibility flag, so
+                    // `box_node`'s computed CSS visibility is equivalent
+                    // to the previous `content.is_visible()` walk through
+                    // the wrapper chain. This removes the last production
+                    // caller of `Pageable::is_visible`.
+                    let visible = doc
+                        .get_node(node_id)
+                        .map(super::style::extract_opacity_visible)
+                        .map(|(_, v)| v)
+                        .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         content,
                         width: px_to_pt(positioned.width),
@@ -879,24 +876,6 @@ mod tests {
                 .is_some(),
             "transform should survive as TransformWrapperPageable at the top \
              of the inline-box content"
-        );
-    }
-
-    #[test]
-    fn inline_block_inner_id_is_registered_with_destination_registry() {
-        use crate::pageable::DestinationRegistry;
-        // A `<span id="target">` placed as an inline-block inside a paragraph
-        // must still register with the destination registry so that
-        // `href="#target"` links can resolve. Before Fix 2 to
-        // `ParagraphPageable::collect_ids`, the registry walk stopped at the
-        // paragraph and ignored nested inline-box content.
-        let html = r#"<!DOCTYPE html><html><body><div>before <span id="target" style="display:inline-block;width:40px;height:20px;background:red">x</span> after</div></body></html>"#;
-        let tree = build_tree(html);
-        let mut reg = DestinationRegistry::default();
-        tree.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
-        assert!(
-            reg.get("target").is_some(),
-            "inline-block inner id should be registered with DestinationRegistry"
         );
     }
 

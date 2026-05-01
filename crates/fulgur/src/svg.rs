@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use usvg::Tree;
 
-use crate::pageable::{Canvas, Pageable, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt};
 
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
@@ -44,13 +44,6 @@ impl SvgPageable {
 }
 
 impl Pageable for SvgPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        Size {
-            width: self.width,
-            height: self.height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         use crate::pageable::draw_with_opacity;
         use krilla_svg::{SurfaceExt, SvgSettings};
@@ -76,10 +69,6 @@ impl Pageable for SvgPageable {
 
     fn clone_box(&self) -> Box<dyn Pageable> {
         Box::new(self.clone())
-    }
-
-    fn height(&self) -> Pt {
-        self.height
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -127,17 +116,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_returns_configured_size() {
-        let mut svg = SvgPageable::new(parse_tree(), 120.0, 60.0);
-        let size = svg.wrap(1000.0, 1000.0);
-        assert_eq!(size.width, 120.0);
-        assert_eq!(size.height, 60.0);
-    }
-
-    #[test]
     fn test_height_returns_configured_height() {
         let svg = SvgPageable::new(parse_tree(), 100.0, 50.0);
-        assert_eq!(svg.height(), 50.0);
+        assert_eq!(svg.height, 50.0);
     }
 
     #[test]

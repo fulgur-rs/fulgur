@@ -5,7 +5,7 @@ use std::sync::Arc;
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pageable, Pagination, Pt, Size};
+use crate::pageable::{Canvas, Pageable, Pt};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -332,7 +332,6 @@ pub struct ShapedLine {
 #[derive(Clone)]
 pub struct ParagraphPageable {
     pub lines: Vec<ShapedLine>,
-    pub pagination: Pagination,
     pub cached_height: f32,
     pub opacity: f32,
     pub visible: bool,
@@ -351,7 +350,6 @@ impl ParagraphPageable {
         let cached_height: f32 = lines.iter().map(|l| l.height).sum();
         Self {
             lines,
-            pagination: Pagination::default(),
             cached_height,
             opacity: 1.0,
             visible: true,
@@ -679,8 +677,41 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
     }
 }
 
+/// PR 8g: render-side context that lets `draw_shaped_lines` dispatch
+/// inline-box content (`LineItem::InlineBox`) through the v2 dispatcher.
+///
+/// `None` is passed by:
+/// - The list-item marker text render path (markers contain only Text /
+///   Image items, never InlineBox).
+/// - Trait-method callers that exercise `draw_shaped_lines` outside the
+///   v2 render pipeline (PR 8g deletes these alongside `Pageable::draw`).
+///
+/// When `Some`, the InlineBox arm computes the inline-flow position
+/// `(ox, oy)` and dispatches the inline-box content directly at those
+/// coordinates via `render::dispatch_fragment`. Descendants in
+/// `Drawables.inline_box_subtree_descendants[content_id]` are dispatched
+/// at `(ox, oy)` plus their body-relative offset from the content's own
+/// fragment — a single coordinate space, no transform stack needed.
+#[derive(Clone, Copy)]
+pub struct InlineBoxRenderCtx<'a> {
+    pub drawables: &'a crate::drawables::Drawables,
+    pub geometry: &'a crate::pagination_layout::PaginationGeometryTable,
+    pub page_index: u32,
+    /// Page margin in PDF pt — needed by `draw_under_clip` /
+    /// `draw_under_transform` / `draw_under_opacity` to compute
+    /// descendant positions during the offset-transform dispatch.
+    pub margin_left_pt: Pt,
+    pub margin_top_pt: Pt,
+}
+
 /// Draw pre-shaped text lines at the given position.
-pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
+pub fn draw_shaped_lines(
+    canvas: &mut Canvas<'_, '_>,
+    lines: &[ShapedLine],
+    x: Pt,
+    y: Pt,
+    inline_box_ctx: Option<InlineBoxRenderCtx<'_>>,
+) {
     // Track the top edge of each line within the paragraph (paragraph y=0 at
     // `y`). Lines pack tightly by `line.height`. We use the full line box for
     // link activation rects (matches WeasyPrint behavior), so tracking the
@@ -805,20 +836,83 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                     }
                     let ox = x + ib.x_offset;
                     let oy = line_top_abs + ib.computed_y;
-                    crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
-                        // Pass (ox, oy) as absolute draw coordinates instead
-                        // of pushing a krilla transform + drawing at (0, 0).
-                        // Nested link rects are tracked in logical coords via
-                        // `Canvas::link_collector` (pageable-space, not krilla
-                        // surface-space), so a krilla transform would shift
-                        // the visuals but leave link hit-areas at the origin.
-                        // `ib.content` is `Box<dyn Pageable>`, so dispatch
-                        // straight to the trait — any wrapper chain
-                        // (Transform / StringSet / Counter / Bookmark /
-                        // RunningElement) is preserved and applies its
-                        // side effects around the inner Block / Paragraph.
-                        ib.content.draw(canvas, ox, oy, ib.width, ib.height);
-                    });
+
+                    // PR 8g: dispatch via the v2 path under an offset
+                    // transform. `ib.content`'s geometry-recorded position
+                    // (Taffy/Parley body-relative) does not include the
+                    // CSS 2.1 §10.8.1 baseline_shift that `convert/
+                    // inline_root.rs:493` applies at convert time, so the
+                    // standard dispatcher would render the content at the
+                    // wrong y. Push a translate transform equal to the
+                    // difference between the inline-flow position
+                    // `(ox, oy)` and the dispatcher's `(geo_x_pt, geo_y_pt)`
+                    // before invoking `render::dispatch_fragment`.
+                    if let Some(ctx) = inline_box_ctx
+                        && let Some(content_id) = ib.content.node_id()
+                        && let Some(content_geom) = ctx.geometry.get(&content_id)
+                        && let Some(content_frag) = content_geom
+                            .fragments
+                            .iter()
+                            .find(|f| f.page_index == ctx.page_index)
+                    {
+                        // Dispatch the inline-box content via the standard
+                        // wrapping helpers (transform / clip / opacity) so
+                        // CSS `transform`, `overflow:hidden`, and fractional
+                        // opacity on the inline-block are honoured. The
+                        // helpers compute descendant positions from
+                        // body-relative geometry as
+                        // `margin + body_offset + px_to_pt(frag.x)`, so we
+                        // dispatch at the body-relative `geo_pt` and use
+                        // `push_transform(translate(off_x, off_y))` to
+                        // shift the whole subtree to the inline-flow
+                        // position `(ox, oy)`.
+                        let geo_x_pt = ctx.margin_left_pt
+                            + ctx.drawables.body_offset_pt.0
+                            + crate::convert::px_to_pt(content_frag.x);
+                        let geo_y_pt = ctx.margin_top_pt
+                            + ctx.drawables.body_offset_pt.1
+                            + crate::convert::px_to_pt(content_frag.y);
+                        let off_x = ox - geo_x_pt;
+                        let off_y = oy - geo_y_pt;
+                        let transform = krilla::geom::Transform::from_translate(off_x, off_y);
+                        let link_affine = crate::pageable::Affine2D::translation(off_x, off_y);
+                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.push_transform(link_affine);
+                            }
+                            canvas.surface.push_transform(&transform);
+                            crate::render::dispatch_inline_box_content(
+                                canvas,
+                                content_id,
+                                content_geom,
+                                content_frag,
+                                geo_x_pt,
+                                geo_y_pt,
+                                ctx.drawables,
+                                ctx.geometry,
+                                ctx.margin_left_pt,
+                                ctx.margin_top_pt,
+                                ctx.page_index,
+                                &ctx.drawables.inline_box_subtree_descendants,
+                            );
+                            canvas.surface.pop();
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.pop_transform();
+                            }
+                        });
+                    } else {
+                        // No v2 ctx (legacy `Pageable::draw` invocation
+                        // path), or the inline-box content has no
+                        // `node_id` / no geometry entry. Preserve the
+                        // direct trait-method dispatch so test-only
+                        // pageable trees (`render_at_rect` /
+                        // gcpm-pageable callers) keep rendering. PR 8h
+                        // (direct convert) deletes this fallback when
+                        // every caller routes through Drawables.
+                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                            ib.content.draw(canvas, ox, oy, ib.width, ib.height);
+                        });
+                    }
 
                     // Link rect built after the opacity block ends, so link
                     // hit-areas remain intact even for opacity<1.0 boxes.
@@ -943,20 +1037,12 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
 }
 
 impl Pageable for ParagraphPageable {
-    fn wrap(&mut self, _avail_width: Pt, _avail_height: Pt) -> Size {
-        self.cached_height = self.lines.iter().map(|l| l.height).sum();
-        Size {
-            width: _avail_width,
-            height: self.cached_height,
-        }
-    }
-
     fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
         if !self.visible {
             return;
         }
         crate::pageable::draw_with_opacity(canvas, self.opacity, |canvas| {
-            draw_shaped_lines(canvas, &self.lines, x, y);
+            draw_shaped_lines(canvas, &self.lines, x, y, None);
         });
     }
 
@@ -964,50 +1050,8 @@ impl Pageable for ParagraphPageable {
         Box::new(self.clone())
     }
 
-    fn height(&self) -> Pt {
-        self.cached_height
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn is_visible(&self) -> bool {
-        self.visible
-    }
-
-    fn collect_ids(
-        &self,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
-        registry: &mut crate::pageable::DestinationRegistry,
-    ) {
-        if let Some(id) = &self.id
-            && !id.is_empty()
-        {
-            registry.record(id, x, y);
-        }
-        // Recurse into inline-box content so nested `id`s (e.g. an
-        // `<a id="target">` inside `<span style="display:inline-block">`)
-        // still reach the destination registry for `href="#target"`
-        // resolution. The coordinate arithmetic mirrors `draw_shaped_lines`
-        // (see paragraph.rs:614): `line_top` starts at 0, advances by
-        // `line.height` after each line, so `oy = y + line_top + computed_y`
-        // matches the draw-path's `line_top_abs + computed_y`.
-        let mut line_top: f32 = 0.0;
-        for line in &self.lines {
-            for item in &line.items {
-                if let LineItem::InlineBox(ib) = item {
-                    let child_x = x + ib.x_offset;
-                    let child_y = y + line_top + ib.computed_y;
-                    ib.content
-                        .collect_ids(child_x, child_y, ib.width, ib.height, registry);
-                }
-            }
-            line_top += line.height;
-        }
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -1359,25 +1403,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_ids_records_paragraph_id() {
-        use crate::pageable::DestinationRegistry;
-        let p = ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("anchor".to_string())));
-        let mut reg = DestinationRegistry::default();
-        reg.set_current_page(3);
-        p.collect_ids(10.0, 42.0, 400.0, 600.0, &mut reg);
-        assert_eq!(reg.get("anchor"), Some((3, 10.0, 42.0)));
-    }
-
-    #[test]
-    fn collect_ids_is_noop_without_id() {
-        use crate::pageable::DestinationRegistry;
-        let p = ParagraphPageable::new(Vec::new());
-        let mut reg = DestinationRegistry::default();
-        p.collect_ids(0.0, 0.0, 400.0, 600.0, &mut reg);
-        assert!(reg.get("anything").is_none());
-    }
-
-    #[test]
     fn line_item_inline_box_variant_can_be_constructed() {
         use crate::pageable::BlockPageable;
         // BlockPageable::new takes Vec<Box<dyn Pageable>>; an empty vec is
@@ -1521,40 +1546,6 @@ mod tests {
             }
             _ => panic!("expected InlineBox at index 1"),
         }
-    }
-
-    // ---------- collect_ids recursion into inline-box Paragraph content ----------
-
-    /// Covers the `ib.content.collect_ids(..)` path in
-    /// `ParagraphPageable::collect_ids` when the inline-box hosts a
-    /// `ParagraphPageable`. Existing integration tests use Block content
-    /// exclusively, so this branch stays otherwise untested.
-    #[test]
-    fn collect_ids_recurses_into_inline_box_paragraph_content() {
-        use crate::pageable::DestinationRegistry;
-        let inner =
-            ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("inner-id".to_string())));
-        let outer_line = ShapedLine {
-            height: 20.0,
-            baseline: 15.0,
-            items: vec![LineItem::InlineBox(InlineBoxItem {
-                content: Box::new(inner) as InlineBoxContent,
-                width: 30.0,
-                height: 20.0,
-                x_offset: 5.0,
-                computed_y: 0.0,
-                link: None,
-                opacity: 1.0,
-                visible: true,
-            })],
-        };
-        let outer = ParagraphPageable::new(vec![outer_line]);
-        let mut reg = DestinationRegistry::default();
-        reg.set_current_page(2);
-        outer.collect_ids(10.0, 20.0, 400.0, 600.0, &mut reg);
-        // Recorded at (x + ib.x_offset, y + line_top + computed_y) =
-        // (10+5, 20+0+0) = (15, 20) on page 2.
-        assert_eq!(reg.get("inner-id"), Some((2, 15.0, 20.0)));
     }
 
     // ---------- pageable_last_baseline walks wrappers ----------
