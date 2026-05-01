@@ -1247,6 +1247,14 @@ fn has_page_name_change_below(
                 continue;
             }
         }
+        // Floats are out of normal flow (CSS 2.1 §9.5) — match
+        // `fragment_pagination_root` / `fragment_block_subtree` which
+        // skip them from `prev_used_page` comparisons. Without this,
+        // a float-only page-name change would force recursion through
+        // a subtree the real comparison would treat as unchanged.
+        if crate::blitz_adapter::node_is_floating(child) {
+            continue;
+        }
         let (child_start, child_end) = table.get(&child_id).cloned().unwrap_or((None, None));
         if !suppress_direct_compare && prev_used.as_ref().is_some_and(|p| *p != child_start) {
             return true;
