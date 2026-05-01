@@ -27,9 +27,28 @@ pub(super) fn try_convert(
     }
     let (width, height) = size_in_pt(node.final_layout.size);
 
-    let paragraph_opt = extract_paragraph(doc, node, ctx, depth, out);
+    // PR 8i: snapshot taken BEFORE `extract_paragraph` because the latter
+    // recurses into inline-box children (registering their drawable
+    // entries into `out`). Pre-PR-8i, `extract_drawables_from_pageable`
+    // walked the v1 `BlockPageable` subtree and collected every nested
+    // node into `clip_descendants`/`opacity_descendants`; placing the
+    // snapshot after `extract_paragraph` would miss those exact nodes.
+    // The `id != node_id` filter on the diff drops the inline-root's
+    // own id from the descendant list; nested inline-box subtree
+    // members are intentionally NOT filtered against
+    // `inline_box_subtree_skip` so the render path's
+    // `draw_under_clip` re-dispatches them inside the clip group —
+    // mirroring the v1 ordering the golden PDFs encode.
     let style = extract_block_style(node, ctx.assets);
     let (opacity, visible) = extract_opacity_visible(node);
+    let needs_block_pre = style.needs_block_wrapper()
+        || pseudo::node_has_block_pseudo_image(doc, node)
+        || pseudo::node_has_absolute_pseudo(doc, node);
+    let clipping_pre = needs_block_pre && style.has_overflow_clip();
+    let opacity_scope_pre = needs_block_pre && !clipping_pre && opacity < 1.0;
+    let pre_snapshot = (clipping_pre || opacity_scope_pre).then(|| collect_drawables_node_ids(out));
+
+    let paragraph_opt = extract_paragraph(doc, node, ctx, depth, out);
     let content_box = compute_content_box(node, &style);
 
     // Inline pseudo images.
@@ -87,12 +106,11 @@ pub(super) fn try_convert(
             }
         }
 
-        // Block / abs pseudos around the paragraph.
-        let block_pseudo_present = pseudo::node_has_block_pseudo_image(doc, node)
-            || pseudo::node_has_absolute_pseudo(doc, node);
-        let needs_block = style.needs_block_wrapper() || block_pseudo_present;
-        let clipping = needs_block && style.has_overflow_clip();
-        let opacity_scope = needs_block && !clipping && opacity < 1.0;
+        // Block / abs pseudo wrapping decision (mirrors `needs_block_pre`
+        // computed up top so the snapshot side matches).
+        let needs_block = needs_block_pre;
+        let clipping = clipping_pre;
+        let _opacity_scope = opacity_scope_pre;
 
         // Always insert the paragraph entry keyed by the inline-root id.
         out.paragraphs.insert(
@@ -117,13 +135,12 @@ pub(super) fn try_convert(
                     opacity_descendants: Vec::new(),
                 },
             );
-            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
             // Register pseudo content (block-pseudo images + abs children).
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
-            if let Some(before) = snapshot {
+            if let Some(before) = pre_snapshot.as_ref() {
                 let after = collect_drawables_node_ids(out);
                 let descendants: Vec<usize> = after
-                    .difference(&before)
+                    .difference(before)
                     .copied()
                     .filter(|&id| id != node_id)
                     .collect();
@@ -153,11 +170,9 @@ pub(super) fn try_convert(
         crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
         let lines = vec![line];
 
-        let block_pseudo_present = pseudo::node_has_block_pseudo_image(doc, node)
-            || pseudo::node_has_absolute_pseudo(doc, node);
-        let needs_block = style.needs_block_wrapper() || block_pseudo_present;
-        let clipping = needs_block && style.has_overflow_clip();
-        let opacity_scope = needs_block && !clipping && opacity < 1.0;
+        let needs_block = needs_block_pre;
+        let clipping = clipping_pre;
+        let _opacity_scope = opacity_scope_pre;
 
         out.paragraphs.insert(
             node_id,
@@ -181,12 +196,11 @@ pub(super) fn try_convert(
                     opacity_descendants: Vec::new(),
                 },
             );
-            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
-            if let Some(before) = snapshot {
+            if let Some(before) = pre_snapshot.as_ref() {
                 let after = collect_drawables_node_ids(out);
                 let descendants: Vec<usize> = after
-                    .difference(&before)
+                    .difference(before)
                     .copied()
                     .filter(|&id| id != node_id)
                     .collect();
@@ -293,6 +307,92 @@ pub(super) fn resolve_enclosing_anchor(
     None
 }
 
+/// CSS 2.1 §10.8.1: return the offset from an inline-block's top edge to
+/// the baseline used for `vertical-align: baseline` (the baseline of the
+/// *last* line box inside). Returns `None` when no in-flow baseline is
+/// available, in which case the caller falls back to the bottom margin
+/// edge (zero `baseline_shift`).
+///
+/// Drawables-aware replacement for `paragraph::inline_box_baseline_offset`,
+/// which walked the v1 `Box<dyn Pageable>` tree via downcasting. After
+/// PR 8i, inline-box content is a `SpacerPageable` placeholder so the
+/// trait walk returns `None` for every inline-block. Read the baseline
+/// from `out.paragraphs[node_id]` (the inline-root case) or recurse into
+/// the node's Taffy children (flex / grid / ordinary block) to find the
+/// last in-flow descendant that contributes a baseline.
+///
+/// Returns `None` when:
+/// - the inline-block has `overflow: clip|hidden|scroll|auto` (the spec
+///   fallback),
+/// - no descendant contributes a CSS line baseline (a leaf `<img>` /
+///   `<svg>` / `<canvas>` inline-box).
+pub(super) fn inline_box_baseline_offset_from_drawables(
+    doc: &BaseDocument,
+    out: &crate::drawables::Drawables,
+    node_id: usize,
+) -> Option<f32> {
+    if let Some(block) = out.block_styles.get(&node_id)
+        && block.style.has_overflow_clip()
+    {
+        return None;
+    }
+    pageable_last_baseline_from_drawables(doc, out, node_id, 0)
+}
+
+/// Recursive worker for `inline_box_baseline_offset_from_drawables`.
+/// Mirrors the pre-PR-8i `pageable_last_baseline` walk over
+/// `BlockPageable.children` in REVERSE — except the children list is
+/// derived from `node.layout_children` / `node.children` (Taffy DOM)
+/// instead of the Pageable tree. `top_inset` of each container adds its
+/// own `border-top + padding-top`; child layout `location.y` adds the
+/// child's offset within the container; the recursive call returns the
+/// inner baseline relative to the child's top edge.
+fn pageable_last_baseline_from_drawables(
+    doc: &BaseDocument,
+    out: &crate::drawables::Drawables,
+    node_id: usize,
+    depth: usize,
+) -> Option<f32> {
+    if depth >= MAX_DOM_DEPTH {
+        return None;
+    }
+    // 1) If this node has a paragraph entry (inline-root), use the last
+    //    line's baseline + the node's top_inset (border + padding).
+    if let Some(para) = out.paragraphs.get(&node_id) {
+        let top_inset = out
+            .block_styles
+            .get(&node_id)
+            .map(|b| b.style.border_widths[0] + b.style.padding[0])
+            .unwrap_or(0.0);
+        if let Some(line) = para.lines.last() {
+            return Some(top_inset + line.baseline);
+        }
+    }
+    // 2) Otherwise walk DOM children in REVERSE, mirroring v1's
+    //    `BlockPageable::children.iter().rev()` search. Use Blitz's
+    //    `layout_children` when available so anonymous block wrappers
+    //    around inline-level siblings are visited correctly.
+    let node = doc.get_node(node_id)?;
+    let layout_children_borrow = node.layout_children.borrow();
+    let walk_children: &[usize] = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&node.children);
+    for &child_id in walk_children.iter().rev() {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        if let Some(inner) = pageable_last_baseline_from_drawables(doc, out, child_id, depth + 1) {
+            // Child y inside this container, in PDF pt. The child
+            // recursively returns its inner baseline relative to its
+            // own top edge; the container's own `top_inset` is folded
+            // in by branch (1) above.
+            return Some(px_to_pt(child.final_layout.location.y) + inner);
+        }
+    }
+    None
+}
+
 /// Recursively convert the Blitz node referenced by a Parley `InlineBox.id`.
 ///
 /// Returns a placeholder `Pageable` content (a zero-height `SpacerPageable`)
@@ -302,6 +402,13 @@ pub(super) fn resolve_enclosing_anchor(
 /// id) so the placeholder content is never actually drawn through the v1
 /// `Pageable::draw` path. The side-effect call to `convert_node` registers
 /// the inline-box subtree into `out` so the v2 dispatcher can find it.
+///
+/// The placeholder MUST carry `node_id` via `with_node_id(Some(node_id))`
+/// because `paragraph::draw_shaped_lines` reads `ib.content.node_id()` to
+/// look up the content's geometry / drawables entry and dispatch it through
+/// `render::dispatch_inline_box_content`. Without it, every inline-block
+/// (and inline `<svg>` / `<img>`) silently disappears from the PDF.
+/// (Phase 4 PR 8i regression — was returned by `convert_node` in PR 8g.)
 fn convert_inline_box_node(
     doc: &BaseDocument,
     node_id: usize,
@@ -313,13 +420,16 @@ fn convert_inline_box_node(
     // Blitz routes through Parley's inline layout — they are re-emitted by
     // `walk_absolute_pseudo_children` at the CSS-correct position. Letting
     // them register here would double-paint via the inline-box dispatch.
+    // The placeholder intentionally has no `node_id` so
+    // `paragraph::draw_shaped_lines`'s `ib.content.node_id()` returns
+    // `None` and the inline-box dispatch is skipped.
     if let Some(node) = doc.get_node(node_id) {
         if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
             return Box::new(SpacerPageable::new(0.0));
         }
     }
     convert_node(doc, node_id, ctx, depth + 1, out);
-    Box::new(SpacerPageable::new(0.0))
+    Box::new(SpacerPageable::new(0.0).with_node_id(Some(node_id)))
 }
 
 /// Extract a `ParagraphPageable` from an inline root node. The caller
@@ -430,8 +540,15 @@ pub(super) fn extract_paragraph(
 
                     let link = ctx.link_cache.lookup(doc, node_id);
                     let height_pt = px_to_pt(positioned.height);
+                    // PR 8i: read baseline from `out` (Drawables) — `content`
+                    // is now a `SpacerPageable` placeholder, so the v1
+                    // `inline_box_baseline_offset(content)` walk through
+                    // BlockPageable / ParagraphPageable trees no longer
+                    // works. The Drawables-aware lookup queries
+                    // `out.paragraphs[node_id]` (and `block_styles[node_id]`
+                    // for top-inset) directly.
                     let baseline_shift =
-                        crate::paragraph::inline_box_baseline_offset(content.as_ref())
+                        inline_box_baseline_offset_from_drawables(doc, out, node_id)
                             .map(|bo| height_pt - bo)
                             .unwrap_or(0.0);
                     let computed_y = px_to_pt(positioned.y) - accumulated_line_top + baseline_shift;

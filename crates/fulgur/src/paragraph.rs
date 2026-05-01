@@ -155,6 +155,16 @@ pub type InlineBoxContent = Box<dyn crate::pageable::Pageable>;
 /// and in-flow text, the baseline of the box is the baseline of the last
 /// line box inside. If the box has `overflow != visible`, or has no in-flow
 /// line boxes, the baseline is the bottom margin edge.
+///
+/// PR 8i: production callers now use the Drawables-aware
+/// `convert::inline_root::inline_box_baseline_offset_from_drawables`
+/// because the v1 `Box<dyn Pageable>` content is a `SpacerPageable`
+/// placeholder that the trait-walk can't see through. The original
+/// helpers stay alive as `#[allow(dead_code)]` so the existing
+/// `pageable_last_baseline_walks_through_wrappers` unit test still
+/// runs (it asserts the wrapper-walk semantics on a synthetic
+/// Pageable tree); the v2 unit-test migration lives in PR 8i Task 8.
+#[allow(dead_code)]
 pub(crate) fn inline_box_baseline_offset(content: &dyn crate::pageable::Pageable) -> Option<f32> {
     // CSS fallback: when the outermost clippable block has overflow clip
     // set, the inline-box baseline is the bottom margin edge. Returning
@@ -170,6 +180,7 @@ pub(crate) fn inline_box_baseline_offset(content: &dyn crate::pageable::Pageable
 /// Peek through wrapper pageables to the outermost Block/Paragraph and ask
 /// whether it has `overflow: clip` (or hidden/scroll/auto). Wrappers
 /// themselves never clip — they only carry markers / transforms.
+#[allow(dead_code)]
 fn has_outer_overflow_clip(p: &dyn crate::pageable::Pageable) -> bool {
     let any = p.as_any();
     if let Some(b) = any.downcast_ref::<crate::pageable::BlockPageable>() {
@@ -206,6 +217,7 @@ fn has_outer_overflow_clip(p: &dyn crate::pageable::Pageable) -> bool {
 /// outside this refactor's scope.
 ///
 /// Exposed at `pub(crate)` so unit tests can assert the walk directly.
+#[allow(dead_code)]
 pub(crate) fn pageable_last_baseline(p: &dyn crate::pageable::Pageable) -> Option<f32> {
     let any = p.as_any();
     if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
