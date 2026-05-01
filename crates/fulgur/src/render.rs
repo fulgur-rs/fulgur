@@ -1,11 +1,11 @@
 use crate::config::Config;
+use crate::draw_primitives::Canvas;
 use crate::drawables::Drawables;
 use crate::error::{Error, Result};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
-use crate::draw_primitives::Canvas;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -1264,13 +1264,14 @@ fn draw_under_clip(
         // Push clip — fall through to inner content + descendants if
         // `compute_overflow_clip_path` returns `None` (style somehow
         // changed since extract decided this block clips).
-        let clip_pushed = if let Some(clip_path) = crate::draw_primitives::compute_overflow_clip_path(
-            &block.style,
-            x_pt,
-            y_pt,
-            total_width,
-            total_height,
-        ) {
+        let clip_pushed = if let Some(clip_path) =
+            crate::draw_primitives::compute_overflow_clip_path(
+                &block.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            ) {
             canvas
                 .surface
                 .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
@@ -2144,7 +2145,14 @@ fn draw_block_inner_paint(
     if entry.visible {
         crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
         crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
-        crate::draw_primitives::draw_block_border(canvas, &entry.style, x, y, total_width, total_height);
+        crate::draw_primitives::draw_block_border(
+            canvas,
+            &entry.style,
+            x,
+            y,
+            total_width,
+            total_height,
+        );
     }
 }
 
@@ -2207,7 +2215,14 @@ fn paint_table_outer_frame(
 ) {
     crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
     crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
-    crate::draw_primitives::draw_block_border(canvas, &entry.style, x, y, total_width, total_height);
+    crate::draw_primitives::draw_block_border(
+        canvas,
+        &entry.style,
+        x,
+        y,
+        total_width,
+        total_height,
+    );
 }
 
 /// Push a `compute_overflow_clip_path` clip around the table's outer
@@ -2244,13 +2259,14 @@ fn draw_under_clip_table(
         // Push clip — fall through to descendant dispatch even if
         // `compute_overflow_clip_path` returns `None` so the cells
         // still paint (defensive, mirrors `draw_under_clip`).
-        let clip_pushed = if let Some(clip_path) = crate::draw_primitives::compute_overflow_clip_path(
-            &table.style,
-            x_pt,
-            y_pt,
-            total_width,
-            total_height,
-        ) {
+        let clip_pushed = if let Some(clip_path) =
+            crate::draw_primitives::compute_overflow_clip_path(
+                &table.style,
+                x_pt,
+                y_pt,
+                total_width,
+                total_height,
+            ) {
             canvas
                 .surface
                 .push_clip_path(&clip_path, &krilla::paint::FillRule::default());

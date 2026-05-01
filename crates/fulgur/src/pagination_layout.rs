@@ -1065,8 +1065,13 @@ fn has_forced_break_below(
     };
     for &child_id in &node.children {
         if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
-            && (matches!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page))
-                || matches!(props.break_after, Some(crate::draw_primitives::BreakAfter::Page)))
+            && (matches!(
+                props.break_before,
+                Some(crate::draw_primitives::BreakBefore::Page)
+            ) || matches!(
+                props.break_after,
+                Some(crate::draw_primitives::BreakAfter::Page)
+            ))
         {
             return true;
         }

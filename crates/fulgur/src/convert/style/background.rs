@@ -480,7 +480,9 @@ fn resolve_conic_gradient(
     ))
 }
 
-fn map_extent(e: style::values::generics::image::ShapeExtent) -> crate::draw_primitives::RadialExtent {
+fn map_extent(
+    e: style::values::generics::image::ShapeExtent,
+) -> crate::draw_primitives::RadialExtent {
     use crate::draw_primitives::RadialExtent;
     use style::values::generics::image::ShapeExtent;
     match e {

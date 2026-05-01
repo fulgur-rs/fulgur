@@ -1721,19 +1721,28 @@ mod tests {
     #[test]
     fn parses_break_before_page() {
         let props = parse_declaration_block("break-before: page;");
-        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page));
+        assert_eq!(
+            props.break_before,
+            Some(crate::draw_primitives::BreakBefore::Page)
+        );
     }
 
     #[test]
     fn parses_break_before_always() {
         let props = parse_declaration_block("break-before: always;");
-        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page));
+        assert_eq!(
+            props.break_before,
+            Some(crate::draw_primitives::BreakBefore::Page)
+        );
     }
 
     #[test]
     fn parses_break_before_auto() {
         let props = parse_declaration_block("break-before: auto;");
-        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Auto));
+        assert_eq!(
+            props.break_before,
+            Some(crate::draw_primitives::BreakBefore::Auto)
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use skrifa::MetadataProvider;
 
-use crate::image::ImageFormat;
 use crate::draw_primitives::{Canvas, Pt};
+use crate::image::ImageFormat;
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -735,7 +735,8 @@ pub fn draw_shaped_lines(
                         let off_x = ox - geo_x_pt;
                         let off_y = oy - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
-                        let link_affine = crate::draw_primitives::Affine2D::translation(off_x, off_y);
+                        let link_affine =
+                            crate::draw_primitives::Affine2D::translation(off_x, off_y);
                         crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);

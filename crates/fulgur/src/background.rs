@@ -77,7 +77,14 @@ fn draw_single_box_shadow(
         };
         pb.push_rect(bbox);
         if style.has_radius() {
-            crate::draw_primitives::append_rounded_rect_subpath(&mut pb, x, y, w, h, &style.border_radii);
+            crate::draw_primitives::append_rounded_rect_subpath(
+                &mut pb,
+                x,
+                y,
+                w,
+                h,
+                &style.border_radii,
+            );
         } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
             pb.push_rect(box_rect);
         } else {
@@ -432,7 +439,11 @@ fn draw_background_layer(
 /// gradient direction is `(H · h_sign, W · v_sign)`, then
 /// `θ = atan2(H · h_sign, −W · v_sign)` because CSS measures clockwise from
 /// the +Y-up axis (`direction(θ) = (sin θ, −cos θ)` in Y-down).
-fn corner_to_angle_rad(corner: crate::draw_primitives::LinearGradientCorner, w: f32, h: f32) -> f32 {
+fn corner_to_angle_rad(
+    corner: crate::draw_primitives::LinearGradientCorner,
+    w: f32,
+    h: f32,
+) -> f32 {
     use crate::draw_primitives::LinearGradientCorner::*;
     let (h_sign, v_sign) = match corner {
         TopLeft => (-1.0_f32, -1.0_f32),
