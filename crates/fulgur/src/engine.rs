@@ -424,6 +424,76 @@ impl Engine {
         };
         crate::convert::dom_to_drawables(&doc, &mut convert_ctx)
     }
+
+    /// Build a `Drawables` map together with the per-NodeId
+    /// `PaginationGeometryTable` for integration tests that need to
+    /// reason about both the per-node draw payload and its absolute
+    /// page-relative placement.
+    ///
+    /// Same GCPM caveat as `build_drawables_for_testing_no_gcpm` —
+    /// margin boxes / running elements / counters / `content:`
+    /// resolution are skipped.
+    #[doc(hidden)]
+    pub fn build_drawables_and_geometry_for_testing_no_gcpm(
+        &self,
+        html: &str,
+    ) -> (
+        crate::drawables::Drawables,
+        crate::pagination_layout::PaginationGeometryTable,
+    ) {
+        let fonts = self
+            .assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
+
+        let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
+            html,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            fonts,
+            self.base_path.as_deref(),
+        );
+
+        let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
+        let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
+        crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        crate::blitz_adapter::resolve(&mut doc);
+        crate::blitz_adapter::relayout_position_fixed(
+            &mut doc,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+            doc.deref_mut(),
+            crate::convert::pt_to_px(self.config.content_height()),
+            &column_styles,
+        );
+
+        let geometry_clone = pagination_geometry.clone();
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut convert_ctx = ConvertContext {
+            running_store: &running_store,
+            assets: self.assets.as_ref(),
+            font_cache: HashMap::new(),
+            string_set_by_node: HashMap::new(),
+            counter_ops_by_node: HashMap::new(),
+            bookmark_by_node: HashMap::new(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((
+                crate::convert::pt_to_px(self.config.content_width()),
+                crate::convert::pt_to_px(self.config.content_height()),
+            )),
+        };
+        let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
+        (drawables, geometry_clone)
+    }
 }
 
 pub struct EngineBuilder {
