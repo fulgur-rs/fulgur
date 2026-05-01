@@ -709,7 +709,7 @@ pub fn extract_inline_svg_tree(
 /// into a child image node — the match arm in
 /// `blitz-dom/src/layout/construct.rs` for non-`String` ContentItem variants is
 /// a TODO. fulgur bypasses that by reading the stylo computed value directly
-/// and constructing an `ImagePageable` itself (see `convert::build_pseudo_image`
+/// and constructing an `ImageRender` itself (see `convert::build_pseudo_image`
 /// and the normal-element `content: url()` path in `convert::convert_node_inner`).
 ///
 /// Scope: only single-item content is matched (per the fulgur-ai3 design scope

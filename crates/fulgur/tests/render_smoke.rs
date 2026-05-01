@@ -520,7 +520,7 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     // element against the abs's narrow box. The %PDF byte check only
     // proves engine completion; the structural assertion is the real
     // regression guard — we walk the Pageable tree, find every
-    // out-of-flow `ParagraphPageable`, and assert the fixed text laid
+    // out-of-flow `ParagraphRender`, and assert the fixed text laid
     // itself out as a single line. Without `relayout_position_fixed`,
     // Parley shapes the long sentence at the abs's ~37.5pt width and
     // produces multiple wrapped lines; with the relayout, the fixed

@@ -80,7 +80,7 @@ pub struct BlockEntry {
 /// Paragraph draw payload for v2. Holds the shaped lines that
 /// `paragraph::draw_shaped_lines` consumes verbatim — no re-shaping
 /// at render time. Mirrors the per-paragraph fields from
-/// `ParagraphPageable` that survive draw.
+/// `ParagraphRender` that survive draw.
 #[derive(Clone)]
 pub struct ParagraphEntry {
     pub lines: Vec<crate::paragraph::ShapedLine>,
@@ -102,7 +102,7 @@ impl std::fmt::Debug for ParagraphEntry {
     }
 }
 
-/// Image draw payload for v2. Mirrors the fields `ImagePageable` holds.
+/// Image draw payload for v2. Mirrors the fields `ImageRender` holds.
 #[derive(Debug, Clone)]
 pub struct ImageEntry {
     pub image_data: std::sync::Arc<Vec<u8>>,
@@ -113,7 +113,7 @@ pub struct ImageEntry {
     pub visible: bool,
 }
 
-/// SVG draw payload for v2. Mirrors the fields `SvgPageable` holds.
+/// SVG draw payload for v2. Mirrors the fields `SvgRender` holds.
 #[derive(Debug, Clone)]
 pub struct SvgEntry {
     pub tree: std::sync::Arc<usvg::Tree>,

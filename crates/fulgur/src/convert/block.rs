@@ -4,7 +4,7 @@ use super::{positioned, pseudo};
 /// Catch-all dispatch for nodes not matched by list_item / table / replaced /
 /// inline_root. Inserts a `BlockEntry` into `out.block_styles` (and walks
 /// children recursively into `out`) — a leaf with no visual style and no
-/// pseudo content registers nothing, matching the v1 `SpacerPageable`
+/// pseudo content registers nothing, matching the v1 zero-height spacer
 /// behaviour where the dispatcher had no per-NodeId payload to record.
 pub(super) fn convert(
     doc: &BaseDocument,

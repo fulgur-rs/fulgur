@@ -85,7 +85,7 @@ pub(super) fn resolve_image_dimensions(
     css_w: Option<f32>,
     css_h: Option<f32>,
 ) -> (f32, f32) {
-    let (iw, ih) = ImagePageable::decode_dimensions(data, format).unwrap_or((1, 1));
+    let (iw, ih) = ImageRender::decode_dimensions(data, format).unwrap_or((1, 1));
     let iw = iw as f32;
     let ih = ih as f32;
     let aspect = if ih > 0.0 { iw / ih } else { 1.0 };
@@ -141,7 +141,7 @@ fn convert_content_url(
     let Some(data) = bundle.get_image(asset_name).cloned() else {
         return false;
     };
-    let Some(format) = ImagePageable::detect_format(&data) else {
+    let Some(format) = ImageRender::detect_format(&data) else {
         return false;
     };
 
@@ -177,7 +177,7 @@ fn convert_image(
     let Some(data) = bundle.get_image(src).cloned() else {
         return false;
     };
-    let Some(format) = ImagePageable::detect_format(&data) else {
+    let Some(format) = ImageRender::detect_format(&data) else {
         return false;
     };
 

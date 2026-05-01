@@ -1,7 +1,6 @@
 use super::*;
 use super::{list_marker, positioned, pseudo};
-use crate::pageable::SpacerPageable;
-use crate::paragraph::{InlineBoxItem, ParagraphPageable};
+use crate::paragraph::{InlineBoxItem, InlineBoxPlaceholder, ParagraphRender};
 
 /// Dispatcher entry for inline-root nodes (those with `node.flags.is_inline_root()`).
 ///
@@ -313,13 +312,12 @@ pub(super) fn resolve_enclosing_anchor(
 /// available, in which case the caller falls back to the bottom margin
 /// edge (zero `baseline_shift`).
 ///
-/// Drawables-aware replacement for `paragraph::inline_box_baseline_offset`,
-/// which walked the v1 `Box<dyn Pageable>` tree via downcasting. After
-/// PR 8i, inline-box content is a `SpacerPageable` placeholder so the
-/// trait walk returns `None` for every inline-block. Read the baseline
-/// from `out.paragraphs[node_id]` (the inline-root case) or recurse into
-/// the node's Taffy children (flex / grid / ordinary block) to find the
-/// last in-flow descendant that contributes a baseline.
+/// Drawables-aware baseline lookup. Inline-box content is represented by an
+/// `InlineBoxPlaceholder` carrying only `node_id`, so there is
+/// no trait tree to walk. Read the baseline from `out.paragraphs[node_id]`
+/// (the inline-root case) or recurse into the node's Taffy children
+/// (flex / grid / ordinary block) to find the last in-flow descendant that
+/// contributes a baseline.
 ///
 /// Returns `None` when:
 /// - the inline-block has `overflow: clip|hidden|scroll|auto` (the spec
@@ -395,47 +393,48 @@ fn pageable_last_baseline_from_drawables(
 
 /// Recursively convert the Blitz node referenced by a Parley `InlineBox.id`.
 ///
-/// Returns a placeholder `Pageable` content (a zero-height `SpacerPageable`)
-/// for the `LineItem::InlineBox.content` slot — that field still has the v1
-/// `Box<dyn Pageable>` shape, but PR 8g routes inline-box rendering through
-/// the v2 dispatcher (`dispatch_inline_box_content` keyed by content node
-/// id) so the placeholder content is never actually drawn through the v1
-/// `Pageable::draw` path. The side-effect call to `convert_node` registers
-/// the inline-box subtree into `out` so the v2 dispatcher can find it.
+/// Returns an `InlineBoxPlaceholder` carrying the content `node_id` for the
+/// `LineItem::InlineBox.placeholder` slot. PR 8g/8i routes inline-box
+/// rendering through the v2 dispatcher (`dispatch_inline_box_content` keyed
+/// by content node id), so the placeholder is geometry-only — there is no
+/// trait object to draw through. The side-effect call to `convert_node`
+/// registers the inline-box subtree into `out` so the v2 dispatcher can
+/// find it.
 ///
-/// The placeholder MUST carry `node_id` via `with_node_id(Some(node_id))`
-/// because `paragraph::draw_shaped_lines` reads `ib.content.node_id()` to
-/// look up the content's geometry / drawables entry and dispatch it through
+/// The placeholder MUST carry `node_id` because
+/// `paragraph::draw_shaped_lines` reads `ib.placeholder.node_id` to look up
+/// the content's geometry / drawables entry and dispatch it through
 /// `render::dispatch_inline_box_content`. Without it, every inline-block
 /// (and inline `<svg>` / `<img>`) silently disappears from the PDF.
-/// (Phase 4 PR 8i regression — was returned by `convert_node` in PR 8g.)
 fn convert_inline_box_node(
     doc: &BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
     out: &mut crate::drawables::Drawables,
-) -> crate::paragraph::InlineBoxContent {
+) -> crate::paragraph::InlineBoxPlaceholder {
     // Suppress the rendering path for absolutely-positioned pseudos that
     // Blitz routes through Parley's inline layout — they are re-emitted by
     // `walk_absolute_pseudo_children` at the CSS-correct position. Letting
     // them register here would double-paint via the inline-box dispatch.
     // The placeholder intentionally has no `node_id` so
-    // `paragraph::draw_shaped_lines`'s `ib.content.node_id()` returns
-    // `None` and the inline-box dispatch is skipped.
+    // `paragraph::draw_shaped_lines`'s `ib.placeholder.node_id` is `None`
+    // and the inline-box dispatch is skipped.
     if let Some(node) = doc.get_node(node_id) {
         if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
-            return Box::new(SpacerPageable::new(0.0));
+            return InlineBoxPlaceholder { node_id: None };
         }
     }
     convert_node(doc, node_id, ctx, depth + 1, out);
-    Box::new(SpacerPageable::new(0.0).with_node_id(Some(node_id)))
+    InlineBoxPlaceholder {
+        node_id: Some(node_id),
+    }
 }
 
-/// Extract a `ParagraphPageable` from an inline root node. The caller
+/// Extract a `ParagraphRender` from an inline root node. The caller
 /// (`try_convert` above, or `list_item::build_list_item_body`) consumes
 /// the returned paragraph and inserts a `ParagraphEntry` into `out`. We
-/// keep returning `Option<ParagraphPageable>` instead of writing into `out`
+/// keep returning `Option<ParagraphRender>` instead of writing into `out`
 /// here so callers can inject pseudo images / list markers BEFORE
 /// committing the entry — the pre-PR-8i interface in that respect.
 ///
@@ -450,7 +449,7 @@ pub(super) fn extract_paragraph(
     ctx: &mut ConvertContext<'_>,
     depth: usize,
     out: &mut crate::drawables::Drawables,
-) -> Option<ParagraphPageable> {
+) -> Option<ParagraphRender> {
     let elem_data = node.element_data()?;
     let text_layout = elem_data.inline_layout_data.as_ref()?;
 
@@ -540,11 +539,8 @@ pub(super) fn extract_paragraph(
 
                     let link = ctx.link_cache.lookup(doc, node_id);
                     let height_pt = px_to_pt(positioned.height);
-                    // PR 8i: read baseline from `out` (Drawables) — `content`
-                    // is now a `SpacerPageable` placeholder, so the v1
-                    // `inline_box_baseline_offset(content)` walk through
-                    // BlockPageable / ParagraphPageable trees no longer
-                    // works. The Drawables-aware lookup queries
+                    // PR 8i: read baseline from `out` (Drawables). The
+                    // placeholder carries `node_id` only; the lookup queries
                     // `out.paragraphs[node_id]` (and `block_styles[node_id]`
                     // for top-inset) directly.
                     let baseline_shift =
@@ -558,7 +554,7 @@ pub(super) fn extract_paragraph(
                         .map(|(_, v)| v)
                         .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
-                        content,
+                        placeholder: content,
                         width: px_to_pt(positioned.width),
                         height: height_pt,
                         x_offset: px_to_pt(positioned.x),
@@ -584,5 +580,5 @@ pub(super) fn extract_paragraph(
         return None;
     }
 
-    Some(ParagraphPageable::new(shaped_lines).with_id(extract_block_id(node)))
+    Some(ParagraphRender::new(shaped_lines).with_id(extract_block_id(node)))
 }

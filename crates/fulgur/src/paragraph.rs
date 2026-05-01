@@ -1,11 +1,11 @@
-//! ParagraphPageable — renders text via the Parley→Krilla glyph bridge.
+//! ParagraphRender — renders text via the Parley→Krilla glyph bridge.
 
 use std::sync::Arc;
 
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pageable, Pt};
+use crate::pageable::{Canvas, Pt};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -135,125 +135,24 @@ pub struct InlineImage {
     pub link: Option<Arc<LinkSpan>>,
 }
 
-/// Content of an atomic inline box. Alias for `Box<dyn Pageable>` so wrapper
-/// Pageables (Transform / StringSet / CounterOp / BookmarkMarker /
-/// RunningElement) survive at the inline-box root and their side effects —
-/// CSS transform, named-string capture, counter ops, outline markers,
-/// running-element rehosting — apply when the inline-box is rendered.
-///
-/// `Box<dyn Pageable>` implements `Clone` via `clone_box()` (see
-/// `impl Clone for Box<dyn Pageable>` in `pageable.rs`), so `LineItem`
-/// still derives `Clone` without an explicit `dyn_clone` crate.
-pub type InlineBoxContent = Box<dyn crate::pageable::Pageable>;
-
-/// Returns the offset from `content`'s top edge to the baseline used by CSS
-/// for `vertical-align: baseline`. Returns `None` when no in-flow baseline is
-/// available, in which case the caller should fall back to the bottom margin
-/// edge (CSS 2.1 §10.8.1).
-///
-/// CSS 2.1 §10.8.1 specifies that for an inline-block with `overflow: visible`
-/// and in-flow text, the baseline of the box is the baseline of the last
-/// line box inside. If the box has `overflow != visible`, or has no in-flow
-/// line boxes, the baseline is the bottom margin edge.
-///
-/// PR 8i: production callers now use the Drawables-aware
-/// `convert::inline_root::inline_box_baseline_offset_from_drawables`
-/// because the v1 `Box<dyn Pageable>` content is a `SpacerPageable`
-/// placeholder that the trait-walk can't see through. The original
-/// helpers stay alive as `#[allow(dead_code)]` so the existing
-/// `pageable_last_baseline_walks_through_wrappers` unit test still
-/// runs (it asserts the wrapper-walk semantics on a synthetic
-/// Pageable tree); the v2 unit-test migration lives in PR 8i Task 8.
-#[allow(dead_code)]
-pub(crate) fn inline_box_baseline_offset(content: &dyn crate::pageable::Pageable) -> Option<f32> {
-    // CSS fallback: when the outermost clippable block has overflow clip
-    // set, the inline-box baseline is the bottom margin edge. Returning
-    // `None` here signals that to the caller (convert.rs), which defaults
-    // to zero shift. Wrapper layers are transparent for this check — we
-    // only peek through them to reach the actual Block / Paragraph.
-    if has_outer_overflow_clip(content) {
-        return None;
-    }
-    pageable_last_baseline(content)
-}
-
-/// Peek through wrapper pageables to the outermost Block/Paragraph and ask
-/// whether it has `overflow: clip` (or hidden/scroll/auto). Wrappers
-/// themselves never clip — they only carry markers / transforms.
-#[allow(dead_code)]
-fn has_outer_overflow_clip(p: &dyn crate::pageable::Pageable) -> bool {
-    let any = p.as_any();
-    if let Some(b) = any.downcast_ref::<crate::pageable::BlockPageable>() {
-        return b.style.has_overflow_clip();
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::TransformWrapperPageable>() {
-        return has_outer_overflow_clip(w.inner.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::BookmarkMarkerWrapperPageable>() {
-        return has_outer_overflow_clip(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::CounterOpWrapperPageable>() {
-        return has_outer_overflow_clip(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::StringSetWrapperPageable>() {
-        return has_outer_overflow_clip(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::RunningElementWrapperPageable>() {
-        return has_outer_overflow_clip(w.child.as_ref());
-    }
-    // Paragraph or any other concrete pageable: no overflow style → no clip.
-    false
-}
-
-/// Recursively find the offset from `p`'s top edge to the last in-flow
-/// baseline inside. Walks through wrapper pageables transparently and
-/// descends into `BlockPageable`'s children. Returns `None` when nothing
-/// paragraph-like is reachable (e.g. a pure image / spacer inline-box).
-///
-/// Note: `TransformWrapperPageable` is walked without reversing its
-/// matrix. For the small rotate/skew transforms common on inline-blocks,
-/// the visual delta is minor; a fully matrix-aware baseline would have
-/// to project the inner baseline back through `self.matrix`, which is
-/// outside this refactor's scope.
-///
-/// Exposed at `pub(crate)` so unit tests can assert the walk directly.
-#[allow(dead_code)]
-pub(crate) fn pageable_last_baseline(p: &dyn crate::pageable::Pageable) -> Option<f32> {
-    let any = p.as_any();
-    if let Some(para) = any.downcast_ref::<ParagraphPageable>() {
-        return para.lines.last().map(|l| l.baseline);
-    }
-    if let Some(block) = any.downcast_ref::<crate::pageable::BlockPageable>() {
-        for pc in block.children.iter().rev() {
-            if let Some(inner_bo) = pageable_last_baseline(pc.child.as_ref()) {
-                return Some(pc.y + inner_bo);
-            }
-        }
-        return None;
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::TransformWrapperPageable>() {
-        return pageable_last_baseline(w.inner.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::BookmarkMarkerWrapperPageable>() {
-        return pageable_last_baseline(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::CounterOpWrapperPageable>() {
-        return pageable_last_baseline(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::StringSetWrapperPageable>() {
-        return pageable_last_baseline(w.child.as_ref());
-    }
-    if let Some(w) = any.downcast_ref::<crate::pageable::RunningElementWrapperPageable>() {
-        return pageable_last_baseline(w.child.as_ref());
-    }
-    None
+/// Geometry-only stand-in for the inline-box content. The actual draw
+/// path is dispatched via `crate::render::dispatch_inline_box_content`
+/// keyed by `node_id` against `Drawables`/`geometry`. Holding the
+/// content NodeId instead of a `Box<dyn Pageable>` lets the v1
+/// `Pageable` trait disappear from `LineItem` entirely (PR 8j-1).
+#[derive(Clone, Debug)]
+pub struct InlineBoxPlaceholder {
+    /// Content NodeId; `None` when the content is suppressed (e.g.
+    /// absolutely-positioned pseudo re-emitted by
+    /// `walk_absolute_pseudo_children`) so `draw_shaped_lines` skips dispatch.
+    pub node_id: Option<usize>,
 }
 
 /// An atomic inline box (display: inline-block / inline-flex / inline-grid /
 /// inline-table) within a shaped line.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InlineBoxItem {
-    pub content: InlineBoxContent,
+    pub placeholder: InlineBoxPlaceholder,
     pub width: f32,
     pub height: f32,
     pub x_offset: f32,
@@ -273,62 +172,11 @@ pub struct InlineBoxItem {
 /// A single item in a shaped line: text glyph run, inline image, or an
 /// atomic inline box (display: inline-block / inline-flex / inline-grid /
 /// inline-table).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LineItem {
     Text(ShapedGlyphRun),
     Image(InlineImage),
     InlineBox(InlineBoxItem),
-}
-
-// Manual `Debug` for `LineItem`: `BlockPageable` / `ParagraphPageable`
-// (reachable via `InlineBox.content`, now a `Box<dyn Pageable>`) do not
-// themselves implement `Debug`, so the derive can't traverse them. Delegate
-// to the existing Text/Image impls and print a compact variant-only form
-// for InlineBox, labeling the inner pageable by type via `Any` introspection.
-impl std::fmt::Debug for LineItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LineItem::Text(t) => f.debug_tuple("Text").field(t).finish(),
-            LineItem::Image(i) => f.debug_tuple("Image").field(i).finish(),
-            LineItem::InlineBox(ib) => f
-                .debug_struct("InlineBox")
-                .field("width", &ib.width)
-                .field("height", &ib.height)
-                .field("x_offset", &ib.x_offset)
-                .field("computed_y", &ib.computed_y)
-                .field("opacity", &ib.opacity)
-                .field("visible", &ib.visible)
-                .field("link", &ib.link.is_some())
-                .field("content", &inline_box_content_label(ib.content.as_ref()))
-                .finish(),
-        }
-    }
-}
-
-/// Best-effort label for the pageable type hosted inside an
-/// `InlineBoxItem.content`. Used only by the manual `Debug` impl so
-/// `{:?}` output keeps the pre-refactor `Block(..)` / `Paragraph(..)`
-/// wording (tests assert on those substrings) while still covering the
-/// wrapper pageables that now flow through.
-fn inline_box_content_label(p: &dyn crate::pageable::Pageable) -> &'static str {
-    let any = p.as_any();
-    if any.is::<crate::pageable::BlockPageable>() {
-        "Block(..)"
-    } else if any.is::<ParagraphPageable>() {
-        "Paragraph(..)"
-    } else if any.is::<crate::pageable::TransformWrapperPageable>() {
-        "Transform(..)"
-    } else if any.is::<crate::pageable::BookmarkMarkerWrapperPageable>() {
-        "BookmarkMarker(..)"
-    } else if any.is::<crate::pageable::CounterOpWrapperPageable>() {
-        "CounterOp(..)"
-    } else if any.is::<crate::pageable::StringSetWrapperPageable>() {
-        "StringSet(..)"
-    } else if any.is::<crate::pageable::RunningElementWrapperPageable>() {
-        "RunningElement(..)"
-    } else {
-        "Other(..)"
-    }
 }
 
 /// A shaped line of text.
@@ -342,7 +190,7 @@ pub struct ShapedLine {
 
 /// Paragraph element that renders shaped text.
 #[derive(Clone)]
-pub struct ParagraphPageable {
+pub struct ParagraphRender {
     pub lines: Vec<ShapedLine>,
     pub cached_height: f32,
     pub opacity: f32,
@@ -357,7 +205,7 @@ pub struct ParagraphPageable {
     pub node_id: Option<usize>,
 }
 
-impl ParagraphPageable {
+impl ParagraphRender {
     pub fn new(lines: Vec<ShapedLine>) -> Self {
         let cached_height: f32 = lines.iter().map(|l| l.height).sum();
         Self {
@@ -692,11 +540,11 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
 /// PR 8g: render-side context that lets `draw_shaped_lines` dispatch
 /// inline-box content (`LineItem::InlineBox`) through the v2 dispatcher.
 ///
-/// `None` is passed by:
-/// - The list-item marker text render path (markers contain only Text /
-///   Image items, never InlineBox).
-/// - Trait-method callers that exercise `draw_shaped_lines` outside the
-///   v2 render pipeline (PR 8g deletes these alongside `Pageable::draw`).
+/// `None` is passed by the list-item marker text render paths
+/// (`ListItemPageable::draw` in `pageable.rs` and
+/// `render::draw_list_item_marker`), because marker line streams only
+/// contain Text / Image items — never `LineItem::InlineBox` — and
+/// therefore have no inline-box children to dispatch.
 ///
 /// When `Some`, the InlineBox arm computes the inline-flow position
 /// `(ox, oy)` and dispatches the inline-box content directly at those
@@ -850,9 +698,9 @@ pub fn draw_shaped_lines(
                     let oy = line_top_abs + ib.computed_y;
 
                     // PR 8g: dispatch via the v2 path under an offset
-                    // transform. `ib.content`'s geometry-recorded position
-                    // (Taffy/Parley body-relative) does not include the
-                    // CSS 2.1 §10.8.1 baseline_shift that `convert/
+                    // transform. `ib.placeholder.node_id`'s geometry-recorded
+                    // position (Taffy/Parley body-relative) does not include
+                    // the CSS 2.1 §10.8.1 baseline_shift that `convert/
                     // inline_root.rs:493` applies at convert time, so the
                     // standard dispatcher would render the content at the
                     // wrong y. Push a translate transform equal to the
@@ -860,7 +708,7 @@ pub fn draw_shaped_lines(
                     // `(ox, oy)` and the dispatcher's `(geo_x_pt, geo_y_pt)`
                     // before invoking `render::dispatch_fragment`.
                     if let Some(ctx) = inline_box_ctx
-                        && let Some(content_id) = ib.content.node_id()
+                        && let Some(content_id) = ib.placeholder.node_id
                         && let Some(content_geom) = ctx.geometry.get(&content_id)
                         && let Some(content_frag) = content_geom
                             .fragments
@@ -911,18 +759,6 @@ pub fn draw_shaped_lines(
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.pop_transform();
                             }
-                        });
-                    } else {
-                        // No v2 ctx (legacy `Pageable::draw` invocation
-                        // path), or the inline-box content has no
-                        // `node_id` / no geometry entry. Preserve the
-                        // direct trait-method dispatch so test-only
-                        // pageable trees (`render_at_rect` /
-                        // gcpm-pageable callers) keep rendering. PR 8h
-                        // (direct convert) deletes this fallback when
-                        // every caller routes through Drawables.
-                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
-                            ib.content.draw(canvas, ox, oy, ib.width, ib.height);
                         });
                     }
 
@@ -1045,29 +881,6 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
         if let LineItem::Image(img) = &mut line.items[idx] {
             img.computed_y = img_top + shift;
         }
-    }
-}
-
-impl Pageable for ParagraphPageable {
-    fn draw(&self, canvas: &mut Canvas<'_, '_>, x: Pt, y: Pt, _avail_width: Pt, _avail_height: Pt) {
-        if !self.visible {
-            return;
-        }
-        crate::pageable::draw_with_opacity(canvas, self.opacity, |canvas| {
-            draw_shaped_lines(canvas, &self.lines, x, y, None);
-        });
-    }
-
-    fn clone_box(&self) -> Box<dyn Pageable> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn node_id(&self) -> Option<usize> {
-        self.node_id
     }
 }
 
@@ -1404,24 +1217,20 @@ mod tests {
 
     #[test]
     fn paragraph_default_has_no_id() {
-        let p = ParagraphPageable::new(Vec::new());
+        let p = ParagraphRender::new(Vec::new());
         assert!(p.id.is_none());
     }
 
     #[test]
     fn paragraph_with_id_stores_value() {
-        let p = ParagraphPageable::new(Vec::new()).with_id(Some(Arc::new("section-1".to_string())));
+        let p = ParagraphRender::new(Vec::new()).with_id(Some(Arc::new("section-1".to_string())));
         assert_eq!(p.id.as_deref().map(String::as_str), Some("section-1"));
     }
 
     #[test]
     fn line_item_inline_box_variant_can_be_constructed() {
-        use crate::pageable::BlockPageable;
-        // BlockPageable::new takes Vec<Box<dyn Pageable>>; an empty vec is
-        // enough for the construction test.
-        let block = BlockPageable::new(Vec::new());
         let item = LineItem::InlineBox(InlineBoxItem {
-            content: Box::new(block) as InlineBoxContent,
+            placeholder: InlineBoxPlaceholder { node_id: Some(42) },
             width: 50.0,
             height: 20.0,
             x_offset: 10.0,
@@ -1434,29 +1243,15 @@ mod tests {
             LineItem::InlineBox(ib) => {
                 assert_eq!(ib.width, 50.0);
                 assert_eq!(ib.height, 20.0);
-                assert!(
-                    ib.content
-                        .as_any()
-                        .downcast_ref::<BlockPageable>()
-                        .is_some()
-                );
+                assert_eq!(ib.placeholder.node_id, Some(42));
             }
             _ => panic!("expected InlineBox variant"),
         }
     }
 
-    // ---------- Manual Debug impl coverage (L230-252) ----------
-
-    /// Covers the manual `Debug` impl for every `LineItem` variant, including
-    /// the `InlineBox` struct fields and the inner `Block(..)` / `Paragraph(..)`
-    /// content branches. The derive can't traverse BlockPageable/Paragraph-
-    /// Pageable because they don't implement Debug, so this path is all
-    /// custom.
     #[test]
     fn line_item_debug_impl_covers_all_variants() {
-        use crate::pageable::BlockPageable;
-
-        // Text variant — delegates to the ShapedGlyphRun derive.
+        // Text variant
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
@@ -1469,18 +1264,15 @@ mod tests {
             link: None,
         };
         let text = LineItem::Text(glyph_run);
-        let s = format!("{:?}", text);
-        assert!(s.contains("Text"), "{}", s);
+        assert!(format!("{:?}", text).contains("Text"));
 
-        // Image variant — delegates to InlineImage derive.
+        // Image variant
         let img = LineItem::Image(make_inline_image(10.0, 10.0, VerticalAlign::Baseline));
-        let s = format!("{:?}", img);
-        assert!(s.contains("Image"), "{}", s);
+        assert!(format!("{:?}", img).contains("Image"));
 
-        // InlineBox with Block content.
-        let block = BlockPageable::new(Vec::new());
-        let ib_block = LineItem::InlineBox(InlineBoxItem {
-            content: Box::new(block) as InlineBoxContent,
+        // InlineBox variant
+        let ib = LineItem::InlineBox(InlineBoxItem {
+            placeholder: InlineBoxPlaceholder { node_id: Some(7) },
             width: 10.0,
             height: 5.0,
             x_offset: 1.0,
@@ -1489,33 +1281,11 @@ mod tests {
             opacity: 1.0,
             visible: true,
         });
-        let s = format!("{:?}", ib_block);
-        assert!(s.contains("InlineBox"), "{}", s);
-        assert!(s.contains("width: 10.0"), "{}", s);
-        assert!(s.contains("Block(..)"), "{}", s);
-        assert!(s.contains("link: false"), "{}", s);
-
-        // InlineBox with Paragraph content (exercises the Paragraph(..) arm
-        // inside the manual Debug's content label lookup — otherwise never
-        // hit).
-        let para = ParagraphPageable::new(Vec::new());
-        let ib_para = LineItem::InlineBox(InlineBoxItem {
-            content: Box::new(para) as InlineBoxContent,
-            width: 0.0,
-            height: 0.0,
-            x_offset: 0.0,
-            computed_y: 0.0,
-            link: Some(Arc::new(LinkSpan {
-                target: LinkTarget::External(Arc::new("https://x".into())),
-                alt_text: None,
-            })),
-            opacity: 0.5,
-            visible: false,
-        });
-        let s = format!("{:?}", ib_para);
-        assert!(s.contains("Paragraph(..)"), "{}", s);
-        assert!(s.contains("visible: false"), "{}", s);
-        assert!(s.contains("link: true"), "{}", s);
+        let s = format!("{:?}", ib);
+        assert!(s.contains("InlineBox"));
+        assert!(s.contains("placeholder"));
+        assert!(s.contains("node_id"));
+        assert!(s.contains("Some(7)"));
     }
 
     // ---------- recalculate_line_box InlineBox `continue` arms (L815, L847) ----------
@@ -1525,16 +1295,13 @@ mod tests {
     /// reach these branches; this mixed-item test does.
     #[test]
     fn recalculate_line_box_skips_inline_box_items() {
-        use crate::pageable::BlockPageable;
-        let block = BlockPageable::new(Vec::new());
         let mut line = ShapedLine {
             height: 16.0,
             baseline: 12.0,
             items: vec![
-                // Image with Top alignment forces phase 2 to iterate too.
                 LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Top)),
                 LineItem::InlineBox(InlineBoxItem {
-                    content: Box::new(block) as InlineBoxContent,
+                    placeholder: InlineBoxPlaceholder { node_id: None },
                     width: 30.0,
                     height: 20.0,
                     x_offset: 0.0,
@@ -1547,49 +1314,14 @@ mod tests {
         };
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        // InlineBox must still be present unmodified (skipped by both phases).
         assert_eq!(line.items.len(), 2);
         match &line.items[1] {
             LineItem::InlineBox(ib) => {
                 assert_eq!(ib.width, 30.0);
-                // computed_y is line-relative and not touched by
-                // recalculate_line_box — must match the input verbatim.
                 assert!(approx(ib.computed_y, 3.0), "computed_y={}", ib.computed_y);
             }
             _ => panic!("expected InlineBox at index 1"),
         }
-    }
-
-    // ---------- pageable_last_baseline walks wrappers ----------
-
-    /// Verifies that `pageable_last_baseline` walks through wrapper
-    /// pageables (e.g. `BookmarkMarkerWrapperPageable`) to reach the inner
-    /// `ParagraphPageable`'s last-line baseline. This is the core baseline
-    /// guarantee that the `Box<dyn Pageable>` refactor enables: prior to
-    /// this, the helper only accepted `BlockPageable` / `ParagraphPageable`
-    /// directly and silently dropped the baseline when a wrapper got in
-    /// the way.
-    #[test]
-    fn pageable_last_baseline_walks_through_wrappers() {
-        use crate::pageable::{BookmarkMarkerPageable, BookmarkMarkerWrapperPageable};
-
-        // ParagraphPageable with a single line of baseline = 10pt.
-        let para = ParagraphPageable::new(vec![ShapedLine {
-            height: 14.0,
-            baseline: 10.0,
-            items: Vec::new(),
-        }]);
-
-        // Wrap in a bookmark marker (zero-size wrapper).
-        let marker = BookmarkMarkerPageable::new(1, "H".to_string());
-        let wrapped: Box<dyn crate::pageable::Pageable> =
-            Box::new(BookmarkMarkerWrapperPageable::new(marker, Box::new(para)));
-
-        assert_eq!(
-            super::pageable_last_baseline(wrapped.as_ref()),
-            Some(10.0),
-            "pageable_last_baseline must walk through the wrapper to reach the inner paragraph's baseline"
-        );
     }
 }
 

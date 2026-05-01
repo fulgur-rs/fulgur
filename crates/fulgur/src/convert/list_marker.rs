@@ -34,7 +34,7 @@ fn size_raster_marker(
     format: crate::image::ImageFormat,
     line_height: f32,
 ) -> Option<(f32, f32)> {
-    let (iw, ih) = ImagePageable::decode_dimensions(data, format)?;
+    let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
     let intrinsic_w = px_to_pt(iw as f32);
     let intrinsic_h = px_to_pt(ih as f32);
     Some(crate::pageable::clamp_marker_size(

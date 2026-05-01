@@ -1926,10 +1926,10 @@ fn build_multicol_stroke(
     Some(stroke)
 }
 
-/// v2 image draw. Mirrors `image::ImagePageable::draw` but operates on
+/// v2 image draw. Mirrors `image::ImageRender::draw` but operates on
 /// the side-channel `ImageEntry` data; the `width`/`height` are the
 /// CSS-resolved size in pt that fulgur stores on the original
-/// `ImagePageable`.
+/// `ImageRender`.
 fn draw_image_v2(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     entry: &crate::drawables::ImageEntry,
@@ -1980,7 +1980,7 @@ fn decode_image_for_v2(entry: &crate::drawables::ImageEntry) -> Option<krilla::i
     image_result.ok()
 }
 
-/// v2 SVG draw. Mirrors `svg::SvgPageable::draw`.
+/// v2 SVG draw. Mirrors `svg::SvgRender::draw`.
 fn draw_svg_v2(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     entry: &crate::drawables::SvgEntry,
@@ -2574,7 +2574,7 @@ fn draw_list_item_marker(
     }
 }
 
-/// v2 paragraph draw. Mirrors `paragraph::ParagraphPageable::draw`:
+/// v2 paragraph draw. Mirrors `paragraph::ParagraphRender::draw`:
 /// honour `visible`, wrap with `draw_with_opacity`, then call the
 /// existing `paragraph::draw_shaped_lines` which already handles glyph
 /// runs / inline images / inline boxes / link rect emission /
@@ -2657,7 +2657,7 @@ fn draw_paragraph_inner_paint(
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
-/// `ParagraphPageable::slice_for_page` so multi-page paragraphs only
+/// `ParagraphRender::slice_for_page` so multi-page paragraphs only
 /// emit the lines belonging to the requested page.
 ///
 /// `is_split` is the parent `PaginationGeometry::is_split()` —
@@ -2719,7 +2719,7 @@ fn paragraph_lines_for_page(
         .map(|mut line| {
             // Rebase paragraph-absolute coords (baseline + inline
             // image `computed_y`) to fragment-local. Mirror
-            // `ParagraphPageable::slice_for_page` exactly.
+            // `ParagraphRender::slice_for_page` exactly.
             line.baseline -= consumed;
             for item in &mut line.items {
                 if let crate::paragraph::LineItem::Image(img) = item {
