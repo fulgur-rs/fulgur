@@ -1,116 +1,83 @@
 use super::*;
 
 /// Dispatcher entry for replaced elements (img / svg / `content: url(...)`).
-/// Returns `Some(Pageable)` if the node matches one of these branches and a
-/// pageable is produced; returns `None` otherwise so the caller falls
+///
+/// Returns `true` when the node matches a replaced-element branch and an
+/// `ImageEntry` / `SvgEntry` (and a `BlockEntry` when the node has visual
+/// styling) was inserted into `out`. Returns `false` so the caller falls
 /// through to the next dispatch stage.
 pub(super) fn try_convert(
     doc: &BaseDocument,
     node_id: usize,
     ctx: &mut super::ConvertContext<'_>,
-) -> Option<Box<dyn crate::pageable::Pageable>> {
-    let node = doc.get_node(node_id)?;
+    out: &mut crate::drawables::Drawables,
+) -> bool {
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
     if let Some(elem_data) = node.element_data() {
         let tag = elem_data.name.local.as_ref();
-        if tag == "img" {
-            if let Some(img) = convert_image(ctx, node, ctx.assets) {
-                return Some(img);
-            }
-            // Fall through to generic handling below to preserve Taffy-computed dimensions
+        // Fall through to the generic / content-url paths below when the
+        // asset can't be resolved (missing in bundle, unsupported format,
+        // or `ImageData::None` from upstream SVG parse failure).
+        if tag == "img" && convert_image(ctx, node, ctx.assets, out) {
+            return true;
         }
-        if tag == "svg" {
-            if let Some(svg) = convert_svg(ctx, node, ctx.assets) {
-                return Some(svg);
-            }
-            // Fall through — e.g., ImageData::None (parse failure upstream)
+        if tag == "svg" && convert_svg(ctx, node, ctx.assets, out) {
+            return true;
         }
     }
     // CSS `content: url(...)` on a normal element replaces its children with
     // the image (CSS Content L3 §2). Blitz 0.2.4 does not materialise this
-    // in layout, so we read the computed value and build an ImagePageable.
-    // Early return skips pseudo-element processing (spec-correct: replaced
-    // elements do not generate ::before/::after).
-    convert_content_url(ctx, node, ctx.assets)
+    // in layout, so we read the computed value and build an ImageEntry.
+    convert_content_url(ctx, node, ctx.assets, out)
 }
 
-/// Wrap an atomic replaced element (image, svg) in a styled `BlockPageable`
-/// when the node has visual styling, or return the inner Pageable directly.
+/// Insert a `BlockEntry` for the replaced element when its computed style
+/// has visual styling (background, border, etc.). Returns the inset
+/// `(content_width, content_height, opacity, visible)` callers use to size
+/// the inner image / svg entry.
 ///
-/// `build_inner` is invoked once with the dimensions and the opacity/visibility
-/// values that should be applied to the inner element. In the styled branch
-/// the inner receives `opacity = 1.0` (the wrapping block handles opacity)
-/// and the dimensions are the content-box, not the border-box. In the unstyled
-/// branch the inner receives the node's own opacity/visibility and full size.
-fn wrap_replaced_in_block_style<F>(
-    _ctx: &ConvertContext<'_>,
+/// When the node has no visual style, returns the full border-box
+/// dimensions and the node's own opacity / visibility — no `BlockEntry`
+/// is inserted because the dispatcher skips block-paint for nodes
+/// without one.
+fn maybe_insert_block_for_replaced(
     node: &Node,
     assets: Option<&AssetBundle>,
-    build_inner: F,
-) -> Box<dyn Pageable>
-where
-    // `build_inner` always sets `node_id` on the inner Pageable. When
-    // wrapped in a styled BlockPageable both share the DOM node's
-    // geometry: the wrapping block carries `node_id` so it can locate
-    // its fragment, and the inner also carries `node_id` so the
-    // fragmenter records its per-page slice via `column_styles`-driven
-    // break decisions.
-    F: FnOnce(f32, f32, f32, bool) -> Box<dyn Pageable>,
-{
+    out: &mut crate::drawables::Drawables,
+) -> (f32, f32, f32, bool) {
     let (width, height) = size_in_pt(node.final_layout.size);
-
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
 
     if style.has_visual_style() {
-        let (cx, cy) = style.content_inset();
-        // content_inset returns (left, top); compute right/bottom insets for content-box
+        let (left_inset, top_inset) = style.content_inset();
         let right_inset = style.border_widths[1] + style.padding[1];
         let bottom_inset = style.border_widths[2] + style.padding[2];
-        let content_width = (width - cx - right_inset).max(0.0);
-        let content_height = (height - cy - bottom_inset).max(0.0);
-        // Inner element receives visibility (it IS the node's own content) but
-        // NOT opacity — the wrapping block handles opacity once for the whole
-        // border-box, otherwise the border would also be faded.
-        let inner = build_inner(content_width, content_height, 1.0, visible);
-        let child = PositionedChild {
-            child: inner,
-            x: cx,
-            y: cy,
-            height: content_height,
-            out_of_flow: false,
-            is_fixed: false,
-        };
-        let mut block = BlockPageable::with_positioned_children(vec![child])
-            .with_style(style)
-            .with_opacity(opacity)
-            .with_visible(visible)
-            .with_id(extract_block_id(node))
-            .with_node_id(Some(node.id));
-        block.layout_size = Some(Size { width, height });
-        Box::new(block)
+        let content_width = (width - left_inset - right_inset).max(0.0);
+        let content_height = (height - top_inset - bottom_inset).max(0.0);
+        out.block_styles.insert(
+            node.id,
+            crate::drawables::BlockEntry {
+                style,
+                opacity,
+                visible,
+                id: extract_block_id(node),
+                layout_size: Some(Size { width, height }),
+                clip_descendants: Vec::new(),
+                opacity_descendants: Vec::new(),
+            },
+        );
+        // Inner image carries visibility but full opacity — the wrapping
+        // BlockEntry handles opacity once for the whole border-box,
+        // otherwise the border would also be faded.
+        (content_width, content_height, 1.0, visible)
     } else {
-        // No wrapping block — inner IS the outermost Pageable for this DOM node.
-        // break-before/after on a bare replaced element still flows through
-        // `column_styles` to the fragmenter, so no thin BlockPageable wrapper
-        // is needed to carry the break decision.
-        build_inner(width, height, opacity, visible)
+        (width, height, opacity, visible)
     }
 }
 
-/// Shared sizing / construction for `ImagePageable`, used by both the `<img>`
-/// element path and the `::before`/`::after` `content: url()` pseudo path.
-///
-/// Sizing rules match the CSS replaced-element spec:
-///
-/// - both css dims given → use them verbatim
-/// - one given → scale the other by the image's intrinsic aspect ratio
-/// - neither given → use intrinsic pixel dimensions (treated as 1px = 1pt
-///   since `ImagePageable` draws in PDF points; this matches the existing
-///   `<img>` behavior when Taffy has nothing to resolve the size from)
-///
-/// The intrinsic dimensions come from `ImagePageable::decode_dimensions`.
-/// A zero-height decode result silently degrades to a 1:1 aspect so width-only
-/// sizing does not produce NaN.
 /// Resolve CSS width/height against intrinsic image dimensions + aspect ratio.
 pub(super) fn resolve_image_dimensions(
     data: &[u8],
@@ -130,126 +97,156 @@ pub(super) fn resolve_image_dimensions(
     }
 }
 
-pub(super) fn make_image_pageable(
+/// Build an `ImageEntry` from raw image bytes plus optional CSS dimensions.
+/// Used by the `<img>` element path, the `content: url()` pseudo path, and
+/// list-style-image marker resolution.
+pub(super) fn make_image_entry(
     data: Arc<Vec<u8>>,
     format: crate::image::ImageFormat,
     css_w: Option<f32>,
     css_h: Option<f32>,
     opacity: f32,
     visible: bool,
-) -> ImagePageable {
+) -> crate::drawables::ImageEntry {
     let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
-    let mut img = ImagePageable::new(data, format, w, h);
-    img.opacity = opacity;
-    img.visible = visible;
-    img
+    crate::drawables::ImageEntry {
+        image_data: data,
+        format,
+        width: w,
+        height: h,
+        opacity,
+        visible,
+    }
 }
 
 /// Convert a normal element whose computed `content` resolves to a single
-/// `url(...)` image into an `ImagePageable`. Per CSS spec, `content` on a
+/// `url(...)` image into an `ImageEntry`. Per CSS spec, `content` on a
 /// normal element replaces the element's children — so we return early and
 /// skip pseudo-element processing.
 ///
-/// Returns `None` when the element has no `content: url()`, the asset is
+/// Returns `false` when the element has no `content: url()`, the asset is
 /// missing, or the format is unsupported — callers fall through to the
 /// standard conversion path.
 fn convert_content_url(
-    ctx: &ConvertContext<'_>,
+    _ctx: &ConvertContext<'_>,
     node: &Node,
     assets: Option<&AssetBundle>,
-) -> Option<Box<dyn Pageable>> {
-    let raw_url = crate::blitz_adapter::extract_content_image_url(node)?;
+    out: &mut crate::drawables::Drawables,
+) -> bool {
+    let Some(raw_url) = crate::blitz_adapter::extract_content_image_url(node) else {
+        return false;
+    };
     let asset_name = extract_asset_name(&raw_url);
-    let bundle = assets?;
-    let data = Arc::clone(bundle.get_image(asset_name)?);
-    let format = ImagePageable::detect_format(&data)?;
-    let node_id = node.id;
+    let Some(bundle) = assets else { return false };
+    let Some(data) = bundle.get_image(asset_name).cloned() else {
+        return false;
+    };
+    let Some(format) = ImagePageable::detect_format(&data) else {
+        return false;
+    };
 
-    Some(wrap_replaced_in_block_style(
-        ctx,
-        node,
-        assets,
-        move |w, h, opacity, visible| {
-            let mut img =
-                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
-            img.node_id = Some(node_id);
-            Box::new(img)
-        },
-    ))
+    let (content_w, content_h, opacity, visible) =
+        maybe_insert_block_for_replaced(node, assets, out);
+    let entry = make_image_entry(
+        data,
+        format,
+        Some(content_w),
+        Some(content_h),
+        opacity,
+        visible,
+    );
+    out.images.insert(node.id, entry);
+    true
 }
 
-/// Convert an `<img>` element into an `ImagePageable`, wrapped in `BlockPageable` if styled.
+/// Convert an `<img>` element into an `ImageEntry`, plus a wrapping
+/// `BlockEntry` when the element has visual styling.
 fn convert_image(
-    ctx: &ConvertContext<'_>,
+    _ctx: &ConvertContext<'_>,
     node: &Node,
     assets: Option<&AssetBundle>,
-) -> Option<Box<dyn Pageable>> {
-    let elem = node.element_data()?;
-    let src = get_attr(elem, "src")?;
-    let bundle = assets?;
-    let data = Arc::clone(bundle.get_image(src)?);
-    let format = ImagePageable::detect_format(&data)?;
-    let node_id = node.id;
+    out: &mut crate::drawables::Drawables,
+) -> bool {
+    let Some(elem) = node.element_data() else {
+        return false;
+    };
+    let Some(src) = get_attr(elem, "src") else {
+        return false;
+    };
+    let Some(bundle) = assets else { return false };
+    let Some(data) = bundle.get_image(src).cloned() else {
+        return false;
+    };
+    let Some(format) = ImagePageable::detect_format(&data) else {
+        return false;
+    };
 
-    Some(wrap_replaced_in_block_style(
-        ctx,
-        node,
-        assets,
-        move |w, h, opacity, visible| {
-            // `wrap_replaced_in_block_style` has already resolved (w, h) from
-            // Taffy's final layout, so we pass them as explicit css_w/css_h.
-            // The shared helper then applies the same `ImagePageable::new`
-            // construction path as the pseudo-content url() case, keeping
-            // sizing behavior byte-identical to the previous <img> path.
-            let mut img =
-                make_image_pageable(data.clone(), format, Some(w), Some(h), opacity, visible);
-            img.node_id = Some(node_id);
-            Box::new(img)
-        },
-    ))
+    let (content_w, content_h, opacity, visible) =
+        maybe_insert_block_for_replaced(node, assets, out);
+    let entry = make_image_entry(
+        data,
+        format,
+        Some(content_w),
+        Some(content_h),
+        opacity,
+        visible,
+    );
+    out.images.insert(node.id, entry);
+    true
 }
 
-/// Convert an inline `<svg>` element into an `SvgPageable`, wrapped in `BlockPageable` if styled.
-///
-/// Blitz parses the inline SVG into a `usvg::Tree` during DOM construction;
-/// `blitz_adapter::extract_inline_svg_tree` retrieves it without exposing
-/// blitz-internal types here.
+/// Convert an inline `<svg>` element into an `SvgEntry`, plus a wrapping
+/// `BlockEntry` when the element has visual styling.
 fn convert_svg(
-    ctx: &ConvertContext<'_>,
+    _ctx: &ConvertContext<'_>,
     node: &Node,
     assets: Option<&AssetBundle>,
-) -> Option<Box<dyn Pageable>> {
-    let elem = node.element_data()?;
-    let tree = extract_inline_svg_tree(elem)?;
-    let node_id = node.id;
+    out: &mut crate::drawables::Drawables,
+) -> bool {
+    let Some(elem) = node.element_data() else {
+        return false;
+    };
+    let Some(tree) = extract_inline_svg_tree(elem) else {
+        return false;
+    };
 
-    Some(wrap_replaced_in_block_style(
-        ctx,
-        node,
-        assets,
-        move |w, h, opacity, visible| {
-            let mut svg = SvgPageable::new(tree, w, h);
-            svg.opacity = opacity;
-            svg.visible = visible;
-            svg.node_id = Some(node_id);
-            Box::new(svg)
+    let (content_w, content_h, opacity, visible) =
+        maybe_insert_block_for_replaced(node, assets, out);
+    out.svgs.insert(
+        node.id,
+        crate::drawables::SvgEntry {
+            tree,
+            width: content_w,
+            height: content_h,
+            opacity,
+            visible,
         },
-    ))
+    );
+    true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{collect_images, sample_png_arc};
-    use super::super::{ConvertContext, dom_to_pageable};
-    use crate::asset::AssetBundle;
-    use crate::image::ImageFormat;
-    use std::collections::HashMap;
+    use super::*;
+
+    // Minimal 1x1 red PNG.
+    const TEST_PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn sample_png_arc() -> Arc<Vec<u8>> {
+        Arc::new(TEST_PNG_1X1.to_vec())
+    }
 
     #[test]
-    fn test_make_image_pageable_both_dimensions() {
-        let img = super::make_image_pageable(
+    fn test_make_image_entry_both_dimensions() {
+        let img = make_image_entry(
             sample_png_arc(),
-            ImageFormat::Png,
+            crate::image::ImageFormat::Png,
             Some(100.0),
             Some(50.0),
             1.0,
@@ -262,11 +259,11 @@ mod tests {
     }
 
     #[test]
-    fn test_make_image_pageable_width_only_uses_intrinsic_aspect() {
+    fn test_make_image_entry_width_only_uses_intrinsic_aspect() {
         // Intrinsic 1x1 → aspect 1.0 → width=40 produces height=40.
-        let img = super::make_image_pageable(
+        let img = make_image_entry(
             sample_png_arc(),
-            ImageFormat::Png,
+            crate::image::ImageFormat::Png,
             Some(40.0),
             None,
             1.0,
@@ -277,10 +274,10 @@ mod tests {
     }
 
     #[test]
-    fn test_make_image_pageable_height_only_uses_intrinsic_aspect() {
-        let img = super::make_image_pageable(
+    fn test_make_image_entry_height_only_uses_intrinsic_aspect() {
+        let img = make_image_entry(
             sample_png_arc(),
-            ImageFormat::Png,
+            crate::image::ImageFormat::Png,
             None,
             Some(25.0),
             1.0,
@@ -291,133 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn test_make_image_pageable_intrinsic_fallback() {
-        let img =
-            super::make_image_pageable(sample_png_arc(), ImageFormat::Png, None, None, 0.5, false);
+    fn test_make_image_entry_intrinsic_fallback() {
+        let img = make_image_entry(
+            sample_png_arc(),
+            crate::image::ImageFormat::Png,
+            None,
+            None,
+            0.5,
+            false,
+        );
         assert_eq!(img.width, 1.0);
         assert_eq!(img.height, 1.0);
         assert_eq!(img.opacity, 0.5);
         assert!(!img.visible);
-    }
-
-    #[test]
-    fn test_convert_content_url_normal_element() {
-        // A normal element with `content: url(...)` + explicit width/height
-        // should produce an ImagePageable, replacing its text children.
-        let icon_bytes = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("examples/image/icon.png"),
-        )
-        .unwrap();
-        let mut bundle = AssetBundle::new();
-        bundle.add_image("icon.png", icon_bytes);
-
-        let html = r#"<!doctype html><html><head><style>
-            .replaced { content: url("icon.png"); width: 24px; height: 24px; }
-        </style></head><body><div class="replaced">This text should be replaced</div></body></html>"#;
-
-        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
-        crate::blitz_adapter::resolve(&mut doc);
-
-        let running_store = crate::gcpm::running::RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &running_store,
-            assets: Some(&bundle),
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let tree = dom_to_pageable(&doc, &mut ctx);
-
-        let mut images = Vec::new();
-        collect_images(&*tree, &mut images);
-        assert!(
-            images.iter().any(|(w, h)| *w == 18.0 && *h == 18.0),
-            "expected an 18x18 pt ImagePageable (24 CSS px × 0.75) from content: url(), got {:?}",
-            images
-        );
-    }
-
-    #[test]
-    fn test_convert_content_url_no_content_falls_through() {
-        // A normal div without content: url() should NOT produce an ImagePageable.
-        let html = r#"<!doctype html><html><head><style>
-            div { width: 100px; height: 50px; background: red; }
-        </style></head><body><div>Normal text</div></body></html>"#;
-
-        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
-        crate::blitz_adapter::resolve(&mut doc);
-
-        let running_store = crate::gcpm::running::RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &running_store,
-            assets: None,
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let tree = dom_to_pageable(&doc, &mut ctx);
-
-        let mut images = Vec::new();
-        collect_images(&*tree, &mut images);
-        assert!(
-            images.is_empty(),
-            "normal div without content: url() should not produce images, got {:?}",
-            images
-        );
-    }
-
-    #[test]
-    fn test_convert_content_url_missing_asset_falls_through() {
-        // content: url("missing.png") where the asset is not in the bundle
-        // should silently fall through to the normal conversion path.
-        let bundle = AssetBundle::new(); // empty bundle
-
-        let html = r#"<!doctype html><html><head><style>
-            .replaced { content: url("missing.png"); width: 24px; height: 24px; }
-        </style></head><body><div class="replaced">fallback text</div></body></html>"#;
-
-        let mut doc = crate::blitz_adapter::parse(html, 800.0, &[]);
-        crate::blitz_adapter::resolve(&mut doc);
-
-        let running_store = crate::gcpm::running::RunningElementStore::new();
-        let mut ctx = ConvertContext {
-            running_store: &running_store,
-            assets: Some(&bundle),
-            font_cache: HashMap::new(),
-            string_set_by_node: HashMap::new(),
-            counter_ops_by_node: HashMap::new(),
-            bookmark_by_node: HashMap::new(),
-            column_styles: crate::column_css::ColumnStyleTable::new(),
-            multicol_geometry: crate::multicol_layout::MulticolGeometryTable::new(),
-            pagination_geometry: ::std::collections::BTreeMap::new(),
-            link_cache: Default::default(),
-            viewport_size_px: None,
-        };
-        let tree = dom_to_pageable(&doc, &mut ctx);
-
-        let mut images = Vec::new();
-        collect_images(&*tree, &mut images);
-        assert!(
-            images.is_empty(),
-            "missing asset should not produce images, got {:?}",
-            images
-        );
     }
 }
