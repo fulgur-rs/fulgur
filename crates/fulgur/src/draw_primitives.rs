@@ -1452,20 +1452,9 @@ pub(crate) fn clamp_marker_size(
 /// `transform_tests` module in `blitz_adapter.rs`).
 #[cfg(test)]
 pub(crate) mod matrix_test_util {
-    use super::Affine2D;
-
     pub(crate) const EPS: f32 = 1e-5;
 
     pub(crate) fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < EPS
-    }
-
-    pub(crate) fn matrix_approx(a: &Affine2D, b: &Affine2D) -> bool {
-        approx(a.a, b.a)
-            && approx(a.b, b.b)
-            && approx(a.c, b.c)
-            && approx(a.d, b.d)
-            && approx(a.e, b.e)
-            && approx(a.f, b.f)
     }
 }
