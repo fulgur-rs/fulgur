@@ -460,6 +460,7 @@ impl EngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pageable::{BlockPageable, SpacerPageable};
 
     #[test]
     fn builder_bookmarks_defaults_to_false() {
@@ -510,5 +511,134 @@ mod tests {
             .build();
         let result = engine.render();
         assert!(result.is_ok());
+    }
+
+    // ── Builder: config fields and override flags ──────────────────────────
+
+    #[test]
+    fn builder_page_size_stores_size_and_sets_override() {
+        let engine = Engine::builder().page_size(PageSize::LETTER).build();
+        let config = engine.config();
+        assert!((config.page_size.width - 612.0).abs() < 0.01);
+        assert!((config.page_size.height - 792.0).abs() < 0.01);
+        assert!(config.overrides.page_size);
+    }
+
+    #[test]
+    fn builder_margin_stores_margin_and_sets_override() {
+        let engine = Engine::builder().margin(Margin::uniform(36.0)).build();
+        let config = engine.config();
+        assert_eq!(config.margin, Margin::uniform(36.0));
+        assert!(config.overrides.margin);
+    }
+
+    #[test]
+    fn builder_landscape_stores_flag_and_sets_override() {
+        let engine = Engine::builder().landscape(true).build();
+        let config = engine.config();
+        assert!(config.landscape);
+        assert!(config.overrides.landscape);
+    }
+
+    // ── Builder: metadata fields ───────────────────────────────────────────
+
+    #[test]
+    fn builder_author_appends_each_call() {
+        // author() pushes rather than overwrites — verify both entries land.
+        let engine = Engine::builder().author("Alice").author("Bob").build();
+        let authors = &engine.config().authors;
+        assert_eq!(authors, &["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn builder_authors_extends_from_iterator() {
+        let engine = Engine::builder().authors(["Alice", "Bob", "Carol"]).build();
+        assert_eq!(
+            engine.config().authors,
+            vec!["Alice".to_string(), "Bob".to_string(), "Carol".to_string()]
+        );
+    }
+
+    #[test]
+    fn builder_keywords_extends_from_iterator() {
+        let engine = Engine::builder().keywords(["pdf", "html", "css"]).build();
+        assert_eq!(
+            engine.config().keywords,
+            vec!["pdf".to_string(), "html".to_string(), "css".to_string()]
+        );
+    }
+
+    #[test]
+    fn builder_metadata_fields_round_trip() {
+        let engine = Engine::builder()
+            .title("My Report")
+            .lang("en-US")
+            .description("A test document")
+            .creator("Test Suite")
+            .producer("fulgur-test")
+            .creation_date("2026-05-01")
+            .build();
+        let cfg = engine.config();
+        assert_eq!(cfg.title.as_deref(), Some("My Report"));
+        assert_eq!(cfg.lang.as_deref(), Some("en-US"));
+        assert_eq!(cfg.description.as_deref(), Some("A test document"));
+        assert_eq!(cfg.creator.as_deref(), Some("Test Suite"));
+        assert_eq!(cfg.producer.as_deref(), Some("fulgur-test"));
+        assert_eq!(cfg.creation_date.as_deref(), Some("2026-05-01"));
+    }
+
+    // ── Builder: assets getter ─────────────────────────────────────────────
+
+    #[test]
+    fn engine_assets_is_none_without_bundle() {
+        let engine = Engine::builder().build();
+        assert!(engine.assets().is_none());
+    }
+
+    #[test]
+    fn engine_assets_is_some_after_bundle_set() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_css("body { color: red; }");
+        let engine = Engine::builder().assets(bundle).build();
+        assert!(engine.assets().is_some());
+    }
+
+    // ── Render methods ─────────────────────────────────────────────────────
+
+    fn make_spacer_tree() -> Box<dyn Pageable> {
+        let mut s = SpacerPageable::new(100.0);
+        s.wrap(100.0, 1000.0);
+        Box::new(BlockPageable::new(vec![Box::new(s)]))
+    }
+
+    #[test]
+    fn render_pageable_returns_valid_pdf() {
+        let engine = Engine::builder().build();
+        let pdf = engine.render_pageable(make_spacer_tree()).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_html_to_file_writes_valid_pdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.pdf");
+        Engine::builder()
+            .build()
+            .render_html_to_file("<html><body><p>test</p></body></html>", &path)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_pageable_to_file_writes_valid_pdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.pdf");
+        Engine::builder()
+            .build()
+            .render_pageable_to_file(make_spacer_tree(), &path)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
     }
 }
