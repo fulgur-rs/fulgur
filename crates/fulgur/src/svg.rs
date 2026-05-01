@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use usvg::Tree;
 
+use crate::draw_primitives::{Canvas, Pt};
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {
@@ -39,8 +41,37 @@ impl SvgRender {
         self.node_id = node_id;
         self
     }
-}
 
+    pub fn draw(
+        &self,
+        canvas: &mut Canvas<'_, '_>,
+        x: Pt,
+        y: Pt,
+        _avail_width: Pt,
+        _avail_height: Pt,
+    ) {
+        use crate::draw_primitives::draw_with_opacity;
+        use krilla_svg::{SurfaceExt, SvgSettings};
+
+        if !self.visible {
+            return;
+        }
+        draw_with_opacity(canvas, self.opacity, |canvas| {
+            let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
+                return;
+            };
+            let transform = krilla::geom::Transform::from_translate(x, y);
+            canvas.surface.push_transform(&transform);
+            // draw_svg returns Option<()>; None means the tree was malformed.
+            // We silently skip rather than panic, matching ImageRender's behavior
+            // when krilla::image::Image::from_* returns Err.
+            let _ = canvas
+                .surface
+                .draw_svg(&self.tree, size, SvgSettings::default());
+            canvas.surface.pop();
+        });
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,6 +83,27 @@ mod tests {
         let opts = usvg::Options::default();
         let tree = Tree::from_str(MINIMAL_SVG, &opts).expect("parse minimal svg");
         Arc::new(tree)
+    }
+
+    /// Draw `svg` onto a freshly-created krilla Document and discard the output.
+    /// Used to exercise `draw()` without asserting on surface state.
+    fn draw_onto_surface(svg: &SvgRender) {
+        let mut doc = krilla::Document::new();
+        {
+            let settings = krilla::page::PageSettings::from_wh(400.0, 400.0)
+                .expect("400×400 is a valid page size");
+            let mut page = doc.start_page_with(settings);
+            let mut surface = page.surface();
+            {
+                let mut canvas = Canvas {
+                    surface: &mut surface,
+                    bookmark_collector: None,
+                    link_collector: None,
+                };
+                svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
+            }
+        }
+        let _ = doc.finish();
     }
 
     #[test]
@@ -77,5 +129,41 @@ mod tests {
         let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         assert_eq!(svg.opacity, 1.0);
         assert!(svg.visible);
+    }
+
+    #[test]
+    fn test_draw_visible_does_not_panic() {
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_not_visible_returns_early() {
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        svg.visible = false;
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_zero_size_skips_draw() {
+        // Size::from_wh(0.0, …) returns None (NonZeroPositiveF32 rejects zero);
+        // this exercises the `let Some(size) = … else { return; }` branch.
+        let svg = SvgRender::new(parse_tree(), 0.0, 50.0);
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_partial_opacity() {
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        svg.opacity = 0.5;
+        draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn test_draw_zero_opacity_returns_early() {
+        // draw_with_opacity short-circuits when opacity == 0.0.
+        let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        svg.opacity = 0.0;
+        draw_onto_surface(&svg);
     }
 }
