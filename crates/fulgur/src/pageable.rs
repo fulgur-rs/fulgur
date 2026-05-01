@@ -1371,8 +1371,8 @@ mod overflow_tests {
 
 #[cfg(test)]
 mod affine_tests {
-    use crate::draw_primitives::matrix_test_util::{approx, matrix_approx};
     use super::*;
+    use crate::draw_primitives::matrix_test_util::{approx, matrix_approx};
     use std::f32::consts::FRAC_PI_2;
 
     #[test]
@@ -1541,8 +1541,8 @@ mod affine_tests {
 
 #[cfg(test)]
 mod transform_wrapper_tests {
-    use crate::draw_primitives::matrix_test_util::approx;
     use super::*;
+    use crate::draw_primitives::matrix_test_util::approx;
     use std::f32::consts::FRAC_PI_2;
 
     #[derive(Clone)]

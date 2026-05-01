@@ -8,6 +8,7 @@ pub mod blitz_adapter;
 pub(crate) mod column_css;
 pub mod config;
 pub mod convert;
+pub mod draw_primitives;
 #[doc(hidden)]
 pub mod drawables;
 pub mod engine;
@@ -20,7 +21,6 @@ pub(crate) mod link;
 pub mod multicol_layout;
 pub(crate) mod net;
 pub mod outline;
-pub mod draw_primitives;
 pub mod pageable;
 #[doc(hidden)]
 pub mod pagination_layout;
