@@ -163,6 +163,31 @@ impl Engine {
         }
 
         crate::blitz_adapter::resolve(&mut doc);
+
+        // Resolve `@page` page-1 size + margin BEFORE relayout / pagination so
+        // every layout pass below sees the same viewport. Without this,
+        // `relayout_position_fixed` and `viewport_size_px` would still use
+        // `self.config.content_*` while `pagination_geometry` (below) used the
+        // resolved size — causing fixed descendants and percentage-based
+        // fixed/abs pseudo sizing to diverge from page break geometry whenever
+        // CSS overrides page size or margins.
+        let (resolved_page_size, resolved_page_margin, resolved_landscape) =
+            crate::gcpm::page_settings::resolve_page_settings(
+                &gcpm.page_settings,
+                1,
+                0,
+                &self.config,
+            );
+        let resolved_page_size = if resolved_landscape {
+            resolved_page_size.landscape()
+        } else {
+            resolved_page_size
+        };
+        let resolved_content_width_pt =
+            resolved_page_size.width - resolved_page_margin.left - resolved_page_margin.right;
+        let resolved_content_height_pt =
+            resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
+
         // Second layout pass: re-run Taffy on every `position: fixed` subtree
         // with the page area as available space. Without this, stylo_taffy
         // collapses Fixed → Absolute and lays each fixed element out against
@@ -173,8 +198,8 @@ impl Engine {
         // viewport fallback in `resolve_cb_for_absolute`.
         crate::blitz_adapter::relayout_position_fixed(
             &mut doc,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.content_height()),
+            crate::convert::pt_to_px(resolved_content_width_pt),
+            crate::convert::pt_to_px(resolved_content_height_pt),
         );
 
         // Harvest Phase A `column-*` properties (column-fill, column-rule-*)
@@ -230,26 +255,11 @@ impl Engine {
         // skip: documents that override page size / margin via
         // `@page { size: ...; margin: ...; }` now feed the fragmenter a
         // matching strip height by construction.
-        // Pass the full `page_settings` slice — `resolve_page_settings`
-        // already does selector matching for `@page :first` / named pages.
-        // Filtering to `page_selector.is_none()` here would make the
-        // fragmenter use the default page size while the renderer later
-        // applies selector overrides, leaving `pagination_geometry` on the
-        // wrong content height for those documents.
-        let (resolved_page_size, resolved_page_margin, resolved_landscape) =
-            crate::gcpm::page_settings::resolve_page_settings(
-                &gcpm.page_settings,
-                1,
-                0,
-                &self.config,
-            );
-        let resolved_page_size = if resolved_landscape {
-            resolved_page_size.landscape()
-        } else {
-            resolved_page_size
-        };
-        let resolved_content_height_pt =
-            resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
+        // The page-1 `@page` size / margin was resolved above (before
+        // `relayout_position_fixed`). Reuse those resolved dimensions
+        // here so the fragmenter, fixed-element layout, and viewport
+        // sizing all share a single content box — see the resolve block
+        // up at the start of this function.
         let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
             doc.deref_mut(),
             crate::convert::pt_to_px(resolved_content_height_pt),
@@ -319,9 +329,12 @@ impl Engine {
             multicol_geometry,
             pagination_geometry,
             link_cache: Default::default(),
+            // Use the resolved `@page` content box so percentage-based
+            // fixed/abs descendants size against the same viewport that
+            // pagination geometry and `relayout_position_fixed` use.
             viewport_size_px: Some((
-                crate::convert::pt_to_px(self.config.content_width()),
-                crate::convert::pt_to_px(self.config.content_height()),
+                crate::convert::pt_to_px(resolved_content_width_pt),
+                crate::convert::pt_to_px(resolved_content_height_pt),
             )),
         };
 
