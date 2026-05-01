@@ -2,11 +2,11 @@
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::{extract_asset_name, px_to_pt};
-use crate::image::ImageRender;
 use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle,
 };
+use crate::image::ImageRender;
 use std::sync::Arc;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
