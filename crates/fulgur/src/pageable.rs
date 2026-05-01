@@ -2338,8 +2338,8 @@ pub(crate) fn clamp_marker_size(
 /// Image marker contents — either a raster image or a parsed SVG tree.
 #[derive(Clone)]
 pub enum ImageMarker {
-    Raster(crate::image::ImagePageable),
-    Svg(crate::svg::SvgPageable),
+    Raster(crate::drawables::ImageEntry),
+    Svg(crate::drawables::SvgEntry),
 }
 
 /// Marker attached to a `ListItemPageable`.
@@ -2408,12 +2408,34 @@ impl Pageable for ListItemPageable {
                     } => {
                         let marker_x = x - *width;
                         let marker_y = y + (self.marker_line_height - *height) / 2.0;
+                        // v1 dead-code path (public entry points removed in PR 8a;
+                        // will be deleted with all of pageable.rs in PR 8j).
+                        // Reconstruct v1 types from ImageEntry/SvgEntry to reuse
+                        // their Pageable::draw impls rather than duplicating krilla
+                        // drawing code here.
                         match marker {
-                            ImageMarker::Raster(img) => {
-                                img.draw(canvas, marker_x, marker_y, *width, *height);
+                            ImageMarker::Raster(entry) => {
+                                crate::image::ImagePageable {
+                                    image_data: entry.image_data.clone(),
+                                    format: entry.format,
+                                    width: entry.width,
+                                    height: entry.height,
+                                    opacity: entry.opacity,
+                                    visible: entry.visible,
+                                    node_id: None,
+                                }
+                                .draw(canvas, marker_x, marker_y, *width, *height);
                             }
-                            ImageMarker::Svg(svg) => {
-                                svg.draw(canvas, marker_x, marker_y, *width, *height);
+                            ImageMarker::Svg(entry) => {
+                                crate::svg::SvgPageable {
+                                    tree: entry.tree.clone(),
+                                    width: entry.width,
+                                    height: entry.height,
+                                    opacity: entry.opacity,
+                                    visible: entry.visible,
+                                    node_id: None,
+                                }
+                                .draw(canvas, marker_x, marker_y, *width, *height);
                             }
                         }
                     }

@@ -2566,27 +2566,8 @@ fn draw_list_item_marker(
             let marker_x = x - *width;
             let marker_y = y + (entry.marker_line_height - *height) / 2.0;
             match marker {
-                ImageMarker::Raster(img) => {
-                    let entry = crate::drawables::ImageEntry {
-                        image_data: img.image_data.clone(),
-                        format: img.format,
-                        width: img.width,
-                        height: img.height,
-                        opacity: img.opacity,
-                        visible: img.visible,
-                    };
-                    draw_image_v2(canvas, &entry, marker_x, marker_y);
-                }
-                ImageMarker::Svg(svg) => {
-                    let entry = crate::drawables::SvgEntry {
-                        tree: svg.tree.clone(),
-                        width: svg.width,
-                        height: svg.height,
-                        opacity: svg.opacity,
-                        visible: svg.visible,
-                    };
-                    draw_svg_v2(canvas, &entry, marker_x, marker_y);
-                }
+                ImageMarker::Raster(img) => draw_image_v2(canvas, img, marker_x, marker_y),
+                ImageMarker::Svg(svg) => draw_svg_v2(canvas, svg, marker_x, marker_y),
             }
         }
         _ => {}
