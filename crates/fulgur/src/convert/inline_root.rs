@@ -1,6 +1,6 @@
 use super::*;
 use super::{list_marker, positioned, pseudo};
-use crate::paragraph::{InlineBoxItem, InlineBoxPlaceholder, ParagraphRender};
+use crate::paragraph::{InlineBoxItem, ParagraphRender};
 
 /// Dispatcher entry for inline-root nodes (those with `node.flags.is_inline_root()`).
 ///
@@ -393,42 +393,36 @@ fn pageable_last_baseline_from_drawables(
 
 /// Recursively convert the Blitz node referenced by a Parley `InlineBox.id`.
 ///
-/// Returns an `InlineBoxPlaceholder` carrying the content `node_id` for the
-/// `LineItem::InlineBox.placeholder` slot. PR 8g/8i routes inline-box
-/// rendering through the v2 dispatcher (`dispatch_inline_box_content` keyed
-/// by content node id), so the placeholder is geometry-only — there is no
-/// trait object to draw through. The side-effect call to `convert_node`
-/// registers the inline-box subtree into `out` so the v2 dispatcher can
-/// find it.
+/// Returns `Some(node_id)` for normal inline boxes so that
+/// `paragraph::draw_shaped_lines` can look up the content's geometry /
+/// drawables entry and dispatch it through
+/// `render::dispatch_inline_box_content`. Returns `None` for
+/// absolutely-positioned pseudos — those are re-emitted by
+/// `walk_absolute_pseudo_children` at the CSS-correct position and must
+/// not be dispatched via the inline-box path.
 ///
-/// The placeholder MUST carry `node_id` because
-/// `paragraph::draw_shaped_lines` reads `ib.placeholder.node_id` to look up
-/// the content's geometry / drawables entry and dispatch it through
-/// `render::dispatch_inline_box_content`. Without it, every inline-block
-/// (and inline `<svg>` / `<img>`) silently disappears from the PDF.
+/// The side-effect call to `convert_node` registers the inline-box subtree
+/// into `out` so the v2 dispatcher can find it.
 fn convert_inline_box_node(
     doc: &BaseDocument,
     node_id: usize,
     ctx: &mut ConvertContext<'_>,
     depth: usize,
     out: &mut crate::drawables::Drawables,
-) -> crate::paragraph::InlineBoxPlaceholder {
+) -> Option<usize> {
     // Suppress the rendering path for absolutely-positioned pseudos that
     // Blitz routes through Parley's inline layout — they are re-emitted by
     // `walk_absolute_pseudo_children` at the CSS-correct position. Letting
     // them register here would double-paint via the inline-box dispatch.
-    // The placeholder intentionally has no `node_id` so
-    // `paragraph::draw_shaped_lines`'s `ib.placeholder.node_id` is `None`
-    // and the inline-box dispatch is skipped.
+    // Returning `None` causes `paragraph::draw_shaped_lines` to skip the
+    // inline-box dispatch for this item.
     if let Some(node) = doc.get_node(node_id) {
         if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
-            return InlineBoxPlaceholder { node_id: None };
+            return None;
         }
     }
     convert_node(doc, node_id, ctx, depth + 1, out);
-    InlineBoxPlaceholder {
-        node_id: Some(node_id),
-    }
+    Some(node_id)
 }
 
 /// Extract a `ParagraphRender` from an inline root node. The caller
@@ -539,10 +533,9 @@ pub(super) fn extract_paragraph(
 
                     let link = ctx.link_cache.lookup(doc, node_id);
                     let height_pt = px_to_pt(positioned.height);
-                    // PR 8i: read baseline from `out` (Drawables). The
-                    // placeholder carries `node_id` only; the lookup queries
-                    // `out.paragraphs[node_id]` (and `block_styles[node_id]`
-                    // for top-inset) directly.
+                    // Read baseline from `out` (Drawables). The Drawables-aware
+                    // lookup queries `out.paragraphs[node_id]` (and
+                    // `block_styles[node_id]` for top-inset) directly.
                     let baseline_shift =
                         inline_box_baseline_offset_from_drawables(doc, out, node_id)
                             .map(|bo| height_pt - bo)
@@ -554,7 +547,7 @@ pub(super) fn extract_paragraph(
                         .map(|(_, v)| v)
                         .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
-                        placeholder: content,
+                        node_id: content,
                         width: px_to_pt(positioned.width),
                         height: height_pt,
                         x_offset: px_to_pt(positioned.x),

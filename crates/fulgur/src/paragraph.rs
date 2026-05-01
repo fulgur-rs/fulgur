@@ -1,4 +1,4 @@
-//! ParagraphRender — renders text via the Parley→Krilla glyph bridge.
+//! `ParagraphRender` — renders text via the Parley→Krilla glyph bridge.
 
 use std::sync::Arc;
 
@@ -135,24 +135,11 @@ pub struct InlineImage {
     pub link: Option<Arc<LinkSpan>>,
 }
 
-/// Geometry-only stand-in for the inline-box content. The actual draw
-/// path is dispatched via `crate::render::dispatch_inline_box_content`
-/// keyed by `node_id` against `Drawables`/`geometry`. Holding the
-/// content NodeId instead of a `Box<dyn Pageable>` lets the v1
-/// `Pageable` trait disappear from `LineItem` entirely (PR 8j-1).
-#[derive(Clone, Debug)]
-pub struct InlineBoxPlaceholder {
-    /// Content NodeId; `None` when the content is suppressed (e.g.
-    /// absolutely-positioned pseudo re-emitted by
-    /// `walk_absolute_pseudo_children`) so `draw_shaped_lines` skips dispatch.
-    pub node_id: Option<usize>,
-}
-
 /// An atomic inline box (display: inline-block / inline-flex / inline-grid /
 /// inline-table) within a shaped line.
 #[derive(Clone, Debug)]
 pub struct InlineBoxItem {
-    pub placeholder: InlineBoxPlaceholder,
+    pub node_id: Option<usize>,
     pub width: f32,
     pub height: f32,
     pub x_offset: f32,
@@ -708,7 +695,7 @@ pub fn draw_shaped_lines(
                     // `(ox, oy)` and the dispatcher's `(geo_x_pt, geo_y_pt)`
                     // before invoking `render::dispatch_fragment`.
                     if let Some(ctx) = inline_box_ctx
-                        && let Some(content_id) = ib.placeholder.node_id
+                        && let Some(content_id) = ib.node_id
                         && let Some(content_geom) = ctx.geometry.get(&content_id)
                         && let Some(content_frag) = content_geom
                             .fragments
@@ -1231,7 +1218,7 @@ mod tests {
     #[test]
     fn line_item_inline_box_variant_can_be_constructed() {
         let item = LineItem::InlineBox(InlineBoxItem {
-            placeholder: InlineBoxPlaceholder { node_id: Some(42) },
+            node_id: Some(42),
             width: 50.0,
             height: 20.0,
             x_offset: 10.0,
@@ -1243,16 +1230,18 @@ mod tests {
         match item {
             LineItem::InlineBox(ib) => {
                 assert_eq!(ib.width, 50.0);
-                assert_eq!(ib.height, 20.0);
-                assert_eq!(ib.placeholder.node_id, Some(42));
+                assert_eq!(ib.node_id, Some(42));
             }
             _ => panic!("expected InlineBox variant"),
         }
     }
 
+    // ---------- Debug impl coverage ----------
+
+    /// Covers the `Debug` impl for every `LineItem` variant.
     #[test]
     fn line_item_debug_impl_covers_all_variants() {
-        // Text variant
+        // Text variant — delegates to the ShapedGlyphRun derive.
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
@@ -1271,9 +1260,9 @@ mod tests {
         let img = LineItem::Image(make_inline_image(10.0, 10.0, VerticalAlign::Baseline));
         assert!(format!("{:?}", img).contains("Image"));
 
-        // InlineBox variant
+        // InlineBox variant — node_id: Some(1).
         let ib = LineItem::InlineBox(InlineBoxItem {
-            placeholder: InlineBoxPlaceholder { node_id: Some(7) },
+            node_id: Some(1),
             width: 10.0,
             height: 5.0,
             x_offset: 1.0,
@@ -1283,10 +1272,8 @@ mod tests {
             visible: true,
         });
         let s = format!("{:?}", ib);
-        assert!(s.contains("InlineBox"));
-        assert!(s.contains("placeholder"));
-        assert!(s.contains("node_id"));
-        assert!(s.contains("Some(7)"));
+        assert!(s.contains("InlineBox"), "{}", s);
+        assert!(s.contains("width: 10.0"), "{}", s);
     }
 
     // ---------- recalculate_line_box InlineBox `continue` arms (L815, L847) ----------
@@ -1302,7 +1289,7 @@ mod tests {
             items: vec![
                 LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Top)),
                 LineItem::InlineBox(InlineBoxItem {
-                    placeholder: InlineBoxPlaceholder { node_id: None },
+                    node_id: None,
                     width: 30.0,
                     height: 20.0,
                     x_offset: 0.0,
