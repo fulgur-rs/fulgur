@@ -3123,7 +3123,7 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
                 let empty_column_styles = crate::column_css::ColumnStyleTable::new();
                 let geometry = crate::pagination_layout::run_pass_with_break_styles(
-                    &mut *render_doc,
+                    &mut render_doc,
                     crate::convert::pt_to_px(rect.height),
                     &empty_column_styles,
                 );
