@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::pageable::{
+use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle, Canvas,
 };
@@ -36,7 +36,7 @@ pub fn draw_box_shadows(
 fn draw_single_box_shadow(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
-    shadow: &crate::pageable::BoxShadow,
+    shadow: &crate::draw_primitives::BoxShadow,
     x: f32,
     y: f32,
     w: f32,
@@ -56,7 +56,7 @@ fn draw_single_box_shadow(
     // Build the (expanded) shadow shape.
     let shadow_path = if style.has_radius() {
         let radii = expand_radii(&style.border_radii, shadow.spread);
-        crate::pageable::build_rounded_rect_path(sx, sy, sw, sh, &radii)
+        crate::draw_primitives::build_rounded_rect_path(sx, sy, sw, sh, &radii)
     } else {
         build_rect_path(sx, sy, sw, sh)
     };
@@ -77,7 +77,7 @@ fn draw_single_box_shadow(
         };
         pb.push_rect(bbox);
         if style.has_radius() {
-            crate::pageable::append_rounded_rect_subpath(&mut pb, x, y, w, h, &style.border_radii);
+            crate::draw_primitives::append_rounded_rect_subpath(&mut pb, x, y, w, h, &style.border_radii);
         } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
             pb.push_rect(box_rect);
         } else {
@@ -158,7 +158,7 @@ fn draw_background_color(
         return;
     };
     let path = if style.has_radius() {
-        crate::pageable::build_rounded_rect_path(x, y, w, h, &style.border_radii)
+        crate::draw_primitives::build_rounded_rect_path(x, y, w, h, &style.border_radii)
     } else {
         build_rect_path(x, y, w, h)
     };
@@ -193,7 +193,7 @@ fn draw_background_layer(
 
     let clip_path = if style.has_radius() {
         let clip_radii = compute_inner_radii(&style.border_radii, style, &layer.clip);
-        crate::pageable::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
+        crate::draw_primitives::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
     } else {
         build_rect_path(cx, cy, cw, ch)
     };
@@ -247,8 +247,8 @@ fn draw_background_layer(
             // loop for irregular tile geometry (e.g. uneven space repeat).
             if let Some(grid) = try_uniform_grid(&tiles) {
                 let angle = match direction {
-                    crate::pageable::LinearGradientDirection::Angle(a) => *a,
-                    crate::pageable::LinearGradientDirection::Corner(corner) => {
+                    crate::draw_primitives::LinearGradientDirection::Angle(a) => *a,
+                    crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
                         // uniform grid → all tiles share the same (cell_w, cell_h)
                         // aspect, so a single corner-derived angle suffices.
                         corner_to_angle_rad(*corner, grid.cell.0, grid.cell.1)
@@ -271,7 +271,7 @@ fn draw_background_layer(
                 // Corner needs per-tile recomputation because the angle depends
                 // on tile aspect — CSS Images §3.1.1).
                 match direction {
-                    crate::pageable::LinearGradientDirection::Angle(a) => {
+                    crate::draw_primitives::LinearGradientDirection::Angle(a) => {
                         let angle = *a;
                         for (tx, ty, tw, th) in &tiles {
                             draw_linear_gradient(
@@ -286,7 +286,7 @@ fn draw_background_layer(
                             );
                         }
                     }
-                    crate::pageable::LinearGradientDirection::Corner(corner) => {
+                    crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
                         for (tx, ty, tw, th) in &tiles {
                             let angle = corner_to_angle_rad(*corner, *tw, *th);
                             draw_linear_gradient(
@@ -432,8 +432,8 @@ fn draw_background_layer(
 /// gradient direction is `(H · h_sign, W · v_sign)`, then
 /// `θ = atan2(H · h_sign, −W · v_sign)` because CSS measures clockwise from
 /// the +Y-up axis (`direction(θ) = (sin θ, −cos θ)` in Y-down).
-fn corner_to_angle_rad(corner: crate::pageable::LinearGradientCorner, w: f32, h: f32) -> f32 {
-    use crate::pageable::LinearGradientCorner::*;
+fn corner_to_angle_rad(corner: crate::draw_primitives::LinearGradientCorner, w: f32, h: f32) -> f32 {
+    use crate::draw_primitives::LinearGradientCorner::*;
     let (h_sign, v_sign) = match corner {
         TopLeft => (-1.0_f32, -1.0_f32),
         TopRight => (1.0, -1.0),
@@ -616,11 +616,11 @@ fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
 ///
 /// `line_length <= 0` の場合は length stop が解決不能なので None。
 fn resolve_gradient_stops(
-    stops: &[crate::pageable::GradientStop],
+    stops: &[crate::draw_primitives::GradientStop],
     line_length: f32,
     repeating: bool,
 ) -> Option<Vec<krilla::paint::Stop>> {
-    use crate::pageable::GradientStopPosition;
+    use crate::draw_primitives::GradientStopPosition;
 
     if stops.len() < 2 {
         return None;
@@ -723,7 +723,7 @@ fn resolve_gradient_stops(
             .map(|(p, rgba)| krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(p).expect("renormalize guarantees [0, 1]"),
                 color: krilla::color::rgb::Color::new(rgba[0], rgba[1], rgba[2]).into(),
-                opacity: crate::pageable::alpha_to_opacity(rgba[3]),
+                opacity: crate::draw_primitives::alpha_to_opacity(rgba[3]),
             })
             .collect(),
     )
@@ -810,7 +810,7 @@ fn expand_repeating_stops(stops: Vec<(f32, [u8; 4])>) -> Option<Vec<(f32, [u8; 4
 fn draw_linear_gradient(
     surface: &mut krilla::surface::Surface<'_>,
     angle_rad: f32,
-    stops: &[crate::pageable::GradientStop],
+    stops: &[crate::draw_primitives::GradientStop],
     repeating: bool,
     ox: f32,
     oy: f32,
@@ -890,18 +890,18 @@ fn draw_linear_gradient(
 #[allow(clippy::too_many_arguments)]
 fn draw_radial_gradient(
     surface: &mut krilla::surface::Surface<'_>,
-    shape: crate::pageable::RadialGradientShape,
-    size: &crate::pageable::RadialGradientSize,
+    shape: crate::draw_primitives::RadialGradientShape,
+    size: &crate::draw_primitives::RadialGradientSize,
     position_x: &BgLengthPercentage,
     position_y: &BgLengthPercentage,
-    stops: &[crate::pageable::GradientStop],
+    stops: &[crate::draw_primitives::GradientStop],
     repeating: bool,
     ox: f32,
     oy: f32,
     ow: f32,
     oh: f32,
 ) {
-    use crate::pageable::{RadialExtent, RadialGradientShape, RadialGradientSize};
+    use crate::draw_primitives::{RadialExtent, RadialGradientShape, RadialGradientSize};
 
     if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
         return;
@@ -1031,7 +1031,7 @@ fn draw_conic_gradient(
     from_angle_rad: f32,
     position_x: &BgLengthPercentage,
     position_y: &BgLengthPercentage,
-    stops: &[crate::pageable::GradientStop],
+    stops: &[crate::draw_primitives::GradientStop],
     repeating: bool,
     ox: f32,
     oy: f32,
@@ -1117,7 +1117,7 @@ fn draw_conic_gradient(
         surface.set_fill(Some(krilla::paint::Fill {
             paint: krilla::color::rgb::Color::new(color[0], color[1], color[2]).into(),
             rule: Default::default(),
-            opacity: crate::pageable::alpha_to_opacity(color[3]),
+            opacity: crate::draw_primitives::alpha_to_opacity(color[3]),
         }));
         surface.draw_path(&path);
 
@@ -1164,8 +1164,8 @@ fn box_edge_at_angle(
 ///
 /// CSS では conic の position は `<angle>|<percentage>` のみで `LengthPx` は
 /// 出ないが、共通 `GradientStop` 経由のため変種が来た場合は無視する。
-fn normalize_conic_stops(stops: &[crate::pageable::GradientStop]) -> Vec<(f32, [u8; 4])> {
-    use crate::pageable::GradientStopPosition;
+fn normalize_conic_stops(stops: &[crate::draw_primitives::GradientStop]) -> Vec<(f32, [u8; 4])> {
+    use crate::draw_primitives::GradientStopPosition;
     if stops.is_empty() {
         return Vec::new();
     }
@@ -2904,7 +2904,7 @@ mod tests {
 
     #[test]
     fn corner_to_angle_rad_top_right_square_is_pi_over_4() {
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         // "to top right" on a square → 45° = π/4 clockwise from "to top"
         let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 100.0, 100.0);
         assert!(
@@ -2915,7 +2915,7 @@ mod tests {
 
     #[test]
     fn corner_to_angle_rad_top_left_square_is_neg_pi_over_4() {
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::TopLeft, 100.0, 100.0);
         assert!(
             (angle + std::f32::consts::FRAC_PI_4).abs() < 1e-5,
@@ -2925,7 +2925,7 @@ mod tests {
 
     #[test]
     fn corner_to_angle_rad_bottom_right_square_is_3pi_over_4() {
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::BottomRight, 100.0, 100.0);
         let expected = 3.0 * std::f32::consts::FRAC_PI_4;
         assert!(
@@ -2936,7 +2936,7 @@ mod tests {
 
     #[test]
     fn corner_to_angle_rad_bottom_left_square_is_neg_3pi_over_4() {
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::BottomLeft, 100.0, 100.0);
         let expected = -3.0 * std::f32::consts::FRAC_PI_4;
         assert!(
@@ -2948,7 +2948,7 @@ mod tests {
     #[test]
     fn corner_to_angle_rad_top_right_and_top_left_are_negations_for_square() {
         // Symmetry: "to top right" and "to top left" are equal-magnitude on a square.
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         let right = corner_to_angle_rad(LinearGradientCorner::TopRight, 200.0, 200.0);
         let left = corner_to_angle_rad(LinearGradientCorner::TopLeft, 200.0, 200.0);
         assert!(
@@ -2961,7 +2961,7 @@ mod tests {
     fn corner_to_angle_rad_non_square_top_right_uses_aspect_ratio() {
         // For w=300, h=400: "to top right" = atan2(h, w) = atan2(400, 300).
         // On a non-square box the corner direction depends on the aspect ratio.
-        use crate::pageable::LinearGradientCorner;
+        use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 300.0, 400.0);
         let expected = f32::atan2(400.0_f32, 300.0_f32);
         assert!(
@@ -3081,8 +3081,8 @@ mod tests {
 #[cfg(test)]
 mod resolve_gradient_stops_tests {
     use super::*;
-    use crate::pageable::GradientStop;
-    use crate::pageable::GradientStopPosition::{self, *};
+    use crate::draw_primitives::GradientStop;
+    use crate::draw_primitives::GradientStopPosition::{self, *};
 
     fn fr(f: f32) -> GradientStopPosition {
         Fraction(f)
@@ -3620,7 +3620,7 @@ mod renormalize_stops_to_unit_range_tests {
 #[cfg(test)]
 mod conic_helpers_tests {
     use super::{box_edge_at_angle, normalize_conic_stops, sample_conic_color};
-    use crate::pageable::{GradientStop, GradientStopPosition};
+    use crate::draw_primitives::{GradientStop, GradientStopPosition};
 
     fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() < eps

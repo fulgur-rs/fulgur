@@ -15,7 +15,7 @@ use crate::drawables::{ImageMarker, ListItemMarker};
 use crate::gcpm::CounterOp;
 use crate::gcpm::running::RunningElementStore;
 use crate::image::ImageRender;
-use crate::pageable::{BlockStyle, Size};
+use crate::draw_primitives::{BlockStyle, Size};
 use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ShapedGlyph, ShapedGlyphRun,
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,

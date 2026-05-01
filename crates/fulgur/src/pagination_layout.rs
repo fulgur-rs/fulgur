@@ -563,7 +563,7 @@ impl<'a> PaginationLayoutTree<'a> {
                     .unwrap_or_default();
                 if matches!(
                     zero_break_props.break_before,
-                    Some(crate::pageable::BreakBefore::Page)
+                    Some(crate::draw_primitives::BreakBefore::Page)
                 ) && cursor_y > 0.0
                 {
                     page_index += 1;
@@ -585,7 +585,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 }
                 if matches!(
                     zero_break_props.break_after,
-                    Some(crate::pageable::BreakAfter::Page)
+                    Some(crate::draw_primitives::BreakAfter::Page)
                 ) {
                     page_index += 1;
                     cursor_y = 0.0;
@@ -617,7 +617,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // is a no-op (CSS 3 Fragmentation §3 collapses it).
             if matches!(
                 break_props.break_before,
-                Some(crate::pageable::BreakBefore::Page)
+                Some(crate::draw_primitives::BreakBefore::Page)
             ) && cursor_y > 0.0
             {
                 page_index += 1;
@@ -626,7 +626,7 @@ impl<'a> PaginationLayoutTree<'a> {
 
             let avoid_inside = matches!(
                 break_props.break_inside,
-                Some(crate::pageable::BreakInside::Avoid)
+                Some(crate::draw_primitives::BreakInside::Avoid)
             );
 
             // fulgur-p55h: if the child carries a Parley inline layout,
@@ -678,7 +678,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 prev_bottom_y_in_body = this_top_in_body + child_h;
                 if matches!(
                     break_props.break_after,
-                    Some(crate::pageable::BreakAfter::Page)
+                    Some(crate::draw_primitives::BreakAfter::Page)
                 ) {
                     page_index += 1;
                     cursor_y = 0.0;
@@ -771,7 +771,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 prev_bottom_y_in_body = this_top_in_body + child_h;
                 if matches!(
                     break_props.break_after,
-                    Some(crate::pageable::BreakAfter::Page)
+                    Some(crate::draw_primitives::BreakAfter::Page)
                 ) {
                     page_index += 1;
                     cursor_y = 0.0;
@@ -848,7 +848,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // whether the page is materialised.
             if matches!(
                 break_props.break_after,
-                Some(crate::pageable::BreakAfter::Page)
+                Some(crate::draw_primitives::BreakAfter::Page)
             ) {
                 page_index += 1;
                 cursor_y = 0.0;
@@ -1065,8 +1065,8 @@ fn has_forced_break_below(
     };
     for &child_id in &node.children {
         if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
-            && (matches!(props.break_before, Some(crate::pageable::BreakBefore::Page))
-                || matches!(props.break_after, Some(crate::pageable::BreakAfter::Page)))
+            && (matches!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page))
+                || matches!(props.break_after, Some(crate::draw_primitives::BreakAfter::Page)))
         {
             return true;
         }
@@ -1238,11 +1238,11 @@ fn fragment_block_subtree(
             .unwrap_or_default();
         let break_before_page = matches!(
             break_props.break_before,
-            Some(crate::pageable::BreakBefore::Page)
+            Some(crate::draw_primitives::BreakBefore::Page)
         );
         let break_after_page = matches!(
             break_props.break_after,
-            Some(crate::pageable::BreakAfter::Page)
+            Some(crate::draw_primitives::BreakAfter::Page)
         );
 
         // Compute Taffy parent-relative top early — both the zero-

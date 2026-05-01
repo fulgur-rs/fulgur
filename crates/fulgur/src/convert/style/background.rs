@@ -3,7 +3,7 @@
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::{extract_asset_name, px_to_pt};
 use crate::image::ImageRender;
-use crate::pageable::{
+use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle,
 };
@@ -144,7 +144,7 @@ fn resolve_linear_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,
 ) -> Option<(BgImageContent, f32, f32)> {
-    use crate::pageable::{LinearGradientCorner, LinearGradientDirection};
+    use crate::draw_primitives::{LinearGradientCorner, LinearGradientDirection};
     use style::values::computed::image::{Gradient, LineDirection};
     use style::values::generics::image::GradientFlags;
     use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
@@ -224,8 +224,8 @@ fn resolve_color_stops(
     >],
     current_color: &style::color::AbsoluteColor,
     gradient_kind: &'static str,
-) -> Option<Vec<crate::pageable::GradientStop>> {
-    use crate::pageable::{GradientStop, GradientStopPosition};
+) -> Option<Vec<crate::draw_primitives::GradientStop>> {
+    use crate::draw_primitives::{GradientStop, GradientStopPosition};
     use style::values::generics::image::GradientItem;
 
     let mut out: Vec<GradientStop> = Vec::with_capacity(items.len());
@@ -321,7 +321,7 @@ fn resolve_radial_gradient(
     g: &style::values::computed::Gradient,
     current_color: &style::color::AbsoluteColor,
 ) -> Option<(BgImageContent, f32, f32)> {
-    use crate::pageable::{RadialGradientShape, RadialGradientSize};
+    use crate::draw_primitives::{RadialGradientShape, RadialGradientSize};
     use style::values::computed::image::Gradient;
     use style::values::generics::image::{Circle, Ellipse, EndingShape, GradientFlags};
 
@@ -430,9 +430,9 @@ fn resolve_conic_gradient(
     let position_y = try_convert_lp_to_bg(&position.vertical)?;
     let repeating = flags.contains(GradientFlags::REPEATING);
 
-    let mut stops: Vec<crate::pageable::GradientStop> = Vec::with_capacity(items.len());
+    let mut stops: Vec<crate::draw_primitives::GradientStop> = Vec::with_capacity(items.len());
     for item in items.iter() {
-        use crate::pageable::{GradientStop, GradientStopPosition};
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
         match item {
             GradientItem::SimpleColorStop(c) => {
                 let abs = c.resolve_to_absolute(current_color);
@@ -480,8 +480,8 @@ fn resolve_conic_gradient(
     ))
 }
 
-fn map_extent(e: style::values::generics::image::ShapeExtent) -> crate::pageable::RadialExtent {
-    use crate::pageable::RadialExtent;
+fn map_extent(e: style::values::generics::image::ShapeExtent) -> crate::draw_primitives::RadialExtent {
+    use crate::draw_primitives::RadialExtent;
     use style::values::generics::image::ShapeExtent;
     match e {
         ShapeExtent::ClosestSide => RadialExtent::ClosestSide,

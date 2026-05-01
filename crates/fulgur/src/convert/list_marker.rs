@@ -37,7 +37,7 @@ fn size_raster_marker(
     let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
     let intrinsic_w = px_to_pt(iw as f32);
     let intrinsic_h = px_to_pt(ih as f32);
-    Some(crate::pageable::clamp_marker_size(
+    Some(crate::draw_primitives::clamp_marker_size(
         intrinsic_w,
         intrinsic_h,
         line_height,
@@ -90,7 +90,7 @@ pub(super) fn resolve_list_marker(
             let intrinsic_w = px_to_pt(size.width());
             let intrinsic_h = px_to_pt(size.height());
             let (width, height) =
-                crate::pageable::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+                crate::draw_primitives::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
             let entry = crate::drawables::SvgEntry {
                 tree: Arc::new(tree),
                 width,

@@ -1,7 +1,7 @@
 //! border-width and padding extraction (layout-only).
 
 use crate::convert::px_to_pt;
-use crate::pageable::BlockStyle;
+use crate::draw_primitives::BlockStyle;
 
 pub(super) fn apply_to(style: &mut BlockStyle, layout: &taffy::Layout) {
     style.border_widths = [
@@ -21,7 +21,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, layout: &taffy::Layout) {
 #[cfg(test)]
 mod tests {
     use super::apply_to;
-    use crate::pageable::BlockStyle;
+    use crate::draw_primitives::BlockStyle;
 
     #[test]
     fn px_to_pt_conversion_top_right_bottom_left() {

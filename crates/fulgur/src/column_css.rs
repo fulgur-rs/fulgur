@@ -45,7 +45,7 @@ use cssparser::{
     color::{parse_hash_color, parse_named_color},
 };
 
-use crate::pageable::{BreakAfter, BreakBefore, BreakInside};
+use crate::draw_primitives::{BreakAfter, BreakBefore, BreakInside};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1721,19 +1721,19 @@ mod tests {
     #[test]
     fn parses_break_before_page() {
         let props = parse_declaration_block("break-before: page;");
-        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page));
     }
 
     #[test]
     fn parses_break_before_always() {
         let props = parse_declaration_block("break-before: always;");
-        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Page));
+        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Page));
     }
 
     #[test]
     fn parses_break_before_auto() {
         let props = parse_declaration_block("break-before: auto;");
-        assert_eq!(props.break_before, Some(crate::pageable::BreakBefore::Auto));
+        assert_eq!(props.break_before, Some(crate::draw_primitives::BreakBefore::Auto));
     }
 
     #[test]
@@ -1743,7 +1743,7 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(
             rules[0].props.break_before,
-            Some(crate::pageable::BreakBefore::Page)
+            Some(crate::draw_primitives::BreakBefore::Page)
         );
     }
 }

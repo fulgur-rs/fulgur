@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
+use crate::draw_primitives::*;
 use crate::drawables::ListItemMarker;
 use crate::gcpm::CounterOp;
-
-pub use crate::draw_primitives::*;
 
 /// Core pagination-aware layout trait.
 pub trait Pageable: Send + Sync {

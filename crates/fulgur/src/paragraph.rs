@@ -5,7 +5,7 @@ use std::sync::Arc;
 use skrifa::MetadataProvider;
 
 use crate::image::ImageFormat;
-use crate::pageable::{Canvas, Pt};
+use crate::draw_primitives::{Canvas, Pt};
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -644,7 +644,7 @@ pub fn draw_shaped_lines(
                     if let Some(link_span) = run.link.as_ref() {
                         let run_width: f32 =
                             run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
-                        let rect = crate::pageable::Rect {
+                        let rect = crate::draw_primitives::Rect {
                             x: x + run.x_offset,
                             y: line_top_abs,
                             width: run_width.max(0.0),
@@ -659,7 +659,7 @@ pub fn draw_shaped_lines(
                     if !img.visible {
                         continue;
                     }
-                    crate::pageable::draw_with_opacity(canvas, img.opacity, |canvas| {
+                    crate::draw_primitives::draw_with_opacity(canvas, img.opacity, |canvas| {
                         let data: krilla::Data = Arc::clone(&img.data).into();
                         let Ok(image) = img.format.to_krilla_image(data) else {
                             return;
@@ -679,7 +679,7 @@ pub fn draw_shaped_lines(
                     // Matches the image's drawn coordinates exactly:
                     // (x + x_offset, y + computed_y, width, height).
                     if let Some(link_span) = img.link.as_ref() {
-                        let rect = crate::pageable::Rect {
+                        let rect = crate::draw_primitives::Rect {
                             x: x + img.x_offset,
                             y: y + img.computed_y,
                             width: img.width.max(0.0),
@@ -735,8 +735,8 @@ pub fn draw_shaped_lines(
                         let off_x = ox - geo_x_pt;
                         let off_y = oy - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
-                        let link_affine = crate::pageable::Affine2D::translation(off_x, off_y);
-                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                        let link_affine = crate::draw_primitives::Affine2D::translation(off_x, off_y);
+                        crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);
                             }
@@ -765,7 +765,7 @@ pub fn draw_shaped_lines(
                     // Link rect built after the opacity block ends, so link
                     // hit-areas remain intact even for opacity<1.0 boxes.
                     if let Some(link_span) = ib.link.as_ref() {
-                        let rect = crate::pageable::Rect {
+                        let rect = crate::draw_primitives::Rect {
                             x: ox,
                             y: oy,
                             width: ib.width.max(0.0),
