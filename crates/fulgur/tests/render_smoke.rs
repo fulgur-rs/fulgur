@@ -1260,3 +1260,81 @@ fn render_v2_smoke_positioned_child_height_field_paths() {
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+// ── Phase 4 PR 8g: dispatch_inline_box_content branches ──────────────────────
+
+#[test]
+fn render_v2_smoke_inline_block_css_transform_branch() {
+    // Exercises dispatch_inline_box_content → draw_under_transform path.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>text <span style="display:inline-block;width:60px;height:30px;background:red;
+                             transform:rotate(15deg)">rotated</span> text</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn render_v2_smoke_inline_block_overflow_hidden_clip_branch() {
+    // Exercises dispatch_inline_box_content → draw_under_clip path.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>text <span style="display:inline-block;width:40px;height:20px;overflow:hidden;">
+            <span style="margin-left:100px">clipped</span>
+        </span> text</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn render_v2_smoke_inline_block_opacity_descendant_branch() {
+    // Exercises dispatch_inline_box_content → draw_under_opacity path.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>text <span style="display:inline-block;width:60px;height:30px;background:blue;">
+            <span style="opacity:0.4;background:red;width:100%;height:100%;display:block;">
+                faded
+            </span>
+        </span> text</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn render_v2_smoke_inline_block_image_child_via_dispatch_fragment() {
+    // Exercises dispatch_fragment image branch when called from the inline-box
+    // subtree descendant walk inside dispatch_inline_box_content.
+    const MINIMAL_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", MINIMAL_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>text <span style="display:inline-block;width:60px;height:40px;background:#eee;">
+            <img src="dot.png" style="width:20px;height:20px;">
+        </span> text</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render_html(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}

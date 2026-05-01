@@ -497,10 +497,6 @@ pub trait Pageable: Send + Sync {
     /// visibility of an inline-box host element propagates through
     /// `TransformWrapperPageable` / marker wrappers to the caller that
     /// needs to gate rendering (see `InlineBoxItem.visible`).
-    fn is_visible(&self) -> bool {
-        true
-    }
-
     /// The DOM `usize` NodeId this Pageable represents, if any. Used by
     /// `extract_drawables_from_pageable` to key per-node draw payloads in
     /// the `Drawables` side-channel. Wrappers delegate to their inner
@@ -1693,10 +1689,6 @@ impl Pageable for BlockPageable {
         self
     }
 
-    fn is_visible(&self) -> bool {
-        self.visible
-    }
-
     fn node_id(&self) -> Option<usize> {
         self.node_id
     }
@@ -1856,10 +1848,6 @@ impl Pageable for BookmarkMarkerWrapperPageable {
         self
     }
 
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
-    }
-
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
     }
@@ -2005,10 +1993,6 @@ impl Pageable for CounterOpWrapperPageable {
         self
     }
 
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
-    }
-
     fn node_id(&self) -> Option<usize> {
         self.child.node_id()
     }
@@ -2082,10 +2066,6 @@ impl Pageable for TransformWrapperPageable {
         self
     }
 
-    fn is_visible(&self) -> bool {
-        self.inner.is_visible()
-    }
-
     fn node_id(&self) -> Option<usize> {
         self.inner.node_id()
     }
@@ -2128,10 +2108,6 @@ impl Pageable for StringSetWrapperPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2178,10 +2154,6 @@ impl Pageable for RunningElementWrapperPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn is_visible(&self) -> bool {
-        self.child.is_visible()
     }
 
     fn node_id(&self) -> Option<usize> {
@@ -2427,7 +2399,7 @@ impl Pageable for ListItemPageable {
                 match &self.marker {
                     ListItemMarker::Text { lines, width } if !lines.is_empty() => {
                         let marker_x = x - width;
-                        crate::paragraph::draw_shaped_lines(canvas, lines, marker_x, y);
+                        crate::paragraph::draw_shaped_lines(canvas, lines, marker_x, y, None);
                     }
                     ListItemMarker::Image {
                         marker,

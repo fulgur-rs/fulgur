@@ -383,6 +383,16 @@ fn draw_v2_page(
             // parent's opacity wrap. (fulgur-gdb9)
             continue;
         }
+        if drawables.inline_box_subtree_skip.contains(&node_id) {
+            // PR 8g: belongs to inline-box content (or its descendants)
+            // dispatched explicitly by `paragraph::draw_shaped_lines`
+            // under an offset transform. Skipping here avoids
+            // double-rendering at the body-relative geometry position
+            // (which doesn't include the CSS 2.1 §10.8.1 baseline_shift
+            // that fulgur applies at convert time, see
+            // `convert/inline_root.rs:493`).
+            continue;
+        }
         // Skip the html root: its bg / border / shadow are painted
         // per-page in the pre-pass (`paint_root_block_v2`) above.
         // Body intentionally is NOT skipped here — page 0 needs the
@@ -536,7 +546,17 @@ fn draw_v2_page(
                 continue;
             }
             dispatch_fragment(
-                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+                canvas,
+                node_id,
+                geom,
+                frag,
+                x_pt,
+                y_pt,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
             );
         }
     }
@@ -583,8 +603,139 @@ fn draw_v2_page(
 /// the appropriate per-type draw — exactly the same logic as before
 /// the transform refactor, just hoisted into a function so
 /// `draw_under_transform` can re-use it for descendants.
+/// PR 8g: dispatch inline-box content (and its descendants) under the
+/// caller's `push_transform(translate(off_x, off_y))`. Mirrors the main
+/// loop's transform / clip / opacity routing so CSS `transform`,
+/// `overflow:hidden`, and fractional opacity on the inline-block are
+/// honoured.
+///
+/// Called by `paragraph::draw_shaped_lines` for `LineItem::InlineBox`.
+/// `(x_pt, y_pt)` is the body-relative dispatch position
+/// (`margin + body_offset + px_to_pt(content_frag.x)`); the active
+/// translate transform shifts the entire subtree to the inline-flow
+/// position computed by the paragraph render path.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_fragment(
+pub(crate) fn dispatch_inline_box_content(
+    canvas: &mut crate::pageable::Canvas<'_, '_>,
+    content_id: usize,
+    content_geom: &crate::pagination_layout::PaginationGeometry,
+    content_frag: &crate::pagination_layout::Fragment,
+    x_pt: f32,
+    y_pt: f32,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+    inline_box_subtree_descendants: &std::collections::BTreeMap<usize, Vec<usize>>,
+) {
+    use crate::convert::px_to_pt;
+
+    if let Some(tx) = drawables.transforms.get(&content_id) {
+        draw_under_transform(
+            canvas,
+            tx,
+            content_id,
+            content_geom,
+            content_frag,
+            x_pt,
+            y_pt,
+            geometry,
+            drawables,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
+        return;
+    }
+    if let Some(block) = drawables.block_styles.get(&content_id)
+        && block.style.has_overflow_clip()
+    {
+        draw_under_clip(
+            canvas,
+            block,
+            content_id,
+            content_geom,
+            content_frag,
+            x_pt,
+            y_pt,
+            geometry,
+            drawables,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
+        return;
+    }
+    if let Some(block) = drawables.block_styles.get(&content_id)
+        && !block.opacity_descendants.is_empty()
+    {
+        draw_under_opacity(
+            canvas,
+            block,
+            content_id,
+            content_geom,
+            content_frag,
+            x_pt,
+            y_pt,
+            geometry,
+            drawables,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
+        return;
+    }
+    // No wrapper effect on the inline-box content itself: dispatch at
+    // body-relative `(x_pt, y_pt)` and walk its strict descendants
+    // (`inline_box_subtree_descendants[content_id]`) at the same body-
+    // relative frame. The caller's translate transform shifts everything.
+    dispatch_fragment(
+        canvas,
+        content_id,
+        content_geom,
+        content_frag,
+        x_pt,
+        y_pt,
+        drawables,
+        geometry,
+        margin_left_pt,
+        margin_top_pt,
+        page_index,
+    );
+    if let Some(descs) = inline_box_subtree_descendants.get(&content_id) {
+        for &desc_id in descs {
+            let Some(desc_geom) = geometry.get(&desc_id) else {
+                continue;
+            };
+            let Some(desc_frag) = desc_geom
+                .fragments
+                .iter()
+                .find(|f| f.page_index == page_index)
+            else {
+                continue;
+            };
+            let desc_x_pt = margin_left_pt + drawables.body_offset_pt.0 + px_to_pt(desc_frag.x);
+            let desc_y_pt = margin_top_pt + drawables.body_offset_pt.1 + px_to_pt(desc_frag.y);
+            dispatch_fragment(
+                canvas,
+                desc_id,
+                desc_geom,
+                desc_frag,
+                desc_x_pt,
+                desc_y_pt,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_fragment(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
@@ -592,6 +743,9 @@ fn dispatch_fragment(
     x_pt: f32,
     y_pt: f32,
     drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
     page_index: u32,
 ) {
     if let Some(table) = drawables.tables.get(&node_id) {
@@ -622,6 +776,10 @@ fn dispatch_fragment(
             &geom.fragments,
             page_index,
             is_split,
+            drawables,
+            geometry,
+            margin_left_pt,
+            margin_top_pt,
         );
         return;
     }
@@ -645,6 +803,10 @@ fn dispatch_fragment(
                 &geom.fragments,
                 page_index,
                 is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
             );
             return;
         }
@@ -667,6 +829,10 @@ fn dispatch_fragment(
             &geom.fragments,
             page_index,
             is_split,
+            drawables,
+            geometry,
+            margin_left_pt,
+            margin_top_pt,
         );
     }
 }
@@ -717,7 +883,17 @@ fn draw_under_transform(
     // Dispatch the wrapper's own payload first (the `inner` Pageable
     // shares this `node_id`) — matches v1's `inner.draw(canvas, x, y, ...)`.
     dispatch_fragment(
-        canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+        canvas,
+        node_id,
+        geom,
+        frag,
+        x_pt,
+        y_pt,
+        drawables,
+        geometry,
+        margin_left_pt,
+        margin_top_pt,
+        page_index,
     );
 
     // Then dispatch every strict descendant on this page. Each
@@ -896,7 +1072,17 @@ fn draw_under_transform(
                 );
             } else {
                 dispatch_fragment(
-                    canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables, page_index,
+                    canvas,
+                    desc_id,
+                    desc_geom,
+                    desc_frag,
+                    desc_x,
+                    desc_y,
+                    drawables,
+                    geometry,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
                 );
             }
         }
@@ -1107,6 +1293,10 @@ fn draw_under_clip(
                 &geom.fragments,
                 page_index,
                 is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
             );
         }
         if let Some(i) = img_for_block {
@@ -1279,7 +1469,16 @@ fn draw_under_clip(
                     );
                 } else {
                     dispatch_fragment(
-                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        canvas,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        drawables,
+                        geometry,
+                        margin_left_pt,
+                        margin_top_pt,
                         page_index,
                     );
                 }
@@ -1359,7 +1558,17 @@ fn draw_under_opacity(
             // from `ListItemEntry`, not `BlockEntry`. Defensive guard
             // only — should be unreachable.
             dispatch_fragment(
-                canvas, node_id, geom, frag, x_pt, y_pt, drawables, page_index,
+                canvas,
+                node_id,
+                geom,
+                frag,
+                x_pt,
+                y_pt,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
             );
         } else {
             // Block bg / border / shadow without the inner opacity
@@ -1434,6 +1643,10 @@ fn draw_under_opacity(
                     &geom.fragments,
                     page_index,
                     is_split,
+                    drawables,
+                    geometry,
+                    margin_left_pt,
+                    margin_top_pt,
                 );
             }
             if let Some(i) = img_for_block {
@@ -1572,7 +1785,16 @@ fn draw_under_opacity(
                     );
                 } else {
                     dispatch_fragment(
-                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        canvas,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        drawables,
+                        geometry,
+                        margin_left_pt,
+                        margin_top_pt,
                         page_index,
                     );
                 }
@@ -2161,7 +2383,16 @@ fn draw_under_clip_table(
                     );
                 } else {
                     dispatch_fragment(
-                        canvas, desc_id, desc_geom, desc_frag, desc_x, desc_y, drawables,
+                        canvas,
+                        desc_id,
+                        desc_geom,
+                        desc_frag,
+                        desc_x,
+                        desc_y,
+                        drawables,
+                        geometry,
+                        margin_left_pt,
+                        margin_top_pt,
                         page_index,
                     );
                 }
@@ -2199,6 +2430,10 @@ fn draw_block_with_inner_content(
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
     is_split: bool,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
 ) {
     use crate::pageable::draw_with_opacity;
 
@@ -2221,7 +2456,17 @@ fn draw_block_with_inner_content(
         draw_block_inner_paint(canvas, block, x, y, frag, is_split);
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(
-                canvas, p, inner_x, inner_y, fragments, page_index, is_split,
+                canvas,
+                p,
+                inner_x,
+                inner_y,
+                fragments,
+                page_index,
+                is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
             );
         }
         if let Some(i) = image {
@@ -2258,6 +2503,10 @@ fn draw_list_item_with_block(
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
     is_split: bool,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
 ) {
     use crate::pageable::draw_with_opacity;
 
@@ -2278,7 +2527,17 @@ fn draw_list_item_with_block(
         }
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(
-                canvas, p, inner_x, inner_y, fragments, page_index, is_split,
+                canvas,
+                p,
+                inner_x,
+                inner_y,
+                fragments,
+                page_index,
+                is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
             );
         }
     });
@@ -2297,7 +2556,7 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(canvas, lines, x - *width, y);
+            crate::paragraph::draw_shaped_lines(canvas, lines, x - *width, y, None);
         }
         ListItemMarker::Image {
             marker,
@@ -2325,6 +2584,7 @@ fn draw_list_item_marker(
 /// runs / inline images / inline boxes / link rect emission /
 /// decoration spans. Reusing the helper keeps the per-glyph PDF output
 /// byte-identical between v1 and v2.
+#[allow(clippy::too_many_arguments)]
 fn draw_paragraph_v2(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     entry: &crate::drawables::ParagraphEntry,
@@ -2333,10 +2593,26 @@ fn draw_paragraph_v2(
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
     is_split: bool,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
 ) {
     use crate::pageable::draw_with_opacity;
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        draw_paragraph_inner_paint(canvas, entry, x, y, fragments, page_index, is_split);
+        draw_paragraph_inner_paint(
+            canvas,
+            entry,
+            x,
+            y,
+            fragments,
+            page_index,
+            is_split,
+            drawables,
+            geometry,
+            margin_left_pt,
+            margin_top_pt,
+        );
     });
 }
 
@@ -2346,6 +2622,7 @@ fn draw_paragraph_v2(
 /// node_id) can compose marker + block paint + glyph runs into a
 /// single opacity group, matching v1's
 /// `ListItemPageable::draw → body.draw → paragraph.draw` chain.
+#[allow(clippy::too_many_arguments)]
 fn draw_paragraph_inner_paint(
     canvas: &mut crate::pageable::Canvas<'_, '_>,
     entry: &crate::drawables::ParagraphEntry,
@@ -2354,6 +2631,10 @@ fn draw_paragraph_inner_paint(
     fragments: &[crate::pagination_layout::Fragment],
     page_index: u32,
     is_split: bool,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
 ) {
     if !entry.visible {
         return;
@@ -2362,7 +2643,21 @@ fn draw_paragraph_inner_paint(
     else {
         return;
     };
-    crate::paragraph::draw_shaped_lines(canvas, &slice, x, y);
+    // PR 8g: build an InlineBoxRenderCtx so `draw_shaped_lines` can
+    // dispatch any `LineItem::InlineBox` content through
+    // `dispatch_inline_box_content` under a translate transform that
+    // moves the body-relative geometry dispatch position to the
+    // inline-flow position computed from `ib.x_offset` and
+    // `ib.computed_y` (the latter folds in the CSS 2.1 §10.8.1
+    // baseline_shift correction from `convert/inline_root.rs:493`).
+    let inline_box_ctx = Some(crate::paragraph::InlineBoxRenderCtx {
+        drawables,
+        geometry,
+        page_index,
+        margin_left_pt,
+        margin_top_pt,
+    });
+    crate::paragraph::draw_shaped_lines(canvas, &slice, x, y, inline_box_ctx);
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror

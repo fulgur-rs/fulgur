@@ -495,14 +495,19 @@ pub(super) fn extract_paragraph(
                             .map(|bo| height_pt - bo)
                             .unwrap_or(0.0);
                     let computed_y = px_to_pt(positioned.y) - accumulated_line_top + baseline_shift;
-                    // Propagate `visibility: hidden` from the inner pageable
-                    // (set by `extract_block_style`) so the inline-box is
-                    // treated as invisible at draw time — link rect emission
-                    // is then also suppressed by the `!ib.visible` guard in
-                    // `draw_shaped_lines`. `Pageable::is_visible()` walks
-                    // wrappers for us so a `visibility: hidden` inline-block
-                    // keeps that state through a transform / marker chain.
-                    let visible = content.is_visible();
+                    // PR 8g: read `visibility: hidden` directly from the
+                    // inline-box's DOM node — wrapper Pageables (Transform /
+                    // BookmarkMarker / CounterOp / StringSet /
+                    // RunningElement) never alter the visibility flag, so
+                    // `box_node`'s computed CSS visibility is equivalent
+                    // to the previous `content.is_visible()` walk through
+                    // the wrapper chain. This removes the last production
+                    // caller of `Pageable::is_visible`.
+                    let visible = doc
+                        .get_node(node_id)
+                        .map(super::style::extract_opacity_visible)
+                        .map(|(_, v)| v)
+                        .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         content,
                         width: px_to_pt(positioned.width),

@@ -677,8 +677,41 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
     }
 }
 
+/// PR 8g: render-side context that lets `draw_shaped_lines` dispatch
+/// inline-box content (`LineItem::InlineBox`) through the v2 dispatcher.
+///
+/// `None` is passed by:
+/// - The list-item marker text render path (markers contain only Text /
+///   Image items, never InlineBox).
+/// - Trait-method callers that exercise `draw_shaped_lines` outside the
+///   v2 render pipeline (PR 8g deletes these alongside `Pageable::draw`).
+///
+/// When `Some`, the InlineBox arm computes the inline-flow position
+/// `(ox, oy)` and dispatches the inline-box content directly at those
+/// coordinates via `render::dispatch_fragment`. Descendants in
+/// `Drawables.inline_box_subtree_descendants[content_id]` are dispatched
+/// at `(ox, oy)` plus their body-relative offset from the content's own
+/// fragment — a single coordinate space, no transform stack needed.
+#[derive(Clone, Copy)]
+pub struct InlineBoxRenderCtx<'a> {
+    pub drawables: &'a crate::drawables::Drawables,
+    pub geometry: &'a crate::pagination_layout::PaginationGeometryTable,
+    pub page_index: u32,
+    /// Page margin in PDF pt — needed by `draw_under_clip` /
+    /// `draw_under_transform` / `draw_under_opacity` to compute
+    /// descendant positions during the offset-transform dispatch.
+    pub margin_left_pt: Pt,
+    pub margin_top_pt: Pt,
+}
+
 /// Draw pre-shaped text lines at the given position.
-pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: Pt, y: Pt) {
+pub fn draw_shaped_lines(
+    canvas: &mut Canvas<'_, '_>,
+    lines: &[ShapedLine],
+    x: Pt,
+    y: Pt,
+    inline_box_ctx: Option<InlineBoxRenderCtx<'_>>,
+) {
     // Track the top edge of each line within the paragraph (paragraph y=0 at
     // `y`). Lines pack tightly by `line.height`. We use the full line box for
     // link activation rects (matches WeasyPrint behavior), so tracking the
@@ -803,20 +836,83 @@ pub fn draw_shaped_lines(canvas: &mut Canvas<'_, '_>, lines: &[ShapedLine], x: P
                     }
                     let ox = x + ib.x_offset;
                     let oy = line_top_abs + ib.computed_y;
-                    crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
-                        // Pass (ox, oy) as absolute draw coordinates instead
-                        // of pushing a krilla transform + drawing at (0, 0).
-                        // Nested link rects are tracked in logical coords via
-                        // `Canvas::link_collector` (pageable-space, not krilla
-                        // surface-space), so a krilla transform would shift
-                        // the visuals but leave link hit-areas at the origin.
-                        // `ib.content` is `Box<dyn Pageable>`, so dispatch
-                        // straight to the trait — any wrapper chain
-                        // (Transform / StringSet / Counter / Bookmark /
-                        // RunningElement) is preserved and applies its
-                        // side effects around the inner Block / Paragraph.
-                        ib.content.draw(canvas, ox, oy, ib.width, ib.height);
-                    });
+
+                    // PR 8g: dispatch via the v2 path under an offset
+                    // transform. `ib.content`'s geometry-recorded position
+                    // (Taffy/Parley body-relative) does not include the
+                    // CSS 2.1 §10.8.1 baseline_shift that `convert/
+                    // inline_root.rs:493` applies at convert time, so the
+                    // standard dispatcher would render the content at the
+                    // wrong y. Push a translate transform equal to the
+                    // difference between the inline-flow position
+                    // `(ox, oy)` and the dispatcher's `(geo_x_pt, geo_y_pt)`
+                    // before invoking `render::dispatch_fragment`.
+                    if let Some(ctx) = inline_box_ctx
+                        && let Some(content_id) = ib.content.node_id()
+                        && let Some(content_geom) = ctx.geometry.get(&content_id)
+                        && let Some(content_frag) = content_geom
+                            .fragments
+                            .iter()
+                            .find(|f| f.page_index == ctx.page_index)
+                    {
+                        // Dispatch the inline-box content via the standard
+                        // wrapping helpers (transform / clip / opacity) so
+                        // CSS `transform`, `overflow:hidden`, and fractional
+                        // opacity on the inline-block are honoured. The
+                        // helpers compute descendant positions from
+                        // body-relative geometry as
+                        // `margin + body_offset + px_to_pt(frag.x)`, so we
+                        // dispatch at the body-relative `geo_pt` and use
+                        // `push_transform(translate(off_x, off_y))` to
+                        // shift the whole subtree to the inline-flow
+                        // position `(ox, oy)`.
+                        let geo_x_pt = ctx.margin_left_pt
+                            + ctx.drawables.body_offset_pt.0
+                            + crate::convert::px_to_pt(content_frag.x);
+                        let geo_y_pt = ctx.margin_top_pt
+                            + ctx.drawables.body_offset_pt.1
+                            + crate::convert::px_to_pt(content_frag.y);
+                        let off_x = ox - geo_x_pt;
+                        let off_y = oy - geo_y_pt;
+                        let transform = krilla::geom::Transform::from_translate(off_x, off_y);
+                        let link_affine = crate::pageable::Affine2D::translation(off_x, off_y);
+                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.push_transform(link_affine);
+                            }
+                            canvas.surface.push_transform(&transform);
+                            crate::render::dispatch_inline_box_content(
+                                canvas,
+                                content_id,
+                                content_geom,
+                                content_frag,
+                                geo_x_pt,
+                                geo_y_pt,
+                                ctx.drawables,
+                                ctx.geometry,
+                                ctx.margin_left_pt,
+                                ctx.margin_top_pt,
+                                ctx.page_index,
+                                &ctx.drawables.inline_box_subtree_descendants,
+                            );
+                            canvas.surface.pop();
+                            if let Some(lc) = canvas.link_collector.as_deref_mut() {
+                                lc.pop_transform();
+                            }
+                        });
+                    } else {
+                        // No v2 ctx (legacy `Pageable::draw` invocation
+                        // path), or the inline-box content has no
+                        // `node_id` / no geometry entry. Preserve the
+                        // direct trait-method dispatch so test-only
+                        // pageable trees (`render_at_rect` /
+                        // gcpm-pageable callers) keep rendering. PR 8h
+                        // (direct convert) deletes this fallback when
+                        // every caller routes through Drawables.
+                        crate::pageable::draw_with_opacity(canvas, ib.opacity, |canvas| {
+                            ib.content.draw(canvas, ox, oy, ib.width, ib.height);
+                        });
+                    }
 
                     // Link rect built after the opacity block ends, so link
                     // hit-areas remain intact even for opacity<1.0 boxes.
@@ -946,7 +1042,7 @@ impl Pageable for ParagraphPageable {
             return;
         }
         crate::pageable::draw_with_opacity(canvas, self.opacity, |canvas| {
-            draw_shaped_lines(canvas, &self.lines, x, y);
+            draw_shaped_lines(canvas, &self.lines, x, y, None);
         });
     }
 
@@ -956,10 +1052,6 @@ impl Pageable for ParagraphPageable {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn is_visible(&self) -> bool {
-        self.visible
     }
 
     fn node_id(&self) -> Option<usize> {

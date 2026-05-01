@@ -111,7 +111,7 @@ pub struct ConvertContext<'a> {
     /// (see [`crate::multicol_layout::run_pass`]). Task 4's
     /// `MulticolRulePageable` reads this to paint `column-rule` lines
     /// between adjacent non-empty columns without re-running layout.
-    /// Keyed by container `usize` NodeId — same convention as
+    /// Keyed by container `usize` crate::drawables::NodeId — same convention as
     /// `column_styles`.
     pub multicol_geometry: crate::multicol_layout::MulticolGeometryTable,
     /// fulgur-cj6u Phase 1.1: per-body-child page-fragment geometry
@@ -121,7 +121,7 @@ pub struct ConvertContext<'a> {
     /// and compares it to `paginate(...).len()` to catch divergence
     /// between the fragmenter and Pageable's split decisions.
     /// Empty when the document had no body or no in-flow children.
-    /// Keyed by source `usize` NodeId — same convention as
+    /// Keyed by source `usize` crate::drawables::NodeId — same convention as
     /// `column_styles` and `multicol_geometry`.
     pub pagination_geometry: crate::pagination_layout::PaginationGeometryTable,
     /// Anchor (`<a href>`) resolution cache shared across the entire
@@ -174,7 +174,7 @@ pub fn dom_to_pageable(doc: &HtmlDocument, ctx: &mut ConvertContext<'_>) -> Box<
 }
 
 /// Phase 4 (fulgur-9t3z): convert a resolved Blitz document into a
-/// `Drawables` struct holding per-NodeId draw payload.
+/// `Drawables` struct holding per-crate::drawables::NodeId draw payload.
 ///
 /// **Migration scaffolding (PRs 2-6)**: this implementation runs
 /// `dom_to_pageable` internally and walks the resulting tree to
@@ -263,6 +263,26 @@ fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
 
 /// Walk a Pageable tree and populate each `Drawables` map by
 /// downcasting concrete types. PR 2 covers `ImagePageable` and
+/// PR 8g helper: collect every crate::drawables::NodeId that has a render entry in
+/// `Drawables` so far. Used to compute the descendant set for an
+/// inline-box content via a before/after diff around the recursive
+/// `extract_drawables_from_pageable(ib.content)` call.
+fn collect_known_node_ids(
+    drawables: &crate::drawables::Drawables,
+) -> std::collections::BTreeSet<crate::drawables::NodeId> {
+    let mut out = std::collections::BTreeSet::new();
+    out.extend(drawables.block_styles.keys().copied());
+    out.extend(drawables.paragraphs.keys().copied());
+    out.extend(drawables.images.keys().copied());
+    out.extend(drawables.svgs.keys().copied());
+    out.extend(drawables.tables.keys().copied());
+    out.extend(drawables.list_items.keys().copied());
+    out.extend(drawables.multicol_rules.keys().copied());
+    out.extend(drawables.transforms.keys().copied());
+    out.extend(drawables.bookmark_anchors.keys().copied());
+    out
+}
+
 /// `SvgPageable`; subsequent PRs add the rest.
 fn extract_drawables_from_pageable(
     pageable: &dyn crate::pageable::Pageable,
@@ -283,7 +303,7 @@ fn extract_drawables_from_pageable(
 
     let any = pageable.as_any();
 
-    // Image leaf — record per-NodeId payload.
+    // Image leaf — record per-crate::drawables::NodeId payload.
     if let Some(img) = any.downcast_ref::<ImagePageable>() {
         if let Some(node_id) = img.node_id {
             out.images.insert(
@@ -300,7 +320,7 @@ fn extract_drawables_from_pageable(
         }
         return;
     }
-    // SVG leaf — record per-NodeId payload.
+    // SVG leaf — record per-crate::drawables::NodeId payload.
     if let Some(svg) = any.downcast_ref::<SvgPageable>() {
         if let Some(node_id) = svg.node_id {
             out.svgs.insert(
@@ -333,15 +353,46 @@ fn extract_drawables_from_pageable(
                 },
             );
         }
-        // Inline-box content (e.g. inline `<svg>`, inline-block
-        // `<span>`) is painted via `paragraph::draw_shaped_lines`
-        // which calls `ib.content.draw(...)` directly (line ~820 of
-        // paragraph.rs). Recursing here and registering the inner
-        // content in `block_styles` / `svgs` / `images` would
-        // double-paint at render time — once via the paragraph's
-        // inline call, once via the v2 dispatcher's per-NodeId loop.
-        // Skip recursion entirely so inline content stays a v1-style
-        // draw rooted in the paragraph's own dispatch.
+        // Phase 4 PR 8g: inline-box content is registered into Drawables
+        // and the v2 dispatcher's main loop SKIPS its crate::drawables::NodeId; the
+        // paragraph render path dispatches it explicitly under an
+        // offset transform that compensates for the
+        // `inline_box_baseline_offset` shift between Taffy/Parley's
+        // bottom-aligned position and fulgur's CSS 2.1 §10.8.1
+        // baseline-aligned render position. Without the skip set the
+        // dispatcher would render the content twice (once at
+        // body-relative geometry, once at inline-flow position).
+        for line in &para.lines {
+            for item in &line.items {
+                if let crate::paragraph::LineItem::InlineBox(ib) = item {
+                    let before = collect_known_node_ids(out);
+                    extract_drawables_from_pageable(ib.content.as_ref(), out);
+                    let after = collect_known_node_ids(out);
+                    if let Some(content_id) = ib.content.node_id() {
+                        // Exclude NodeIds already claimed by a nested
+                        // inline-box (added to `inline_box_subtree_skip`
+                        // during the recursion above) so their offset-
+                        // transform dispatch happens at the inner
+                        // paragraph's layer, not at this outer
+                        // paragraph's. Without this filter, nested
+                        // inline-block content would dispatch twice —
+                        // once under the outer's transform here and
+                        // again under the inner paragraph's transform.
+                        let descendants: Vec<crate::drawables::NodeId> = after
+                            .difference(&before)
+                            .copied()
+                            .filter(|id| *id != content_id)
+                            .filter(|id| !out.inline_box_subtree_skip.contains(id))
+                            .collect();
+                        out.inline_box_subtree_skip.insert(content_id);
+                        out.inline_box_subtree_skip
+                            .extend(descendants.iter().copied());
+                        out.inline_box_subtree_descendants
+                            .insert(content_id, descendants);
+                    }
+                }
+            }
+        }
         return;
     }
     // Block / List / Table / wrappers — recurse into children. Block
@@ -368,7 +419,7 @@ fn extract_drawables_from_pageable(
                 },
             );
         }
-        // Snapshot the per-NodeId map keys before recursing so we can
+        // Snapshot the per-crate::drawables::NodeId map keys before recursing so we can
         // identify which descendants belong inside this block's
         // `push_clip / pop` scope when the block carries
         // `overflow: hidden | clip`, OR inside its `draw_with_opacity`
@@ -465,7 +516,7 @@ fn extract_drawables_from_pageable(
     //
     // Transform wrapper: record `TransformEntry` keyed by the inner's
     // `node_id` (the wrapper has no node_id of its own — it inherits
-    // from inner). After recursing, every NodeId added by the inner
+    // from inner). After recursing, every crate::drawables::NodeId added by the inner
     // subtree is captured into the entry's `descendants` list so the
     // render dispatcher can paint them all inside one
     // `push_transform / pop` group, mirroring v1's
@@ -531,14 +582,14 @@ fn extract_drawables_from_pageable(
         }
         extract_drawables_from_pageable(w.child.as_ref(), out);
     }
-    // Other types (Spacer, marker-only Pageables) have no per-NodeId
+    // Other types (Spacer, marker-only Pageables) have no per-crate::drawables::NodeId
     // payload — Spacer is invisible, and the four marker wrappers
     // (Bookmark / StringSet / Running / CounterOp) drive their effects
     // through fragmenter geometry rather than per-marker entries.
 }
 
-/// Snapshot the union of `NodeId` keys currently present in `out`'s
-/// per-NodeId maps. Used by `extract_drawables_from_pageable`'s
+/// Snapshot the union of `crate::drawables::NodeId` keys currently present in `out`'s
+/// per-crate::drawables::NodeId maps. Used by `extract_drawables_from_pageable`'s
 /// transform arm to compute `descendants = after - before` so the
 /// transform can list every node added by walking its inner subtree.
 fn collect_drawables_node_ids(

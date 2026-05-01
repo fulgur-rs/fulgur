@@ -268,6 +268,21 @@ pub struct Drawables {
     pub transforms: BTreeMap<NodeId, TransformEntry>,
     pub bookmark_anchors: BTreeMap<NodeId, BookmarkAnchorEntry>,
     pub link_spans: Vec<(NodeId, LinkSpanEntry)>,
+    /// PR 8g: NodeIds the v2 dispatcher's main loop must skip because
+    /// they belong to inline-box content (or its descendants) dispatched
+    /// explicitly by `paragraph::draw_shaped_lines` under an offset
+    /// transform. Membership in this set means "do not dispatch at the
+    /// geometry-recorded body-relative position; the paragraph render
+    /// path owns this NodeId and will translate it to inline-flow
+    /// position before invoking the standard dispatcher."
+    pub inline_box_subtree_skip: std::collections::BTreeSet<NodeId>,
+    /// PR 8g: per-inline-box-content descendant list. Keyed by the
+    /// inline-box content's root NodeId; values are the strict
+    /// descendant NodeIds the paragraph render path dispatches under
+    /// the same offset transform. Both the key and values appear in
+    /// `inline_box_subtree_skip`. `BTreeMap`/`Vec` keep iteration
+    /// deterministic for PDF byte-equality.
+    pub inline_box_subtree_descendants: BTreeMap<NodeId, Vec<NodeId>>,
 }
 
 impl Drawables {
