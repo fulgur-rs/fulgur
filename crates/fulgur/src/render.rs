@@ -2552,7 +2552,7 @@ fn draw_list_item_marker(
     x: f32,
     y: f32,
 ) {
-    use crate::pageable::{ImageMarker, ListItemMarker};
+    use crate::drawables::{ImageMarker, ListItemMarker};
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
