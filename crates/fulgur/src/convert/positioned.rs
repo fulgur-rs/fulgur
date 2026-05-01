@@ -242,7 +242,26 @@ fn maybe_apply_abs_pseudo_inset_correction(
     let Some(parent_geom) = ctx.pagination_geometry.get(&parent_id) else {
         return;
     };
-    let Some(parent_frag) = parent_geom.fragments.first().cloned() else {
+    // Preserve the page the fragmenter originally placed the pseudo on
+    // when the parent splits across pages. Falling back to
+    // `parent_geom.fragments.first()` would always reattach the
+    // correction to the parent's first page, even when the pseudo was
+    // legitimately placed on a later one.
+    let pseudo_page = ctx
+        .pagination_geometry
+        .get(&pseudo_id)
+        .and_then(|g| g.fragments.first())
+        .map(|f| f.page_index);
+    let Some(parent_frag) = pseudo_page
+        .and_then(|page| {
+            parent_geom
+                .fragments
+                .iter()
+                .find(|f| f.page_index == page)
+                .cloned()
+        })
+        .or_else(|| parent_geom.fragments.first().cloned())
+    else {
         return;
     };
     let parent_x_px = parent_frag.x;

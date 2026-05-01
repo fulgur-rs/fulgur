@@ -230,15 +230,15 @@ impl Engine {
         // skip: documents that override page size / margin via
         // `@page { size: ...; margin: ...; }` now feed the fragmenter a
         // matching strip height by construction.
-        let default_page_rules: Vec<_> = gcpm
-            .page_settings
-            .iter()
-            .filter(|r| r.page_selector.is_none())
-            .cloned()
-            .collect();
+        // Pass the full `page_settings` slice — `resolve_page_settings`
+        // already does selector matching for `@page :first` / named pages.
+        // Filtering to `page_selector.is_none()` here would make the
+        // fragmenter use the default page size while the renderer later
+        // applies selector overrides, leaving `pagination_geometry` on the
+        // wrong content height for those documents.
         let (resolved_page_size, resolved_page_margin, resolved_landscape) =
             crate::gcpm::page_settings::resolve_page_settings(
-                &default_page_rules,
+                &gcpm.page_settings,
                 1,
                 0,
                 &self.config,
@@ -467,10 +467,23 @@ impl Engine {
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
             crate::convert::pt_to_px(self.config.content_height()),
             &column_styles,
+        );
+
+        // Mirror the production `render_html` path so test callers that
+        // consult the returned geometry as a placement oracle see the
+        // same `position: fixed` per-page repetition that the real
+        // render emits (see the `append_position_fixed_fragments` block
+        // in `render_html`). Without this, the helper would diverge
+        // from `render_html` for documents with `position: fixed`.
+        let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
+        crate::pagination_layout::append_position_fixed_fragments(
+            &mut pagination_geometry,
+            doc.deref_mut(),
+            total_pages,
         );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();

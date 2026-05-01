@@ -372,10 +372,12 @@ fn pageable_last_baseline_from_drawables(
     //    around inline-level siblings are visited correctly.
     let node = doc.get_node(node_id)?;
     let layout_children_borrow = node.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&node.children);
+    // An explicit `Some([])` from Blitz means "no in-flow children" and is
+    // authoritative — fall back to `node.children` only when Blitz has not
+    // populated `layout_children` at all. Otherwise an inline-block whose
+    // only descendants are absolutely-positioned would walk those out-of-flow
+    // nodes here and report a bogus baseline.
+    let walk_children: &[usize] = layout_children_borrow.as_deref().unwrap_or(&node.children);
     for &child_id in walk_children.iter().rev() {
         let Some(child) = doc.get_node(child_id) else {
             continue;

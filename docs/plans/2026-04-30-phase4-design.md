@@ -130,7 +130,7 @@ keeps that single computation; render only walks it.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-`draw_node` is a thin dispatcher: lookup `node_id` in each map, call the
+`draw_node` is a thin dispatcher: look up `node_id` in each map, call the
 per-type pure draw function, recurse for containers.
 
 ## Hard-case handling

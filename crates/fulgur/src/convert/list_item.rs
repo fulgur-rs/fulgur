@@ -208,6 +208,16 @@ pub(super) fn try_convert(
             // marker into a descendant paragraph if any. Without a
             // paragraph descendant we synthesize a marker-only paragraph
             // at the li level.
+            //
+            // Snapshot existing paragraph ids before the child walk so
+            // `inject_marker_into_first_paragraph` only considers
+            // paragraphs registered for *this* list-item's subtree.
+            // Without the snapshot, `out.paragraphs.iter_mut().next()`
+            // picks the lowest NodeId in the entire document (e.g. an
+            // earlier `<p>` or a previous `<li>`), prepending the
+            // marker to unrelated content.
+            let pre_paragraph_ids: std::collections::BTreeSet<usize> =
+                out.paragraphs.keys().copied().collect();
             positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
 
@@ -227,7 +237,7 @@ pub(super) fn try_convert(
                     });
 
             if let Some(item) = marker_item {
-                if !inject_marker_into_first_paragraph(out, item.clone()) {
+                if !inject_marker_into_first_paragraph(out, &pre_paragraph_ids, item.clone()) {
                     let lines = vec![ShapedLine {
                         height: line_height,
                         baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
@@ -263,16 +273,24 @@ pub(super) fn try_convert(
     false
 }
 
-/// Inject `item` at the start of the first paragraph entry currently in
-/// `out.paragraphs`, returning `true` on success. The first-paragraph
-/// search is iteration-order over `BTreeMap<NodeId, ...>` so ordering is
-/// deterministic — matches v1's depth-first walk for the inside-marker
-/// fallback path.
+/// Inject `item` at the start of the first paragraph entry registered
+/// AFTER `pre_existing_ids` was captured, returning `true` on success.
+/// The first-paragraph search is iteration-order over
+/// `BTreeMap<NodeId, ...>` so ordering is deterministic — matches v1's
+/// depth-first walk for the inside-marker fallback path. Restricting to
+/// post-snapshot ids keeps the marker scoped to the current list
+/// item's subtree (a sibling list item or earlier `<p>` that registered
+/// before the snapshot is excluded).
 fn inject_marker_into_first_paragraph(
     out: &mut crate::drawables::Drawables,
+    pre_existing_ids: &std::collections::BTreeSet<usize>,
     item: LineItem,
 ) -> bool {
-    let Some((_, entry)) = out.paragraphs.iter_mut().next() else {
+    let Some((_, entry)) = out
+        .paragraphs
+        .iter_mut()
+        .find(|(id, _)| !pre_existing_ids.contains(id))
+    else {
         return false;
     };
     let Some(first_line) = entry.lines.first_mut() else {

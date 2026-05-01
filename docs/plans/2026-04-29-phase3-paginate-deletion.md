@@ -100,7 +100,7 @@ table / list-item / multicol column / fixed-pos など Pageable 側で特殊 spl
 - fragmenter geometry から `implied_page_count(geometry)` で page 数を決定
 - 各 page p について root を walk し、page p に該当する fragment のみを保持した Pageable を構築
   - subtree の深さ・wrapper 構造は保持 (counter / bookmark / string-set marker が draw 順を保つため)
-  - fragment の y は page-local coordinate に変換 (geometry の y は body 全体での累積値)
+  - fragment の y は page-local coordinate のまま使用 (現行 slice 仕様で `Fragment.y` は既に page-local。body-global cumulative ではないので rebase 不要)
   - page p に fragment を持たない subtree は除去 (or empty placeholder)
 - 出力は既存 `paginate()` と同じ `Vec<Box<dyn Pageable>>`
 
