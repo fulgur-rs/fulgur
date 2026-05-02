@@ -2266,10 +2266,163 @@ pub fn append_position_fixed_fragments(
                 height: h,
             });
         }
+
+        // fulgur-4m16: emit per-page repeated fragments for every
+        // in-flow descendant of the fixed root. v2 dispatch is
+        // geometry-driven and reads fragments per `node_id`, so a
+        // fixed root with a sized block-element child (e.g. WPT
+        // fixedpos-009 `<div style="position:fixed; bottom:0; right:0">
+        // <div class="pencil" style="width:36px; height:36px;
+        // background:black; mask-image:..."></div></div>`) needs an
+        // entry for the pencil child or v2 never reaches it. The
+        // existing root-only fragment carries inline text rendering
+        // (fixedpos-001 / 008 ref pattern) but not block descendants.
+        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages);
     }
 
     // Don't allocate empty entries for nodes without fragments.
     geometry.retain(|_, geom| !geom.fragments.is_empty());
+}
+
+/// fulgur-4m16: walk every in-flow descendant of a `position: fixed`
+/// root and emit one fragment per page (`is_repeat = true`) at the
+/// descendant's offset within the fixed subtree, anchored to the
+/// root's already-resolved viewport-CB position.
+///
+/// Mirrors [`record_subtree_fragments_at_offset`] (used by
+/// `append_position_absolute_body_direct_fragments`) except:
+///   - fragments repeat on every page instead of landing on a single
+///     y-derived page,
+///   - the caller passes the root's body-relative stored (x, y) so we
+///     don't re-resolve viewport-CB here (the root's `final_layout`
+///     can lack end-side inset resolution — see fulgur-a8m5),
+///   - body-offset compensation already happened on the caller's `(x, y)`,
+///     so descendants just add their subtree offset on top.
+///
+/// Skips out-of-flow descendants (handled by their own pass) and
+/// whitespace-only text nodes (matches fragmenter behavior).
+fn record_fixed_subtree_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    fixed_root_id: usize,
+    root_stored_xy: (f32, f32),
+    pages: u32,
+) {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+
+    fn walk(
+        geometry: &mut PaginationGeometryTable,
+        doc: &BaseDocument,
+        node_id: usize,
+        offset_in_subtree: (f32, f32),
+        root_stored_xy: (f32, f32),
+        pages: u32,
+        depth: usize,
+    ) {
+        if depth >= crate::MAX_DOM_DEPTH {
+            return;
+        }
+        let Some(node) = doc.get_node(node_id) else {
+            return;
+        };
+        let stored_x = root_stored_xy.0 + offset_in_subtree.0;
+        let stored_y = root_stored_xy.1 + offset_in_subtree.1;
+        let w = node.final_layout.size.width;
+        let h = node.final_layout.size.height;
+
+        let entry = geometry.entry(node_id).or_default();
+        entry.fragments.clear();
+        entry.is_repeat = true;
+        for page_index in 0..pages.max(1) {
+            entry.fragments.push(Fragment {
+                page_index,
+                x: stored_x,
+                y: stored_y,
+                width: w,
+                height: h,
+            });
+        }
+
+        let children: Vec<usize> = {
+            let layout_borrow = node.layout_children.borrow();
+            if let Some(lc) = layout_borrow.as_deref()
+                && !lc.is_empty()
+            {
+                lc.to_vec()
+            } else {
+                node.children.clone()
+            }
+        };
+        for child_id in children {
+            let Some(child) = doc.get_node(child_id) else {
+                continue;
+            };
+            let is_oof = child.primary_styles().is_some_and(|s| {
+                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            });
+            if is_oof {
+                continue;
+            }
+            if let Some(text) = child.text_data()
+                && text.content.chars().all(char::is_whitespace)
+            {
+                continue;
+            }
+            let child_offset = (
+                offset_in_subtree.0 + child.final_layout.location.x,
+                offset_in_subtree.1 + child.final_layout.location.y,
+            );
+            walk(
+                geometry,
+                doc,
+                child_id,
+                child_offset,
+                root_stored_xy,
+                pages,
+                depth + 1,
+            );
+        }
+    }
+
+    let Some(root) = doc.get_node(fixed_root_id) else {
+        return;
+    };
+    let children: Vec<usize> = {
+        let layout_borrow = root.layout_children.borrow();
+        if let Some(lc) = layout_borrow.as_deref()
+            && !lc.is_empty()
+        {
+            lc.to_vec()
+        } else {
+            root.children.clone()
+        }
+    };
+    for child_id in children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        let is_oof = child
+            .primary_styles()
+            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed));
+        if is_oof {
+            continue;
+        }
+        if let Some(text) = child.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
+            continue;
+        }
+        let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
+        walk(
+            geometry,
+            doc,
+            child_id,
+            child_offset,
+            root_stored_xy,
+            pages,
+            1,
+        );
+    }
 }
 
 /// fulgur-a8m5: emit a Fragment for every body-direct
@@ -3340,6 +3493,89 @@ h2 { string-set: chapter-title content(text); }
             "top:0 fixed frag.y must be -body_offset (={}); got {}",
             -body_y_px,
             frag.y
+        );
+    }
+
+    /// fulgur-4m16: when a `position: fixed` root has a sized
+    /// block-element child, the child must also receive per-page
+    /// repeated fragments. v2 dispatch reads
+    /// `pagination_geometry[node_id]` and never recurses into a fixed
+    /// root's subtree, so without per-descendant fragments the child
+    /// is never drawn (WPT fixedpos-009: a `<div class="pencil"
+    /// style="width:36px; height:36px">` inside the fixed root never
+    /// renders, leaving every page blank where the pencil should be).
+    #[test]
+    fn position_fixed_emits_fragments_for_block_descendants() {
+        // Use shrink-to-fit-friendly width / height on the fixed root
+        // so Taffy gives it a definite size; otherwise an unsized fixed
+        // root inherits available_space (600 wide), which obscures the
+        // root-vs-child position relationship the test pins. The bug
+        // being tested (descendants missing from geometry) is
+        // independent of root sizing.
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; bottom: 0; width: 36px; height: 36px">
+                <div style="width: 36px; height: 36px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        crate::blitz_adapter::relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 2, 600.0, 800.0);
+
+        // Both root and its 36×36 child must appear in `geom`. The
+        // root's fragments come from the existing inset-resolution
+        // path; the child's fragments come from the new descendants
+        // walker (fulgur-4m16). Without that walker, only one entry
+        // (the root) shows up.
+        let entries: Vec<_> = geom
+            .iter()
+            .filter(|(_, g)| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.width - 36.0).abs() < 0.5 && (f.height - 36.0).abs() < 0.5)
+            })
+            .collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "expected 2 entries (fixed root + child), got {} — fulgur-4m16: \
+             without record_fixed_subtree_descendants the child entry is missing",
+            entries.len(),
+        );
+
+        // Both must be `is_repeat = true` with one fragment per page.
+        for (_, g) in &entries {
+            assert!(g.is_repeat, "entry must be is_repeat=true");
+            assert_eq!(g.fragments.len(), 2, "entry: one fragment per page");
+            let pages_seen: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
+            assert_eq!(pages_seen, vec![0u32, 1u32]);
+        }
+
+        // Both entries' first fragments must agree on (x, y) because
+        // the child's `final_layout.location` inside the root is
+        // (0, 0) (no padding/margin/border on the root). A divergence
+        // here would mean the descendants walker is computing offsets
+        // wrong.
+        let f0 = &entries[0].1.fragments[0];
+        let f1 = &entries[1].1.fragments[0];
+        assert!(
+            (f0.x - f1.x).abs() < 0.5 && (f0.y - f1.y).abs() < 0.5,
+            "root and child must share (x, y); got root=({},{}) child=({},{})",
+            f0.x,
+            f0.y,
+            f1.x,
+            f1.y,
+        );
+
+        // Pin the y coordinate: bottom:0 with height=36 in an 800px
+        // viewport places the box top at y=764. body is empty so
+        // body_offset_xy=(0,0).
+        assert!(
+            (f0.y - 764.0).abs() < 1.0,
+            "bottom:0 fixed (h=36) must resolve to y=764 (viewport_h - h); got {}",
+            f0.y,
         );
     }
 
