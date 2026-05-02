@@ -2202,10 +2202,13 @@ pub fn append_position_fixed_fragments(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
     total_pages: u32,
+    viewport_w_px: f32,
+    viewport_h_px: f32,
 ) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
     let pages = total_pages.max(1);
+    let body_offset_xy = body_origin_in_px(doc);
     let mut fixed_ids: Vec<usize> = Vec::new();
     let root_id = doc.root_element().id;
     walk_for_position_fixed(doc, root_id, &mut fixed_ids, 0);
@@ -2226,7 +2229,26 @@ pub fn append_position_fixed_fragments(
         }
         let layout = node.final_layout;
         let (w, h) = (layout.size.width, layout.size.height);
-        let (x, y) = (layout.location.x, layout.location.y);
+        // fulgur-a8m5: Taffy's `compute_root_layout` (used by
+        // `relayout_position_fixed`) does not resolve `bottom` / `right`
+        // insets when the absolute element is the root of a layout
+        // subtree — it places the element at (0, 0) regardless. The
+        // CSS 2.1 §9.4 viewport CB needs explicit inset resolution
+        // here, otherwise WPT fixedpos-001/002/008 render `bottom: 0`
+        // fixed elements at the top of every page.
+        let (resolved_x, resolved_y) =
+            resolve_viewport_cb_location(node, w, h, viewport_w_px, viewport_h_px)
+                .unwrap_or((layout.location.x, layout.location.y));
+        // Render adds `body_offset_pt.y` to every fragment's y to
+        // account for the html→body offset (collapsed margins from
+        // in-flow body-direct children, etc.). Fixed elements are
+        // viewport-anchored, not body-anchored, so subtract that
+        // offset here so the dispatch path produces a viewport-
+        // relative y in PDF coordinates. Without this compensation,
+        // documents that mix in-flow content with `position: fixed`
+        // (WPT fixedpos-008) shift the fixed text by the in-flow
+        // div's margin-top.
+        let (x, y) = (resolved_x - body_offset_xy.0, resolved_y - body_offset_xy.1);
 
         let entry = geometry.entry(id).or_default();
         // Replace any prior placements (e.g. if the fixed element was
@@ -2248,6 +2270,308 @@ pub fn append_position_fixed_fragments(
 
     // Don't allocate empty entries for nodes without fragments.
     geometry.retain(|_, geom| !geom.fragments.is_empty());
+}
+
+/// fulgur-a8m5: emit a Fragment for every body-direct
+/// `position: absolute` element whose effective containing block falls
+/// back to the viewport (when body's box collapses to zero because all
+/// of its children are out-of-flow — see CSS 2.1 §10.1.5 and the
+/// matching `viewport_size_px` body-zero fallback in
+/// `convert::positioned::resolve_cb_for_absolute`).
+///
+/// `fragment_pagination_root` skips out-of-flow children unconditionally,
+/// so without this pass `<body><div style="position:absolute; bottom:0">…</div></body>`
+/// never reaches `pagination_geometry` and the v2 dispatch loop drops
+/// the element entirely (WPT `fixedpos-00{1,2,8}` ref-side breakage).
+///
+/// Each emitted Fragment lives on the page where its resolved y lands
+/// (`page_index = floor(y / page_h)`); off-page elements (e.g.
+/// `bottom: -100vh` in a single-page document) are dropped because no
+/// page can paint them.
+pub fn append_position_absolute_body_direct_fragments(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    total_pages: u32,
+    viewport_w_px: f32,
+    viewport_h_px: f32,
+) {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+
+    let pages = total_pages.max(1);
+    let body_id = match find_body_id(doc) {
+        Some(id) => id,
+        None => return,
+    };
+    let body = match doc.get_node(body_id) {
+        Some(n) => n,
+        None => return,
+    };
+    // Per CSS 2.1 §10.1.5, the containing block for `position: absolute`
+    // children of `<body>` (a static-position element) falls through to
+    // the initial containing block (the viewport) regardless of body's
+    // own size. The fragmenter unconditionally skips out-of-flow
+    // children (`fragment_pagination_root` `continue` for `Pos::Absolute`),
+    // so this pass runs for every body-direct abs — not just when body
+    // collapses to zero.
+    let body_offset_xy = body_origin_in_px(doc);
+
+    let body_children = body.children.clone();
+    for child_id in body_children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        let is_abs_only = child
+            .primary_styles()
+            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute));
+        if !is_abs_only {
+            continue;
+        }
+        let layout = child.final_layout;
+        let (w, h) = (layout.size.width, layout.size.height);
+        let (resolved_x, resolved_y) =
+            resolve_viewport_cb_location(child, w, h, viewport_w_px, viewport_h_px)
+                .unwrap_or((layout.location.x, layout.location.y));
+
+        // Walk the subtree and emit a fragment for every in-flow node
+        // (block, paragraph, anonymous wrapper). Without this the
+        // dispatch loop drops descendants whose node_id is not the
+        // root abs id (anonymous block wrappers around mixed
+        // text/element content — fixedpos-002 / fixedpos-008 ref-side
+        // pattern). Out-of-flow descendants are skipped because they
+        // are handled by their own pass. The render path adds
+        // `body_offset_pt` to every emitted fragment's y, so we pass
+        // the body offset down and let the walker subtract it from the
+        // stored y while keeping page assignment based on the un-
+        // compensated viewport-anchored y.
+        record_subtree_fragments_at_offset(
+            geometry,
+            doc,
+            child_id,
+            (resolved_x, resolved_y),
+            body_offset_xy,
+            viewport_h_px,
+            pages,
+        );
+    }
+
+    // Don't allocate empty entries for nodes without fragments.
+    geometry.retain(|_, geom| !geom.fragments.is_empty());
+}
+
+/// Walk a body-direct out-of-flow subtree and emit a single Fragment for
+/// each in-flow node (the subtree root + every block / paragraph /
+/// anonymous wrapper inside it). Each fragment's body-relative
+/// location = the subtree root's resolved viewport-CB location plus the
+/// node's accumulated `final_layout.location` offset from that root.
+///
+/// Skips out-of-flow descendants (their own pass handles them) and
+/// whitespace-only text nodes (mirrors `fragment_pagination_root`).
+fn record_subtree_fragments_at_offset(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    subtree_root_id: usize,
+    root_xy_for_paging: (f32, f32),
+    body_offset: (f32, f32),
+    page_h_px: f32,
+    total_pages: u32,
+) {
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        geometry: &mut PaginationGeometryTable,
+        doc: &BaseDocument,
+        node_id: usize,
+        offset_in_subtree: (f32, f32),
+        root_xy_for_paging: (f32, f32),
+        body_offset: (f32, f32),
+        page_h_px: f32,
+        total_pages: u32,
+        depth: usize,
+    ) {
+        use ::style::properties::longhands::position::computed_value::T as Pos;
+        if depth >= crate::MAX_DOM_DEPTH {
+            return;
+        }
+        let Some(node) = doc.get_node(node_id) else {
+            return;
+        };
+        // Page assignment is based on the un-compensated viewport-CB
+        // resolved position (the actual paint location). Storage is
+        // body-relative because the dispatch path adds `body_offset_pt`
+        // back at draw time.
+        let final_y_for_paging = root_xy_for_paging.1 + offset_in_subtree.1;
+        let stored_x = root_xy_for_paging.0 + offset_in_subtree.0 - body_offset.0;
+        let w = node.final_layout.size.width;
+        let h = node.final_layout.size.height;
+
+        if final_y_for_paging.is_finite() && page_h_px > 0.0 && final_y_for_paging >= 0.0 {
+            // Stylo computes `Nvh` against the viewport snapshot taken
+            // at parse time, which can differ from `page_h_px` by a
+            // sub-px amount (the @page resolution uses the resolved
+            // content area; Stylo's computed `100vh` rounds elsewhere).
+            // Without tolerance, `top: 100vh` on a 1-page render
+            // becomes `final_y = 971.0` against `page_h_px = 971.34`,
+            // which floor()s to page 0 and renders the off-page text
+            // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
+            // toward integer multiples of page_h before paging.
+            let raw_ratio = final_y_for_paging / page_h_px;
+            let snapped_ratio = if (raw_ratio - raw_ratio.round()).abs() < 1e-3 {
+                raw_ratio.round()
+            } else {
+                raw_ratio
+            };
+            let page_index_f = snapped_ratio.floor();
+            if page_index_f.is_finite() && page_index_f < total_pages as f32 {
+                let page_index = page_index_f as u32;
+                let y_in_page = final_y_for_paging - (page_index as f32) * page_h_px;
+                let stored_y = y_in_page - body_offset.1;
+                let entry = geometry.entry(node_id).or_default();
+                entry.fragments.clear();
+                entry.is_repeat = false;
+                entry.fragments.push(Fragment {
+                    page_index,
+                    x: stored_x,
+                    y: stored_y,
+                    width: w,
+                    height: h,
+                });
+            }
+        }
+
+        // Prefer `layout_children` so anonymous block wrappers Stylo
+        // synthesizes around mixed inline/block content are visited
+        // (CSS 2.1 §9.2.1.1 — see `fragment_pagination_root` for the
+        // same idiom).
+        let children: Vec<usize> = {
+            let layout_borrow = node.layout_children.borrow();
+            if let Some(lc) = layout_borrow.as_deref()
+                && !lc.is_empty()
+            {
+                lc.to_vec()
+            } else {
+                node.children.clone()
+            }
+        };
+
+        for child_id in children {
+            let Some(child) = doc.get_node(child_id) else {
+                continue;
+            };
+            // Skip out-of-flow descendants (handled by their own
+            // pass — `append_position_fixed_fragments` for fixed,
+            // separate body-direct walk for abs).
+            let is_oof = child.primary_styles().is_some_and(|s| {
+                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+            });
+            if is_oof {
+                continue;
+            }
+            // Skip whitespace-only text (matches fragmenter).
+            if let Some(text) = child.text_data()
+                && text.content.chars().all(char::is_whitespace)
+            {
+                continue;
+            }
+            let child_offset = (
+                offset_in_subtree.0 + child.final_layout.location.x,
+                offset_in_subtree.1 + child.final_layout.location.y,
+            );
+            walk(
+                geometry,
+                doc,
+                child_id,
+                child_offset,
+                root_xy_for_paging,
+                body_offset,
+                page_h_px,
+                total_pages,
+                depth + 1,
+            );
+        }
+    }
+
+    walk(
+        geometry,
+        doc,
+        subtree_root_id,
+        (0.0, 0.0),
+        root_xy_for_paging,
+        body_offset,
+        page_h_px,
+        total_pages,
+        0,
+    );
+}
+
+/// CSS-px (x, y) of `<body>`'s top-left in its containing block (html).
+/// Mirrors `convert::extract_body_offset_pt` but stays in CSS px so
+/// pagination_layout doesn't need to round-trip through pt. The render
+/// path adds `drawables.body_offset_pt` to every fragment's y when
+/// dispatching, so viewport-anchored fragments must subtract this
+/// offset to keep the dispatched y page-relative.
+fn body_origin_in_px(doc: &BaseDocument) -> (f32, f32) {
+    let Some(body_id) = find_body_id(doc) else {
+        return (0.0, 0.0);
+    };
+    let Some(body) = doc.get_node(body_id) else {
+        return (0.0, 0.0);
+    };
+    (body.final_layout.location.x, body.final_layout.location.y)
+}
+
+/// Resolve a viewport-CB-anchored absolute/fixed element's CSS px
+/// (x, y) using its computed `top` / `left` / `right` / `bottom`
+/// insets. Mirrors CSS 2.1 §10.3.7 / §10.6.4 over-constrained
+/// resolution: start-side (top / left) wins when both sides are set,
+/// end-side (bottom / right) only fires when the start-side is `auto`.
+///
+/// Returns `None` when no inset is set on either axis (caller should
+/// keep Taffy's `final_layout.location` as the static-position
+/// fallback).
+fn resolve_viewport_cb_location(
+    node: &blitz_dom::Node,
+    el_w_px: f32,
+    el_h_px: f32,
+    cb_w_px: f32,
+    cb_h_px: f32,
+) -> Option<(f32, f32)> {
+    use ::style::values::computed::Length;
+    use ::style::values::generics::position::GenericInset;
+
+    fn resolve(inset: &::style::values::computed::position::Inset, basis_px: f32) -> Option<f32> {
+        match inset {
+            GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
+            _ => None,
+        }
+    }
+
+    let styles = node.primary_styles()?;
+    let pos = styles.get_position();
+    let left = resolve(&pos.left, cb_w_px);
+    let top = resolve(&pos.top, cb_h_px);
+    let right = resolve(&pos.right, cb_w_px);
+    let bottom = resolve(&pos.bottom, cb_h_px);
+    if left.is_none() && top.is_none() && right.is_none() && bottom.is_none() {
+        return None;
+    }
+    // Per-axis resolution: when both insets on an axis are `auto`, fall
+    // back to Taffy's static position (`final_layout.location`). Caller
+    // unwraps the returned tuple against that fallback, so we surface
+    // only the axes that have an explicit inset.
+    let x = if let Some(l) = left {
+        l
+    } else if let Some(r) = right {
+        cb_w_px - el_w_px - r
+    } else {
+        node.final_layout.location.x
+    };
+    let y = if let Some(t) = top {
+        t
+    } else if let Some(b) = bottom {
+        cb_h_px - el_h_px - b
+    } else {
+        node.final_layout.location.y
+    };
+    Some((x, y))
 }
 
 /// Recursive walker that collects every node id whose computed
@@ -2879,7 +3203,13 @@ h2 { string-set: chapter-title content(text); }
             "two 600px blocks on 800px page should split → {pages_before} pages",
         );
 
-        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), pages_before);
+        super::append_position_fixed_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            pages_before,
+            600.0,
+            800.0,
+        );
 
         // The fixed div should now appear in `geom` with one fragment
         // per page. We don't know its NodeId statically, so locate it
@@ -2922,11 +3252,139 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let mut geom = PaginationGeometryTable::new();
-        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 0);
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 0, 600.0, 800.0);
         assert_eq!(geom.len(), 1);
         let (_, g) = geom.iter().next().unwrap();
         assert_eq!(g.fragments.len(), 1);
         assert_eq!(g.fragments[0].page_index, 0);
+    }
+
+    /// fulgur-a8m5: `append_position_fixed_fragments` must resolve
+    /// `bottom: 0` against the viewport CB. Taffy's `compute_root_layout`
+    /// (used by `relayout_position_fixed`) does not honour end-side
+    /// insets when the absolute element IS the layout-tree root, so
+    /// `final_layout.location.y` stays at 0 even for `bottom: 0`. v2's
+    /// dispatch reads `pagination_geometry` directly, so without inset
+    /// resolution here, WPT fixedpos-001 / fixedpos-002 / fixedpos-008
+    /// render their `bottom: 0` fixed text at the top of every page
+    /// instead of the bottom.
+    #[test]
+    fn position_fixed_bottom_zero_resolves_against_viewport() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; bottom: 0; height: 30px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        crate::blitz_adapter::relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 1, 600.0, 800.0);
+
+        // Locate the fixed div fragment by its 30px height.
+        let entries: Vec<_> = geom
+            .iter()
+            .filter(|(_, g)| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one fixed entry");
+        let (_, g) = entries[0];
+        assert_eq!(g.fragments.len(), 1);
+        let frag = &g.fragments[0];
+        // viewport_h_px=800, height=30 → bottom edge sits at 800 → top at 770.
+        // body has zero height (no in-flow content), so body_offset_xy=(0,0).
+        assert!(
+            (frag.y - 770.0).abs() < 1.0,
+            "bottom:0 fixed should resolve to y=770 (viewport_h - height); got {}",
+            frag.y
+        );
+    }
+
+    /// fulgur-a8m5: body's collapsed-margin offset (e.g. an in-flow
+    /// child with `margin-top:4em`) appears in
+    /// `drawables.body_offset_pt`, which the v2 dispatch path adds to
+    /// every fragment's y. Viewport-anchored fixed elements must
+    /// subtract that offset at storage time so the dispatched y lands
+    /// at the page-relative position the CSS asks for. Locks the math
+    /// PDF y = margin_top_pt + body_offset_pt + (frag.y_pt) — for
+    /// `top:0` we want PDF y = margin_top_pt, so frag.y_px must equal
+    /// `-body_offset_y_px`.
+    #[test]
+    fn position_fixed_top_zero_compensates_for_body_offset() {
+        // The in-flow div pushes body's content area down by ~4em.
+        let html = r#"
+            <html><body>
+              <div style="margin-top:4em">x</div>
+              <div style="position: fixed; top: 0; height: 30px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        crate::blitz_adapter::relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let body_y_px = super::body_origin_in_px(doc.deref_mut()).1;
+        // Sanity: body_offset must be non-zero, otherwise the test is
+        // not exercising compensation at all.
+        assert!(
+            body_y_px > 0.5,
+            "test assumes body has a non-zero offset; got {body_y_px}"
+        );
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_fixed_fragments(&mut geom, doc.deref_mut(), 1, 600.0, 800.0);
+
+        let entries: Vec<_> = geom
+            .iter()
+            .filter(|(_, g)| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one fixed entry");
+        let frag = entries[0].1.fragments.first().unwrap();
+        // top:0 → resolved_y=0 → stored_y = 0 - body_y_px = -body_y_px.
+        assert!(
+            (frag.y - (-body_y_px)).abs() < 0.5,
+            "top:0 fixed frag.y must be -body_offset (={}); got {}",
+            -body_y_px,
+            frag.y
+        );
+    }
+
+    /// fulgur-a8m5: body-direct `position: absolute` with `bottom: 0`
+    /// should land at the bottom of page 0 with its descendant Paragraph
+    /// fragments at the same position. The fragmenter unconditionally
+    /// skips out-of-flow children, so this pass is the only thing that
+    /// puts these abs body-direct nodes into `pagination_geometry` for
+    /// v2 dispatch (WPT fixedpos-001 ref, fixedpos-008 ref).
+    #[test]
+    fn position_absolute_body_direct_bottom_zero_lands_on_page_zero() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; bottom: 0; height: 30px">x</div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+        );
+
+        // Locate the abs div by height=30.
+        let mut found = None;
+        for g in geom.values() {
+            for f in &g.fragments {
+                if (f.height - 30.0).abs() < 0.5 {
+                    found = Some(f.clone());
+                }
+            }
+        }
+        let frag = found.expect("abs body-direct fragment for bottom:0 must be emitted");
+        assert_eq!(frag.page_index, 0);
+        // Same math as the fixed case: body has zero height, so
+        // body_offset compensation is a no-op and viewport-CB
+        // resolution gives y = 800 - 30 = 770.
+        assert!(
+            (frag.y - 770.0).abs() < 1.0,
+            "abs body-direct bottom:0 should land at y=770; got {}",
+            frag.y
+        );
     }
 
     /// Exercises `PaginationLayoutTree`'s `LayoutPartialTree` /
