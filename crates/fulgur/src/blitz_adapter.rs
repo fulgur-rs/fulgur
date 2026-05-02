@@ -385,6 +385,7 @@ pub fn set_viewport_size_px(doc: &mut HtmlDocument, width_px: f32, height_px: f3
 /// coordinates on every page.
 pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewport_h_px: f32) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::values::computed::Length;
     use ::style::values::generics::length::GenericSize;
     use ::style::values::generics::position::GenericInset;
     use std::ops::DerefMut;
@@ -396,47 +397,91 @@ pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewp
         return;
     }
 
-    // fulgur-6wap: pre-compute per-element inline-axis available space
-    // before we hand the document to Taffy. CSS 2.1 §10.3.7 says a
-    // `position: fixed` element with `width: auto` and exactly one of
-    // `left`/`right` set shrinks-to-fit; passing `Definite(viewport_w)`
-    // would make Taffy fill the whole viewport on the inline axis, and
-    // the subsequent `right` resolution in `resolve_viewport_cb_location`
-    // would anchor the box at x=0 instead of the right edge (WPT
-    // fixedpos-009-print). `MaxContent` lets Taffy size the root to its
-    // children's max-content width, which matches §10.3.7 for the
-    // common case of badge / icon overlays.
+    // fulgur-6wap: pre-compute per-element CSS 2.1 §10.3.7 shrink-to-fit
+    // metadata. A `position: fixed` element with `width: auto` and
+    // exactly one of `left`/`right` set must shrink-to-fit on the inline
+    // axis; passing `Definite(viewport_w_px)` would make Taffy fill the
+    // viewport, and `resolve_viewport_cb_location` would then anchor
+    // `right: 0` at x=0 (WPT fixedpos-009-print, pencil at left edge).
+    //
+    // §10.3.7's used width formula is:
+    //   width = min(max(min_content, available_w), max_content)
+    // where `available_w = cb_w - inset_start_or_end`. We approximate by
+    // measuring max-content with a probe pass (`AvailableSpace::MaxContent`)
+    // and clamping at `available_w`. Pure `MaxContent` is *not* a valid
+    // substitute on its own — Taffy's `AvailableSpace::MaxContent` means
+    // "indefinite, no soft line wrapping", so wrappable text would lay
+    // out on a single unwrapped line and overflow the viewport.
     //
     // The block axis stays `Definite(viewport_h_px)`: Taffy's
     // block-layout algorithm already gives content-height for `auto`
     // height roots even with definite available space (verified by
-    // WPT fixedpos-001/002/008 currently PASSing with this same input).
-    let mut shrink_inline: Vec<bool> = Vec::with_capacity(fixed_ids.len());
+    // WPT fixedpos-001/002/008 PASSing with this input).
+    enum InlineMode {
+        FillViewport,
+        ShrinkToFit { available_w: f32 },
+    }
+    let mut inline_modes: Vec<InlineMode> = Vec::with_capacity(fixed_ids.len());
     for &id in &fixed_ids {
-        let needs_shrink = doc
+        let mode = doc
             .get_node(id)
             .and_then(|n| n.primary_styles())
-            .is_some_and(|s| {
+            .and_then(|s| {
                 let pos = s.get_position();
                 let width_is_auto = matches!(pos.width, GenericSize::Auto);
-                let left_set = matches!(pos.left, GenericInset::LengthPercentage(_));
-                let right_set = matches!(pos.right, GenericInset::LengthPercentage(_));
-                width_is_auto && (left_set ^ right_set)
-            });
-        shrink_inline.push(needs_shrink);
+                let left = match &pos.left {
+                    GenericInset::LengthPercentage(lp) => {
+                        Some(lp.resolve(Length::new(viewport_w_px)).px())
+                    }
+                    _ => None,
+                };
+                let right = match &pos.right {
+                    GenericInset::LengthPercentage(lp) => {
+                        Some(lp.resolve(Length::new(viewport_w_px)).px())
+                    }
+                    _ => None,
+                };
+                let needs_shrink = width_is_auto && (left.is_some() ^ right.is_some());
+                if !needs_shrink {
+                    return None;
+                }
+                let inset = left.or(right).unwrap_or(0.0);
+                Some(InlineMode::ShrinkToFit {
+                    available_w: (viewport_w_px - inset).max(0.0),
+                })
+            })
+            .unwrap_or(InlineMode::FillViewport);
+        inline_modes.push(mode);
     }
 
     let base = doc.deref_mut();
-    for (id, shrink) in fixed_ids.into_iter().zip(shrink_inline) {
+    for (id, mode) in fixed_ids.into_iter().zip(inline_modes) {
+        let nid = taffy::NodeId::from(id);
+        let width_avail = match mode {
+            InlineMode::FillViewport => taffy::AvailableSpace::Definite(viewport_w_px),
+            InlineMode::ShrinkToFit { available_w } => {
+                // Probe pass: measure max-content width. Taffy caches on
+                // (node_id, inputs); the MaxContent inputs differ from
+                // the final pass below so both run.
+                let probe = taffy::Size {
+                    width: taffy::AvailableSpace::MaxContent,
+                    height: taffy::AvailableSpace::Definite(viewport_h_px),
+                };
+                taffy::compute_root_layout(base, nid, probe);
+                let max_content_w = base
+                    .get_node(id)
+                    .map(|n| n.final_layout.size.width)
+                    .unwrap_or(available_w);
+                // §10.3.7: clamp max-content to the available width so
+                // wrappable content wraps at the viewport edge instead
+                // of overflowing on a single line.
+                taffy::AvailableSpace::Definite(max_content_w.min(available_w))
+            }
+        };
         let avail = taffy::Size {
-            width: if shrink {
-                taffy::AvailableSpace::MaxContent
-            } else {
-                taffy::AvailableSpace::Definite(viewport_w_px)
-            },
+            width: width_avail,
             height: taffy::AvailableSpace::Definite(viewport_h_px),
         };
-        let nid = taffy::NodeId::from(id);
         taffy::compute_root_layout(base, nid, avail);
         taffy::round_layout(base, nid);
     }
@@ -2506,6 +2551,55 @@ mod tests {
         assert!(
             (post_width - 36.0).abs() < 1.0,
             "expected ~36 px shrink-to-fit width, got {post_width}"
+        );
+    }
+
+    /// fulgur-6wap (regression net for the wrappable-text branch): CSS
+    /// 2.1 §10.3.7 shrink-to-fit must clamp to the available width,
+    /// `min(max(min-content, available), max-content)`. For a fixed
+    /// element with `right: 0; width: auto` containing a long text node,
+    /// the box must wrap to fit within the viewport — passing
+    /// `AvailableSpace::MaxContent` to `compute_root_layout` would
+    /// produce pure max-content (single unwrapped line) and overflow,
+    /// which is exactly the regression coderabbit flagged on PR #342.
+    #[test]
+    fn relayout_position_fixed_shrink_to_fit_clamps_breakable_text_to_viewport() {
+        let html = r#"<!doctype html>
+<html><body style="margin:0">
+<div id="fix" style="position:fixed; right:0; font-size:16px">This is a long sentence that should wrap to fit within the available viewport width when CSS 2.1 §10.3.7 shrink-to-fit is applied correctly, instead of laying out on a single very wide unwrapped line.</div>
+</body></html>"#;
+        let mut doc = parse(html, 600.0, &[]);
+        resolve(&mut doc);
+
+        fn find_by_id(doc: &HtmlDocument, id: &str) -> Option<usize> {
+            fn walk(doc: &HtmlDocument, node_id: usize, target: &str) -> Option<usize> {
+                let n = doc.get_node(node_id)?;
+                if let Some(elem) = n.element_data()
+                    && elem.attr(blitz_dom::LocalName::from("id")) == Some(target)
+                {
+                    return Some(node_id);
+                }
+                for &c in &n.children {
+                    if let Some(found) = walk(doc, c, target) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, id)
+        }
+        let fix_id = find_by_id(&doc, "fix").expect("fixed div id=fix");
+
+        // Viewport is 600 CSS px wide; shrink-to-fit available width
+        // for `right: 0` is `viewport_w - 0 = 600`. The text's
+        // max-content width is well over 600, so the box must clamp at
+        // 600 and wrap, not stretch to max-content.
+        relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let post_width = doc.get_node(fix_id).unwrap().final_layout.size.width;
+        assert!(
+            post_width <= 600.5,
+            "shrink-to-fit must clamp at the available width (600); \
+             got {post_width} — pure max-content would overflow viewport"
         );
     }
 
