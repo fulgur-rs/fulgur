@@ -716,4 +716,17 @@ mod tests {
         // node_id 10 has no entry in block_styles — must not panic.
         record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
     }
+
+    #[test]
+    fn record_excludes_node_id_even_when_snapshot_does_not_contain_it() {
+        // pre is empty, so after − before = {10, 11}. The `.filter(|&id| id != node_id)`
+        // guard must drop 10 so clip_descendants contains only the child.
+        let mut out = Drawables::new();
+        out.block_styles.insert(10, make_block_entry());
+        out.block_styles.insert(11, make_block_entry());
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+        assert_eq!(out.block_styles[&10].clip_descendants, vec![11usize]);
+        assert!(out.block_styles[&10].opacity_descendants.is_empty());
+    }
 }
