@@ -36,7 +36,7 @@ FAIL  css/css-page/fixedpos-005-print.html  # page count mismatch: test=3 ref=5
 FAIL  css/css-page/fixedpos-006-print.html  # page count mismatch: test=3 ref=5
 FAIL  css/css-page/fixedpos-007-print.html  # page 1 diff: 1765/891662 pixels exceed tol (max_ch=255)
 PASS  css/css-page/fixedpos-008-print.html
-FAIL  css/css-page/fixedpos-009-print.html  # fulgur-6wap: fixed auto-width fills viewport instead of CSS 2.1 §10.3.7 shrink-to-fit; pencil child fragment now emits via fulgur-4m16, root x still wrong
+FAIL  css/css-page/fixedpos-009-print.html  # page 1 diff: 216/891662 pixels exceed tol (max_ch=149) — §10.3.7 shrink-to-fit now correct (pencil at bottom-right per spec, was 2738 px wrong); residual is sub-pixel anti-aliasing on the 36×36 mask edge between the test (position:fixed root) and ref (position:absolute inside relative .fakepage) y rounding
 FAIL  css/css-page/fixedpos-010-print.html  # page 1 diff: 10844/160000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/fixedpos-011-print.html  # page 1 diff: 84920/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/fixedpos-with-abspos-with-link-print.html  # page 1 diff: 2541/891662 pixels exceed tol (max_ch=255)

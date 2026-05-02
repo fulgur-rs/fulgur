@@ -385,6 +385,8 @@ pub fn set_viewport_size_px(doc: &mut HtmlDocument, width_px: f32, height_px: f3
 /// coordinates on every page.
 pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewport_h_px: f32) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::values::generics::length::GenericSize;
+    use ::style::values::generics::position::GenericInset;
     use std::ops::DerefMut;
 
     let mut fixed_ids: Vec<usize> = Vec::new();
@@ -394,13 +396,46 @@ pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewp
         return;
     }
 
-    let avail = taffy::Size {
-        width: taffy::AvailableSpace::Definite(viewport_w_px),
-        height: taffy::AvailableSpace::Definite(viewport_h_px),
-    };
+    // fulgur-6wap: pre-compute per-element inline-axis available space
+    // before we hand the document to Taffy. CSS 2.1 §10.3.7 says a
+    // `position: fixed` element with `width: auto` and exactly one of
+    // `left`/`right` set shrinks-to-fit; passing `Definite(viewport_w)`
+    // would make Taffy fill the whole viewport on the inline axis, and
+    // the subsequent `right` resolution in `resolve_viewport_cb_location`
+    // would anchor the box at x=0 instead of the right edge (WPT
+    // fixedpos-009-print). `MaxContent` lets Taffy size the root to its
+    // children's max-content width, which matches §10.3.7 for the
+    // common case of badge / icon overlays.
+    //
+    // The block axis stays `Definite(viewport_h_px)`: Taffy's
+    // block-layout algorithm already gives content-height for `auto`
+    // height roots even with definite available space (verified by
+    // WPT fixedpos-001/002/008 currently PASSing with this same input).
+    let mut shrink_inline: Vec<bool> = Vec::with_capacity(fixed_ids.len());
+    for &id in &fixed_ids {
+        let needs_shrink = doc
+            .get_node(id)
+            .and_then(|n| n.primary_styles())
+            .is_some_and(|s| {
+                let pos = s.get_position();
+                let width_is_auto = matches!(pos.width, GenericSize::Auto);
+                let left_set = matches!(pos.left, GenericInset::LengthPercentage(_));
+                let right_set = matches!(pos.right, GenericInset::LengthPercentage(_));
+                width_is_auto && (left_set ^ right_set)
+            });
+        shrink_inline.push(needs_shrink);
+    }
 
     let base = doc.deref_mut();
-    for id in fixed_ids {
+    for (id, shrink) in fixed_ids.into_iter().zip(shrink_inline) {
+        let avail = taffy::Size {
+            width: if shrink {
+                taffy::AvailableSpace::MaxContent
+            } else {
+                taffy::AvailableSpace::Definite(viewport_w_px)
+            },
+            height: taffy::AvailableSpace::Definite(viewport_h_px),
+        };
         let nid = taffy::NodeId::from(id);
         taffy::compute_root_layout(base, nid, avail);
         taffy::round_layout(base, nid);
@@ -2416,6 +2451,61 @@ mod tests {
             post_width > 50.5,
             "viewport relayout should widen the fixed box past the 50px parent; \
              got {post_width} (pre was {pre_width})"
+        );
+    }
+
+    /// fulgur-6wap: when a `position: fixed` element has `width: auto`
+    /// with exactly one of `left`/`right` set, CSS 2.1 §10.3.7 says the
+    /// width shrinks to fit content. Without the §10.3.7 path,
+    /// `compute_root_layout` with `available_space = Definite(viewport_w)`
+    /// makes `width = viewport_w`, and the start-side of a `right: 0`
+    /// element resolves to `cb_w - viewport_w - 0 = 0`, painting at the
+    /// left edge instead of the right. The repro mirrors WPT
+    /// fixedpos-009-print: a fixed div with `right: 0` containing a
+    /// 36×36 child should shrink to 36 px, not the viewport width.
+    #[test]
+    fn relayout_position_fixed_shrinks_to_fit_when_only_right_inset_set() {
+        let html = r#"<!doctype html>
+<html><body style="margin:0">
+<div id="fix" style="position:fixed; right:0">
+  <div id="child" style="width:36px; height:36px; background:black"></div>
+</div>
+</body></html>"#;
+        let mut doc = parse(html, 600.0, &[]);
+        resolve(&mut doc);
+
+        fn find_by_id(doc: &HtmlDocument, id: &str) -> Option<usize> {
+            fn walk(doc: &HtmlDocument, node_id: usize, target: &str) -> Option<usize> {
+                let n = doc.get_node(node_id)?;
+                if let Some(elem) = n.element_data()
+                    && elem.attr(blitz_dom::LocalName::from("id")) == Some(target)
+                {
+                    return Some(node_id);
+                }
+                for &c in &n.children {
+                    if let Some(found) = walk(doc, c, target) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, id)
+        }
+        let fix_id = find_by_id(&doc, "fix").expect("fixed div id=fix");
+
+        relayout_position_fixed(&mut doc, 600.0, 800.0);
+        let post_width = doc.get_node(fix_id).unwrap().final_layout.size.width;
+        assert!(
+            post_width < 600.0,
+            "shrink-to-fit per CSS 2.1 §10.3.7: right:0 + width:auto must \
+             not fill viewport (600); got {post_width}"
+        );
+        // The 36 px child sets max-content width; allow small slack for
+        // box-model differences (borders, scrollbar) but not enough to
+        // accommodate viewport-fill (~600).
+        assert!(
+            (post_width - 36.0).abs() < 1.0,
+            "expected ~36 px shrink-to-fit width, got {post_width}"
         );
     }
 
