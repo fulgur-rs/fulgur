@@ -453,3 +453,280 @@ fn record_li_clip_opacity_descendants(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{inject_marker_into_first_paragraph, record_li_clip_opacity_descendants};
+    use crate::drawables::{BlockEntry, Drawables, ParagraphEntry};
+    use crate::paragraph::{
+        InlineBoxItem, InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine,
+        TextDecoration, VerticalAlign,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    fn make_line(items: Vec<LineItem>) -> ShapedLine {
+        ShapedLine {
+            height: 12.0,
+            baseline: 9.0,
+            items,
+        }
+    }
+
+    fn make_para(lines: Vec<ShapedLine>) -> ParagraphEntry {
+        ParagraphEntry {
+            lines,
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        }
+    }
+
+    fn inline_box(width: f32, x_offset: f32) -> LineItem {
+        LineItem::InlineBox(InlineBoxItem {
+            node_id: None,
+            width,
+            height: 10.0,
+            x_offset,
+            computed_y: 0.0,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        })
+    }
+
+    fn make_block_entry() -> BlockEntry {
+        BlockEntry {
+            style: crate::draw_primitives::BlockStyle::default(),
+            opacity: 1.0,
+            visible: true,
+            id: None,
+            layout_size: None,
+            clip_descendants: vec![],
+            opacity_descendants: vec![],
+        }
+    }
+
+    // ── inject_marker_into_first_paragraph ────────────────────────────
+
+    #[test]
+    fn inject_returns_false_when_paragraphs_is_empty() {
+        let mut out = Drawables::new();
+        let pre = BTreeSet::new();
+        assert!(!inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn inject_returns_false_when_all_paragraphs_pre_existing() {
+        let mut out = Drawables::new();
+        out.paragraphs.insert(1, make_para(vec![make_line(vec![])]));
+        let pre: BTreeSet<usize> = [1].into();
+        assert!(!inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn inject_returns_false_when_new_paragraph_has_no_lines() {
+        let mut out = Drawables::new();
+        out.paragraphs.insert(5, make_para(vec![])); // new but no lines
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(!inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn inject_inline_box_marker_is_prepended_to_first_line() {
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 0.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+        let first_line = &out.paragraphs[&5].lines[0];
+        assert_eq!(first_line.items.len(), 2);
+        // Newly-inserted marker is at index 0.
+        let LineItem::InlineBox(marker_ib) = &first_line.items[0] else {
+            panic!("expected InlineBox at index 0");
+        };
+        assert_eq!(marker_ib.width, 10.0);
+    }
+
+    #[test]
+    fn inject_shifts_existing_inline_box_by_marker_width() {
+        let mut out = Drawables::new();
+        // Existing item at x_offset=5.
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 5.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        inject_marker_into_first_paragraph(&mut out, &pre, inline_box(10.0, 0.0));
+        // shift = marker width = 10 → existing item should now be at x_offset = 5 + 10 = 15.
+        let LineItem::InlineBox(existing) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected InlineBox at index 1");
+        };
+        assert!(
+            (existing.x_offset - 15.0).abs() < 0.001,
+            "got {}",
+            existing.x_offset
+        );
+    }
+
+    #[test]
+    fn inject_image_marker_shifts_existing_by_image_width() {
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 3.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        let image_marker = LineItem::Image(InlineImage {
+            data: Arc::new(vec![]),
+            format: crate::image::ImageFormat::Png,
+            width: 8.0,
+            height: 8.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        });
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            image_marker
+        ));
+        // shift = image width = 8 → existing at x_offset=3 → 3 + 8 = 11.
+        let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected InlineBox at index 1");
+        };
+        assert!((ib.x_offset - 11.0).abs() < 0.001, "got {}", ib.x_offset);
+    }
+
+    #[test]
+    fn inject_text_marker_shifts_by_sum_of_advance_times_font_size() {
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 0.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        // Two glyphs, each x_advance=0.5, font_size=12 → shift = 2 × 0.5 × 12 = 12.
+        let text_marker = LineItem::Text(ShapedGlyphRun {
+            font_data: Arc::new(vec![]),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![
+                ShapedGlyph {
+                    id: 0,
+                    x_advance: 0.5,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 0..1,
+                },
+                ShapedGlyph {
+                    id: 0,
+                    x_advance: 0.5,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 1..2,
+                },
+            ],
+            text: "• ".to_string(),
+            x_offset: 0.0,
+            link: None,
+        });
+        inject_marker_into_first_paragraph(&mut out, &pre, text_marker);
+        let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected InlineBox at index 1");
+        };
+        assert!((ib.x_offset - 12.0).abs() < 0.001, "got {}", ib.x_offset);
+    }
+
+    #[test]
+    fn inject_picks_lowest_new_node_id_via_btreemap_ordering() {
+        // BTreeMap iterates in ascending key order → node 5 is picked before node 10.
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(10, make_para(vec![make_line(vec![])]));
+        out.paragraphs.insert(5, make_para(vec![make_line(vec![])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+        // Marker went into node 5 (the lower key).
+        assert_eq!(out.paragraphs[&5].lines[0].items.len(), 1);
+        assert_eq!(out.paragraphs[&10].lines[0].items.len(), 0);
+    }
+
+    // ── record_li_clip_opacity_descendants ────────────────────────────
+
+    #[test]
+    fn record_none_snapshot_is_noop() {
+        let mut out = Drawables::new();
+        out.block_styles.insert(1, make_block_entry());
+        record_li_clip_opacity_descendants(1, true, None, &mut out);
+        assert!(out.block_styles[&1].clip_descendants.is_empty());
+        assert!(out.block_styles[&1].opacity_descendants.is_empty());
+    }
+
+    #[test]
+    fn record_clipping_true_fills_clip_descendants_and_excludes_self() {
+        let mut out = Drawables::new();
+        out.block_styles.insert(10, make_block_entry()); // parent
+        out.block_styles.insert(20, make_block_entry()); // child 1
+        out.block_styles.insert(30, make_block_entry()); // child 2
+        // Snapshot captured before the children were walked — only node 10 existed then.
+        let pre: BTreeSet<usize> = [10].into();
+        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+        let mut got = out.block_styles[&10].clip_descendants.clone();
+        got.sort_unstable();
+        assert_eq!(got, vec![20usize, 30]);
+        assert!(out.block_styles[&10].opacity_descendants.is_empty());
+    }
+
+    #[test]
+    fn record_clipping_false_fills_opacity_descendants_and_excludes_self() {
+        let mut out = Drawables::new();
+        out.block_styles.insert(10, make_block_entry());
+        out.block_styles.insert(11, make_block_entry());
+        let pre: BTreeSet<usize> = [10].into();
+        record_li_clip_opacity_descendants(10, false, Some(pre), &mut out);
+        assert_eq!(out.block_styles[&10].opacity_descendants, vec![11usize]);
+        assert!(out.block_styles[&10].clip_descendants.is_empty());
+    }
+
+    #[test]
+    fn record_missing_block_entry_does_not_panic() {
+        let mut out = Drawables::new();
+        out.block_styles.insert(20, make_block_entry());
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        // node_id 10 has no entry in block_styles — must not panic.
+        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+    }
+
+    #[test]
+    fn record_excludes_node_id_even_when_snapshot_does_not_contain_it() {
+        // pre is empty, so after − before = {10, 11}. The `.filter(|&id| id != node_id)`
+        // guard must drop 10 so clip_descendants contains only the child.
+        let mut out = Drawables::new();
+        out.block_styles.insert(10, make_block_entry());
+        out.block_styles.insert(11, make_block_entry());
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+        assert_eq!(out.block_styles[&10].clip_descendants, vec![11usize]);
+        assert!(out.block_styles[&10].opacity_descendants.is_empty());
+    }
+}
