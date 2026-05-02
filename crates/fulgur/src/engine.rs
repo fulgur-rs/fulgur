@@ -114,14 +114,31 @@ impl Engine {
         } else {
             resolved_page_size
         };
+        // Clamp to non-negative — defensive against pathological CSS like
+        // `@page { margin: 1000mm }` where margins exceed the page size.
+        // Without the clamp the resulting negative value would silently flip
+        // sign across `as u32` (saturating to 0 for Stylo's viewport) but
+        // remain negative when fed to Taffy / `viewport_size_px`, causing
+        // divergence between the layers (CodeRabbit on PR #338).
         let resolved_content_width_pt =
-            resolved_page_size.width - resolved_page_margin.left - resolved_page_margin.right;
+            (resolved_page_size.width - resolved_page_margin.left - resolved_page_margin.right)
+                .max(0.0);
         let resolved_content_height_pt =
-            resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom;
+            (resolved_page_size.height - resolved_page_margin.top - resolved_page_margin.bottom)
+                .max(0.0);
+        // Compute the px-space content box once and reuse the same f32
+        // values for every downstream consumer (Stylo viewport,
+        // `relayout_position_fixed`, the pagination fragmenter, the v2
+        // ConvertContext) so they all see an identical content area.
+        // `set_viewport_size_px` truncates to u32 internally for Blitz's
+        // `Viewport.window_size`; Taffy keeps the f32 sub-pixel precision
+        // it needs for its layout cache.
+        let resolved_content_width_px = crate::convert::pt_to_px(resolved_content_width_pt);
+        let resolved_content_height_px = crate::convert::pt_to_px(resolved_content_height_pt);
         crate::blitz_adapter::set_viewport_size_px(
             &mut doc,
-            crate::convert::pt_to_px(resolved_content_width_pt),
-            crate::convert::pt_to_px(resolved_content_height_pt),
+            resolved_content_width_px,
+            resolved_content_height_px,
         );
 
         // Prepend UA CSS bookmark mappings so author-CSS rules (appearing
@@ -200,9 +217,10 @@ impl Engine {
         // first `resolve()` above already cascaded against the corrected
         // viewport. The bindings — `resolved_page_size`,
         // `resolved_page_margin`, `resolved_landscape`,
-        // `resolved_content_width_pt`, `resolved_content_height_pt` — are
-        // reused here for `relayout_position_fixed`, the pagination
-        // fragmenter, and downstream margin-box rendering.
+        // `resolved_content_width_pt` / `_height_pt`, and the px-space
+        // `resolved_content_width_px` / `_height_px` — are reused here for
+        // `relayout_position_fixed`, the pagination fragmenter, and
+        // downstream margin-box rendering.
 
         // Second layout pass: re-run Taffy on every `position: fixed` subtree
         // with the page area as available space. Without this, stylo_taffy
@@ -214,8 +232,8 @@ impl Engine {
         // viewport fallback in `resolve_cb_for_absolute`.
         crate::blitz_adapter::relayout_position_fixed(
             &mut doc,
-            crate::convert::pt_to_px(resolved_content_width_pt),
-            crate::convert::pt_to_px(resolved_content_height_pt),
+            resolved_content_width_px,
+            resolved_content_height_px,
         );
 
         // Harvest Phase A `column-*` properties (column-fill, column-rule-*)
@@ -278,7 +296,7 @@ impl Engine {
         // up at the start of this function.
         let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
             doc.deref_mut(),
-            crate::convert::pt_to_px(resolved_content_height_pt),
+            resolved_content_height_px,
             &column_styles,
             &running_store,
         );
@@ -348,10 +366,7 @@ impl Engine {
             // Use the resolved `@page` content box so percentage-based
             // fixed/abs descendants size against the same viewport that
             // pagination geometry and `relayout_position_fixed` use.
-            viewport_size_px: Some((
-                crate::convert::pt_to_px(resolved_content_width_pt),
-                crate::convert::pt_to_px(resolved_content_height_pt),
-            )),
+            viewport_size_px: Some((resolved_content_width_px, resolved_content_height_px)),
         };
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
