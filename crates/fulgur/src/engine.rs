@@ -317,6 +317,22 @@ impl Engine {
             &mut pagination_geometry,
             doc.deref_mut(),
             total_pages,
+            resolved_content_width_px,
+            resolved_content_height_px,
+        );
+        // fulgur-a8m5: emit fragments for body-direct
+        // `position: absolute` children whose effective CB is the
+        // viewport (body's box collapses to zero when every child is
+        // out-of-flow — CSS 2.1 §10.1.5). The fragmenter skips them
+        // unconditionally, so without this pass they never reach
+        // `dispatch_fragment` and ref-side renders blank for WPT
+        // fixedpos-001/002/008.
+        crate::pagination_layout::append_position_absolute_body_direct_fragments(
+            &mut pagination_geometry,
+            doc.deref_mut(),
+            total_pages,
+            resolved_content_width_px,
+            resolved_content_height_px,
         );
 
         // --- Convert DOM to Pageable and render ---
@@ -528,6 +544,15 @@ impl Engine {
             &mut pagination_geometry,
             doc.deref_mut(),
             total_pages,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
+        );
+        crate::pagination_layout::append_position_absolute_body_direct_fragments(
+            &mut pagination_geometry,
+            doc.deref_mut(),
+            total_pages,
+            crate::convert::pt_to_px(self.config.content_width()),
+            crate::convert::pt_to_px(self.config.content_height()),
         );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();

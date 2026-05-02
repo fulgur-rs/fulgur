@@ -30,13 +30,13 @@ SKIP  css/css-page/cssom/page-001.html  # NoMatch
 SKIP  css/css-page/cssom/page-002.html  # NoMatch
 PASS  css/css-page/fixedpos-001-print.html
 PASS  css/css-page/fixedpos-002-print.html
-FAIL  css/css-page/fixedpos-003-print.html  # page count mismatch: test=2 ref=3
+PASS  css/css-page/fixedpos-003-print.html
 FAIL  css/css-page/fixedpos-004-print.html  # page count mismatch: test=2 ref=3
 FAIL  css/css-page/fixedpos-005-print.html  # page count mismatch: test=3 ref=5
 FAIL  css/css-page/fixedpos-006-print.html  # page count mismatch: test=3 ref=5
 FAIL  css/css-page/fixedpos-007-print.html  # page 1 diff: 1765/891662 pixels exceed tol (max_ch=255)
 PASS  css/css-page/fixedpos-008-print.html
-PASS  css/css-page/fixedpos-009-print.html
+FAIL  css/css-page/fixedpos-009-print.html  # fulgur-4m16: regressed by PR #338 viewport-units-content-area (page 1 diff: 1369 px)
 FAIL  css/css-page/fixedpos-010-print.html  # page 1 diff: 10844/160000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/fixedpos-011-print.html  # page 1 diff: 84920/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/fixedpos-with-abspos-with-link-print.html  # page 1 diff: 2541/891662 pixels exceed tol (max_ch=255)
@@ -100,7 +100,7 @@ FAIL  css/css-page/monolithic-overflow-009-print.html  # page 1 diff: 673864/891
 FAIL  css/css-page/monolithic-overflow-010-print.html  # page 1 diff: 673864/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/monolithic-overflow-011-print.html  # page 1 diff: 673864/891662 pixels exceed tol (max_ch=255)
 PASS  css/css-page/monolithic-overflow-012-print.html
-FAIL  css/css-page/monolithic-overflow-013-print.html  # fulgur-puml: tall abs content does not drive page generation (regressed by fulgur-aijf — was passing for the wrong reason via abs-in-flow)
+PASS  css/css-page/monolithic-overflow-013-print.html
 FAIL  css/css-page/monolithic-overflow-014-print.html  # page 1 diff: 53448/891662 pixels exceed tol (max_ch=180)
 FAIL  css/css-page/monolithic-overflow-015-print.html  # page 1 diff: 53448/891662 pixels exceed tol (max_ch=150)
 FAIL  css/css-page/monolithic-overflow-016-print.html  # page count mismatch: test=1 ref=6
@@ -140,9 +140,9 @@ FAIL  css/css-page/page-box-010-print.html  # page 1 diff: 28680/891662 pixels e
 FAIL  css/css-page/page-box-011-print.html  # page 1 diff: 720831/891662 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-left-right-001-print.html  # page 1 diff: 56200/180000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-left-right-002-print.html  # page 1 diff: 42939/180000 pixels exceed tol (max_ch=255)
-FAIL  css/css-page/page-margin-001-print.html  # page 1 diff: 66780/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-page/page-margin-001-print.html
 FAIL  css/css-page/page-margin-002-print.html  # page 1 diff: 156457/891662 pixels exceed tol (max_ch=255)
-FAIL  css/css-page/page-margin-003-print.html  # page 1 diff: 66780/891662 pixels exceed tol (max_ch=255)
+PASS  css/css-page/page-margin-003-print.html
 FAIL  css/css-page/page-margin-004-print.html  # page 1 diff: 67614/90000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-margin-005-print.html  # page 1 diff: 51597/180000 pixels exceed tol (max_ch=255)
 FAIL  css/css-page/page-margin-006-print.html  # page 1 diff: 39226/331776 pixels exceed tol (max_ch=255)
