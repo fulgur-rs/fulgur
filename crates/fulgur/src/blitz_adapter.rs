@@ -337,6 +337,27 @@ pub fn resolve(doc: &mut HtmlDocument) {
     doc.resolve(0.0);
 }
 
+/// Update the document's viewport size (in CSS px) and mark Stylo's stylist
+/// dirty so the next `resolve()` re-cascades viewport-relative units (`vh`,
+/// `vw`, `vmin`, `vmax`, `vi`, `vb`, etc.) against the new dimensions.
+///
+/// fulgur calls this after extracting `@page` size / margin overrides from
+/// inline `<style>` blocks, but before the first `resolve()` pass. Without
+/// this, Stylo binds `100vh` to the *initial* viewport height passed at parse
+/// time (the full page height in CSS px), so a `height: 100vh` element
+/// resolves to the page area instead of the @page-resolved content area —
+/// the bottom margin gets ignored. See `engine.rs` and beads `fulgur-lv0a`.
+///
+/// `set_viewport()` updates the Stylo `Device` via `make_device()` and marks
+/// stylesheets dirty (see blitz-dom 0.2.4 `document.rs:1002-1011`); the
+/// downstream `resolve()` then re-runs the cascade with the corrected screen
+/// size.
+pub fn set_viewport_size_px(doc: &mut HtmlDocument, width_px: f32, height_px: f32) {
+    let mut new_viewport = doc.viewport().clone();
+    new_viewport.window_size = (width_px as u32, height_px as u32);
+    doc.set_viewport(new_viewport);
+}
+
 /// Re-run Taffy layout on every `position: fixed` subtree using the page area
 /// as available space. CSS 2.1 §10.1.5 specifies the initial containing block
 /// (viewport) as the CB for `position: fixed`, but `stylo_taffy::convert`

@@ -1795,6 +1795,34 @@ fn page_property_on_inline_canvas_is_ignored() {
 }
 
 #[test]
+fn vh_resolves_against_at_page_content_area() {
+    // fulgur-lv0a regression net: viewport-relative units (`vh`, `vw`,
+    // `vmin`, `vmax`) must bind to the @page-resolved content area, not
+    // the initial page size. Before the fix, `height: 100vh` resolved to
+    // the full page height (842pt for A4) so a cover element overflowed
+    // into the @page bottom margin. After the fix, the viewport is
+    // updated via `blitz_adapter::set_viewport_size_px` *before* the
+    // first `resolve()` pass, so Stylo cascades vh/vw against the
+    // resolved content area (page_size − @page margins).
+    //
+    // The VRT golden `bugs/cover-page-break-after.pdf` is the
+    // visual-level regression net; this smoke test drives the new
+    // `set_viewport_size_px` hook through `Engine::render_html`.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        @page { size: A4; margin: 20mm; }
+        .cover { height: 100vh; background: #123; page-break-after: always; }
+    </style></head><body>
+        <div class="cover"></div>
+        <p>after</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("vh-with-page-margin render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
 fn page_property_inside_flex_container_does_not_propagate_outward() {
     // fulgur-uebl: flex containers establish a flex formatting context
     // where children are not class A break points. `page` on flex items
