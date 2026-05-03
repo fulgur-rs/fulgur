@@ -3,7 +3,15 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
 
-create_exception!(pyfulgur, RenderError, PyException, "Rendering failed");
+create_exception!(
+    pyfulgur,
+    RenderError,
+    PyException,
+    "Raised when fulgur fails to render an HTML document to PDF.\n\
+     \n\
+     Wraps parse, layout, font, and PDF-generation errors from the underlying\n\
+     fulgur engine."
+);
 
 pub fn map_fulgur_error(err: FulgurError) -> PyErr {
     match err {

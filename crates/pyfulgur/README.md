@@ -57,6 +57,13 @@ engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 - `Margin`: `Margin(top, right, bottom, left)`, `Margin.uniform(pt)`, `Margin.symmetric(v, h)`, `Margin.uniform_mm(mm)`
 - Exceptions: `FileNotFoundError`, `ValueError`, `pyfulgur.RenderError`
 
+## Type stubs
+
+pyfulgur ships PEP 561 type stubs (`py.typed` + `__init__.pyi`) so mypy,
+pyright, and IDEs can type-check call sites against the native API.
+Docstrings live in the Rust source and are exposed via `__doc__` for
+`help()`, Jupyter `?`, and griffe / mkdocstrings inspection.
+
 ## Known limitation: blitz parse-error noise on stdout
 
 The underlying `blitz-dom` parser writes non-fatal html5ever parse errors directly to the process's stdout via `println!`. These fire for browser-tolerated but technically invalid HTML — documents without a `<!DOCTYPE>`, missing `<html>`/`<body>` wrappers, or structural quirks that browsers silently auto-correct — and show up as `ERROR: ...` noise in Jupyter notebooks or any environment that captures stdout. The PDF bytes returned by `render_html` are **not** affected; only the caller's terminal is polluted.
