@@ -4,16 +4,18 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::path::PathBuf;
 
-/// Bundle of CSS, fonts, and images passed to :class:`Engine`.
+/// Bundle of CSS, fonts, and images passed to `Engine`.
 ///
 /// fulgur is offline-first: every asset must be explicitly registered before
 /// rendering. The engine never performs network fetches.
 ///
 /// Example:
-///     >>> from pyfulgur import AssetBundle, Engine
-///     >>> bundle = AssetBundle()
-///     >>> bundle.add_css("body { font-family: sans-serif; }")
-///     >>> engine = Engine(assets=bundle)
+///     ```python
+///     from pyfulgur import AssetBundle, Engine
+///     bundle = AssetBundle()
+///     bundle.add_css("body { font-family: sans-serif; }")
+///     engine = Engine(assets=bundle)
+///     ```
 #[pyclass(name = "AssetBundle", module = "pyfulgur")]
 pub struct PyAssetBundle {
     pub(crate) inner: AssetBundle,
@@ -21,7 +23,6 @@ pub struct PyAssetBundle {
 
 #[pymethods]
 impl PyAssetBundle {
-    /// Create an empty asset bundle.
     #[new]
     fn new() -> Self {
         Self {

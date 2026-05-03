@@ -5,12 +5,14 @@ use pyo3::prelude::*;
 ///
 /// Margins apply uniformly to every generated page. Use the constructor for
 /// explicit per-side values, or one of the helper factories
-/// (:meth:`uniform`, :meth:`symmetric`, :meth:`uniform_mm`).
+/// (`uniform`, `symmetric`, `uniform_mm`).
 ///
 /// Example:
-///     >>> from pyfulgur import Margin
-///     >>> Margin(36.0, 36.0, 36.0, 36.0)
-///     >>> Margin.uniform_mm(20.0)
+///     ```python
+///     from pyfulgur import Margin
+///     Margin(36.0, 36.0, 36.0, 36.0)
+///     Margin.uniform_mm(20.0)
+///     ```
 #[pyclass(name = "Margin", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyMargin {
@@ -19,8 +21,6 @@ pub struct PyMargin {
 
 #[pymethods]
 impl PyMargin {
-    /// Create a margin with explicit per-side values.
-    ///
     /// Args:
     ///     top: Top margin in points.
     ///     right: Right margin in points.

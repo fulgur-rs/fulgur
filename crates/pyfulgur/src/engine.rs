@@ -9,21 +9,23 @@ use crate::asset_bundle::PyAssetBundle;
 use crate::margin::PyMargin;
 use crate::page_size::PyPageSize;
 
-/// Builder for configuring and constructing an :class:`Engine`.
+/// Builder for configuring and constructing an `Engine`.
 ///
 /// All setters return ``self`` to support method chaining. Each builder
 /// instance can be ``build()`` ed only once; subsequent calls raise
 /// ``RuntimeError``.
 ///
 /// Example:
-///     >>> from pyfulgur import Engine, PageSize, Margin
-///     >>> engine = (
-///     ...     Engine.builder()
-///     ...     .page_size(PageSize.A4)
-///     ...     .margin(Margin.uniform_mm(20.0))
-///     ...     .title("Doc")
-///     ...     .build()
-///     ... )
+///     ```python
+///     from pyfulgur import Engine, PageSize, Margin
+///     engine = (
+///         Engine.builder()
+///         .page_size(PageSize.A4)
+///         .margin(Margin.uniform_mm(20.0))
+///         .title("Doc")
+///         .build()
+///     )
+///     ```
 #[pyclass(name = "EngineBuilder", module = "pyfulgur")]
 pub struct PyEngineBuilder {
     inner: Option<EngineBuilder>,
@@ -65,7 +67,6 @@ pub(crate) fn extract_page_size(value: &Bound<'_, PyAny>) -> PyResult<PageSize> 
 
 #[pymethods]
 impl PyEngineBuilder {
-    /// Create a new builder seeded with default configuration.
     #[new]
     fn new() -> Self {
         Self {
@@ -76,7 +77,7 @@ impl PyEngineBuilder {
     /// Set the page size.
     ///
     /// Args:
-    ///     value: Either a :class:`PageSize` instance or a string name
+    ///     value: Either a `PageSize` instance or a string name
     ///         (``"A4"``, ``"LETTER"``, ``"A3"``; case-insensitive).
     ///
     /// Returns:
@@ -93,7 +94,7 @@ impl PyEngineBuilder {
     /// Set the page margins.
     ///
     /// Args:
-    ///     margin: A :class:`Margin` instance.
+    ///     margin: A `Margin` instance.
     ///
     /// Returns:
     ///     ``self`` for method chaining.
@@ -162,13 +163,13 @@ impl PyEngineBuilder {
         Ok(slf.into())
     }
 
-    /// Attach an :class:`AssetBundle` of CSS, fonts, and images.
+    /// Attach an `AssetBundle` of CSS, fonts, and images.
     ///
     /// The bundle is consumed and reset to an empty state so it can be
     /// reused for a new build cycle.
     ///
     /// Args:
-    ///     bundle: The :class:`AssetBundle` to attach.
+    ///     bundle: The `AssetBundle` to attach.
     ///
     /// Returns:
     ///     ``self`` for method chaining.
@@ -181,10 +182,10 @@ impl PyEngineBuilder {
         Ok(slf.into())
     }
 
-    /// Finalize the configuration and build an :class:`Engine`.
+    /// Finalize the configuration and build an `Engine`.
     ///
     /// Returns:
-    ///     A new :class:`Engine` ready to render HTML.
+    ///     A new `Engine` ready to render HTML.
     ///
     /// Raises:
     ///     RuntimeError: When the builder has already been consumed.
@@ -197,14 +198,15 @@ impl PyEngineBuilder {
 /// HTML/CSS to PDF conversion engine.
 ///
 /// fulgur converts HTML, CSS, and SVG into a PDF document deterministically
-/// and offline. All assets must be explicitly bundled via
-/// :class:`AssetBundle`; no network fetches are performed.
+/// and offline. All assets must be explicitly bundled via `AssetBundle`;
+/// no network fetches are performed.
 ///
 /// Example:
-///     >>> from pyfulgur import Engine, PageSize
-///     >>> engine = Engine(page_size=PageSize.A4, title="Hello")
-///     >>> pdf = engine.render_html("<h1>Hi</h1>")
-///     >>> assert pdf.startswith(b"%PDF")
+///     ```python
+///     from pyfulgur import Engine, PageSize
+///     engine = Engine(page_size=PageSize.A4, title="Hello")
+///     engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
+///     ```
 #[pyclass(name = "Engine", module = "pyfulgur")]
 pub struct PyEngine {
     pub(crate) inner: Engine,
@@ -212,13 +214,8 @@ pub struct PyEngine {
 
 #[pymethods]
 impl PyEngine {
-    /// Construct an engine directly with keyword arguments.
-    ///
-    /// All arguments are keyword-only and optional. For more granular
-    /// configuration use :meth:`builder`.
-    ///
     /// Args:
-    ///     page_size: Page dimensions, either a :class:`PageSize` or a
+    ///     page_size: Page dimensions, either a `PageSize` or a
     ///         case-insensitive string name (``"A4"``, ``"LETTER"``,
     ///         ``"A3"``).
     ///     margin: Page margins.
@@ -227,7 +224,7 @@ impl PyEngine {
     ///     author: PDF author metadata.
     ///     lang: BCP 47 language tag.
     ///     bookmarks: ``True`` to generate bookmarks from heading hierarchy.
-    ///     assets: An :class:`AssetBundle` of CSS, fonts, and images.
+    ///     assets: An `AssetBundle` of CSS, fonts, and images.
     ///
     /// Raises:
     ///     ValueError: When ``page_size`` is an unknown name.
@@ -282,10 +279,10 @@ impl PyEngine {
         Ok(Self { inner: b.build() })
     }
 
-    /// Return a fresh :class:`EngineBuilder` for fluent configuration.
+    /// Return a fresh `EngineBuilder` for fluent configuration.
     ///
     /// Returns:
-    ///     A new :class:`EngineBuilder`.
+    ///     A new `EngineBuilder`.
     #[staticmethod]
     fn builder() -> PyEngineBuilder {
         PyEngineBuilder::new()
