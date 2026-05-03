@@ -451,7 +451,12 @@ fn corner_to_angle_rad(
         BottomLeft => (-1.0, 1.0),
         BottomRight => (1.0, 1.0),
     };
-    (h * h_sign).atan2(-w * v_sign)
+    let angle_deg = (h * h_sign).atan2(-w * v_sign).to_degrees();
+    match corner {
+        BottomLeft => (angle_deg + 360.0).to_radians(),
+        BottomRight => (angle_deg - 360.0).to_radians(),
+        TopLeft | TopRight => angle_deg.to_radians(),
+    }
 }
 
 /// 範囲外 fraction を CSS Images 3 §3.5.1 準拠で `[0, 1]` 内表現に renormalize する。
@@ -2938,10 +2943,10 @@ mod tests {
     fn corner_to_angle_rad_bottom_right_square_is_3pi_over_4() {
         use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::BottomRight, 100.0, 100.0);
-        let expected = 3.0 * std::f32::consts::FRAC_PI_4;
+        let expected = 3.0 * std::f32::consts::FRAC_PI_4 - std::f32::consts::TAU;
         assert!(
             (angle - expected).abs() < 1e-5,
-            "expected 3π/4, got {angle}"
+            "expected -5π/4, got {angle}"
         );
     }
 
@@ -2949,10 +2954,10 @@ mod tests {
     fn corner_to_angle_rad_bottom_left_square_is_neg_3pi_over_4() {
         use crate::draw_primitives::LinearGradientCorner;
         let angle = corner_to_angle_rad(LinearGradientCorner::BottomLeft, 100.0, 100.0);
-        let expected = -3.0 * std::f32::consts::FRAC_PI_4;
+        let expected = -3.0 * std::f32::consts::FRAC_PI_4 + std::f32::consts::TAU;
         assert!(
             (angle - expected).abs() < 1e-5,
-            "expected -3π/4, got {angle}"
+            "expected 5π/4, got {angle}"
         );
     }
 
@@ -2979,6 +2984,23 @@ mod tests {
             (angle - expected).abs() < 1e-5,
             "expected atan2(400,300)={expected}, got {angle}"
         );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_non_square_matches_wpt_reference_angles() {
+        use crate::draw_primitives::LinearGradientCorner;
+
+        let cases = [
+            (LinearGradientCorner::BottomRight, 0xc066_bc41),
+            (LinearGradientCorner::BottomLeft, 0x4066_bc41),
+            (LinearGradientCorner::TopLeft, 0xbeed_6339),
+            (LinearGradientCorner::TopRight, 0x3eed_6339),
+        ];
+
+        for (corner, expected_bits) in cases {
+            let angle = corner_to_angle_rad(corner, 200.0, 100.0);
+            assert_eq!(angle.to_bits(), expected_bits, "corner={corner:?}");
+        }
     }
 
     // ─── ellipse_corner_scale ─────────────────────────────────────────────────

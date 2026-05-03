@@ -26,7 +26,7 @@ PASS  css/css-grid/grid-definition/grid-layout-basic.html             # fulgur-8
 # 独立検証用の test↔ref harness は
 # `crates/fulgur-vrt/tests/gradient_harness.rs` に。
 PASS  css/css-images/linear-gradient-1.html             # fulgur-yax4: linear-gradient (3-stop axis direction)
-FAIL  css/css-images/linear-gradient-non-square.html    # Tracking: beads fulgur-woge — latent regression, bisect details in issue body
+PASS  css/css-images/linear-gradient-non-square.html
 
 # fulgur-gm56: radial-gradient Phase 2 実装 (shape/size/position + %-positioned
 # stops + auto stop spacing) は実装済み。視覚比較は VRT
