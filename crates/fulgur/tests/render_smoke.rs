@@ -2133,3 +2133,70 @@ fn multicol_inline_root_split_renders_both_columns_in_pdf_case_a() {
         x_clusters,
     );
 }
+
+/// fulgur-6q5 Fix 1: Case A's `cloned.align(...)` previously hard-coded
+/// `Alignment::default()` (= `Start`), so `text-align: center` (or any
+/// non-Start) on a self-inline-root multicol container rendered the
+/// split slices as start-aligned. Read the container's resolved
+/// `text-align` and feed the matching `parley::Alignment`.
+///
+/// The check inspects the materialised `Drawables.paragraph_slices`
+/// directly: a centre-aligned line in a column whose width far exceeds
+/// the glyph-run width must produce a `ShapedGlyphRun.x_offset > 0`
+/// (parley records the per-line horizontal shift on each run's offset
+/// after `Layout::align`).
+#[test]
+fn multicol_inline_root_split_honours_text_align_center() {
+    use fulgur::PageSize;
+    use fulgur::paragraph::LineItem;
+
+    let html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; text-align: center; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "Case A multicol must produce paragraph_slices for the test fixture",
+    );
+
+    // The single source paragraph (the container itself) splits across
+    // the two columns — exactly two non-empty slices.
+    let entry = drawables
+        .paragraph_slices
+        .values()
+        .next()
+        .expect("at least one paragraph_slices entry");
+    assert_eq!(
+        entry.slices.len(),
+        2,
+        "Case A long text in a two-column container must yield two slices, \
+         got {}",
+        entry.slices.len(),
+    );
+
+    // For each slice, examine the first line and grab the leading text
+    // run's `x_offset` (parley's per-line horizontal shift). With
+    // `text-align: start` (the pre-fix default), this would be 0; with
+    // `text-align: center` it must be strictly positive.
+    for (idx, slice) in entry.slices.iter().enumerate() {
+        let first_line = &slice.lines[0];
+        let first_text_x = first_line.items.iter().find_map(|item| match item {
+            LineItem::Text(t) => Some(t.x_offset),
+            _ => None,
+        });
+        let x = first_text_x.unwrap_or_else(|| {
+            panic!("slice {idx} first line must contain a text item");
+        });
+        assert!(
+            x > 0.5,
+            "slice {idx}: text-align: center should produce x_offset > 0, \
+             got {x:.3} (start-aligned would be 0)",
+        );
+    }
+}

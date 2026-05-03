@@ -85,6 +85,31 @@ fn size_in_pt(size: taffy::Size<f32>) -> (f32, f32) {
 /// unavailable (CSS 2 §10.8.1 initial value for `line-height: normal`).
 const DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.2;
 
+/// Map a stylo `text-align` keyword to the corresponding parley
+/// `Alignment`. Mirrors blitz-dom's own mapping
+/// (`blitz-dom-0.2.4/src/layout/inline.rs:142-152`) so split paragraph
+/// fragments render with the same alignment Blitz uses for the
+/// non-split path. CSS values not directly representable in
+/// `parley::Alignment` (e.g. legacy `-moz-*` keywords) collapse to
+/// their nearest equivalent; anything entirely unknown falls back to
+/// `Alignment::Start`.
+fn css_text_align_to_parley_alignment(
+    text_align: ::style::values::specified::TextAlignKeyword,
+) -> parley::Alignment {
+    use ::style::values::specified::TextAlignKeyword;
+    match text_align {
+        TextAlignKeyword::Start => parley::Alignment::Start,
+        TextAlignKeyword::Left => parley::Alignment::Left,
+        TextAlignKeyword::Right => parley::Alignment::Right,
+        TextAlignKeyword::Center => parley::Alignment::Center,
+        TextAlignKeyword::Justify => parley::Alignment::Justify,
+        TextAlignKeyword::End => parley::Alignment::End,
+        TextAlignKeyword::MozCenter => parley::Alignment::Center,
+        TextAlignKeyword::MozLeft => parley::Alignment::Left,
+        TextAlignKeyword::MozRight => parley::Alignment::Right,
+    }
+}
+
 /// Context for DOM-to-Drawables conversion, bundling all shared state.
 pub struct ConvertContext<'a> {
     pub running_store: &'a RunningElementStore,
@@ -598,12 +623,27 @@ fn convert_multicol_paragraph_slices(
             // Hold the rebroken clone alive across the per-line loop in
             // Case A. In Case B the borrowed reference into Blitz is
             // sufficient because Blitz already broke at `col_w`.
+            //
+            // For alignment: Blitz's own inline layout pass aligns each
+            // inline-root layout with that node's resolved
+            // `text-align`. Case B inherits that alignment for free
+            // because we read the existing parley layout in place. Case
+            // A re-clones + re-breaks here, which would otherwise
+            // discard alignment unless we re-apply it. The container
+            // (which IS the inline root in Case A — `source_id ==
+            // node_id`) supplies the keyword via its primary styles,
+            // matching the mapping at
+            // `blitz-dom-0.2.4/src/layout/inline.rs:142-152`.
             let owned_layout: Option<parley::Layout<blitz_dom::node::TextBrush>> = if case_a {
+                let alignment = source_node
+                    .primary_styles()
+                    .map(|s| css_text_align_to_parley_alignment(s.clone_text_align()))
+                    .unwrap_or(parley::Alignment::Start);
                 let mut cloned = text_layout.layout.clone();
                 cloned.break_all_lines(Some(group.col_w));
                 cloned.align(
                     Some(group.col_w),
-                    parley::Alignment::default(),
+                    alignment,
                     parley::AlignmentOptions::default(),
                 );
                 Some(cloned)
