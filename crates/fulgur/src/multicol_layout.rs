@@ -1843,6 +1843,64 @@ mod tests {
     }
 
     #[test]
+    fn multicol_container_border_offsets_children_and_contributes_height() {
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0; border: 5px solid black;">
+              <p id="a">alpha alpha alpha alpha</p>
+              <p id="b">beta beta beta beta</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        tree.layout_multicol_subtrees();
+
+        let a = layout_of_id(&doc, "a");
+        let b = layout_of_id(&doc, "b");
+        let mc = layout_of_id(&doc, "mc");
+
+        assert!(
+            (a.location.x - 5.0).abs() < 0.5,
+            "first-column child.x expected ≈ 5 (border-left), got {}",
+            a.location.x
+        );
+        assert!(
+            (a.location.y - 5.0).abs() < 0.5,
+            "first child.y expected ≈ 5 (border-top), got {}",
+            a.location.y
+        );
+        assert!(
+            b.location.x > a.location.x + 50.0,
+            "second-column child should sit right of first: a.x={}, b.x={}",
+            a.location.x,
+            b.location.x
+        );
+        assert!(
+            (mc.border.left - 5.0).abs() < 0.5 && (mc.border.top - 5.0).abs() < 0.5,
+            "container border metrics should be preserved for painting, got left={} top={}",
+            mc.border.left,
+            mc.border.top
+        );
+
+        let expected_col_w = (mc.size.width - 10.0) / 2.0;
+        assert!(
+            (a.size.width - expected_col_w).abs() < 1.0,
+            "col_w expected ≈ {expected_col_w} ((mc.width {} − 2×5) / 2), got {}",
+            mc.size.width,
+            a.size.width
+        );
+
+        let col_bottom = (a.location.y + a.size.height).max(b.location.y + b.size.height);
+        assert!(
+            mc.size.height >= col_bottom + 5.0 - 0.5,
+            "container height {} should include border-bottom (content bottom {} + 5)",
+            mc.size.height,
+            col_bottom
+        );
+    }
+
+    #[test]
     fn multicol_span_all_respects_container_padding() {
         // The SpanAll branch must honour the multicol's own padding too —
         // a column-span: all heading should start at padding-left, not at
