@@ -1398,15 +1398,6 @@ fn fragment_block_subtree(
     // - grid / flex parallel siblings: same y (Taffy reports same
     //   `location.y` for cards in the same row, so the offset
     //   collapses to the row's first y).
-    //
-    // `origin_pending` defers the rebase: after a page
-    // advance (forced break, strip overflow, recursion crossing) we
-    // don't know the next child's Taffy y yet. When it arrives, choose
-    // an origin that places it at the requested page-local target. For
-    // a fresh-page break this is usually `page_start_y` (0). For a
-    // block sibling after a recursively split child, it is the current
-    // cursor so the sibling continues after the split tail instead of
-    // overlapping it at the page top.
     let mut page_taffy_origin: f32 = 0.0;
     let mut origin_pending_target_y: Option<f32> = None;
     let mut origin_pending_same_row: Option<(f32, f32, f32)> = None;
@@ -1495,9 +1486,6 @@ fn fragment_block_subtree(
         // it (and break-before / break-after rebases the
         // `page_taffy_origin` against it on page advance).
         let this_top_in_parent = layout.location.y;
-        // Apply deferred origin rebase: the previous child's page
-        // advance requested a target y for this first child on the new
-        // page strip.
         if let Some(mut target_y) = origin_pending_target_y.take() {
             if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
                 && this_top_in_parent < row_bottom - 0.5
@@ -1534,8 +1522,7 @@ fn fragment_block_subtree(
                 // Zero-height break-before: this child IS the first
                 // on the new page — apply origin rebase eagerly.
                 page_taffy_origin = this_top_in_parent;
-                origin_pending_target_y = None;
-                origin_pending_same_row = None;
+                (origin_pending_target_y, origin_pending_same_row) = (None, None);
             }
             if child.element_data().is_some() {
                 geometry
@@ -1570,8 +1557,7 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Zero-height break-after: NEXT child is the first
                 // on the new page — defer origin rebase.
-                origin_pending_target_y = Some(page_start_y);
-                origin_pending_same_row = None;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1677,21 +1663,10 @@ fn fragment_block_subtree(
             // backward cursor returns (impossible in normal flow).
             if page_index != pre_recursion_page || nc < page_start_y {
                 page_start_y = 0.0;
-                // Recursion crossed pages. In a grid/flex parent, the
-                // next sibling may be a parallel item in the same visual
-                // row, so it should rebase to the page start. In normal
-                // block flow, the next sibling must continue after the
-                // split child's tail on the current page.
                 origin_pending_target_y = Some(cursor_y);
-                origin_pending_same_row = if suppress_page_check {
-                    Some((
-                        this_top_in_parent,
-                        this_top_in_parent + child_h,
-                        page_start_y,
-                    ))
-                } else {
-                    None
-                };
+                let row_top = this_top_in_parent;
+                let row_bottom = row_top + child_h;
+                origin_pending_same_row = suppress_page_check.then_some((row_top, row_bottom, 0.0));
             }
 
             // Honour `break-after: page` after recursion.
@@ -1710,10 +1685,7 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
-                // Break-after: NEXT child starts the new page —
-                // defer origin rebase to its arrival.
-                origin_pending_target_y = Some(page_start_y);
-                origin_pending_same_row = None;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1799,10 +1771,7 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
-            // Break-after: NEXT child starts the new page — defer
-            // origin rebase to its arrival.
-            origin_pending_target_y = Some(page_start_y);
-            origin_pending_same_row = None;
+            (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
