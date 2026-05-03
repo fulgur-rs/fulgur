@@ -11,9 +11,8 @@ use crate::page_size::PyPageSize;
 
 /// Builder for configuring and constructing an `Engine`.
 ///
-/// All setters return ``self`` to support method chaining. Each builder
-/// instance can be ``build()`` ed only once; subsequent calls raise
-/// ``RuntimeError``.
+/// All setters return ``self`` to support method chaining. ``build()`` can
+/// be called only once per builder; subsequent calls raise ``RuntimeError``.
 ///
 /// Example:
 ///     ```python
