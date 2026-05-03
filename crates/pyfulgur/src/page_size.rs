@@ -4,13 +4,15 @@ use pyo3::prelude::*;
 /// Page size with dimensions in millimeters.
 ///
 /// Use the predefined class attributes ``A4``, ``LETTER``, or ``A3``, or
-/// :meth:`custom` for arbitrary sizes. ``PageSize`` is immutable.
+/// `custom` for arbitrary sizes. ``PageSize`` is immutable.
 ///
 /// Example:
-///     >>> from pyfulgur import PageSize
-///     >>> a4 = PageSize.A4
-///     >>> custom = PageSize.custom(210.0, 297.0)
-///     >>> landscape = a4.landscape()
+///     ```python
+///     from pyfulgur import PageSize
+///     a4 = PageSize.A4
+///     custom = PageSize.custom(210.0, 297.0)
+///     landscape = a4.landscape()
+///     ```
 #[pyclass(name = "PageSize", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyPageSize {
