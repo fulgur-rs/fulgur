@@ -2238,4 +2238,92 @@ mod tests {
             "multicol without column-rule must not produce a MulticolRuleEntry"
         );
     }
+
+    /// Pre-flight probe for fulgur-6q5: does Blitz re-break parley layout
+    /// when the multicol Taffy hook calls `compute_child_layout(child,
+    /// known_dimensions = col_w)` on an inline-root child?
+    ///
+    /// Removed in Task 9 of the plan. Run with:
+    ///
+    ///   cargo test -p fulgur --lib \
+    ///       probe_parley_rebreak_after_compute_child_layout \
+    ///       -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_parley_rebreak_after_compute_child_layout() {
+        // 30 alphas — far more than col_w (~92 px) at 16px font can hold
+        // on a single line, so a re-break would clearly produce more lines.
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">
+              <p>alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 200.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        // Locate <p> by element name via DFS — same shape as the existing
+        // `find_by_id` walker in `siblings_after_multicol_get_repositioned_by_height_delta`.
+        fn find_p(doc: &BaseDocument, node_id: usize) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if node
+                .element_data()
+                .map(|e| e.name.local.as_ref() == "p")
+                .unwrap_or(false)
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = find_p(doc, child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let p_id = find_p(&doc, doc.root_element().id).expect("<p> must exist");
+
+        let read_layout_stats = |doc: &BaseDocument, id: usize| -> (usize, f32) {
+            let elem = doc.get_node(id).unwrap().element_data().unwrap();
+            let layout = &elem.inline_layout_data.as_ref().unwrap().layout;
+            let mut count = 0_usize;
+            let mut max_adv = 0.0_f32;
+            for line in layout.lines() {
+                count += 1;
+                let adv = line.metrics().advance;
+                if adv > max_adv {
+                    max_adv = adv;
+                }
+            }
+            (count, max_adv)
+        };
+
+        let (pre_count, pre_max_adv) = read_layout_stats(&doc, p_id);
+
+        // Container content width and resolved (n, col_w).
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        let mc_content_w = doc.get_node(mc_id).unwrap().unrounded_layout.size.width;
+        let (n, col_w) = resolve_column_layout(mc_content_w, Some(2), None, 0.0);
+
+        eprintln!("=== PRE-FLIGHT PROBE: parley re-break after compute_child_layout ===");
+        eprintln!("mc container_w (px) = {mc_content_w}");
+        eprintln!("resolved (n, col_w) = ({n}, {col_w})");
+        eprintln!("pre-hook  lines = {pre_count}, max line advance (px) = {pre_max_adv}");
+
+        // Drive the hook — `compute_child_layout(p_id, known_dimensions=col_w)`
+        // happens inside `layout_column_group`'s measure step.
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let _ = run_pass(&mut doc, &column_styles);
+
+        let (post_count, post_max_adv) = read_layout_stats(&doc, p_id);
+        eprintln!("post-hook lines = {post_count}, max line advance (px) = {post_max_adv}");
+
+        let verdict = if post_count > pre_count && post_max_adv <= col_w + 0.5 {
+            "RE_BREAKS"
+        } else if post_count == pre_count && post_max_adv > col_w {
+            "NO_REBREAK"
+        } else {
+            "OTHER"
+        };
+        eprintln!("verdict = {verdict}");
+        eprintln!("=== END PROBE ===");
+    }
 }
