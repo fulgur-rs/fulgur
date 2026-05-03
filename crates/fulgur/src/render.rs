@@ -192,9 +192,8 @@ pub fn render_v2(
             }
             // Paint margin boxes after body content so page headers /
             // footers are not hidden by page-filling body backgrounds.
-            // They use a collector-less canvas because running elements
-            // promoted into a margin box shouldn't re-record bookmarks
-            // or links every page.
+            // Keep bookmarks disabled for repeated running elements, but
+            // collect links so margin-box anchors remain clickable.
             let mut margin_canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
                 bookmark_collector: None,
