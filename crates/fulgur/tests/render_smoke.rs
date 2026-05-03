@@ -634,6 +634,85 @@ fn position_fixed_repeats_on_every_page() {
     );
 }
 
+#[test]
+fn page_counter_footer_paints_above_body_background() {
+    let html = r#"<!doctype html><html><head><style>
+        @page {
+          size: A4;
+          margin: 20mm;
+          @bottom-center {
+            content: "888";
+            font-size: 24pt;
+            color: #000;
+          }
+        }
+        html, body { margin: 0; padding: 0; background: #fff; }
+        .page { height: 100vh; background: #fff; }
+      </style></head><body><div class="page">body</div></body></html>"#;
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pdf_path = dir.path().join("out.pdf");
+    std::fs::write(&pdf_path, &pdf).unwrap();
+    if std::process::Command::new("pdftoppm")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
+        eprintln!("pdftoppm not available; skipping visual footer assertion");
+        return;
+    }
+
+    let prefix = dir.path().join("page");
+    let output = std::process::Command::new("pdftoppm")
+        .args(["-f", "1", "-l", "1", "-r", "72"])
+        .arg(&pdf_path)
+        .arg(&prefix)
+        .output()
+        .expect("run pdftoppm");
+    assert!(output.status.success(), "pdftoppm failed: {output:?}");
+
+    let ppm = std::fs::read(dir.path().join("page-1.ppm")).expect("ppm output");
+    let mut idx = 0;
+    let next_token = |bytes: &[u8], idx: &mut usize| -> String {
+        while *idx < bytes.len() && bytes[*idx].is_ascii_whitespace() {
+            *idx += 1;
+        }
+        let start = *idx;
+        while *idx < bytes.len() && !bytes[*idx].is_ascii_whitespace() {
+            *idx += 1;
+        }
+        String::from_utf8(bytes[start..*idx].to_vec()).unwrap()
+    };
+    assert_eq!(next_token(&ppm, &mut idx), "P6");
+    let width: usize = next_token(&ppm, &mut idx).parse().unwrap();
+    let height: usize = next_token(&ppm, &mut idx).parse().unwrap();
+    assert_eq!(next_token(&ppm, &mut idx), "255");
+    while idx < ppm.len() && ppm[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let pixels = &ppm[idx..];
+    let y_start = height * 91 / 100;
+    let y_end = height * 98 / 100;
+    let x_start = 0;
+    let x_end = width;
+    let dark_pixels = (y_start..y_end)
+        .flat_map(|y| (x_start..x_end).map(move |x| (y, x)))
+        .filter(|(y, x)| {
+            let offset = (y * width + x) * 3;
+            let r = pixels[offset];
+            let g = pixels[offset + 1];
+            let b = pixels[offset + 2];
+            r < 80 && g < 80 && b < 80
+        })
+        .count();
+    assert!(
+        dark_pixels > 10,
+        "expected visible black footer glyph pixels in the bottom margin, found {dark_pixels}"
+    );
+}
+
 // ── Phase 4 v2 render path smoke tests (fulgur-9t3z) ─────────────────
 //
 // Exercise the v2 render path (`render_v2`) so the patch-coverage

@@ -1358,6 +1358,15 @@ fn fragment_block_subtree(
     page_height_px: f32,
     depth: usize,
 ) -> (u32, f32) {
+    enum PendingOrigin {
+        Fixed(f32),
+        AfterSplit {
+            row_top: f32,
+            same_row_y: f32,
+            next_row_y: f32,
+        },
+    }
+
     if depth >= crate::MAX_DOM_DEPTH {
         // Bailed: emit a single whole-fragment for the parent at its
         // entry coordinates so geometry still has an entry for it.
@@ -1399,14 +1408,16 @@ fn fragment_block_subtree(
     //   `location.y` for cards in the same row, so the offset
     //   collapses to the row's first y).
     //
-    // `origin_pending` defers the rebase: after a page advance
-    // (forced break, strip overflow, recursion crossing) we don't
-    // immediately know whether the next child is sequential or
-    // parallel, so we set the origin lazily to the next-arriving
-    // child's `this_top_in_parent` — that child lands at
-    // `page_start_y` regardless of what its absolute Taffy y is.
+    // `origin_pending` defers the rebase: after a page
+    // advance (forced break, strip overflow, recursion crossing) we
+    // don't know the next child's Taffy y yet. When it arrives, choose
+    // an origin that places it at the requested page-local target. For
+    // a fresh-page break this is usually `page_start_y` (0). For a
+    // block sibling after a recursively split child, it is the current
+    // cursor so the sibling continues after the split tail instead of
+    // overlapping it at the page top.
     let mut page_taffy_origin: f32 = 0.0;
-    let mut origin_pending: bool = false;
+    let mut origin_pending: Option<PendingOrigin> = None;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
     // for implicit forced-break detection; see `fragment_pagination_root`
     // for the rationale and the outer-Option semantics.
@@ -1492,12 +1503,25 @@ fn fragment_block_subtree(
         // it (and break-before / break-after rebases the
         // `page_taffy_origin` against it on page advance).
         let this_top_in_parent = layout.location.y;
-        // Apply deferred origin rebase: the previous child's
-        // page advance left `origin_pending` set, so this child
-        // becomes the "first child on the new page strip".
-        if origin_pending {
-            page_taffy_origin = this_top_in_parent;
-            origin_pending = false;
+        // Apply deferred origin rebase: the previous child's page
+        // advance requested a target y for this first child on the new
+        // page strip.
+        if let Some(pending) = origin_pending.take() {
+            let target_y = match pending {
+                PendingOrigin::Fixed(y) => y,
+                PendingOrigin::AfterSplit {
+                    row_top,
+                    same_row_y,
+                    next_row_y,
+                } => {
+                    if (this_top_in_parent - row_top).abs() < 0.5 {
+                        same_row_y
+                    } else {
+                        next_row_y
+                    }
+                }
+            };
+            page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
         }
 
         if child_h <= 0.0 {
@@ -1527,7 +1551,7 @@ fn fragment_block_subtree(
                 // Zero-height break-before: this child IS the first
                 // on the new page — apply origin rebase eagerly.
                 page_taffy_origin = this_top_in_parent;
-                origin_pending = false;
+                origin_pending = None;
             }
             if child.element_data().is_some() {
                 geometry
@@ -1562,7 +1586,7 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Zero-height break-after: NEXT child is the first
                 // on the new page — defer origin rebase.
-                origin_pending = true;
+                origin_pending = Some(PendingOrigin::Fixed(page_start_y));
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1668,11 +1692,20 @@ fn fragment_block_subtree(
             // backward cursor returns (impossible in normal flow).
             if page_index != pre_recursion_page || nc < page_start_y {
                 page_start_y = 0.0;
-                // Recursion crossed pages: NEXT sibling is the first
-                // child on the new page — defer origin rebase to its
-                // arrival (could be sequential block or grid / flex
-                // parallel, same handling either way).
-                origin_pending = true;
+                // Recursion crossed pages. In a grid/flex parent, the
+                // next sibling may be a parallel item in the same visual
+                // row, so it should rebase to the page start. In normal
+                // block flow, the next sibling must continue after the
+                // split child's tail on the current page.
+                origin_pending = Some(if suppress_page_check {
+                    PendingOrigin::AfterSplit {
+                        row_top: this_top_in_parent,
+                        same_row_y: page_start_y,
+                        next_row_y: cursor_y,
+                    }
+                } else {
+                    PendingOrigin::Fixed(cursor_y)
+                });
             }
 
             // Honour `break-after: page` after recursion.
@@ -1693,7 +1726,7 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Break-after: NEXT child starts the new page —
                 // defer origin rebase to its arrival.
-                origin_pending = true;
+                origin_pending = Some(PendingOrigin::Fixed(page_start_y));
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1781,7 +1814,7 @@ fn fragment_block_subtree(
             page_start_y = 0.0;
             // Break-after: NEXT child starts the new page — defer
             // origin rebase to its arrival.
-            origin_pending = true;
+            origin_pending = Some(PendingOrigin::Fixed(page_start_y));
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
@@ -3732,6 +3765,80 @@ h2 { string-set: chapter-title content(text); }
                  to cursor-advance)",
             );
         }
+    }
+
+    #[test]
+    fn fragment_block_subtree_following_block_continues_after_split_child_tail() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+                <h2 style="height: 30px; width: 200px; margin: 0">after grid</h2>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut candidates: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .collect();
+        candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let h2 = candidates
+            .first()
+            .expect("expected the trailing h2 to land on page 1");
+        assert!(
+            h2.y >= 100.0,
+            "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
+            h2.y
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_grid_later_row_parallel_siblings_share_page_y() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
+        assert_eq!(
+            page_one_cells.len(),
+            2,
+            "expected the second grid row's two cells on page 1, got {cells:?}"
+        );
+        assert!(
+            (page_one_cells[0].2 - page_one_cells[1].2).abs() < 0.5,
+            "parallel cells in the same later grid row must share y; got {cells:?}"
+        );
     }
 
     /// fulgur-916y: a multicol container with a `column-span: all`
