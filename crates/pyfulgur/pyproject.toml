@@ -36,6 +36,7 @@ test = ["pytest>=7"]
 
 [tool.maturin]
 module-name = "pyfulgur"
+python-source = "python"
 manifest-path = "Cargo.toml"
 features = ["extension-module"]
 py-limited-api = "cp39"
