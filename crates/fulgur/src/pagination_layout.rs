@@ -1097,7 +1097,22 @@ fn would_split_block_subtree(
     };
     let mut cursor: f32 = 0.0;
     let mut prev_bottom: f32 = 0.0;
-    for &child_id in &parent.children {
+    // fulgur-yb27: walk `layout_children` so anonymous block wrappers
+    // Stylo synthesizes around inline-level siblings (CSS 2.1
+    // §9.2.1.1) participate in the cumulative-overflow simulation.
+    // Mirrors the `fragment_block_subtree` walker switch above —
+    // without this, a block whose tail anon block wrapper would
+    // overflow is missed by the preflight, the recursion gate
+    // returns false, and the parent falls back to a single
+    // oversize fragment.
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: Vec<usize> = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_vec())
+        .unwrap_or_else(|| parent.children.clone());
+    drop(layout_children_borrow);
+    for &child_id in &walk_children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -4298,7 +4313,8 @@ h2 { string-set: chapter-title content(text); }
     fn fragment_block_subtree_emits_parent_fragment_when_recursion_crosses_page() {
         // Two-deep nesting: outer (with background) > inner > [tall
         // child, trailing inline]. Inner's recursion will cross the
-        // page boundary; outer must still get a fragment on page 0.
+        // page boundary; outer (the <section>) must still get a
+        // fragment on page 0.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <section style="width: 200px;">
@@ -4311,22 +4327,62 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
+        // Locate the <section> node id explicitly so the assertion
+        // targets the specific block that should keep a page-0
+        // fragment — without this, a wide body fragment on page 0
+        // would satisfy a generic "any wide page-0 fragment" check
+        // even when the section itself has no page-0 entry.
+        let section_id =
+            find_node_by_local_name(&doc, "section").expect("fixture must contain a <section>");
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0, &table);
-        // Locate the outermost section and confirm it has a fragment
-        // on page 0 (otherwise its background/borders disappear from
-        // the page that visually contains the tall child).
-        let section_with_page_0 = geom.values().any(|g| {
-            // Section is the only node whose width matches the
-            // viewport_w fixture (200) and that has fragments on
-            // both page 0 and page ≥ 1 (or any first-page emission).
-            g.fragments
-                .iter()
-                .any(|f| f.page_index == 0 && f.width >= 199.0)
+        let section_geom = geom.get(&section_id).unwrap_or_else(|| {
+            panic!("oc51: <section> (node_id={section_id}) missing from geometry; geom={geom:?}")
         });
+        let has_page_0 = section_geom.fragments.iter().any(|f| f.page_index == 0);
         assert!(
-            section_with_page_0,
-            "oc51: outer block must keep a page-0 fragment when its \
-             nested recursion crosses a page boundary; geometry={geom:?}",
+            has_page_0,
+            "oc51: <section> (node_id={section_id}) must keep a page-0 \
+             fragment when its nested recursion crosses a page boundary; \
+             section_fragments={:?}",
+            section_geom.fragments,
         );
+        // Must also reach page 1+ — otherwise the test isn't actually
+        // exercising the recursion-cross-page path.
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_page >= 1,
+            "oc51: fixture must paginate to ≥ 2 pages to exercise the \
+             recursion-cross-page path; max_page={max_page}",
+        );
+    }
+
+    /// Locate the first node in the document whose element local name
+    /// matches `tag`. Used by tests that need a node_id reference for
+    /// a specific HTML element without depending on Stylo's internal
+    /// node numbering.
+    fn find_node_by_local_name(doc: &blitz_html::HtmlDocument, tag: &str) -> Option<usize> {
+        use std::ops::Deref;
+        let base: &blitz_dom::BaseDocument = doc.deref();
+        let root_id = base.root_element().id;
+        fn walk(base: &blitz_dom::BaseDocument, id: usize, tag: &str) -> Option<usize> {
+            let node = base.get_node(id)?;
+            if let Some(elem) = node.element_data()
+                && elem.name.local.as_ref() == tag
+            {
+                return Some(id);
+            }
+            for &child_id in &node.children {
+                if let Some(found) = walk(base, child_id, tag) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(base, root_id, tag)
     }
 }
