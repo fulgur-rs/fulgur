@@ -124,6 +124,32 @@ fn link_works_through_gcpm_render_path() {
     assert!(text.contains("https://gcpm.test"), "GCPM path missing URI");
 }
 
+#[test]
+fn margin_box_running_element_link_keeps_pdf_annotation() {
+    let html = r##"<html>
+        <head><style>
+            .header { position: running(pageHeader); }
+            @page { margin: 2cm; @top-center { content: element(pageHeader); } }
+        </style></head>
+        <body>
+            <div class="header"><a href="https://margin-box-link.test">header link</a></div>
+            <p>body</p>
+        </body>
+    </html>"##;
+    let bytes = engine().render_html(html).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("/Link"),
+        "margin-box anchor should emit a PDF link annotation"
+    );
+    assert!(text.contains("/URI"), "missing /URI action type");
+    let uri_count = text.matches("https://margin-box-link.test").count();
+    assert!(
+        uri_count >= 2,
+        "expected both source running element and margin-box render to keep link annotations, got {uri_count} URI entries"
+    );
+}
+
 // TODO(fulgur-pdf-links): wire link emission for `<a><img/></a>` when the
 // anchor and `<img>` live inside an inline-root paragraph.
 //

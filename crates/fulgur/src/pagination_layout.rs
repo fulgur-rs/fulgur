@@ -1398,15 +1398,9 @@ fn fragment_block_subtree(
     // - grid / flex parallel siblings: same y (Taffy reports same
     //   `location.y` for cards in the same row, so the offset
     //   collapses to the row's first y).
-    //
-    // `origin_pending` defers the rebase: after a page advance
-    // (forced break, strip overflow, recursion crossing) we don't
-    // immediately know whether the next child is sequential or
-    // parallel, so we set the origin lazily to the next-arriving
-    // child's `this_top_in_parent` — that child lands at
-    // `page_start_y` regardless of what its absolute Taffy y is.
     let mut page_taffy_origin: f32 = 0.0;
-    let mut origin_pending: bool = false;
+    let mut origin_pending_target_y: Option<f32> = None;
+    let mut origin_pending_same_row: Option<(f32, f32, f32)> = None;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
     // for implicit forced-break detection; see `fragment_pagination_root`
     // for the rationale and the outer-Option semantics.
@@ -1428,7 +1422,8 @@ fn fragment_block_subtree(
         .parent
         .and_then(|gp_id| doc.get_node(gp_id))
         .is_some_and(|gp| crate::blitz_adapter::is_orthogonal_to_parent(gp, parent));
-    let suppress_page_check = crate::blitz_adapter::is_flex_or_grid_container_node(parent)
+    let allow_same_row_rebase = crate::blitz_adapter::is_flex_or_grid_container_node(parent);
+    let suppress_page_check = allow_same_row_rebase
         || crate::blitz_adapter::is_atomic_inline_container_node(parent)
         || parent_is_orthogonal;
 
@@ -1492,12 +1487,13 @@ fn fragment_block_subtree(
         // it (and break-before / break-after rebases the
         // `page_taffy_origin` against it on page advance).
         let this_top_in_parent = layout.location.y;
-        // Apply deferred origin rebase: the previous child's
-        // page advance left `origin_pending` set, so this child
-        // becomes the "first child on the new page strip".
-        if origin_pending {
-            page_taffy_origin = this_top_in_parent;
-            origin_pending = false;
+        if let Some(mut target_y) = origin_pending_target_y.take() {
+            if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
+                && this_top_in_parent < row_bottom - 0.5
+            {
+                target_y = same_row_y + (this_top_in_parent - row_top);
+            }
+            page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
         }
 
         if child_h <= 0.0 {
@@ -1527,7 +1523,7 @@ fn fragment_block_subtree(
                 // Zero-height break-before: this child IS the first
                 // on the new page — apply origin rebase eagerly.
                 page_taffy_origin = this_top_in_parent;
-                origin_pending = false;
+                (origin_pending_target_y, origin_pending_same_row) = (None, None);
             }
             if child.element_data().is_some() {
                 geometry
@@ -1562,7 +1558,7 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Zero-height break-after: NEXT child is the first
                 // on the new page — defer origin rebase.
-                origin_pending = true;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1668,11 +1664,11 @@ fn fragment_block_subtree(
             // backward cursor returns (impossible in normal flow).
             if page_index != pre_recursion_page || nc < page_start_y {
                 page_start_y = 0.0;
-                // Recursion crossed pages: NEXT sibling is the first
-                // child on the new page — defer origin rebase to its
-                // arrival (could be sequential block or grid / flex
-                // parallel, same handling either way).
-                origin_pending = true;
+                origin_pending_target_y = Some(cursor_y);
+                let row_top = this_top_in_parent;
+                let row_bottom = row_top + child_h;
+                origin_pending_same_row =
+                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
             }
 
             // Honour `break-after: page` after recursion.
@@ -1691,9 +1687,7 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
-                // Break-after: NEXT child starts the new page —
-                // defer origin rebase to its arrival.
-                origin_pending = true;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1779,9 +1773,7 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
-            // Break-after: NEXT child starts the new page — defer
-            // origin rebase to its arrival.
-            origin_pending = true;
+            (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
@@ -3732,6 +3724,226 @@ h2 { string-set: chapter-title content(text); }
                  to cursor-advance)",
             );
         }
+    }
+
+    #[test]
+    fn fragment_block_subtree_following_block_continues_after_split_child_tail() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+                <h2 style="height: 30px; width: 200px; margin: 0">after grid</h2>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut candidates: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .collect();
+        candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let h2 = candidates
+            .first()
+            .expect("expected the trailing h2 to land on page 1");
+        assert!(
+            h2.y >= 100.0,
+            "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
+            h2.y
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_following_block_continues_after_split_flex_tail() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+                <h2 style="height: 30px; width: 200px; margin: 0">after flex</h2>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut candidates: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .collect();
+        candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let h2 = candidates
+            .first()
+            .expect("expected the trailing h2 to land on page 1");
+        assert!(
+            h2.y >= 100.0,
+            "block sibling after split flex must continue after the flex tail; got y={} (pre-fix: y=0 overlaps the tail)",
+            h2.y
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_grid_later_row_parallel_siblings_share_page_y() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
+        assert_eq!(
+            page_one_cells.len(),
+            2,
+            "expected the second grid row's two cells on page 1, got {cells:?}"
+        );
+        assert!(
+            (page_one_cells[0].2 - page_one_cells[1].2).abs() < 0.5,
+            "parallel cells in the same later grid row must share y; got {cells:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_flex_later_row_parallel_siblings_share_page_y() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
+        assert_eq!(
+            page_one_cells.len(),
+            2,
+            "expected the second flex row's two cells on page 1, got {cells:?}"
+        );
+        assert!(
+            (page_one_cells[0].2 - page_one_cells[1].2).abs() < 0.5,
+            "parallel cells in the same later flex row must share y; got {cells:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_grid_later_row_preserves_parallel_sibling_offset() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; align-items: start; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 80px; width: 100px; margin-top: 20px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut page_one_cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.height, f.x, f.y))
+            .collect();
+        page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let unshifted = page_one_cells
+            .iter()
+            .find(|(h, _, _)| (*h - 100.0).abs() < 0.5)
+            .expect("expected unshifted second-row grid cell on page 1");
+        assert!(
+            (unshifted.2 + 20.0).abs() < 0.5,
+            "same-row sibling must preserve its cross-axis offset relative to the split row; got {page_one_cells:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_flex_later_row_preserves_parallel_sibling_offset() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; align-items: flex-start; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 80px; width: 100px; margin-top: 20px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut page_one_cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.height, f.x, f.y))
+            .collect();
+        page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let unshifted = page_one_cells
+            .iter()
+            .find(|(h, _, _)| (*h - 100.0).abs() < 0.5)
+            .expect("expected unshifted second-row flex item on page 1");
+        assert!(
+            (unshifted.2 + 20.0).abs() < 0.5,
+            "same-row sibling must preserve its cross-axis offset relative to the split row; got {page_one_cells:?}"
+        );
     }
 
     /// fulgur-916y: a multicol container with a `column-span: all`

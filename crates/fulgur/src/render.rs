@@ -132,86 +132,82 @@ pub fn render_v2(
         link_collector.set_current_page(page_idx);
         {
             let mut surface = page.surface();
-            // Margin box pre-pass first (mirrors v1's
-            // `render_to_pdf_with_gcpm` per-page ordering — header /
-            // footer / corner content paint before body content). v1
-            // gives margin boxes their own collector-less canvas
-            // because running elements promoted into a margin box
-            // shouldn't re-record bookmarks every page; we mirror that
-            // here.
             {
-                let mut margin_canvas = crate::draw_primitives::Canvas {
+                let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
-                    bookmark_collector: None,
-                    link_collector: None,
+                    bookmark_collector: bookmark_collector.as_mut(),
+                    link_collector: Some(&mut link_collector),
                 };
-                let page_content_width =
-                    page_size.width - resolved_margin.left - resolved_margin.right;
-                margin_box_renderer.render_page(
-                    &mut margin_canvas,
-                    page_idx,
-                    page_num,
-                    page_count,
-                    page_size,
-                    resolved_margin,
-                    page_content_width,
+                // Root `<html>` + `<body>` background pre-pass. v1's
+                // `BlockPageable::draw` for these elements paints
+                // bg/border/shadow on EVERY page because each page's
+                // sliced root pageable still calls them. v2's main
+                // dispatch sees them via the fragmenter's single fragment
+                // on page 0 only — multi-page docs would lose those fills
+                // on continuation pages. Paint each here at its own offset
+                // (`(margin.left, margin.top)` for html, plus
+                // `body_offset_pt` for body) using `layout_size` from the
+                // entry — mirrors v1's
+                // `total_width = self.layout_size.or(cached_size)...`
+                // derivation. The main dispatch loop skips both `root_id`
+                // and `body_id` to avoid double-painting on page 0.
+                if let Some(root_id) = drawables.root_id
+                    && let Some(root_block) = drawables.block_styles.get(&root_id)
+                {
+                    paint_root_block_v2(
+                        &mut canvas,
+                        root_block,
+                        resolved_margin.left,
+                        resolved_margin.top,
+                    );
+                }
+                // body's bg pre-pass runs on continuation pages only.
+                // Page 0 already paints body via the main dispatch loop
+                // (the fragmenter records body's fragment on page 0, with
+                // `layout_size` covering body's full height — clipped to
+                // page area at PDF render time, mirroring v1 exactly).
+                // Without this guard, page 0 would double-paint body's bg.
+                if page_idx > 0
+                    && let Some(body_id) = drawables.body_id
+                    && let Some(body_block) = drawables.block_styles.get(&body_id)
+                {
+                    paint_root_block_v2(
+                        &mut canvas,
+                        body_block,
+                        resolved_margin.left + drawables.body_offset_pt.0,
+                        resolved_margin.top + drawables.body_offset_pt.1,
+                    );
+                }
+                // `frag.x` is html-relative (fragmenter folds body's x
+                // offset in); `frag.y` is body-content-area-relative — so
+                // only y receives `body_offset_pt`.
+                draw_v2_page(
+                    &mut canvas,
+                    page_idx as u32,
+                    resolved_margin.left,
+                    resolved_margin.top + drawables.body_offset_pt.1,
+                    geometry,
+                    drawables,
                 );
             }
-            let mut canvas = crate::draw_primitives::Canvas {
+            // Paint margin boxes after body content so page headers /
+            // footers are not hidden by page-filling body backgrounds.
+            // Keep bookmarks disabled for repeated running elements, but
+            // collect links so margin-box anchors remain clickable.
+            let mut margin_canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
-                bookmark_collector: bookmark_collector.as_mut(),
+                bookmark_collector: None,
                 link_collector: Some(&mut link_collector),
             };
-            // Root `<html>` + `<body>` background pre-pass. v1's
-            // `BlockPageable::draw` for these elements paints
-            // bg/border/shadow on EVERY page because each page's
-            // sliced root pageable still calls them. v2's main
-            // dispatch sees them via the fragmenter's single fragment
-            // on page 0 only — multi-page docs would lose those fills
-            // on continuation pages. Paint each here at its own offset
-            // (`(margin.left, margin.top)` for html, plus
-            // `body_offset_pt` for body) using `layout_size` from the
-            // entry — mirrors v1's
-            // `total_width = self.layout_size.or(cached_size)...`
-            // derivation. The main dispatch loop skips both `root_id`
-            // and `body_id` to avoid double-painting on page 0.
-            if let Some(root_id) = drawables.root_id
-                && let Some(root_block) = drawables.block_styles.get(&root_id)
-            {
-                paint_root_block_v2(
-                    &mut canvas,
-                    root_block,
-                    resolved_margin.left,
-                    resolved_margin.top,
-                );
-            }
-            // body's bg pre-pass runs on continuation pages only.
-            // Page 0 already paints body via the main dispatch loop
-            // (the fragmenter records body's fragment on page 0, with
-            // `layout_size` covering body's full height — clipped to
-            // page area at PDF render time, mirroring v1 exactly).
-            // Without this guard, page 0 would double-paint body's bg.
-            if page_idx > 0
-                && let Some(body_id) = drawables.body_id
-                && let Some(body_block) = drawables.block_styles.get(&body_id)
-            {
-                paint_root_block_v2(
-                    &mut canvas,
-                    body_block,
-                    resolved_margin.left + drawables.body_offset_pt.0,
-                    resolved_margin.top + drawables.body_offset_pt.1,
-                );
-            }
-            // `frag.x` is html-relative (fragmenter folds body's x
-            // offset in); `frag.y` is body-content-area-relative — so
-            // only y receives `body_offset_pt`.
-            draw_v2_page(
-                &mut canvas,
-                page_idx as u32,
-                resolved_margin.left,
-                resolved_margin.top + drawables.body_offset_pt.1,
-                geometry,
-                drawables,
+            let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
+            margin_box_renderer.render_page(
+                &mut margin_canvas,
+                page_idx,
+                page_num,
+                page_count,
+                page_size,
+                resolved_margin,
+                page_content_width,
             );
         }
         let per_page = link_collector.take_page(page_idx);

@@ -155,6 +155,9 @@ bookmarks = true
 path = "gcpm/link-annotations.html"
 
 [[fixture]]
+path = "gcpm/page-counter-footer-over-body.html"
+
+[[fixture]]
 path = "gcpm/page-selector.html"
 
 # fulgur-uebl: CSS Page 3 named-page implicit forced breaks.
