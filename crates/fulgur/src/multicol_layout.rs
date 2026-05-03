@@ -838,6 +838,59 @@ fn layout_column_group(
     (placements, geometry)
 }
 
+/// Distribute `line_heights` (per-line total height in CSS px) across
+/// `n` columns of `budget` height each.
+///
+/// Returns one `(line_range, slice_height)` pair per column; ranges are
+/// half-open against the input slice index space.
+///
+/// Greedy fill semantics:
+/// - Each column receives lines starting at the previous column's end.
+/// - When the next line would push the column over `budget`, advance to
+///   the next column.
+/// - Exception: a column always receives at least one line even when
+///   that line alone exceeds `budget` (CSS monolithic-line rule —
+///   otherwise we loop forever and never make progress).
+/// - When the column count is exhausted before all lines are placed,
+///   the final column absorbs every remaining line. This violates the
+///   per-column budget but never silently drops content; the caller
+///   ensures the budget is `>= avail_h / n` so this branch fires only on
+///   pathological inputs where the multicol container itself overflows
+///   the page (handled elsewhere).
+///
+/// Currently only invoked from tests; production wire-up lands in a
+/// follow-up task (see `docs/plans/2026-05-03-multicol-inline-root-split.md`).
+#[allow(dead_code)]
+fn slice_lines_by_budget(
+    line_heights: &[f32],
+    budget: f32,
+    n: u32,
+) -> Vec<(std::ops::Range<usize>, f32)> {
+    let n = n.max(1) as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut start = 0_usize;
+    for col in 0..n {
+        let mut consumed = 0.0_f32;
+        let mut end = start;
+        let last_col = col == n - 1;
+        while end < line_heights.len() {
+            let h = line_heights[end];
+            let line_count = end - start;
+            // First line in this column always fits (monolithic-line rule).
+            // Otherwise stop when adding this line would overflow,
+            // unless we are the final column (absorb remainder).
+            if line_count > 0 && consumed + h > budget && !last_col {
+                break;
+            }
+            consumed += h;
+            end += 1;
+        }
+        out.push((start..end, consumed));
+        start = end;
+    }
+    out
+}
+
 /// Linear search for the smallest per-column budget (starting from `total / n`
 /// and growing in `avail_h / 20` increments) that fits all children in `n`
 /// columns with no overflow. Bounded to ≤ 20 iterations.
@@ -1303,6 +1356,62 @@ mod tests {
         let children = fake_sized(6, 10.0);
         assert!(fits_in_n_columns(&children, 2, 30.0)); // 3 per col at 30pt
         assert!(!fits_in_n_columns(&children, 2, 20.0)); // 2 per col → 2 left over
+    }
+
+    // ── slice_lines_by_budget ───────────────────────────────────────
+    #[test]
+    fn slice_lines_by_budget_short_paragraph_one_slice() {
+        // Heights [10, 10, 10] — total 30, budget 100, n=2.
+        // All three lines fit in column 0; column 1 stays empty.
+        let heights = [10.0_f32, 10.0, 10.0];
+        let slices = slice_lines_by_budget(&heights, /*budget*/ 100.0, /*n*/ 2);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0], (0..3, 30.0));
+        assert_eq!(slices[1], (3..3, 0.0));
+    }
+
+    #[test]
+    fn slice_lines_by_budget_splits_at_budget_boundary() {
+        // 10 lines × 10pt = 100pt total, budget 50, n=2.
+        // 5 lines per column.
+        let heights = [10.0_f32; 10];
+        let slices = slice_lines_by_budget(&heights, 50.0, 2);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0], (0..5, 50.0));
+        assert_eq!(slices[1], (5..10, 50.0));
+    }
+
+    #[test]
+    fn slice_lines_by_budget_admits_overflow_when_one_line_exceeds_budget() {
+        // The first line exceeds the budget — we must not loop forever.
+        // Spec: monolithic line, allowed to overflow.
+        let heights = [80.0_f32, 20.0, 20.0];
+        let slices = slice_lines_by_budget(&heights, 50.0, 2);
+        assert_eq!(slices[0], (0..1, 80.0));
+        assert_eq!(slices[1], (1..3, 40.0));
+    }
+
+    #[test]
+    fn slice_lines_by_budget_overflow_into_unavailable_columns_truncates() {
+        // 5 lines × 20pt = 100pt total, budget 30pt, n=2 → only 60pt of
+        // capacity. Last two lines have nowhere to go; the helper assigns
+        // them to the final column (overflow allowed) so we never silently
+        // drop content.
+        let heights = [20.0_f32; 5];
+        let slices = slice_lines_by_budget(&heights, 30.0, 2);
+        assert_eq!(slices[0], (0..1, 20.0)); // 1 line fits in 30pt
+        assert_eq!(slices[1].0.start, 1); // last column absorbs the rest
+        assert_eq!(slices[1].0.end, 5);
+    }
+
+    #[test]
+    fn slice_lines_by_budget_empty_input_returns_n_empty_slices() {
+        let slices = slice_lines_by_budget(&[], 100.0, 3);
+        assert_eq!(slices.len(), 3);
+        for (range, h) in &slices {
+            assert!(range.is_empty());
+            assert_eq!(*h, 0.0);
+        }
     }
 
     // ── propagate_height_delta: edge cases ──────────────────────────
