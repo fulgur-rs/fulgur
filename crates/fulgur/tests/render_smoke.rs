@@ -1921,3 +1921,524 @@ fn page_property_inside_flex_container_does_not_propagate_outward() {
         .expect("flex page render");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-6q5 Task 7: convert pass populates `Drawables.paragraph_slices`
+/// from `MulticolGeometry::paragraph_splits`. Case B fixture — inline-root
+/// `<p>` child whose paragraph parley layout was rebroken to `col_w` by
+/// Blitz during `compute_child_layout`. The convert pass reads the
+/// per-column line ranges from the multicol geometry side-table and
+/// builds one `ParagraphSlice` per non-empty column.
+#[test]
+fn multicol_inline_root_split_emits_paragraph_slices_case_b() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "Case B split paragraph must register paragraph_slices entry"
+    );
+    let entry = drawables.paragraph_slices.values().next().unwrap();
+    assert_eq!(
+        entry.slices.len(),
+        2,
+        "expected 2 non-empty column slices, got {}",
+        entry.slices.len()
+    );
+    for slice in &entry.slices {
+        assert!(!slice.lines.is_empty(), "slice lines must not be empty");
+        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        // First-line baseline must be slice-relative (line-local). For
+        // a 16px (12pt) font, ascent is ~10pt — the baseline must be
+        // strictly less than the line height (otherwise the slice
+        // wasn't rebased and is still parley-absolute).
+        let first = &slice.lines[0];
+        assert!(
+            first.baseline > 0.0 && first.baseline <= first.height,
+            "slice line[0].baseline must be slice-local: got baseline={}, height={}",
+            first.baseline,
+            first.height,
+        );
+    }
+    // The two slices must land in different x columns.
+    assert_ne!(
+        entry.slices[0].origin_pt.0, entry.slices[1].origin_pt.0,
+        "slices must occupy distinct columns"
+    );
+}
+
+/// fulgur-6q5 Task 7: Case A fixture — bare text directly in the multicol
+/// container (the container itself is the inline root). The Case A path
+/// re-clones the container's parley layout, rebreaks at `col_w`, and
+/// reads slice line ranges from the recorded geometry.
+#[test]
+fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "Case A split paragraph must register paragraph_slices entry"
+    );
+    let entry = drawables.paragraph_slices.values().next().unwrap();
+    assert_eq!(
+        entry.slices.len(),
+        2,
+        "expected 2 non-empty column slices, got {}",
+        entry.slices.len()
+    );
+    for slice in &entry.slices {
+        assert!(!slice.lines.is_empty(), "slice lines must not be empty");
+        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        let first = &slice.lines[0];
+        assert!(
+            first.baseline > 0.0 && first.baseline <= first.height,
+            "slice line[0].baseline must be slice-local: got baseline={}, height={}",
+            first.baseline,
+            first.height,
+        );
+    }
+    assert_ne!(
+        entry.slices[0].origin_pt.0, entry.slices[1].origin_pt.0,
+        "slices must occupy distinct columns"
+    );
+}
+
+/// fulgur-6q5 Task 8: `dispatch_fragment` consumes
+/// `Drawables.paragraph_slices` and paints each slice at its column
+/// origin. Acceptance check — confirm the rendered PDF carries text
+/// runs at TWO distinct x positions corresponding to col 0 and col 1.
+///
+/// Implementation note: we use `fulgur::inspect()` (which already
+/// implements CTM / text-matrix tracking via lopdf) on a tempfile-
+/// written PDF, rather than re-implementing PDF text-stream parsing
+/// inline. Asserting at least two distinct `text_items[i].x` cluster
+/// values is sufficient to prove the slice override fired — before
+/// this task the standard `draw_paragraph_v2` path painted every line
+/// at the source's body-relative position, producing a single x
+/// cluster regardless of `column-count`.
+///
+/// Case B fixture: the source paragraph is a `<p>` child of the
+/// multicol container, so `paragraph_slices` is keyed by the `<p>`'s
+/// NodeId. The standard `paragraphs.get(&node_id)` arm of
+/// `dispatch_fragment` handles the override.
+#[test]
+fn multicol_inline_root_split_renders_both_columns_in_pdf_case_b() {
+    use fulgur::PageSize;
+    use fulgur::inspect::inspect;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-case-b.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let inspected = inspect(&path).expect("inspect pdf");
+    assert!(
+        !inspected.text_items.is_empty(),
+        "rendered PDF must contain text items"
+    );
+
+    // Cluster x positions to the nearest 0.5 pt to absorb intra-column
+    // glyph drift; we want the count of distinct *column* origins, not
+    // the count of distinct text-show operators.
+    let mut x_clusters = std::collections::BTreeSet::new();
+    for item in &inspected.text_items {
+        x_clusters.insert((item.x * 2.0).round() as i32);
+    }
+    assert!(
+        x_clusters.len() >= 2,
+        "expected text drawn at >=2 distinct x positions (col 0 + col 1), \
+         got {} cluster(s): {:?}",
+        x_clusters.len(),
+        x_clusters,
+    );
+}
+
+/// fulgur-6q5 Task 8: Case A render acceptance — bare text directly in
+/// the multicol container (no `<p>` wrapper). The container is itself
+/// the inline root, so `paragraph_slices` is keyed by the container's
+/// own NodeId. The container also carries a `block_styles` entry, so
+/// `dispatch_fragment` enters the `block_styles` arm and routes through
+/// the new `has_paragraph_slices` branch that suppresses the inline
+/// `draw_paragraph_inner_paint` call inside `draw_block_with_inner_content`
+/// and paints the slices afterward via `paint_multicol_paragraph_slices`.
+#[test]
+fn multicol_inline_root_split_renders_both_columns_in_pdf_case_a() {
+    use fulgur::PageSize;
+    use fulgur::inspect::inspect;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-case-a.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let inspected = inspect(&path).expect("inspect pdf");
+    assert!(
+        !inspected.text_items.is_empty(),
+        "rendered PDF must contain text items"
+    );
+
+    let mut x_clusters = std::collections::BTreeSet::new();
+    for item in &inspected.text_items {
+        x_clusters.insert((item.x * 2.0).round() as i32);
+    }
+    assert!(
+        x_clusters.len() >= 2,
+        "Case A: expected text drawn at >=2 distinct x positions (col 0 + col 1), \
+         got {} cluster(s): {:?}",
+        x_clusters.len(),
+        x_clusters,
+    );
+}
+
+/// fulgur-6q5 Fix 1: Case A's `cloned.align(...)` previously hard-coded
+/// `Alignment::default()` (= `Start`), so `text-align: center` (or any
+/// non-Start) on a self-inline-root multicol container rendered the
+/// split slices as start-aligned. Read the container's resolved
+/// `text-align` and feed the matching `parley::Alignment`.
+///
+/// The check inspects the materialised `Drawables.paragraph_slices`
+/// directly: a centre-aligned line in a column whose width far exceeds
+/// the glyph-run width must produce a `ShapedGlyphRun.x_offset > 0`
+/// (parley records the per-line horizontal shift on each run's offset
+/// after `Layout::align`).
+#[test]
+fn multicol_inline_root_split_honours_text_align_center() {
+    use fulgur::PageSize;
+    use fulgur::drawables::Drawables;
+    use fulgur::paragraph::LineItem;
+
+    // Same content, only the `text-align` value differs. Comparing the
+    // measured x_offset of the leading text run between the two cases
+    // makes the test relative — wrapping drift across font / parley
+    // versions cancels out, and we still catch a regression to
+    // start-alignment because the two values must be strictly ordered.
+    let center_html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; text-align: center; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let start_html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; text-align: start; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let center_drawables = engine.build_drawables_for_testing_no_gcpm(center_html);
+    let start_drawables = engine.build_drawables_for_testing_no_gcpm(start_html);
+    assert!(
+        !center_drawables.paragraph_slices.is_empty(),
+        "Case A multicol (center) must produce paragraph_slices for the test fixture",
+    );
+    assert!(
+        !start_drawables.paragraph_slices.is_empty(),
+        "Case A multicol (start) must produce paragraph_slices for the test fixture",
+    );
+
+    // The single source paragraph (the container itself) splits across
+    // the two columns — exactly two non-empty slices in both fixtures.
+    // The slice counts must match for the comparison to be apples-to-apples.
+    let center_slice_count = center_drawables
+        .paragraph_slices
+        .values()
+        .next()
+        .expect("center: at least one paragraph_slices entry")
+        .slices
+        .len();
+    let start_slice_count = start_drawables
+        .paragraph_slices
+        .values()
+        .next()
+        .expect("start: at least one paragraph_slices entry")
+        .slices
+        .len();
+    assert_eq!(
+        center_slice_count, 2,
+        "Case A long text in a two-column container must yield two slices (center), \
+         got {center_slice_count}",
+    );
+    assert_eq!(
+        start_slice_count, 2,
+        "Case A long text in a two-column container must yield two slices (start), \
+         got {start_slice_count}",
+    );
+
+    fn x_offset_of_first_run(drawables: &Drawables, slice_idx: usize) -> f32 {
+        let entry = drawables
+            .paragraph_slices
+            .values()
+            .next()
+            .expect("at least one paragraph_slices entry");
+        let line = &entry.slices[slice_idx].lines[0];
+        line.items
+            .iter()
+            .find_map(|item| match item {
+                LineItem::Text(t) => Some(t.x_offset),
+                _ => None,
+            })
+            .expect("first line of slice must have a text item")
+    }
+
+    // For each slice, compare the first text run's `x_offset` between
+    // the center- and start-aligned fixtures. With `text-align: start`,
+    // the leading run sits at x=0 in current fonts; with `text-align:
+    // center`, parley shifts it right by the per-line trailing space.
+    // The relative comparison survives wrapping drift because both
+    // fixtures share the same content and width.
+    for slice_idx in 0..2 {
+        let center_x = x_offset_of_first_run(&center_drawables, slice_idx);
+        let start_x = x_offset_of_first_run(&start_drawables, slice_idx);
+        assert!(
+            center_x > start_x + 1e-3,
+            "slice {slice_idx}: text-align: center should produce a larger \
+             x_offset than text-align: start, but got center={center_x:.3} \
+             vs start={start_x:.3}",
+        );
+    }
+}
+
+/// fulgur-6q5 Fix 2: a multicol container whose inline-root paragraph
+/// contains inline-box content (`display: inline-block`, inline images,
+/// inline-flex …) must NOT generate `paragraph_slices`.
+/// `convert_multicol_paragraph_slices` only reconstructs `GlyphRun`
+/// items from the parley layout, so an inline-box would be silently
+/// dropped on render. The layout pass falls back to atomic placement
+/// (whole paragraph in column 0) instead.
+///
+/// Case A trigger — the multicol container is itself the inline root,
+/// hosting bare text with an `inline-block` span.
+#[test]
+fn multicol_with_inline_box_paragraph_falls_back_to_atomic() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha <span style="display: inline-block; width: 30px; height: 16px; background: red"></span> alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        drawables.paragraph_slices.is_empty(),
+        "paragraph_slices must be empty when the inline-root paragraph contains \
+         inline-box content (would otherwise drop the inline-box on render); \
+         got slices for source ids {:?}",
+        drawables.paragraph_slices.keys().collect::<Vec<_>>(),
+    );
+    // Sanity: rendering still succeeds (the container falls back to
+    // atomic placement and renders the text at full container width via
+    // the standard inline-root path).
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+/// fulgur-6q5 Fix 4: when a multicol container straddles a page
+/// boundary, `paint_multicol_paragraph_slices` must partition slices
+/// per fragment. A slice's `origin_pt.y` is measured from the
+/// container's border-box top (= the start of the FIRST fragment), so
+/// on a page that owns the container's second fragment we have to
+/// subtract the consumed height of prior fragments before placing the
+/// slice. Without this, slices on page 2+ would render at impossibly
+/// large y positions (the un-rebased pre-fix value could be many times
+/// the page height).
+///
+/// Pre-fix, `paint_multicol_paragraph_slices` painted **every** slice
+/// against the **current** page's container fragment origin — meaning
+/// page 1 slices were also replayed on every subsequent page (at
+/// off-page coordinates) and the page-2 fragment's slices were placed
+/// at their original (page-1-relative) y values, far below the page
+/// bottom on page 2.
+///
+/// The regression signal is the per-page bounds sweep below: if any
+/// `Tm` operand lands outside the page's vertical visible area on any
+/// page, Fix 4 has regressed. Reverting Fix 4 (forcing `consumed = 0`
+/// and `needs_partition = false` in `paint_multicol_paragraph_slices`)
+/// reproduces the pre-fix bug — page 2's `Tm` y reaches ~126pt on a
+/// 100pt-tall page (verified locally on Linux 2026-05-03).
+///
+/// We deliberately do **not** assert that page 2 carries any `Tm`
+/// content. Fix 4 conservatively skips slices that straddle a page
+/// boundary, and the post-fix continuation slice on page 2 sits flush
+/// against the page-2 fragment's `cutoff` (slice_bottom == cutoff in
+/// Linux measurements). That gives ~zero slack against font-driven
+/// layout drift: macOS system fonts can shift slice heights / fragment
+/// heights by up to ~10%, which would push the slice into the straddle
+/// skip and produce zero `Tm` operators on page 2 — without that being
+/// a regression of Fix 4 (it's the conservative skip working as
+/// designed). Asserting `page 2 has Tm` would therefore be a false
+/// negative on macOS while Linux happens to land inside the strip.
+/// The bounds sweep is platform-stable: it fires when (and only when)
+/// Fix 4 regresses, regardless of whether the continuation slice is
+/// painted or skipped on a given page.
+///
+/// The acceptance test exercises the per-fragment partition by
+/// rendering a tight page that forces a multi-fragment multicol
+/// container, then asserting:
+///
+/// 1. Render does not panic.
+/// 2. The output PDF has more than one page (confirming the multi-page
+///    case is exercised — without this, the test is vacuous because
+///    `paint_multicol_paragraph_slices`'s split branch is never
+///    reached).
+/// 3. The PDF parses cleanly via `lopdf`.
+/// 4. No `Tm` operator on any page lands outside the vertical visible
+///    area (the bounds sweep — primary regression signal).
+#[test]
+fn multicol_inline_root_split_skips_slices_outside_current_page() {
+    use fulgur::PageSize;
+
+    // Multicol containers only paginate across pages when they include
+    // a `column-span: all` child (see `pagination_layout.rs:818`).
+    // Otherwise the container is atomic and stays on one page. Combine
+    // an inline-root paragraph that splits across columns (Fix 4's
+    // target) with a column-span block tall enough to force the
+    // *post-span* group onto page 2 — that produces a 2-fragment
+    // multicol container.
+    let html = r#"<!doctype html><html><body style="margin: 0">
+        <div style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px; margin: 0;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+          <h1 style="column-span: all; font-size: 16px; margin: 0;">SPAN</h1>
+          <p style="font-size: 16px; margin: 0;">beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 100.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty(), "render produced empty PDF");
+    assert!(pdf.starts_with(b"%PDF"));
+
+    // Confirm the fixture actually produces paragraph_slices entries
+    // (without that, the test exercises nothing). We re-run the
+    // engine via the Drawables-only helper so we can inspect the
+    // intermediate state directly.
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "fixture must produce paragraph_slices to exercise Fix 4",
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-multipage.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let doc = lopdf::Document::load(&path).expect("PDF must parse");
+    let pages = doc.get_pages();
+    assert!(
+        pages.len() >= 2,
+        "fixture must produce a multi-page document to exercise Fix 4 \
+         (pre-fix would mis-position slices on pages > 1); got {} page(s)",
+        pages.len(),
+    );
+
+    // Walk every page's content stream and check that no text-matrix
+    // (Tm) operator places text at a y coordinate outside the visible
+    // page area. PDF coordinate space is Y-up with origin at the
+    // bottom-left (ISO 32000), so on a 100pt-tall page a Tm y operand
+    // sitting at y=0 is the bottom of the page and y=100 is the top —
+    // any value below 0 or above ~110 (slack for font ascent above
+    // baseline) means the text is invisible / off page.
+    //
+    // Pre-fix `paint_multicol_paragraph_slices` painted slices on
+    // page-2+ at their original (page-1-relative) origins because it
+    // never subtracted `consumed = sum of prior fragment heights`. On
+    // a 100pt page, that produced Tm y operands far above the page
+    // top (e.g. y > 100 = above the page). The strict bound below
+    // catches that drift.
+    const PAGE_HEIGHT_PT: f32 = 100.0;
+    // Slack above page top: a glyph baseline sits up to ~font_size
+    // above the line top in Y-up space; 16pt font + safety = 25pt.
+    const Y_TOP_SLACK: f32 = 25.0;
+    let y_max = PAGE_HEIGHT_PT + Y_TOP_SLACK;
+    let y_min = -Y_TOP_SLACK;
+
+    // Bounds sweep across all pages — primary regression signal.
+    //
+    // We deliberately don't assert "page 2 has at least N Tm operators":
+    // Fix 4 conservatively skips slices that straddle a page boundary,
+    // and on this fixture the page-2 continuation slice can land flush
+    // against the fragment cutoff (slice_bottom == cutoff). macOS
+    // system fonts drift slice / fragment heights by up to ~10% from
+    // Linux's bundled Noto Sans, which would push the slice into the
+    // straddle skip and produce zero Tm operators on page 2 — without
+    // that being a regression of Fix 4. The bounds sweep, by contrast,
+    // is platform-stable: it asserts only that **whatever** lands on
+    // each page lands inside the page rect.
+    //
+    // Verified by reverting Fix 4 (`consumed = 0` and
+    // `needs_partition = false`) on Linux 2026-05-03: the sweep fails
+    // with "page 2: Tm at y=126.1, outside [-25, 125]".
+    for (&page_num, &page_id) in &pages {
+        let bytes = doc
+            .get_page_content(page_id)
+            .expect("page content stream readable");
+        let content =
+            lopdf::content::Content::decode(&bytes).expect("page content stream decodable");
+        for op in &content.operations {
+            if op.operator == "Tm" && op.operands.len() >= 6 {
+                let y = match &op.operands[5] {
+                    lopdf::Object::Integer(i) => *i as f32,
+                    lopdf::Object::Real(f) => *f,
+                    _ => continue,
+                };
+                assert!(
+                    y >= y_min && y <= y_max,
+                    "page {page_num}: Tm operator placed text at y={y:.1}, \
+                     outside the visible page area [{y_min:.0}, {y_max:.0}] \
+                     (page height {PAGE_HEIGHT_PT}pt) — Fix 4 regressed",
+                );
+            }
+        }
+    }
+}
