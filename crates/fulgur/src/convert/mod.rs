@@ -316,6 +316,7 @@ pub(super) fn convert_node(
     let before = collect_drawables_node_ids(out);
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
+    convert_multicol_paragraph_slices(doc, node_id, ctx, out);
     record_transform(doc, node_id, &before, out);
 }
 
@@ -520,6 +521,240 @@ fn record_multicol_rule(
             groups: groups_pt,
         },
     );
+}
+
+/// fulgur-6q5 Task 7: populate `Drawables.paragraph_slices` for a multicol
+/// container from `MulticolGeometry::paragraph_splits`.
+///
+/// For every `ParagraphSplitEntry` recorded by `multicol_layout` against
+/// this container, materialise one `ParagraphSlice` per non-empty column.
+/// Each slice carries `Vec<ShapedLine>` rebased to the slice's own top
+/// edge, mirroring the `ParagraphPageable::split` convention used for
+/// continuation fragments after a page break (commit 9c0e092).
+///
+/// Two source-layout sources, distinguished by whether
+/// `source_node_id == node_id`:
+///
+/// - **Case A** (container is itself an inline root): the container's
+///   `inline_layout_data.layout` was shaped at the container's content
+///   width; multicol recorded line indices against a clone re-broken at
+///   `col_w`. Convert reproduces that re-broken clone here.
+/// - **Case B** (a child element is the inline root): Blitz already
+///   re-broke the child's parley layout at `col_w` during
+///   `compute_child_layout`, so the line indices stored against
+///   `inline_layout_data` line up directly.
+///
+/// Scope: this path covers plain-text inline-root paragraphs only. Inline
+/// boxes / replaced content aren't handled here — the paragraphs that
+/// `multicol_layout` actually splits across columns never carry inline
+/// boxes (Task 4 / 5 only emit `ParagraphSplitEntry` for pure-text inline
+/// roots), so the simpler `GlyphRun`-only loop is sufficient and keeps
+/// us out of `convert_inline_box_node`'s out-mutating descendant
+/// machinery.
+fn convert_multicol_paragraph_slices(
+    doc: &BaseDocument,
+    node_id: usize,
+    ctx: &mut ConvertContext<'_>,
+    out: &mut crate::drawables::Drawables,
+) {
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if !crate::blitz_adapter::is_multicol_container(node) {
+        return;
+    }
+    let Some(geometry) = ctx.multicol_geometry.get(&node_id).cloned() else {
+        return;
+    };
+    for group in &geometry.groups {
+        if group.paragraph_splits.is_empty() {
+            continue;
+        }
+        let group_x_pt = px_to_pt(group.x_offset);
+        let group_y_pt = px_to_pt(group.y_offset);
+        let col_w_pt = px_to_pt(group.col_w);
+
+        for split in &group.paragraph_splits {
+            let source_id = split.source_node_id;
+            let case_a = source_id == node_id;
+
+            // Pull the source `(layout, text)` pair from the source
+            // node's `inline_layout_data`. For Case A we additionally
+            // clone the layout and re-break at `col_w` so the line
+            // indices recorded by `layout_self_inline_root_container`
+            // resolve correctly. (Case B's layout was already re-broken
+            // by Blitz during `compute_child_layout`.)
+            let Some(source_node) = doc.get_node(source_id) else {
+                continue;
+            };
+            let Some(elem) = source_node.element_data() else {
+                continue;
+            };
+            let Some(text_layout) = elem.inline_layout_data.as_ref() else {
+                continue;
+            };
+            let text = text_layout.text.clone();
+
+            // Hold the rebroken clone alive across the per-line loop in
+            // Case A. In Case B the borrowed reference into Blitz is
+            // sufficient because Blitz already broke at `col_w`.
+            let owned_layout: Option<parley::Layout<blitz_dom::node::TextBrush>> = if case_a {
+                let mut cloned = text_layout.layout.clone();
+                cloned.break_all_lines(Some(group.col_w));
+                cloned.align(
+                    Some(group.col_w),
+                    parley::Alignment::default(),
+                    parley::AlignmentOptions::default(),
+                );
+                Some(cloned)
+            } else {
+                None
+            };
+            let layout_ref: &parley::Layout<blitz_dom::node::TextBrush> = match &owned_layout {
+                Some(cloned) => cloned,
+                None => &text_layout.layout,
+            };
+
+            // Materialise one `ShapedLine` per parley line. This is a
+            // simplified version of the per-line shaping in
+            // `inline_root::extract_paragraph` covering only `GlyphRun`s
+            // — see this function's doc comment for scope notes.
+            let all_lines = shape_paragraph_glyph_runs(doc, layout_ref, &text, ctx);
+            if all_lines.is_empty() {
+                continue;
+            }
+
+            let mut slices = Vec::new();
+            for col_slice in &split.column_slices {
+                if col_slice.line_range.is_empty() {
+                    continue;
+                }
+                if col_slice.line_range.end > all_lines.len() {
+                    debug_assert!(
+                        false,
+                        "ParagraphSplitEntry line_range {:?} exceeds shaped line count {}",
+                        col_slice.line_range,
+                        all_lines.len(),
+                    );
+                    continue;
+                }
+
+                // Pre-shift baselines into slice-local frame, then run
+                // `recalculate_paragraph_line_boxes` to recompute
+                // per-line boxes from the slice's own first line. This
+                // mirrors `ParagraphPageable::split`'s rebase for
+                // continuation fragments (commit 9c0e092).
+                let consumed: f32 = all_lines[..col_slice.line_range.start]
+                    .iter()
+                    .map(|l| l.height)
+                    .sum();
+                let mut lines: Vec<crate::paragraph::ShapedLine> = all_lines
+                    [col_slice.line_range.clone()]
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.baseline -= consumed;
+                    l
+                })
+                .collect();
+                inline_root::recalculate_paragraph_line_boxes(&mut lines);
+
+                let origin_pt = (
+                    group_x_pt + px_to_pt(col_slice.origin.x),
+                    group_y_pt + px_to_pt(col_slice.origin.y),
+                );
+                let size_pt = (col_w_pt, px_to_pt(col_slice.size.height));
+
+                slices.push(crate::drawables::ParagraphSlice {
+                    origin_pt,
+                    size_pt,
+                    lines,
+                });
+            }
+
+            if !slices.is_empty() {
+                out.paragraph_slices.insert(
+                    source_id,
+                    crate::drawables::ParagraphSlicesEntry {
+                        container_node_id: node_id,
+                        slices,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Shape one `Vec<ShapedLine>` out of a parley layout, covering only
+/// `GlyphRun` items (no inline boxes). Used by
+/// [`convert_multicol_paragraph_slices`] — see that function for scope
+/// notes. Mirrors the `GlyphRun` arm of `inline_root::extract_paragraph`'s
+/// per-line loop; baselines are parley-layout-absolute on output (the
+/// caller rebases per-slice).
+fn shape_paragraph_glyph_runs(
+    doc: &BaseDocument,
+    parley_layout: &parley::Layout<blitz_dom::node::TextBrush>,
+    text: &str,
+    ctx: &mut ConvertContext<'_>,
+) -> Vec<ShapedLine> {
+    let mut shaped_lines = Vec::new();
+    for line in parley_layout.lines() {
+        let metrics = line.metrics();
+        let mut items = Vec::new();
+        for item in line.items() {
+            if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                let run = glyph_run.run();
+                let font_ref = run.font();
+                let font_index = font_ref.index;
+                let font_arc = ctx.get_or_insert_font(font_ref);
+                let font_size_parley = run.font_size();
+                let font_size = px_to_pt(font_size_parley);
+
+                let brush = &glyph_run.style().brush;
+                let color = get_text_color(doc, brush.id);
+                let decoration = get_text_decoration(doc, brush.id);
+                let link = ctx.link_cache.lookup(doc, brush.id);
+
+                let text_len = text.len();
+                let mut glyphs = Vec::new();
+                for g in glyph_run.glyphs() {
+                    glyphs.push(ShapedGlyph {
+                        id: g.id,
+                        x_advance: g.advance / font_size_parley,
+                        x_offset: g.x / font_size_parley,
+                        y_offset: g.y / font_size_parley,
+                        text_range: 0..text_len,
+                    });
+                }
+
+                if !glyphs.is_empty() {
+                    let run_text = text.to_string();
+                    let run_x_offset = px_to_pt(glyph_run.offset());
+                    items.push(LineItem::Text(ShapedGlyphRun {
+                        font_data: font_arc,
+                        font_index,
+                        font_size,
+                        color,
+                        decoration,
+                        glyphs,
+                        text: run_text,
+                        x_offset: run_x_offset,
+                        link,
+                    }));
+                }
+            }
+            // InlineBox items are intentionally not handled — see
+            // `convert_multicol_paragraph_slices`'s scope note.
+        }
+
+        let line_height_pt = px_to_pt(metrics.line_height);
+        shaped_lines.push(ShapedLine {
+            height: line_height_pt,
+            baseline: px_to_pt(metrics.baseline),
+            items,
+        });
+    }
+    shaped_lines
 }
 
 use crate::blitz_adapter::{extract_inline_svg_tree, get_attr};

@@ -1921,3 +1921,104 @@ fn page_property_inside_flex_container_does_not_propagate_outward() {
         .expect("flex page render");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-6q5 Task 7: convert pass populates `Drawables.paragraph_slices`
+/// from `MulticolGeometry::paragraph_splits`. Case B fixture — inline-root
+/// `<p>` child whose paragraph parley layout was rebroken to `col_w` by
+/// Blitz during `compute_child_layout`. The convert pass reads the
+/// per-column line ranges from the multicol geometry side-table and
+/// builds one `ParagraphSlice` per non-empty column.
+#[test]
+fn multicol_inline_root_split_emits_paragraph_slices_case_b() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "Case B split paragraph must register paragraph_slices entry"
+    );
+    let entry = drawables.paragraph_slices.values().next().unwrap();
+    assert_eq!(
+        entry.slices.len(),
+        2,
+        "expected 2 non-empty column slices, got {}",
+        entry.slices.len()
+    );
+    for slice in &entry.slices {
+        assert!(!slice.lines.is_empty(), "slice lines must not be empty");
+        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        // First-line baseline must be slice-relative (line-local). For
+        // a 16px (12pt) font, ascent is ~10pt — the baseline must be
+        // strictly less than the line height (otherwise the slice
+        // wasn't rebased and is still parley-absolute).
+        let first = &slice.lines[0];
+        assert!(
+            first.baseline > 0.0 && first.baseline <= first.height,
+            "slice line[0].baseline must be slice-local: got baseline={}, height={}",
+            first.baseline,
+            first.height,
+        );
+    }
+    // The two slices must land in different x columns.
+    assert_ne!(
+        entry.slices[0].origin_pt.0, entry.slices[1].origin_pt.0,
+        "slices must occupy distinct columns"
+    );
+}
+
+/// fulgur-6q5 Task 7: Case A fixture — bare text directly in the multicol
+/// container (the container itself is the inline root). The Case A path
+/// re-clones the container's parley layout, rebreaks at `col_w`, and
+/// reads slice line ranges from the recorded geometry.
+#[test]
+fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "Case A split paragraph must register paragraph_slices entry"
+    );
+    let entry = drawables.paragraph_slices.values().next().unwrap();
+    assert_eq!(
+        entry.slices.len(),
+        2,
+        "expected 2 non-empty column slices, got {}",
+        entry.slices.len()
+    );
+    for slice in &entry.slices {
+        assert!(!slice.lines.is_empty(), "slice lines must not be empty");
+        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        let first = &slice.lines[0];
+        assert!(
+            first.baseline > 0.0 && first.baseline <= first.height,
+            "slice line[0].baseline must be slice-local: got baseline={}, height={}",
+            first.baseline,
+            first.height,
+        );
+    }
+    assert_ne!(
+        entry.slices[0].origin_pt.0, entry.slices[1].origin_pt.0,
+        "slices must occupy distinct columns"
+    );
+}
