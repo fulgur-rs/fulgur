@@ -2148,10 +2148,19 @@ fn multicol_inline_root_split_renders_both_columns_in_pdf_case_a() {
 #[test]
 fn multicol_inline_root_split_honours_text_align_center() {
     use fulgur::PageSize;
+    use fulgur::drawables::Drawables;
     use fulgur::paragraph::LineItem;
 
-    let html = r#"<!doctype html><html><body>
+    // Same content, only the `text-align` value differs. Comparing the
+    // measured x_offset of the leading text run between the two cases
+    // makes the test relative — wrapping drift across font / parley
+    // versions cancels out, and we still catch a regression to
+    // start-alignment because the two values must be strictly ordered.
+    let center_html = r#"<!doctype html><html><body>
         <div style="column-count: 2; column-gap: 0; text-align: center; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let start_html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; text-align: start; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
     </body></html>"#;
     let engine = Engine::builder()
         .page_size(PageSize {
@@ -2159,44 +2168,75 @@ fn multicol_inline_root_split_honours_text_align_center() {
             height: 600.0,
         })
         .build();
-    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    let center_drawables = engine.build_drawables_for_testing_no_gcpm(center_html);
+    let start_drawables = engine.build_drawables_for_testing_no_gcpm(start_html);
     assert!(
-        !drawables.paragraph_slices.is_empty(),
-        "Case A multicol must produce paragraph_slices for the test fixture",
+        !center_drawables.paragraph_slices.is_empty(),
+        "Case A multicol (center) must produce paragraph_slices for the test fixture",
+    );
+    assert!(
+        !start_drawables.paragraph_slices.is_empty(),
+        "Case A multicol (start) must produce paragraph_slices for the test fixture",
     );
 
     // The single source paragraph (the container itself) splits across
-    // the two columns — exactly two non-empty slices.
-    let entry = drawables
+    // the two columns — exactly two non-empty slices in both fixtures.
+    // The slice counts must match for the comparison to be apples-to-apples.
+    let center_slice_count = center_drawables
         .paragraph_slices
         .values()
         .next()
-        .expect("at least one paragraph_slices entry");
+        .expect("center: at least one paragraph_slices entry")
+        .slices
+        .len();
+    let start_slice_count = start_drawables
+        .paragraph_slices
+        .values()
+        .next()
+        .expect("start: at least one paragraph_slices entry")
+        .slices
+        .len();
     assert_eq!(
-        entry.slices.len(),
-        2,
-        "Case A long text in a two-column container must yield two slices, \
-         got {}",
-        entry.slices.len(),
+        center_slice_count, 2,
+        "Case A long text in a two-column container must yield two slices (center), \
+         got {center_slice_count}",
+    );
+    assert_eq!(
+        start_slice_count, 2,
+        "Case A long text in a two-column container must yield two slices (start), \
+         got {start_slice_count}",
     );
 
-    // For each slice, examine the first line and grab the leading text
-    // run's `x_offset` (parley's per-line horizontal shift). With
-    // `text-align: start` (the pre-fix default), this would be 0; with
-    // `text-align: center` it must be strictly positive.
-    for (idx, slice) in entry.slices.iter().enumerate() {
-        let first_line = &slice.lines[0];
-        let first_text_x = first_line.items.iter().find_map(|item| match item {
-            LineItem::Text(t) => Some(t.x_offset),
-            _ => None,
-        });
-        let x = first_text_x.unwrap_or_else(|| {
-            panic!("slice {idx} first line must contain a text item");
-        });
+    fn x_offset_of_first_run(drawables: &Drawables, slice_idx: usize) -> f32 {
+        let entry = drawables
+            .paragraph_slices
+            .values()
+            .next()
+            .expect("at least one paragraph_slices entry");
+        let line = &entry.slices[slice_idx].lines[0];
+        line.items
+            .iter()
+            .find_map(|item| match item {
+                LineItem::Text(t) => Some(t.x_offset),
+                _ => None,
+            })
+            .expect("first line of slice must have a text item")
+    }
+
+    // For each slice, compare the first text run's `x_offset` between
+    // the center- and start-aligned fixtures. With `text-align: start`,
+    // the leading run sits at x=0 in current fonts; with `text-align:
+    // center`, parley shifts it right by the per-line trailing space.
+    // The relative comparison survives wrapping drift because both
+    // fixtures share the same content and width.
+    for slice_idx in 0..2 {
+        let center_x = x_offset_of_first_run(&center_drawables, slice_idx);
+        let start_x = x_offset_of_first_run(&start_drawables, slice_idx);
         assert!(
-            x > 0.5,
-            "slice {idx}: text-align: center should produce x_offset > 0, \
-             got {x:.3} (start-aligned would be 0)",
+            center_x > start_x + 1e-3,
+            "slice {slice_idx}: text-align: center should produce a larger \
+             x_offset than text-align: start, but got center={center_x:.3} \
+             vs start={start_x:.3}",
         );
     }
 }
@@ -2342,6 +2382,37 @@ fn multicol_inline_root_split_skips_slices_outside_current_page() {
     const Y_TOP_SLACK: f32 = 25.0;
     let y_max = PAGE_HEIGHT_PT + Y_TOP_SLACK;
     let y_min = -Y_TOP_SLACK;
+
+    // Primary tightening: explicitly verify page 2 contains slice
+    // content. `pages` is a `BTreeMap<u32, ObjectId>` keyed by page
+    // number, so iterating in order gives us page 1 → page 2 → … . If
+    // Fix 4 regressed in a way that simply dropped page-2 slices (or
+    // replayed them all on page 1), the bounds sweep alone would still
+    // pass because page 2 would have zero Tm operators. The explicit
+    // Tm-count assertion catches that.
+    let mut page_iter = pages.iter();
+    let _page1 = page_iter.next().expect("page 1 must exist");
+    let (&page2_num, &page2_id) = page_iter.next().expect("page 2 must exist");
+    let page2_bytes = doc
+        .get_page_content(page2_id)
+        .expect("page 2 content stream readable");
+    let page2_content =
+        lopdf::content::Content::decode(&page2_bytes).expect("page 2 content stream decodable");
+    let page2_tm_count = page2_content
+        .operations
+        .iter()
+        .filter(|op| op.operator == "Tm")
+        .count();
+    assert!(
+        page2_tm_count > 0,
+        "page {page2_num}: must contain text content (Tm operators) — Fix 4 \
+         must place post-consumed slices on the continuation page; got \
+         {page2_tm_count} Tm operators",
+    );
+
+    // Defensive sweep across all pages: catches placement regressions
+    // beyond page 2 (e.g. a page-3 fragment painted off-page). Keeps
+    // the original bounds check as a backstop.
     for (&page_num, &page_id) in &pages {
         let bytes = doc
             .get_page_content(page_id)
