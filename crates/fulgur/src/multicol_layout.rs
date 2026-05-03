@@ -599,6 +599,46 @@ pub fn compute_multicol_layout(
         .and_then(|p| p.fill)
         .unwrap_or_default();
 
+    // 4b. Case A — self-inline-root container.
+    //
+    //     When the multicol container itself is `is_inline_root()` (its
+    //     direct children are all inline / text), Blitz shaped the
+    //     paragraph against the **container's own** content width and never
+    //     calls `compute_child_layout` on the container itself. The
+    //     segment-walking path below would descend into the bare text-node
+    //     child and produce no meaningful column distribution, leaving
+    //     trailing columns empty.
+    //
+    //     Detect this case and dispatch to `layout_self_inline_root_container`,
+    //     which clones the container's parley layout, re-breaks it at
+    //     `col_w`, and fills `paragraph_splits` directly off the rebroken
+    //     line heights. See `docs/plans/2026-05-03-multicol-inline-root-split.md`.
+    let is_self_inline_root = tree
+        .doc
+        .get_node(usize::from(node_id))
+        .map(|n| {
+            n.flags.is_inline_root()
+                && n.element_data()
+                    .and_then(|e| e.inline_layout_data.as_ref())
+                    .is_some()
+        })
+        .unwrap_or(false);
+    if is_self_inline_root {
+        return layout_self_inline_root_container(
+            tree,
+            node_id,
+            container_w,
+            col_w,
+            gap,
+            n,
+            avail_h,
+            fill,
+            inset_left,
+            inset_top,
+            inset_bottom,
+        );
+    }
+
     // 5. Walk the segments produced by `partition_children_into_segments`
     //    and dispatch each to the appropriate layout strategy:
     //
@@ -701,6 +741,185 @@ pub fn compute_multicol_layout(
     let container_h = (cursor_y + inset_top + inset_bottom).max(0.0);
 
     // 7. Container size = width × stacked segment height.
+    taffy::LayoutOutput {
+        size: Size {
+            width: container_w,
+            height: container_h,
+        },
+        content_size: Size {
+            width: container_w,
+            height: container_h,
+        },
+        first_baselines: Point::NONE,
+        top_margin: CollapsibleMarginSet::ZERO,
+        bottom_margin: CollapsibleMarginSet::ZERO,
+        margins_can_collapse_through: false,
+    }
+}
+
+/// Case A handler — multicol container that is itself inline-root.
+///
+/// The container has only inline / text content, so Blitz shaped its
+/// own parley layout against `content_w` and never calls
+/// `compute_child_layout` on the container. Re-breaking the layout at
+/// `col_w` requires a local clone (the canonical `inline_layout_data`
+/// stays untouched so the convert pass still has a copy to re-clone in
+/// Task 7).
+///
+/// Output: a single `ColumnGroupGeometry` whose `paragraph_splits` carry
+/// the per-column line ranges for the container's own NodeId. No
+/// placements are written back to Taffy — `compute_root_layout` populates
+/// the container's outer slot from the returned `LayoutOutput`, and the
+/// container is its own paragraph (no child elements to position).
+#[allow(clippy::too_many_arguments)]
+fn layout_self_inline_root_container(
+    tree: &mut FulgurLayoutTree<'_>,
+    node_id: NodeId,
+    container_w: f32,
+    col_w: f32,
+    gap: f32,
+    n: u32,
+    avail_h: f32,
+    fill: crate::column_css::ColumnFill,
+    inset_left: f32,
+    inset_top: f32,
+    inset_bottom: f32,
+) -> taffy::LayoutOutput {
+    // 1. Clone the container's parley layout. Drop the doc borrow before
+    //    mutating `tree.geometry` below.
+    let cloned_layout = {
+        let node = tree
+            .doc
+            .get_node(usize::from(node_id))
+            .expect("Case A predicate guarantees the node exists");
+        let elem = node
+            .element_data()
+            .expect("Case A predicate guarantees element_data");
+        let text_layout = elem
+            .inline_layout_data
+            .as_ref()
+            .expect("Case A predicate guarantees inline_layout_data");
+        text_layout.layout.clone()
+    };
+
+    // 2. Re-break at `col_w` and re-align. Alignment is left-as-default
+    //    (`Alignment::Start`) — this matches the layout pass's role: the
+    //    rebroken clone is consumed only to read line counts and per-line
+    //    heights here, so horizontal alignment within the rebroken column
+    //    has no effect on the recorded `paragraph_splits`. Task 7 will
+    //    re-clone the same source layout, re-break with the same `col_w`,
+    //    then apply the container's own `text-align` for rendering — line
+    //    break positions are deterministic given identical `max_advance`,
+    //    so Task 7's indices match the ones we record here.
+    let mut rebroken = cloned_layout;
+    rebroken.break_all_lines(Some(col_w));
+    rebroken.align(
+        Some(col_w),
+        parley::Alignment::default(),
+        parley::AlignmentOptions::default(),
+    );
+
+    // 3. Per-line heights from the rebroken clone.
+    let line_heights = crate::blitz_adapter::parley_line_heights(&rebroken);
+    let total_h: f32 = line_heights.iter().sum();
+
+    // 4. Per-column budget. For Case A there is exactly one paragraph and
+    //    one column group, so balance and auto resolve trivially:
+    //    - `auto`  → `avail_h` (greedy fill, trailing columns empty when
+    //      content fits in one).
+    //    - `balance` → `ceil(total_h / n)` (single-paragraph one-shot
+    //      ideal split). Clamped to `avail_h` only when finite, so the
+    //      common in-test path with `avail_h = +inf` keeps the ideal
+    //      split untouched. Multi-paragraph balance search is unnecessary
+    //      because there is exactly one source.
+    let budget = match fill {
+        crate::column_css::ColumnFill::Auto => avail_h,
+        crate::column_css::ColumnFill::Balance => {
+            if n == 0 || total_h <= 0.0 {
+                0.0
+            } else {
+                let ideal = (total_h / n as f32).ceil();
+                if avail_h.is_finite() {
+                    ideal.min(avail_h)
+                } else {
+                    ideal
+                }
+            }
+        }
+    };
+
+    // 5. Slice the line heights across the `n` columns.
+    let slices = slice_lines_by_budget(&line_heights, budget, n);
+
+    // 6. Build per-column `ColumnLineSlice` entries. Empty slices keep
+    //    `Default` placeholder values per the type contract.
+    let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
+    let mut column_slices: Vec<ColumnLineSlice> = Vec::with_capacity(n as usize);
+    for (col_idx, (line_range, slice_h)) in slices.iter().enumerate() {
+        if line_range.is_empty() {
+            column_slices.push(ColumnLineSlice::default());
+            continue;
+        }
+        let col_x = col_idx as f32 * (col_w + gap);
+        col_heights[col_idx] = *slice_h;
+        column_slices.push(ColumnLineSlice {
+            line_range: line_range.clone(),
+            // Slice origin in the segment-relative content-box frame —
+            // `compute_multicol_layout` would normally shift this into the
+            // border-box frame in the post-loop fixup; here we apply the
+            // shift ourselves on the geometry below before returning.
+            origin: Point { x: col_x, y: 0.0 },
+            size: Size {
+                width: col_w,
+                height: *slice_h,
+            },
+        });
+    }
+    debug_assert_eq!(column_slices.len(), n as usize);
+
+    let paragraph_splits = vec![ParagraphSplitEntry {
+        source_node_id: usize::from(node_id),
+        column_slices,
+    }];
+
+    // 7. Geometry — already in the container's *border-box* frame because
+    //    we set `x_offset` / `y_offset` to the resolved insets directly
+    //    (mirrors the post-loop shift that the segment path applies in
+    //    `compute_multicol_layout`).
+    let geometry = ColumnGroupGeometry {
+        x_offset: inset_left,
+        y_offset: inset_top,
+        col_w,
+        gap,
+        n,
+        col_heights,
+        paragraph_splits,
+    };
+
+    // 8. Stash the per-container geometry under the container's own
+    //    NodeId, the same key Case B uses. Task 7 looks up by the multicol
+    //    container's NodeId; for Case A the container *is* the source, so
+    //    `paragraph_splits[0].source_node_id == node_id`.
+    tree.geometry.insert(
+        usize::from(node_id),
+        MulticolGeometry {
+            groups: vec![geometry],
+        },
+    );
+
+    // 9. Container outer height = tallest column + vertical insets. Width
+    //    is already the border-box width on input. Don't write
+    //    `set_unrounded_layout` for the container itself — the caller
+    //    (`compute_root_layout` via `layout_multicol_subtrees`) populates
+    //    the container's outer slot from the returned `LayoutOutput`.
+    let max_col_h = tree
+        .geometry
+        .get(&usize::from(node_id))
+        .and_then(|g| g.groups.first())
+        .map(|g| g.col_heights.iter().copied().fold(0.0_f32, f32::max))
+        .unwrap_or(0.0);
+    let container_h = (max_col_h + inset_top + inset_bottom).max(0.0);
+
     taffy::LayoutOutput {
         size: Size {
             width: container_w,
@@ -2512,6 +2731,41 @@ mod tests {
         assert_eq!(split.column_slices.len(), 2);
         assert!(!split.column_slices[0].line_range.is_empty());
         assert!(!split.column_slices[1].line_range.is_empty());
+    }
+
+    #[test]
+    fn multicol_splits_self_inline_root_container_with_bare_text() {
+        // Bare text directly inside the multicol container — the div itself
+        // is inline-root, no <p> wrapper. Case A of fulgur-6q5: the
+        // container's own parley layout is shaped at the container's content
+        // width and Blitz does NOT call `compute_child_layout` on the
+        // container itself, so re-breaking at `col_w` requires a local
+        // clone+`break_all_lines` inside the multicol hook.
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 200.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let geometry_table = run_pass(&mut doc, &column_styles);
+        let mc_geom = geometry_table
+            .get(&mc_id)
+            .expect("multicol container should have a geometry entry");
+        let group = &mc_geom.groups[0];
+        assert!(
+            group.col_heights[0] > 0.0,
+            "col 0 must be filled, got {:?}",
+            group.col_heights
+        );
+        assert!(
+            group.col_heights[1] > 0.0,
+            "self-inline-root container must spread lines across both columns, got {:?}",
+            group.col_heights
+        );
+        assert_eq!(group.paragraph_splits.len(), 1);
+        assert_eq!(group.paragraph_splits[0].source_node_id, mc_id);
     }
 
     // ── convert.rs integration: MulticolRule entry emission (Task 5 Part C) ──
