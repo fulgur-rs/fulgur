@@ -639,11 +639,24 @@ fn convert_multicol_paragraph_slices(
                     continue;
                 }
 
-                // Pre-shift baselines into slice-local frame, then run
-                // `recalculate_paragraph_line_boxes` to recompute
-                // per-line boxes from the slice's own first line. This
-                // mirrors `ParagraphPageable::split`'s rebase for
-                // continuation fragments (commit 9c0e092).
+                // Rebase per-line baselines into slice-local space.
+                // This mirrors `ParagraphPageable::split`'s rebase for
+                // continuation fragments (commit 9c0e092):
+                //
+                // 1. `line.baseline -= consumed` shifts each line's
+                //    baseline from parley-layout space (paragraph top →
+                //    baseline) to slice-local space (slice top →
+                //    baseline). `consumed` is the cumulative height of
+                //    all *prior* parley lines that this slice does not
+                //    own.
+                // 2. `recalculate_paragraph_line_boxes` then defensively
+                //    re-accumulates per-line `line_box` heights starting
+                //    at zero — for GlyphRun-only slices the per-line
+                //    height is already parley-final so this is a no-op
+                //    on baselines, but the call keeps the slice contract
+                //    aligned with `ParagraphEntry::lines`'s contract
+                //    (every consumer of `Vec<ShapedLine>` expects
+                //    `recalculate_paragraph_line_boxes` to have run).
                 let consumed: f32 = all_lines[..col_slice.line_range.start]
                     .iter()
                     .map(|l| l.height)
@@ -689,8 +702,16 @@ fn convert_multicol_paragraph_slices(
 /// `GlyphRun` items (no inline boxes). Used by
 /// [`convert_multicol_paragraph_slices`] — see that function for scope
 /// notes. Mirrors the `GlyphRun` arm of `inline_root::extract_paragraph`'s
-/// per-line loop; baselines are parley-layout-absolute on output (the
-/// caller rebases per-slice).
+/// per-line loop.
+///
+/// `ShapedLine.baseline` for each emitted line is the **parley layout's
+/// cumulative offset from the layout top edge to that line's baseline**
+/// (not line-local; not page-absolute). For line `i`, this equals
+/// `Σ_{k=0..i} line_height[k] - leading_below[i] + ascent[i]` as parley
+/// reports it via `LineMetrics::baseline`. Convert consumers must rebase
+/// this value (subtract the slice's prior consumed height, then call
+/// `inline_root::recalculate_paragraph_line_boxes`) when emitting
+/// per-slice fragments — see `convert_multicol_paragraph_slices`.
 fn shape_paragraph_glyph_runs(
     doc: &BaseDocument,
     parley_layout: &parley::Layout<blitz_dom::node::TextBrush>,
