@@ -22,6 +22,36 @@ use taffy::{
     TraverseTree,
 };
 
+/// Per-column slice of an inline-root paragraph distributed across
+/// columns by `layout_column_group`. Empty `line_range` means the column
+/// receives no content from this paragraph; this happens when the
+/// paragraph fits entirely in fewer columns than `n`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnLineSlice {
+    /// Half-open parley line index range. Indices reference the parley
+    /// layout reachable through `source_node_id`'s `inline_layout_data`.
+    pub line_range: std::ops::Range<usize>,
+    /// Slice top-left in the multicol container's content-box frame
+    /// (CSS pixels). `compute_multicol_layout` shifts this into the
+    /// border-box frame after the segment loop, mirroring the existing
+    /// `(x_offset, y_offset)` shift on `ColumnGroupGeometry` itself.
+    pub origin: taffy::Point<f32>,
+    /// Slice size — `col_w × Σ line_height(line_range)`. CSS pixels.
+    pub size: taffy::Size<f32>,
+}
+
+/// Plan for one paragraph distributed across `ColumnGroupGeometry`'s
+/// columns. `column_slices.len() == ColumnGroupGeometry.n` always; entries
+/// for unused columns have empty `line_range`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParagraphSplitEntry {
+    /// DOM `usize` NodeId whose `inline_layout_data` was sliced. In Case A
+    /// this equals the multicol container's own NodeId; in Case B it's
+    /// the inline-root child's NodeId.
+    pub source_node_id: usize,
+    pub column_slices: Vec<ColumnLineSlice>,
+}
+
 /// Per-`ColumnGroup` geometry recorded by the Taffy multicol hook.
 ///
 /// `layout_column_group` builds one of these every time it balances a run of
@@ -61,6 +91,9 @@ pub struct ColumnGroupGeometry {
     /// `i`, clamped to `>= 0.0`. An entry of `0.0` means column `i` received
     /// no placements. Always has length == `n`.
     pub col_heights: Vec<f32>,
+    /// Inline-root paragraphs distributed across the columns of this
+    /// group. Empty when no child paragraph needed splitting.
+    pub paragraph_splits: Vec<ParagraphSplitEntry>,
 }
 
 /// Full per-container multicol geometry record.
@@ -799,6 +832,7 @@ fn layout_column_group(
         gap,
         n,
         col_heights,
+        paragraph_splits: Vec::new(),
     };
 
     (placements, geometry)
@@ -904,6 +938,12 @@ fn collect_multicol_node_ids(doc: &BaseDocument) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_group_geometry_default_paragraph_splits_is_empty() {
+        let g = ColumnGroupGeometry::default();
+        assert!(g.paragraph_splits.is_empty());
+    }
 
     #[test]
     fn wrapper_intercepts_multicol_during_taffy_pass() {

@@ -510,6 +510,7 @@ fn record_multicol_rule(
             gap: px_to_pt(g.gap),
             n: g.n,
             col_heights: g.col_heights.iter().copied().map(px_to_pt).collect(),
+            paragraph_splits: Vec::new(),
         })
         .collect();
     out.multicol_rules.insert(
