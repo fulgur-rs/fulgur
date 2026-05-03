@@ -1422,7 +1422,8 @@ fn fragment_block_subtree(
         .parent
         .and_then(|gp_id| doc.get_node(gp_id))
         .is_some_and(|gp| crate::blitz_adapter::is_orthogonal_to_parent(gp, parent));
-    let suppress_page_check = crate::blitz_adapter::is_flex_or_grid_container_node(parent)
+    let allow_same_row_rebase = crate::blitz_adapter::is_flex_or_grid_container_node(parent);
+    let suppress_page_check = allow_same_row_rebase
         || crate::blitz_adapter::is_atomic_inline_container_node(parent)
         || parent_is_orthogonal;
 
@@ -1666,7 +1667,8 @@ fn fragment_block_subtree(
                 origin_pending_target_y = Some(cursor_y);
                 let row_top = this_top_in_parent;
                 let row_bottom = row_top + child_h;
-                origin_pending_same_row = suppress_page_check.then_some((row_top, row_bottom, 0.0));
+                origin_pending_same_row =
+                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
             }
 
             // Honour `break-after: page` after recursion.
