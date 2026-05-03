@@ -882,7 +882,17 @@ fn layout_self_inline_root_container(
         column_slices,
     }];
 
-    // 7. Geometry — already in the container's *border-box* frame because
+    // 7. Container outer height = tallest column + vertical insets. Width
+    //    is already the border-box width on input. Don't write
+    //    `set_unrounded_layout` for the container itself — the caller
+    //    (`compute_root_layout` via `layout_multicol_subtrees`) populates
+    //    the container's outer slot from the returned `LayoutOutput`.
+    //    Compute `max_col_h` from the local before moving `col_heights`
+    //    into the geometry struct, so we don't have to re-fetch through
+    //    `tree.geometry` after insertion.
+    let max_col_h = col_heights.iter().copied().fold(0.0_f32, f32::max);
+
+    // 8. Geometry — already in the container's *border-box* frame because
     //    we set `x_offset` / `y_offset` to the resolved insets directly
     //    (mirrors the post-loop shift that the segment path applies in
     //    `compute_multicol_layout`).
@@ -896,7 +906,7 @@ fn layout_self_inline_root_container(
         paragraph_splits,
     };
 
-    // 8. Stash the per-container geometry under the container's own
+    // 9. Stash the per-container geometry under the container's own
     //    NodeId, the same key Case B uses. Task 7 looks up by the multicol
     //    container's NodeId; for Case A the container *is* the source, so
     //    `paragraph_splits[0].source_node_id == node_id`.
@@ -907,17 +917,6 @@ fn layout_self_inline_root_container(
         },
     );
 
-    // 9. Container outer height = tallest column + vertical insets. Width
-    //    is already the border-box width on input. Don't write
-    //    `set_unrounded_layout` for the container itself — the caller
-    //    (`compute_root_layout` via `layout_multicol_subtrees`) populates
-    //    the container's outer slot from the returned `LayoutOutput`.
-    let max_col_h = tree
-        .geometry
-        .get(&usize::from(node_id))
-        .and_then(|g| g.groups.first())
-        .map(|g| g.col_heights.iter().copied().fold(0.0_f32, f32::max))
-        .unwrap_or(0.0);
     let container_h = (max_col_h + inset_top + inset_bottom).max(0.0);
 
     taffy::LayoutOutput {
@@ -2766,6 +2765,62 @@ mod tests {
         );
         assert_eq!(group.paragraph_splits.len(), 1);
         assert_eq!(group.paragraph_splits[0].source_node_id, mc_id);
+    }
+
+    #[test]
+    fn multicol_self_inline_root_column_fill_auto_leaves_trailing_columns_empty() {
+        // Case A + column-fill: auto → greedy fill (CSS Multi-column Level 1
+        // §6.1): all lines that fit within `avail_h` go into col 0 first;
+        // col 1 stays empty when col 0 absorbs everything. Exercises the
+        // `ColumnFill::Auto` arm in `layout_self_inline_root_container`,
+        // which uses `budget = avail_h` rather than `ceil(total_h / n)`.
+        //
+        // The fixture must wrap to ≥ 2 lines at `col_w` so the balance
+        // branch (`budget = ceil(total_h / n)`) would distribute the lines
+        // across both columns, while auto with `avail_h ≥ total_h` keeps
+        // them all in col 0. We force `avail_h` large via `height: 200px`
+        // on the container (Taffy passes the container's prior-layout
+        // height as `available_space`); without that, `avail_h` collapses
+        // to the single-line container height and auto/balance produce
+        // the same `[h, h]` distribution.
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px; height: 200px;">alpha alpha alpha alpha</div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 200.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        // Inject column-fill: auto via the Phase A side-table (stylo 0.8.0
+        // doesn't surface `column-fill` for the servo engine blitz uses;
+        // same pattern as
+        // `column_fill_auto_leaves_later_columns_empty_when_content_fits`).
+        let mut column_styles = crate::column_css::ColumnStyleTable::new();
+        column_styles.insert(
+            mc_id,
+            crate::column_css::ColumnStyleProps {
+                rule: None,
+                fill: Some(crate::column_css::ColumnFill::Auto),
+                ..Default::default()
+            },
+        );
+
+        let geometry_table = run_pass(&mut doc, &column_styles);
+        let mc_geom = geometry_table
+            .get(&mc_id)
+            .expect("multicol container should have a geometry entry");
+        assert_eq!(mc_geom.groups.len(), 1);
+        let group = &mc_geom.groups[0];
+        assert_eq!(group.n, 2);
+        assert!(
+            group.col_heights[0] > 0.0,
+            "col 0 must be filled, got {:?}",
+            group.col_heights
+        );
+        assert_eq!(
+            group.col_heights[1], 0.0,
+            "column-fill: auto must leave col 1 empty when content fits in col 0, got {:?}",
+            group.col_heights
+        );
     }
 
     // ── convert.rs integration: MulticolRule entry emission (Task 5 Part C) ──
