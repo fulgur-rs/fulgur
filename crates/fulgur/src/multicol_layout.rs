@@ -819,6 +819,71 @@ fn layout_self_inline_root_container(
         parley::AlignmentOptions::default(),
     );
 
+    // fulgur-6q5 Fix 2: when the rebroken layout contains inline-box
+    // items (inline images, inline-blocks, replaced atomic inlines),
+    // `convert_multicol_paragraph_slices`'s `GlyphRun`-only materialiser
+    // would silently drop them. Avoid emitting a `ParagraphSplitEntry`
+    // in that case — instead record a degenerate single-column group
+    // whose height matches the original (un-rebroken) parley layout, so
+    // the container renders its text at full container width through
+    // the standard inline-root path. This is layout-imperfect (the text
+    // doesn't actually flow into the second column) but content-safe
+    // (no glyph or image is dropped).
+    if !parley_layout_is_glyph_run_only(&rebroken) {
+        let original_h = {
+            let node = tree
+                .doc
+                .get_node(usize::from(node_id))
+                .expect("Case A predicate guarantees the node exists");
+            let elem = node
+                .element_data()
+                .expect("Case A predicate guarantees element_data");
+            let text_layout = elem
+                .inline_layout_data
+                .as_ref()
+                .expect("Case A predicate guarantees inline_layout_data");
+            crate::blitz_adapter::parley_line_heights(&text_layout.layout)
+                .iter()
+                .sum::<f32>()
+        };
+        // Single column-group covering column 0; `paragraph_splits`
+        // empty so the convert pass skips this container.
+        let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
+        if let Some(first) = col_heights.first_mut() {
+            *first = original_h;
+        }
+        let geometry = ColumnGroupGeometry {
+            x_offset: inset_left,
+            y_offset: inset_top,
+            col_w,
+            gap,
+            n,
+            col_heights,
+            paragraph_splits: Vec::new(),
+        };
+        tree.geometry.insert(
+            usize::from(node_id),
+            MulticolGeometry {
+                groups: vec![geometry],
+            },
+        );
+        let container_h = (original_h + inset_top + inset_bottom).max(0.0);
+        return taffy::LayoutOutput {
+            size: Size {
+                width: container_w,
+                height: container_h,
+            },
+            content_size: Size {
+                width: container_w,
+                height: container_h,
+            },
+            first_baselines: Point::NONE,
+            top_margin: CollapsibleMarginSet::ZERO,
+            bottom_margin: CollapsibleMarginSet::ZERO,
+            margins_can_collapse_through: false,
+        };
+    }
+
     // 3. Per-line heights from the rebroken clone.
     let line_heights = crate::blitz_adapter::parley_line_heights(&rebroken);
     let total_h: f32 = line_heights.iter().sum();
@@ -1027,7 +1092,13 @@ fn layout_column_group(
             .map(|tl| &tl.layout);
 
         match inline_root_layout {
-            Some(layout) if size.height > budget => {
+            // fulgur-6q5 Fix 2: also gate on `parley_layout_is_glyph_run_only` —
+            // splitting a paragraph that contains inline images / inline-blocks
+            // would silently drop those items at convert time
+            // (`shape_paragraph_glyph_runs` reconstructs `GlyphRun`s only).
+            // Fall through to atomic placement instead so the paragraph
+            // renders intact in column 0.
+            Some(layout) if size.height > budget && parley_layout_is_glyph_run_only(layout) => {
                 let line_heights = crate::blitz_adapter::parley_line_heights(layout);
                 let slices = slice_lines_by_budget(&line_heights, budget, n);
                 debug_assert!(
@@ -1254,6 +1325,31 @@ fn slice_lines_by_budget(
         start = end;
     }
     out
+}
+
+/// fulgur-6q5 Fix 2: returns true when every line of `layout` contains
+/// only `GlyphRun` items (no `InlineBox`).
+///
+/// `convert_multicol_paragraph_slices`'s materialiser
+/// (`shape_paragraph_glyph_runs`) only reconstructs `GlyphRun`s when
+/// turning `ParagraphSplitEntry` into `ParagraphSlice` — inline-image /
+/// inline-block content would be silently dropped at slice render
+/// time. Both layout-side split detectors (`layout_column_group` Case
+/// B and `layout_self_inline_root_container` Case A) gate split
+/// generation on this predicate so paragraphs the convert pass cannot
+/// faithfully reproduce fall back to atomic placement (whole paragraph
+/// in column 0). Until inline-box reconstruction lands in the convert
+/// path, the fallback is a strict improvement over silent data loss.
+fn parley_layout_is_glyph_run_only(layout: &parley::Layout<blitz_dom::node::TextBrush>) -> bool {
+    for line in layout.lines() {
+        for item in line.items() {
+            match item {
+                parley::PositionedLayoutItem::GlyphRun(_) => continue,
+                parley::PositionedLayoutItem::InlineBox(_) => return false,
+            }
+        }
+    }
+    true
 }
 
 /// Linear search for the smallest per-column budget (starting from `total / n`

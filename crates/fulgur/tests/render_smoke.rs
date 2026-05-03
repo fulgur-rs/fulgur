@@ -2200,3 +2200,41 @@ fn multicol_inline_root_split_honours_text_align_center() {
         );
     }
 }
+
+/// fulgur-6q5 Fix 2: a multicol container whose inline-root paragraph
+/// contains inline-box content (`display: inline-block`, inline images,
+/// inline-flex …) must NOT generate `paragraph_slices`.
+/// `convert_multicol_paragraph_slices` only reconstructs `GlyphRun`
+/// items from the parley layout, so an inline-box would be silently
+/// dropped on render. The layout pass falls back to atomic placement
+/// (whole paragraph in column 0) instead.
+///
+/// Case A trigger — the multicol container is itself the inline root,
+/// hosting bare text with an `inline-block` span.
+#[test]
+fn multicol_with_inline_box_paragraph_falls_back_to_atomic() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body>
+        <div style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha <span style="display: inline-block; width: 30px; height: 16px; background: red"></span> alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        drawables.paragraph_slices.is_empty(),
+        "paragraph_slices must be empty when the inline-root paragraph contains \
+         inline-box content (would otherwise drop the inline-box on render); \
+         got slices for source ids {:?}",
+        drawables.paragraph_slices.keys().collect::<Vec<_>>(),
+    );
+    // Sanity: rendering still succeeds (the container falls back to
+    // atomic placement and renders the text at full container width via
+    // the standard inline-root path).
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+}
