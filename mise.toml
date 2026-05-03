@@ -33,6 +33,24 @@ for dir in examples/*/; do
 done
 """
 
+[tasks."wpt:fetch"]
+description = "Fetch WPT sources into target/wpt/ (pinned SHA)"
+run = "scripts/wpt/fetch.sh"
+
+[tasks."wpt:run-one"]
+description = "Run a single WPT reftest (usage: mise run wpt:run-one -- <test.html> [--dpi N])"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+if [ $# -eq 0 ]; then
+  echo "usage: mise run wpt:run-one -- <test.html> [--dpi N]" >&2
+  echo "  test.html: path under target/wpt/ or absolute" >&2
+  exit 1
+fi
+export FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf"
+cargo run -p fulgur-wpt --example run_one -- "$@"
+"""
+
 [tasks."docs:install"]
 description = "Install website Python deps via uv"
 dir = "website"
