@@ -760,45 +760,143 @@ fn layout_column_group(
         }
     };
 
-    // 3. Distribute
-    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::with_capacity(children.len());
+    // 3. Build the distribution work list. Each measured child becomes
+    //    either a single `Atomic` item (regular block / replaced / inline-
+    //    root that fits within the per-column budget) or a sequence of
+    //    `InlineRootSlice` items — one per non-empty column receiving lines
+    //    from a sliced inline-root paragraph (Case B in
+    //    `docs/plans/2026-05-03-multicol-inline-root-split.md`).
+    //
+    //    The pre-flight probe (commit 0c2c762) confirmed
+    //    `compute_child_layout(child, known_dimensions = col_w)` already
+    //    re-breaks parley to col_w during the measure step, so per-line
+    //    heights read from `inline_layout_data` reflect the column-width
+    //    wrap and don't need a manual `break_all_lines`.
+    enum DistItem {
+        Atomic {
+            id: NodeId,
+            size: Size<f32>,
+        },
+        InlineRootSlice {
+            source_id: NodeId,
+            line_range: std::ops::Range<usize>,
+            size: Size<f32>,
+        },
+    }
+
+    let mut items: Vec<DistItem> = Vec::with_capacity(measured.len());
+    for (id, size) in &measured {
+        let id_u: usize = (*id).into();
+        // Borrow the post-measure parley layout for this child if it is an
+        // inline root *and* its measured height exceeds the per-column
+        // budget (otherwise an atomic placement is cheaper and preserves
+        // the byte-identical output the existing tests assert on).
+        let inline_root_layout = tree
+            .doc
+            .get_node(id_u)
+            .filter(|n| n.flags.is_inline_root())
+            .and_then(|n| n.element_data())
+            .and_then(|e| e.inline_layout_data.as_ref())
+            .map(|tl| &tl.layout);
+
+        match inline_root_layout {
+            Some(layout) if size.height > budget => {
+                let line_heights = crate::blitz_adapter::parley_line_heights(layout);
+                let slices = slice_lines_by_budget(&line_heights, budget, n);
+                for (line_range, slice_h) in slices {
+                    if !line_range.is_empty() {
+                        items.push(DistItem::InlineRootSlice {
+                            source_id: *id,
+                            line_range,
+                            size: Size {
+                                width: col_w,
+                                height: slice_h,
+                            },
+                        });
+                    }
+                }
+            }
+            _ => items.push(DistItem::Atomic {
+                id: *id,
+                size: *size,
+            }),
+        }
+    }
+
+    // 4. Distribute
+    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::with_capacity(items.len());
+    // Per-source accumulated slice metadata. `BTreeMap` (not `HashMap`)
+    // keeps iteration order deterministic — `paragraph_splits` flows into
+    // PDF byte order downstream.
+    let mut placed_slices: BTreeMap<usize, Vec<ColumnLineSlice>> = BTreeMap::new();
     let mut col_idx: u32 = 0;
     let mut col_y: f32 = 0.0;
-    for (child_id, size) in &measured {
+    for item in &items {
+        let size = match item {
+            DistItem::Atomic { size, .. } => *size,
+            DistItem::InlineRootSlice { size, .. } => *size,
+        };
+
+        // Same column-advance check used for atomic children today.
         if col_y > 0.0 && col_y + size.height > budget && col_idx + 1 < n {
             col_idx += 1;
             col_y = 0.0;
         }
+
         let col_x = col_idx as f32 * (col_w + gap);
-        placements.push((
-            *child_id,
-            Point {
-                x: col_x,
-                y: y_offset + col_y,
-            },
-            *size,
-        ));
+        let location = Point {
+            x: col_x,
+            y: y_offset + col_y,
+        };
+
+        match item {
+            DistItem::Atomic { id, .. } => {
+                placements.push((*id, location, size));
+            }
+            DistItem::InlineRootSlice {
+                source_id,
+                line_range,
+                ..
+            } => {
+                // Only the first slice owns the Taffy `set_unrounded_layout`
+                // write — that's what surrounding siblings position
+                // against. Later slices feed `paragraph_splits` only.
+                let id_u: usize = (*source_id).into();
+                let entry = placed_slices.entry(id_u).or_default();
+                if entry.is_empty() {
+                    placements.push((*source_id, location, size));
+                }
+                entry.push(ColumnLineSlice {
+                    line_range: line_range.clone(),
+                    // Slice origin in the *content-box frame* — same
+                    // convention used for `col_heights` (relative to
+                    // `y_offset`). The container-level border-box shift
+                    // applied in `compute_multicol_layout` updates these
+                    // alongside the rest of the geometry.
+                    origin: Point { x: col_x, y: col_y },
+                    size,
+                });
+            }
+        }
+
         col_y += size.height;
     }
 
-    // 4. Per-column filled heights — bottom-most placement per column,
+    // 5. Per-column filled heights — bottom-most placement per column,
     //    relative to y_offset. Empty columns stay at 0.0.
     //
     //    We recover each placement's column index by inverting the
-    //    `col_x = col_idx * (col_w + gap)` formula from step 3. The stride
+    //    `col_x = col_idx * (col_w + gap)` formula from step 4. The stride
     //    `col_w + gap` is non-zero for any real multicol container (both
     //    `col_w` and `gap` are `>= 0.0`, and `col_w == 0 && gap == 0`
     //    indicates a degenerate container where the column index doesn't
     //    meaningfully differ across placements anyway). The guard below
     //    protects against a divide-by-zero; `round()` tolerates float
-    //    accumulation from the multiplication in step 3.
+    //    accumulation from the multiplication in step 4.
     let stride = col_w + gap;
-    let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
-    for (_, loc, sz) in &placements {
-        let idx = if stride > 0.0 {
-            let raw = (loc.x / stride).round();
-            // Clamp to [0, n-1] — float noise at exact stride boundaries
-            // could push `raw` a hair outside the valid range.
+    let resolve_col_idx = |x: f32| -> usize {
+        if stride > 0.0 {
+            let raw = (x / stride).round();
             if raw.is_finite() && raw >= 0.0 {
                 (raw as u32).min(n.saturating_sub(1)) as usize
             } else {
@@ -806,10 +904,26 @@ fn layout_column_group(
             }
         } else {
             0
-        };
+        }
+    };
+    let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
+    for (_, loc, sz) in &placements {
+        let idx = resolve_col_idx(loc.x);
         let bottom = (loc.y - y_offset) + sz.height;
         if bottom > col_heights[idx] {
             col_heights[idx] = bottom;
+        }
+    }
+    // Augment with later-column slices that don't appear in `placements`
+    // (only the first slice of each split paragraph is written back to
+    // Taffy storage).
+    for slices in placed_slices.values() {
+        for slice in slices.iter().skip(1) {
+            let idx = resolve_col_idx(slice.origin.x);
+            let bottom = slice.origin.y + slice.size.height;
+            if bottom > col_heights[idx] {
+                col_heights[idx] = bottom;
+            }
         }
     }
     // Guard against negative accumulation (should be unreachable given
@@ -820,6 +934,28 @@ fn layout_column_group(
             *h = 0.0;
         }
     }
+
+    // 6. Build `paragraph_splits` from the per-source slice accumulator.
+    //    Each entry's `column_slices` length equals `n`, with empty
+    //    `ColumnLineSlice` placeholders for unused columns so downstream
+    //    consumers can index by column position without bounds juggling.
+    let paragraph_splits: Vec<ParagraphSplitEntry> = placed_slices
+        .into_iter()
+        .map(|(source_id, mut slices)| {
+            let mut by_col: Vec<Option<ColumnLineSlice>> = (0..n).map(|_| None).collect();
+            for slice in slices.drain(..) {
+                let idx = resolve_col_idx(slice.origin.x);
+                by_col[idx] = Some(slice);
+            }
+            let column_slices: Vec<ColumnLineSlice> =
+                by_col.into_iter().map(|s| s.unwrap_or_default()).collect();
+            debug_assert_eq!(column_slices.len(), n as usize);
+            ParagraphSplitEntry {
+                source_node_id: source_id,
+                column_slices,
+            }
+        })
+        .collect();
 
     let geometry = ColumnGroupGeometry {
         // `x_offset` / `y_offset` here are in the container's *content-box*
@@ -832,7 +968,7 @@ fn layout_column_group(
         gap,
         n,
         col_heights,
-        paragraph_splits: Vec::new(),
+        paragraph_splits,
     };
 
     (placements, geometry)
@@ -857,10 +993,6 @@ fn layout_column_group(
 ///   ensures the budget is `>= avail_h / n` so this branch fires only on
 ///   pathological inputs where the multicol container itself overflows
 ///   the page (handled elsewhere).
-///
-/// Currently only invoked from tests; production wire-up lands in a
-/// follow-up task (see `docs/plans/2026-05-03-multicol-inline-root-split.md`).
-#[allow(dead_code)]
 fn slice_lines_by_budget(
     line_heights: &[f32],
     budget: f32,
@@ -2268,9 +2400,17 @@ mod tests {
         // table (not via inline CSS) because stylo 0.8.0 doesn't surface
         // `column-fill` for the servo engine blitz uses; that's exactly the
         // reason the side-table exists.
+        //
+        // The fixture text must fit in **one line at col_w**, not merely at
+        // viewport width: the multicol hook re-breaks parley to col_w in
+        // its measure step, and a paragraph that wraps to 2 lines there is
+        // an overflow case that the inline-root split (Task 4) correctly
+        // distributes across columns. Keep this single-word so this test
+        // exercises the "content fits → don't split" path, not the overflow
+        // branch.
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
-              <p>alpha alpha alpha alpha</p>
+              <p>alpha</p>
             </div>
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
@@ -2307,6 +2447,56 @@ mod tests {
             "column-fill: auto must leave the second column empty when content fits in the first, got {:?}",
             group.col_heights
         );
+    }
+
+    // ── Inline-root child split across columns (Task 4) ─────────────
+
+    #[test]
+    fn multicol_splits_single_inline_root_p_child_across_two_columns() {
+        // Single <p> with enough text to force lines into both columns.
+        // 200 px viewport, multicol uses column-count: 2, column-gap: 0 →
+        // col_w ≈ 92 px. 30 alphas at 16px font is far more than 92 px ×
+        // any sensible budget can hold in one column.
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0;">
+              <p style="font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 200.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let geometry_table = run_pass(&mut doc, &column_styles);
+        let mc_geom = geometry_table
+            .get(&mc_id)
+            .expect("multicol container should have a geometry entry");
+        assert_eq!(mc_geom.groups.len(), 1);
+        let group = &mc_geom.groups[0];
+        assert_eq!(group.n, 2);
+
+        // Both columns must be filled.
+        assert!(
+            group.col_heights[0] > 0.0,
+            "col 0 must be filled, got {:?}",
+            group.col_heights
+        );
+        assert!(
+            group.col_heights[1] > 0.0,
+            "col 1 must be filled (the bug we're fixing), got {:?}",
+            group.col_heights
+        );
+
+        // The split metadata must be populated.
+        assert_eq!(
+            group.paragraph_splits.len(),
+            1,
+            "exactly one inline-root child should have been split"
+        );
+        let split = &group.paragraph_splits[0];
+        assert_eq!(split.column_slices.len(), 2);
+        assert!(!split.column_slices[0].line_range.is_empty());
+        assert!(!split.column_slices[1].line_range.is_empty());
     }
 
     // ── convert.rs integration: MulticolRule entry emission (Task 5 Part C) ──
