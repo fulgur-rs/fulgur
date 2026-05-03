@@ -1,5 +1,5 @@
 use crate::config::{Config, Margin, PageSize};
-use crate::gcpm::{PageSettingsRule, PageSizeDecl};
+use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 
 /// Map a CSS page-size keyword (case-insensitive) to a [`PageSize`].
 /// Falls back to A4 for unrecognised keywords.
@@ -42,9 +42,9 @@ pub fn resolve_page_settings(
 ) -> (PageSize, Margin, bool) {
     // --- Collect CSS declarations, separating default from selector-matched ---
     let mut default_size: Option<&PageSizeDecl> = None;
-    let mut default_margin: Option<&Margin> = None;
+    let mut default_margin = PartialMargin::default();
     let mut matched_size: Option<&PageSizeDecl> = None;
-    let mut matched_margin: Option<&Margin> = None;
+    let mut matched_margin = PartialMargin::default();
 
     for rule in rules {
         match &rule.page_selector {
@@ -53,18 +53,14 @@ pub fn resolve_page_settings(
                 if rule.size.is_some() {
                     default_size = rule.size.as_ref();
                 }
-                if rule.margin.is_some() {
-                    default_margin = rule.margin.as_ref();
-                }
+                default_margin.overlay(&rule.margin);
             }
             Some(sel) => {
                 if selector_matches(sel, page_num) {
                     if rule.size.is_some() {
                         matched_size = rule.size.as_ref();
                     }
-                    if rule.margin.is_some() {
-                        matched_margin = rule.margin.as_ref();
-                    }
+                    matched_margin.overlay(&rule.margin);
                 }
             }
         }
@@ -72,7 +68,6 @@ pub fn resolve_page_settings(
 
     // Selector match overrides default for each property independently.
     let css_size = matched_size.or(default_size);
-    let css_margin = matched_margin.or(default_margin);
 
     // --- Resolve page size and landscape ---
     let (size, landscape) = if config.overrides.page_size {
@@ -125,13 +120,17 @@ pub fn resolve_page_settings(
     };
 
     // --- Resolve margin ---
+    // Cascade: config.margin (lowest) → default @page → matched selector
+    // (highest). Each layer overlays per-side onto the previous so partial
+    // longhand declarations like `margin-top: 200px` only affect their own
+    // side and the rest of the box inherits from the layer below.
     let margin = if config.overrides.margin {
         config.margin
     } else {
-        match css_margin {
-            Some(decl) => *decl,
-            None => config.margin,
-        }
+        let mut m = config.margin;
+        default_margin.apply_to_margin(&mut m);
+        matched_margin.apply_to_margin(&mut m);
+        m
     };
 
     (size, margin, landscape)
@@ -149,8 +148,8 @@ fn resolve_landscape_from_css(css_size: Option<&PageSizeDecl>, fallback: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Margin, PageSize};
-    use crate::gcpm::{PageSettingsRule, PageSizeDecl};
+    use crate::config::{Config, PageSize};
+    use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 
     #[test]
     fn test_no_page_settings_uses_config() {
@@ -167,7 +166,7 @@ mod tests {
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::Keyword("letter".into())),
-            margin: None,
+            margin: PartialMargin::default(),
         }];
         let (size, _, _) = resolve_page_settings(&rules, 1, 10, &config);
         assert!((size.width - PageSize::LETTER.width).abs() < 0.01);
@@ -180,7 +179,7 @@ mod tests {
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::Keyword("letter".into())),
-            margin: None,
+            margin: PartialMargin::default(),
         }];
         let (size, _, _) = resolve_page_settings(&rules, 1, 10, &config);
         assert!((size.width - PageSize::A3.width).abs() < 0.01);
@@ -193,22 +192,12 @@ mod tests {
             PageSettingsRule {
                 page_selector: None,
                 size: None,
-                margin: Some(Margin {
-                    top: 20.0,
-                    right: 20.0,
-                    bottom: 20.0,
-                    left: 20.0,
-                }),
+                margin: PartialMargin::from_uniform(20.0),
             },
             PageSettingsRule {
                 page_selector: Some(":first".into()),
                 size: None,
-                margin: Some(Margin {
-                    top: 50.0,
-                    right: 50.0,
-                    bottom: 50.0,
-                    left: 50.0,
-                }),
+                margin: PartialMargin::from_uniform(50.0),
             },
         ];
         let (_, margin_p1, _) = resolve_page_settings(&rules, 1, 10, &config);
@@ -224,22 +213,12 @@ mod tests {
             PageSettingsRule {
                 page_selector: Some(":left".into()),
                 size: None,
-                margin: Some(Margin {
-                    top: 20.0,
-                    right: 30.0,
-                    bottom: 20.0,
-                    left: 10.0,
-                }),
+                margin: PartialMargin::from_sides(20.0, 30.0, 20.0, 10.0),
             },
             PageSettingsRule {
                 page_selector: Some(":right".into()),
                 size: None,
-                margin: Some(Margin {
-                    top: 20.0,
-                    right: 10.0,
-                    bottom: 20.0,
-                    left: 30.0,
-                }),
+                margin: PartialMargin::from_sides(20.0, 10.0, 20.0, 30.0),
             },
         ];
         let (_, m2, _) = resolve_page_settings(&rules, 2, 10, &config);
@@ -254,7 +233,7 @@ mod tests {
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), true)),
-            margin: None,
+            margin: PartialMargin::default(),
         }];
         let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config);
         assert!(landscape);
@@ -266,11 +245,62 @@ mod tests {
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::Custom(400.0, 600.0)),
-            margin: None,
+            margin: PartialMargin::default(),
         }];
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config);
         assert!((size.width - 400.0).abs() < 0.01);
         assert!((size.height - 600.0).abs() < 0.01);
         assert!(!landscape);
+    }
+
+    #[test]
+    fn test_partial_margin_inherits_unset_sides_from_default() {
+        // Default `@page { margin: 0 }` should provide bottom and left when
+        // `:right` only sets top and right (the page-left-right-001 case).
+        let config = Config::default();
+        let rules = vec![
+            PageSettingsRule {
+                page_selector: None,
+                size: None,
+                margin: PartialMargin::from_uniform(0.0),
+            },
+            PageSettingsRule {
+                page_selector: Some(":right".into()),
+                size: None,
+                margin: PartialMargin {
+                    top: Some(150.0),
+                    right: Some(375.0),
+                    bottom: None,
+                    left: None,
+                },
+            },
+        ];
+        let (_, m, _) = resolve_page_settings(&rules, 1, 10, &config);
+        assert!((m.top - 150.0).abs() < 0.01);
+        assert!((m.right - 375.0).abs() < 0.01);
+        assert!((m.bottom - 0.0).abs() < 0.01);
+        assert!((m.left - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_partial_margin_falls_back_to_config_when_no_default_rule() {
+        // No default `@page` rule. Sides not set by the matched selector
+        // fall back to `config.margin` (lowest cascade layer).
+        let config = Config::default();
+        let rules = vec![PageSettingsRule {
+            page_selector: Some(":first".into()),
+            size: None,
+            margin: PartialMargin {
+                top: Some(100.0),
+                right: None,
+                bottom: None,
+                left: None,
+            },
+        }];
+        let (_, m, _) = resolve_page_settings(&rules, 1, 10, &config);
+        assert!((m.top - 100.0).abs() < 0.01);
+        assert!((m.right - config.margin.right).abs() < 0.01);
+        assert!((m.bottom - config.margin.bottom).abs() < 0.01);
+        assert!((m.left - config.margin.left).abs() < 0.01);
     }
 }

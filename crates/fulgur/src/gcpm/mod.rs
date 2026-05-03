@@ -118,8 +118,83 @@ pub struct PageSettingsRule {
     pub page_selector: Option<String>,
     /// Parsed `size` declaration, if present.
     pub size: Option<PageSizeDecl>,
-    /// Parsed `margin` declaration, if present. Values in points.
-    pub margin: Option<crate::config::Margin>,
+    /// Parsed `margin` declaration. Tracks each side independently so partial
+    /// declarations (`margin-top: 200px`) cascade per-side rather than
+    /// replacing the full margin box.
+    pub margin: PartialMargin,
+}
+
+/// Margin sides individually overridable. Sides set to `None` inherit from the
+/// preceding rule in the cascade (default `@page` rule, then [`Config::margin`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PartialMargin {
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+}
+
+impl PartialMargin {
+    /// All sides set to the same value (used by the `margin: <length>` shorthand).
+    pub fn from_uniform(v: f32) -> Self {
+        Self {
+            top: Some(v),
+            right: Some(v),
+            bottom: Some(v),
+            left: Some(v),
+        }
+    }
+
+    /// All four sides set explicitly (used by 2/3/4-value shorthand and the
+    /// fully-resolved [`Margin`] cascade).
+    pub fn from_sides(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        Self {
+            top: Some(top),
+            right: Some(right),
+            bottom: Some(bottom),
+            left: Some(left),
+        }
+    }
+
+    /// `true` when no side has been set.
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none() && self.right.is_none() && self.bottom.is_none() && self.left.is_none()
+    }
+
+    /// Apply set sides on top of the given [`Margin`] (overwrite). Sides set
+    /// to `None` leave `target` untouched.
+    pub fn apply_to_margin(&self, target: &mut crate::config::Margin) {
+        if let Some(v) = self.top {
+            target.top = v;
+        }
+        if let Some(v) = self.right {
+            target.right = v;
+        }
+        if let Some(v) = self.bottom {
+            target.bottom = v;
+        }
+        if let Some(v) = self.left {
+            target.left = v;
+        }
+    }
+
+    /// Merge `other` into `self`: every side `other` sets overwrites `self`.
+    /// Used to accumulate longhand declarations within a single `@page` rule
+    /// and across rules sharing the same selector.
+    pub fn overlay(&mut self, other: &PartialMargin) {
+        if let Some(v) = other.top {
+            self.top = Some(v);
+        }
+        if let Some(v) = other.right {
+            self.right = Some(v);
+        }
+        if let Some(v) = other.bottom {
+            self.bottom = Some(v);
+        }
+        if let Some(v) = other.left {
+            self.left = Some(v);
+        }
+    }
 }
 
 /// A single counter operation from counter-reset, counter-increment, or counter-set.
