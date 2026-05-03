@@ -46,27 +46,27 @@ pub fn resolve_page_settings(
     let mut matched_size: Option<&PageSizeDecl> = None;
     let mut matched_margin = PartialMargin::default();
 
+    // Later rules override earlier ones per side; selector-matched layer
+    // wins over the default layer.
     for rule in rules {
         match &rule.page_selector {
             None => {
-                // Default (no selector) — later rules override earlier ones.
                 if rule.size.is_some() {
                     default_size = rule.size.as_ref();
                 }
-                default_margin.overlay(&rule.margin);
+                default_margin.merge(&rule.margin);
             }
             Some(sel) => {
                 if selector_matches(sel, page_num) {
                     if rule.size.is_some() {
                         matched_size = rule.size.as_ref();
                     }
-                    matched_margin.overlay(&rule.margin);
+                    matched_margin.merge(&rule.margin);
                 }
             }
         }
     }
 
-    // Selector match overrides default for each property independently.
     let css_size = matched_size.or(default_size);
 
     // --- Resolve page size and landscape ---
@@ -119,11 +119,9 @@ pub fn resolve_page_settings(
         }
     };
 
-    // --- Resolve margin ---
-    // Cascade: config.margin (lowest) → default @page → matched selector
-    // (highest). Each layer overlays per-side onto the previous so partial
-    // longhand declarations like `margin-top: 200px` only affect their own
-    // side and the rest of the box inherits from the layer below.
+    // Margin cascade: config.margin → default @page → matched selector.
+    // Each layer overlays per-side, so partial longhand declarations only
+    // affect their own side.
     let margin = if config.overrides.margin {
         config.margin
     } else {
@@ -256,7 +254,7 @@ mod tests {
     #[test]
     fn test_partial_margin_inherits_unset_sides_from_default() {
         // Default `@page { margin: 0 }` should provide bottom and left when
-        // `:right` only sets top and right (the page-left-right-001 case).
+        // a matched selector only sets top and right.
         let config = Config::default();
         let rules = vec![
             PageSettingsRule {
@@ -284,8 +282,6 @@ mod tests {
 
     #[test]
     fn test_partial_margin_falls_back_to_config_when_no_default_rule() {
-        // No default `@page` rule. Sides not set by the matched selector
-        // fall back to `config.margin` (lowest cascade layer).
         let config = Config::default();
         let rules = vec![PageSettingsRule {
             page_selector: Some(":first".into()),

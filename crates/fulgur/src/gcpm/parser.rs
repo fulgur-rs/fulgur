@@ -502,7 +502,7 @@ impl<'i, 'a> DeclarationParser<'i> for PageRuleParser<'a> {
             }
         } else if name.eq_ignore_ascii_case("margin") {
             if let Some(v) = parse_page_margin_value(input) {
-                self.margin.overlay(&v);
+                self.margin.merge(&v);
             }
         } else if name.eq_ignore_ascii_case("margin-top") {
             if let Some(v) = parse_page_margin_longhand_value(input) {
