@@ -294,6 +294,14 @@ pub struct Drawables {
     pub transforms: BTreeMap<NodeId, TransformEntry>,
     pub bookmark_anchors: BTreeMap<NodeId, BookmarkAnchorEntry>,
     pub link_spans: Vec<(NodeId, LinkSpanEntry)>,
+    /// Tagged-PDF semantic classification keyed by source NodeId
+    /// (fulgur-izp.3). Convert-side populates this from element local
+    /// names; render integration arrives in fulgur-izp.4 and tag-tree
+    /// assembly in fulgur-izp.5. Empty when tagging-related conversion
+    /// records nothing — for example a fixture with `<custom-tag>`
+    /// only — so byte-identical output is preserved while the data
+    /// layer lands in isolation.
+    pub semantics: BTreeMap<NodeId, crate::tagging::SemanticEntry>,
     /// PR 8g: NodeIds the v2 dispatcher's main loop must skip because
     /// they belong to inline-box content (or its descendants) dispatched
     /// explicitly by `paragraph::draw_shaped_lines` under an offset
@@ -335,6 +343,7 @@ impl Drawables {
             && self.transforms.is_empty()
             && self.bookmark_anchors.is_empty()
             && self.link_spans.is_empty()
+            && self.semantics.is_empty()
     }
 }
 

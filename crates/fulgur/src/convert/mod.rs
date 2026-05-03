@@ -168,6 +168,7 @@ pub fn dom_to_drawables(
     drawables.body_offset_pt = extract_body_offset_pt(doc);
     drawables.root_id = Some(root.id);
     drawables.body_id = find_body_id_in_dom(doc);
+    record_semantics_pass(doc, &mut drawables);
     drawables
 }
 
@@ -316,6 +317,70 @@ pub(super) fn convert_node(
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
     record_transform(doc, node_id, &before, out);
+}
+
+/// Walk the DOM top-down from `<body>` and populate `out.semantics`
+/// with one `SemanticEntry` per element whose local name is recognised
+/// by `crate::tagging::classify_element`. Runs as a standalone pass
+/// after `convert_node` so the classification covers elements (e.g.
+/// `<thead>`, `<tbody>`) that the per-type converters traverse via
+/// custom child walks instead of recursing through `convert_node`.
+///
+/// `<head>` and its descendants are intentionally skipped — none of
+/// them participate in the StructTree, and starting from `<body>`
+/// keeps later expansions of `classify_element` (e.g. promoting
+/// `<header>` / `<footer>` to dedicated tags) from accidentally
+/// classifying `<head>`'s `<title>` / `<style>` etc.
+///
+/// fulgur-izp.3: pure data layer. The render path does not consume
+/// these entries yet, so PDF byte equality is preserved across this
+/// change.
+fn record_semantics_pass(doc: &HtmlDocument, out: &mut crate::drawables::Drawables) {
+    use std::ops::Deref;
+    let base = doc.deref();
+    let Some(body_id) = out.body_id else {
+        return;
+    };
+    walk_semantics(base, body_id, 0, out);
+}
+
+fn walk_semantics(
+    doc: &BaseDocument,
+    node_id: usize,
+    depth: usize,
+    out: &mut crate::drawables::Drawables,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(elem) = node.element_data() {
+        if let Some(tag) = crate::tagging::classify_element(elem.name.local.as_ref()) {
+            // Walk up `node.parent` until an already-recorded ancestor
+            // is found. The traversal is top-down so any classified
+            // ancestor is guaranteed to be present.
+            let mut parent = node.parent;
+            let parent_node_id = loop {
+                let Some(pid) = parent else { break None };
+                if out.semantics.contains_key(&pid) {
+                    break Some(pid);
+                }
+                parent = doc.get_node(pid).and_then(|p| p.parent);
+            };
+            out.semantics.insert(
+                node_id,
+                crate::tagging::SemanticEntry {
+                    tag,
+                    parent: parent_node_id,
+                },
+            );
+        }
+    }
+    for &child_id in &node.children {
+        walk_semantics(doc, child_id, depth + 1, out);
+    }
 }
 
 /// Inner dispatcher. Tries each specialized converter in order; falls
@@ -639,6 +704,184 @@ mod bookmark_outline_tests {
         assert!(
             pdf_str.contains("/Outlines"),
             "bookmark anchors must reach the v2 outline pipeline; PDF missing /Outlines"
+        );
+    }
+}
+
+#[cfg(test)]
+mod semantics_tests {
+    //! fulgur-izp.3: convert-side semantic tag classification. Verifies
+    //! `dom_to_drawables` populates `Drawables.semantics` with the
+    //! expected `(tag, parent)` pairs for representative HTML fixtures.
+    //!
+    //! Render-side wire-up (`fulgur-izp.4`) and StructTree assembly
+    //! (`fulgur-izp.5`) are out of scope; these tests assert the data
+    //! shape only.
+
+    use crate::tagging::PdfTag;
+    use std::ops::DerefMut;
+
+    fn build_drawables(html: &str) -> crate::drawables::Drawables {
+        // Drive the convert pipeline directly without the full Engine
+        // so the assertions stay focused on `dom_to_drawables`.
+        // `parse_and_layout` already runs stylo + Taffy + the
+        // `position: fixed` relayout, matching what the engine feeds
+        // into convert at this point.
+        let mut doc = crate::blitz_adapter::parse_and_layout(html, 595.0, 842.0, &[]);
+
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = super::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        super::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    fn entries_by_tag(
+        d: &crate::drawables::Drawables,
+        target: &PdfTag,
+    ) -> Vec<(usize, Option<usize>)> {
+        d.semantics
+            .iter()
+            .filter(|(_, e)| e.tag == *target)
+            .map(|(id, e)| (*id, e.parent))
+            .collect()
+    }
+
+    #[test]
+    fn dom_to_drawables_records_semantic_entries_for_block_elements() {
+        let html = "<!DOCTYPE html><html><body><h1>T</h1><p>x</p><div><img src='a.png' alt='a'></div><p>y <span>inside</span> z</p></body></html>";
+        let d = build_drawables(html);
+
+        let h1s = entries_by_tag(&d, &PdfTag::H { level: 1 });
+        assert_eq!(h1s.len(), 1, "expected one h1 entry");
+        let ps = entries_by_tag(&d, &PdfTag::P);
+        assert_eq!(ps.len(), 2, "expected two p entries");
+        let divs = entries_by_tag(&d, &PdfTag::Div);
+        assert_eq!(divs.len(), 1, "expected one div entry");
+        let figures = entries_by_tag(&d, &PdfTag::Figure);
+        assert_eq!(figures.len(), 1, "expected one figure entry for <img>");
+        let spans = entries_by_tag(&d, &PdfTag::Span);
+        assert_eq!(spans.len(), 1, "expected one span entry");
+
+        let (img_id, img_parent) = figures[0];
+        let (div_id, _) = divs[0];
+        assert_eq!(
+            img_parent,
+            Some(div_id),
+            "img semantic parent should be its enclosing div, got {img_parent:?} for img id {img_id}"
+        );
+
+        // span's parent must be one of the recorded paragraphs — the
+        // exact NodeId depends on Blitz's parse order which is stable
+        // but not part of the contract under test. Asserting set
+        // membership keeps the test robust to renumbering.
+        let p_ids: std::collections::BTreeSet<_> = ps.iter().map(|(id, _)| *id).collect();
+        let (_, span_parent) = spans[0];
+        assert!(
+            span_parent.map(|p| p_ids.contains(&p)).unwrap_or(false),
+            "span parent must be one of the recorded p NodeIds, got {span_parent:?}"
+        );
+    }
+
+    #[test]
+    fn dom_to_drawables_records_semantic_entries_for_lists() {
+        let html = "<!DOCTYPE html><html><body><ul><li>a</li><li>b</li></ul></body></html>";
+        let d = build_drawables(html);
+        let lists = entries_by_tag(&d, &PdfTag::L);
+        assert_eq!(lists.len(), 1, "expected one ul entry");
+        let items = entries_by_tag(&d, &PdfTag::Li);
+        assert_eq!(items.len(), 2, "expected two li entries");
+
+        let (ul_id, _) = lists[0];
+        for (li_id, parent) in &items {
+            assert_eq!(
+                *parent,
+                Some(ul_id),
+                "li {li_id} parent should be ul {ul_id}, got {parent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dom_to_drawables_records_semantic_entries_for_tables() {
+        let html = "<!DOCTYPE html><html><body><table><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody></table></body></html>";
+        let d = build_drawables(html);
+
+        let tables = entries_by_tag(&d, &PdfTag::Table);
+        assert_eq!(tables.len(), 1);
+        let row_groups = entries_by_tag(&d, &PdfTag::TRowGroup);
+        assert_eq!(row_groups.len(), 2, "thead + tbody");
+        let rows = entries_by_tag(&d, &PdfTag::Tr);
+        assert_eq!(rows.len(), 2);
+        let ths = entries_by_tag(&d, &PdfTag::Th);
+        assert_eq!(ths.len(), 1);
+        let tds = entries_by_tag(&d, &PdfTag::Td);
+        assert_eq!(tds.len(), 1);
+
+        let (table_id, _) = tables[0];
+        for (_, parent) in &row_groups {
+            assert_eq!(*parent, Some(table_id), "row group should parent to table");
+        }
+        // Each row's parent must be one of the row-group ids; each
+        // header/data cell's parent must be one of the row ids. We
+        // assert containment rather than specific ids because Blitz
+        // assigns NodeIds during parse — the order is stable but
+        // hard-coding ids would couple the test to internal numbering.
+        let row_group_ids: std::collections::BTreeSet<_> =
+            row_groups.iter().map(|(id, _)| *id).collect();
+        for (_, parent) in &rows {
+            assert!(
+                parent.map(|p| row_group_ids.contains(&p)).unwrap_or(false),
+                "tr parent must be a row group, got {parent:?}"
+            );
+        }
+        let row_ids: std::collections::BTreeSet<_> = rows.iter().map(|(id, _)| *id).collect();
+        for (_, parent) in ths.iter().chain(tds.iter()) {
+            assert!(
+                parent.map(|p| row_ids.contains(&p)).unwrap_or(false),
+                "th/td parent must be a tr, got {parent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dom_to_drawables_skips_unrecognised_elements() {
+        // Fixture intentionally contains only one classifiable element
+        // (`<p>`). Everything else (`<script>`, `<a>`, `<custom-tag>`,
+        // `<body>`, `<html>`) must produce no `SemanticEntry`. The
+        // assertions below pin the *exact* contents of `semantics` so
+        // any future regression that synthesises an extra entry from
+        // an unrecognised element fails immediately, regardless of
+        // which tag variant it picks.
+        let html = "<!DOCTYPE html><html><body><script>x=1</script><a href='#'>link</a><custom-tag>y</custom-tag><p>z</p></body></html>";
+        let d = build_drawables(html);
+
+        let tags: Vec<&PdfTag> = d.semantics.values().map(|e| &e.tag).collect();
+        assert_eq!(
+            d.semantics.len(),
+            1,
+            "expected exactly one semantic entry for the <p>, got {} entries: {tags:?}",
+            d.semantics.len()
+        );
+        let only_entry = d.semantics.values().next().expect("one entry asserted");
+        assert_eq!(
+            only_entry.tag,
+            PdfTag::P,
+            "the single entry must be the <p>, got {:?}",
+            only_entry.tag
         );
     }
 }

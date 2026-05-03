@@ -27,6 +27,7 @@ pub mod paragraph;
 pub mod render;
 pub mod schema;
 pub mod svg;
+pub mod tagging;
 pub mod template;
 
 pub use asset::AssetBundle;
