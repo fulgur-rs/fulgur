@@ -23,20 +23,29 @@ use taffy::{
 };
 
 /// Per-column slice of an inline-root paragraph distributed across
-/// columns by `layout_column_group`. Empty `line_range` means the column
-/// receives no content from this paragraph; this happens when the
-/// paragraph fits entirely in fewer columns than `n`.
+/// columns by `layout_column_group`.
+///
+/// `line_range.is_empty()` is the **placeholder marker**: the entry was
+/// padded into `ParagraphSplitEntry::column_slices` to keep the vector
+/// length equal to `ColumnGroupGeometry.n`, and the column receives no
+/// content from this paragraph. In that case `origin` and `size` are
+/// both zero (`Default` values) — consumers MUST check
+/// `line_range.is_empty()` before reading them. For non-empty slices,
+/// `origin` is in the segment-relative content-box frame (same frame
+/// as `ColumnGroupGeometry::col_heights`); absolute coordinates are
+/// `(group.x_offset + origin.x, group.y_offset + origin.y)`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnLineSlice {
     /// Half-open parley line index range. Indices reference the parley
     /// layout reachable through `source_node_id`'s `inline_layout_data`.
+    /// Empty range = placeholder slot; see the type-level doc.
     pub line_range: std::ops::Range<usize>,
-    /// Slice top-left in the multicol container's content-box frame
-    /// (CSS pixels). `compute_multicol_layout` shifts this into the
-    /// border-box frame after the segment loop, mirroring the existing
-    /// `(x_offset, y_offset)` shift on `ColumnGroupGeometry` itself.
+    /// Slice top-left in CSS pixels, relative to the column group
+    /// segment (matches `ColumnGroupGeometry::col_heights`'s frame).
+    /// Zero for placeholder entries — gate on `line_range.is_empty()`.
     pub origin: taffy::Point<f32>,
     /// Slice size — `col_w × Σ line_height(line_range)`. CSS pixels.
+    /// Zero for placeholder entries.
     pub size: taffy::Size<f32>,
 }
 
@@ -803,6 +812,12 @@ fn layout_column_group(
             Some(layout) if size.height > budget => {
                 let line_heights = crate::blitz_adapter::parley_line_heights(layout);
                 let slices = slice_lines_by_budget(&line_heights, budget, n);
+                debug_assert!(
+                    slices.first().is_some_and(|(range, _)| !range.is_empty()),
+                    "slice_lines_by_budget must populate col 0 (monolithic-line rule); \
+                     surrounding-sibling positioning depends on the first DistItem::InlineRootSlice \
+                     for a source landing in col 0",
+                );
                 for (line_range, slice_h) in slices {
                     if !line_range.is_empty() {
                         items.push(DistItem::InlineRootSlice {
