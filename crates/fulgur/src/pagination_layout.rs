@@ -3763,6 +3763,42 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
+    fn fragment_block_subtree_following_block_continues_after_split_flex_tail() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+                <h2 style="height: 30px; width: 200px; margin: 0">after flex</h2>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut candidates: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .collect();
+        candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let h2 = candidates
+            .first()
+            .expect("expected the trailing h2 to land on page 1");
+        assert!(
+            h2.y >= 100.0,
+            "block sibling after split flex must continue after the flex tail; got y={} (pre-fix: y=0 overlaps the tail)",
+            h2.y
+        );
+    }
+
+    #[test]
     fn fragment_block_subtree_grid_later_row_parallel_siblings_share_page_y() {
         let html = r#"
             <html><body style="margin: 0; padding: 0">
@@ -3801,6 +3837,44 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
+    fn fragment_block_subtree_flex_later_row_parallel_siblings_share_page_y() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
+        assert_eq!(
+            page_one_cells.len(),
+            2,
+            "expected the second flex row's two cells on page 1, got {cells:?}"
+        );
+        assert!(
+            (page_one_cells[0].2 - page_one_cells[1].2).abs() < 0.5,
+            "parallel cells in the same later flex row must share y; got {cells:?}"
+        );
+    }
+
+    #[test]
     fn fragment_block_subtree_grid_later_row_preserves_parallel_sibling_offset() {
         let html = r#"
             <html><body style="margin: 0; padding: 0">
@@ -3830,6 +3904,42 @@ h2 { string-set: chapter-title content(text); }
             .iter()
             .find(|(h, _, _)| (*h - 100.0).abs() < 0.5)
             .expect("expected unshifted second-row grid cell on page 1");
+        assert!(
+            (unshifted.2 + 20.0).abs() < 0.5,
+            "same-row sibling must preserve its cross-axis offset relative to the split row; got {page_one_cells:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_flex_later_row_preserves_parallel_sibling_offset() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: flex; flex-wrap: wrap; align-items: flex-start; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 80px; width: 100px; margin-top: 20px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut page_one_cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.height, f.x, f.y))
+            .collect();
+        page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let unshifted = page_one_cells
+            .iter()
+            .find(|(h, _, _)| (*h - 100.0).abs() < 0.5)
+            .expect("expected unshifted second-row flex item on page 1");
         assert!(
             (unshifted.2 + 20.0).abs() < 0.5,
             "same-row sibling must preserve its cross-axis offset relative to the split row; got {page_one_cells:?}"
