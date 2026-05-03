@@ -2641,6 +2641,14 @@ mod tests {
         // distributes across columns. Keep this single-word so this test
         // exercises the "content fits → don't split" path, not the overflow
         // branch.
+        //
+        // Test-coverage gap tracked at fulgur-aml4: this fixture used to
+        // be `alpha alpha alpha alpha` and pinned auto-fill behaviour
+        // closer to the budget boundary; after fulgur-6q5 the inline-root
+        // split fired on it. fulgur-aml4 will add a separate test with a
+        // bounded `avail_h` (e.g. `column-fill: auto; height: 40pt`) so
+        // the auto-fill + overflow path is exercised against a non-trivial
+        // budget.
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p>alpha</p>
