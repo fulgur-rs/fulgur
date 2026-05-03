@@ -890,6 +890,19 @@ pub(crate) fn dispatch_fragment(
 /// and `opacity` exactly like `draw_paragraph_v2`. `lines` are
 /// pre-rebased (Task 7) so each slice's first line has
 /// `baseline = ascent` from the slice top — no further rebase here.
+///
+/// **Case A opacity limitation (fulgur-6q5 follow-up):** when the
+/// multicol container itself has `opacity:N` (Case A:
+/// `<div opacity:0.5; column-count:2>text</div>`),
+/// `paragraphs[node_id].opacity` is forced to 1.0 by `extract_paragraph`
+/// (because `needs_block` is true), so this helper applies no alpha to
+/// the slice text. The container's block layer already paints at
+/// `block.opacity`, but slices are emitted **outside** that
+/// `draw_with_opacity` group — so text loses block opacity. This is a
+/// strict improvement over pre-Task-8 (which kept all text in col 0).
+/// Revisit if Task 10 VRT or downstream usage exposes a regression;
+/// the fix likely requires invoking the slice paint inside the block's
+/// opacity group, not at the dispatch level.
 fn paint_multicol_paragraph_slices(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     drawables: &Drawables,
