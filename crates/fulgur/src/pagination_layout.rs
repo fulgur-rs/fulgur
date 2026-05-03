@@ -1358,16 +1358,6 @@ fn fragment_block_subtree(
     page_height_px: f32,
     depth: usize,
 ) -> (u32, f32) {
-    enum PendingOrigin {
-        Fixed(f32),
-        AfterSplit {
-            row_top: f32,
-            row_bottom: f32,
-            same_row_y: f32,
-            next_row_y: f32,
-        },
-    }
-
     if depth >= crate::MAX_DOM_DEPTH {
         // Bailed: emit a single whole-fragment for the parent at its
         // entry coordinates so geometry still has an entry for it.
@@ -1418,7 +1408,8 @@ fn fragment_block_subtree(
     // cursor so the sibling continues after the split tail instead of
     // overlapping it at the page top.
     let mut page_taffy_origin: f32 = 0.0;
-    let mut origin_pending: Option<PendingOrigin> = None;
+    let mut origin_pending_target_y: Option<f32> = None;
+    let mut origin_pending_same_row: Option<(f32, f32, f32)> = None;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
     // for implicit forced-break detection; see `fragment_pagination_root`
     // for the rationale and the outer-Option semantics.
@@ -1507,22 +1498,12 @@ fn fragment_block_subtree(
         // Apply deferred origin rebase: the previous child's page
         // advance requested a target y for this first child on the new
         // page strip.
-        if let Some(pending) = origin_pending.take() {
-            let target_y = match pending {
-                PendingOrigin::Fixed(y) => y,
-                PendingOrigin::AfterSplit {
-                    row_top,
-                    row_bottom,
-                    same_row_y,
-                    next_row_y,
-                } => {
-                    if this_top_in_parent < row_bottom - 0.5 {
-                        same_row_y + (this_top_in_parent - row_top)
-                    } else {
-                        next_row_y
-                    }
-                }
-            };
+        if let Some(mut target_y) = origin_pending_target_y.take() {
+            if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
+                && this_top_in_parent < row_bottom - 0.5
+            {
+                target_y = same_row_y + (this_top_in_parent - row_top);
+            }
             page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
         }
 
@@ -1553,7 +1534,8 @@ fn fragment_block_subtree(
                 // Zero-height break-before: this child IS the first
                 // on the new page — apply origin rebase eagerly.
                 page_taffy_origin = this_top_in_parent;
-                origin_pending = None;
+                origin_pending_target_y = None;
+                origin_pending_same_row = None;
             }
             if child.element_data().is_some() {
                 geometry
@@ -1588,7 +1570,8 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Zero-height break-after: NEXT child is the first
                 // on the new page — defer origin rebase.
-                origin_pending = Some(PendingOrigin::Fixed(page_start_y));
+                origin_pending_target_y = Some(page_start_y);
+                origin_pending_same_row = None;
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1699,16 +1682,16 @@ fn fragment_block_subtree(
                 // row, so it should rebase to the page start. In normal
                 // block flow, the next sibling must continue after the
                 // split child's tail on the current page.
-                origin_pending = Some(if suppress_page_check {
-                    PendingOrigin::AfterSplit {
-                        row_top: this_top_in_parent,
-                        row_bottom: this_top_in_parent + child_h,
-                        same_row_y: page_start_y,
-                        next_row_y: cursor_y,
-                    }
+                origin_pending_target_y = Some(cursor_y);
+                origin_pending_same_row = if suppress_page_check {
+                    Some((
+                        this_top_in_parent,
+                        this_top_in_parent + child_h,
+                        page_start_y,
+                    ))
                 } else {
-                    PendingOrigin::Fixed(cursor_y)
-                });
+                    None
+                };
             }
 
             // Honour `break-after: page` after recursion.
@@ -1729,7 +1712,8 @@ fn fragment_block_subtree(
                 page_start_y = 0.0;
                 // Break-after: NEXT child starts the new page —
                 // defer origin rebase to its arrival.
-                origin_pending = Some(PendingOrigin::Fixed(page_start_y));
+                origin_pending_target_y = Some(page_start_y);
+                origin_pending_same_row = None;
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -1817,7 +1801,8 @@ fn fragment_block_subtree(
             page_start_y = 0.0;
             // Break-after: NEXT child starts the new page — defer
             // origin rebase to its arrival.
-            origin_pending = Some(PendingOrigin::Fixed(page_start_y));
+            origin_pending_target_y = Some(page_start_y);
+            origin_pending_same_row = None;
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
