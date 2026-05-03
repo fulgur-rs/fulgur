@@ -1362,6 +1362,7 @@ fn fragment_block_subtree(
         Fixed(f32),
         AfterSplit {
             row_top: f32,
+            row_bottom: f32,
             same_row_y: f32,
             next_row_y: f32,
         },
@@ -1511,11 +1512,12 @@ fn fragment_block_subtree(
                 PendingOrigin::Fixed(y) => y,
                 PendingOrigin::AfterSplit {
                     row_top,
+                    row_bottom,
                     same_row_y,
                     next_row_y,
                 } => {
-                    if (this_top_in_parent - row_top).abs() < 0.5 {
-                        same_row_y
+                    if this_top_in_parent < row_bottom - 0.5 {
+                        same_row_y + (this_top_in_parent - row_top)
                     } else {
                         next_row_y
                     }
@@ -1700,6 +1702,7 @@ fn fragment_block_subtree(
                 origin_pending = Some(if suppress_page_check {
                     PendingOrigin::AfterSplit {
                         row_top: this_top_in_parent,
+                        row_bottom: this_top_in_parent + child_h,
                         same_row_y: page_start_y,
                         next_row_y: cursor_y,
                     }
@@ -3838,6 +3841,42 @@ h2 { string-set: chapter-title content(text); }
         assert!(
             (page_one_cells[0].2 - page_one_cells[1].2).abs() < 0.5,
             "parallel cells in the same later grid row must share y; got {cells:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_block_subtree_grid_later_row_preserves_parallel_sibling_offset() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="height: 100px; width: 200px"></div>
+                <div style="display: grid; grid-template-columns: 100px 100px; align-items: start; width: 200px;">
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 80px; width: 100px; margin-top: 20px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut page_one_cells: Vec<_> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.height, f.x, f.y))
+            .collect();
+        page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let unshifted = page_one_cells
+            .iter()
+            .find(|(h, _, _)| (*h - 100.0).abs() < 0.5)
+            .expect("expected unshifted second-row grid cell on page 1");
+        assert!(
+            (unshifted.2 + 20.0).abs() < 0.5,
+            "same-row sibling must preserve its cross-axis offset relative to the split row; got {page_one_cells:?}"
         );
     }
 

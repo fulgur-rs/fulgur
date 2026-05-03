@@ -198,7 +198,7 @@ pub fn render_v2(
             let mut margin_canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
                 bookmark_collector: None,
-                link_collector: None,
+                link_collector: Some(&mut link_collector),
             };
             let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
             margin_box_renderer.render_page(
