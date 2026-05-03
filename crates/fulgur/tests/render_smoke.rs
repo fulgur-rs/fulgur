@@ -2022,3 +2022,114 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
         "slices must occupy distinct columns"
     );
 }
+
+/// fulgur-6q5 Task 8: `dispatch_fragment` consumes
+/// `Drawables.paragraph_slices` and paints each slice at its column
+/// origin. Acceptance check — confirm the rendered PDF carries text
+/// runs at TWO distinct x positions corresponding to col 0 and col 1.
+///
+/// Implementation note: we use `fulgur::inspect()` (which already
+/// implements CTM / text-matrix tracking via lopdf) on a tempfile-
+/// written PDF, rather than re-implementing PDF text-stream parsing
+/// inline. Asserting at least two distinct `text_items[i].x` cluster
+/// values is sufficient to prove the slice override fired — before
+/// this task the standard `draw_paragraph_v2` path painted every line
+/// at the source's body-relative position, producing a single x
+/// cluster regardless of `column-count`.
+///
+/// Case B fixture: the source paragraph is a `<p>` child of the
+/// multicol container, so `paragraph_slices` is keyed by the `<p>`'s
+/// NodeId. The standard `paragraphs.get(&node_id)` arm of
+/// `dispatch_fragment` handles the override.
+#[test]
+fn multicol_inline_root_split_renders_both_columns_in_pdf_case_b() {
+    use fulgur::PageSize;
+    use fulgur::inspect::inspect;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-case-b.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let inspected = inspect(&path).expect("inspect pdf");
+    assert!(
+        !inspected.text_items.is_empty(),
+        "rendered PDF must contain text items"
+    );
+
+    // Cluster x positions to the nearest 0.5 pt to absorb intra-column
+    // glyph drift; we want the count of distinct *column* origins, not
+    // the count of distinct text-show operators.
+    let mut x_clusters = std::collections::BTreeSet::new();
+    for item in &inspected.text_items {
+        x_clusters.insert((item.x * 2.0).round() as i32);
+    }
+    assert!(
+        x_clusters.len() >= 2,
+        "expected text drawn at >=2 distinct x positions (col 0 + col 1), \
+         got {} cluster(s): {:?}",
+        x_clusters.len(),
+        x_clusters,
+    );
+}
+
+/// fulgur-6q5 Task 8: Case A render acceptance — bare text directly in
+/// the multicol container (no `<p>` wrapper). The container is itself
+/// the inline root, so `paragraph_slices` is keyed by the container's
+/// own NodeId. The container also carries a `block_styles` entry, so
+/// `dispatch_fragment` enters the `block_styles` arm and routes through
+/// the new `has_paragraph_slices` branch that suppresses the inline
+/// `draw_paragraph_inner_paint` call inside `draw_block_with_inner_content`
+/// and paints the slices afterward via `paint_multicol_paragraph_slices`.
+#[test]
+fn multicol_inline_root_split_renders_both_columns_in_pdf_case_a() {
+    use fulgur::PageSize;
+    use fulgur::inspect::inspect;
+
+    let html = r#"<!doctype html><html><body>
+        <div id="mc" style="column-count: 2; column-gap: 0; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-case-a.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let inspected = inspect(&path).expect("inspect pdf");
+    assert!(
+        !inspected.text_items.is_empty(),
+        "rendered PDF must contain text items"
+    );
+
+    let mut x_clusters = std::collections::BTreeSet::new();
+    for item in &inspected.text_items {
+        x_clusters.insert((item.x * 2.0).round() as i32);
+    }
+    assert!(
+        x_clusters.len() >= 2,
+        "Case A: expected text drawn at >=2 distinct x positions (col 0 + col 1), \
+         got {} cluster(s): {:?}",
+        x_clusters.len(),
+        x_clusters,
+    );
+}

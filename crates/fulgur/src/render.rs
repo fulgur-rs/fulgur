@@ -779,11 +779,30 @@ pub(crate) fn dispatch_fragment(
         );
         return;
     }
+    // fulgur-6q5 Task 8: when a multicol container splits a paragraph
+    // across columns, `convert_multicol_paragraph_slices` records a
+    // per-source-NodeId override in `drawables.paragraph_slices`. The
+    // standard `paragraphs[node_id]` path would render every line at
+    // the source's body-relative position (column 0 only); the override
+    // suppresses that path and paints one slice per non-empty column at
+    // the slice origin (computed from the multicol container's
+    // border-box top-left + per-column line frame).
+    let has_paragraph_slices = drawables.paragraph_slices.contains_key(&node_id);
     // Block + inner content (paragraph / image / svg) sharing the
     // same node_id: combine into one `draw_with_opacity` group. See
     // `draw_block_with_inner_content` for the v1 mirror.
     if let Some(block) = drawables.block_styles.get(&node_id) {
-        let para_for_block = drawables.paragraphs.get(&node_id);
+        // Suppress the inline-paragraph branch of
+        // `draw_block_with_inner_content` when paragraph_slices owns
+        // this NodeId (Case A: container is itself the inline root, so
+        // it carries both `block_styles` and `paragraphs` entries — we
+        // still need the block's bg / border / shadow but the lines
+        // come from the slice override painted afterward).
+        let para_for_block = if has_paragraph_slices {
+            None
+        } else {
+            drawables.paragraphs.get(&node_id)
+        };
         let img_for_block = drawables.images.get(&node_id);
         let svg_for_block = drawables.svgs.get(&node_id);
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
@@ -804,6 +823,17 @@ pub(crate) fn dispatch_fragment(
                 margin_left_pt,
                 margin_top_pt,
             );
+            if has_paragraph_slices {
+                paint_multicol_paragraph_slices(
+                    canvas,
+                    drawables,
+                    geometry,
+                    node_id,
+                    margin_left_pt,
+                    margin_top_pt,
+                    page_index,
+                );
+            }
             return;
         }
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
@@ -814,6 +844,18 @@ pub(crate) fn dispatch_fragment(
     }
     if let Some(svg) = drawables.svgs.get(&node_id) {
         draw_svg_v2(canvas, svg, x_pt, y_pt);
+        return;
+    }
+    if has_paragraph_slices {
+        paint_multicol_paragraph_slices(
+            canvas,
+            drawables,
+            geometry,
+            node_id,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        );
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
@@ -831,6 +873,68 @@ pub(crate) fn dispatch_fragment(
             margin_top_pt,
         );
     }
+}
+
+/// fulgur-6q5 Task 8: paint a paragraph that `multicol_layout`
+/// distributed across columns. The standard `draw_paragraph_v2` path
+/// renders every line at the source's body-relative position (column 0
+/// only); this override paints one slice per non-empty column at the
+/// slice origin recorded by `convert_multicol_paragraph_slices`.
+///
+/// The slice's `origin_pt` is **multicol container border-box-relative**
+/// in PDF pt (per the `ParagraphSlice` doc on `drawables.rs`). Resolve
+/// the container's body-relative page position via
+/// `geometry[container_node_id]` — same shape as the main loop's
+/// `(margin_left_pt + px_to_pt(frag.x), margin_top_pt + px_to_pt(frag.y))`
+/// — and add the slice origin. Honour the source paragraph's `visible`
+/// and `opacity` exactly like `draw_paragraph_v2`. `lines` are
+/// pre-rebased (Task 7) so each slice's first line has
+/// `baseline = ascent` from the slice top — no further rebase here.
+fn paint_multicol_paragraph_slices(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    source_node_id: usize,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::convert::px_to_pt;
+    use crate::draw_primitives::draw_with_opacity;
+    let Some(slices_entry) = drawables.paragraph_slices.get(&source_node_id) else {
+        return;
+    };
+    let para = drawables.paragraphs.get(&source_node_id);
+    if let Some(p) = para
+        && !p.visible
+    {
+        return;
+    }
+    let opacity = para.map(|p| p.opacity).unwrap_or(1.0);
+    // Resolve the container's body-relative position on this page from
+    // the geometry table — same convention as `dispatch_fragment`'s
+    // caller. Skip when the container has no fragment on `page_index`
+    // (e.g. earlier-page-only containers shouldn't repaint here).
+    let Some(container_geom) = geometry.get(&slices_entry.container_node_id) else {
+        return;
+    };
+    let Some(container_frag) = container_geom
+        .fragments
+        .iter()
+        .find(|f| f.page_index == page_index)
+    else {
+        return;
+    };
+    let container_x_pt = margin_left_pt + px_to_pt(container_frag.x);
+    let container_y_pt = margin_top_pt + px_to_pt(container_frag.y);
+
+    draw_with_opacity(canvas, opacity, |canvas| {
+        for slice in &slices_entry.slices {
+            let abs_x = container_x_pt + slice.origin_pt.0;
+            let abs_y = container_y_pt + slice.origin_pt.1;
+            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
+        }
+    });
 }
 
 /// Push the transform onto the surface + link collector, dispatch the
