@@ -118,8 +118,72 @@ pub struct PageSettingsRule {
     pub page_selector: Option<String>,
     /// Parsed `size` declaration, if present.
     pub size: Option<PageSizeDecl>,
-    /// Parsed `margin` declaration, if present. Values in points.
-    pub margin: Option<crate::config::Margin>,
+    /// Parsed `margin` declaration; sides not declared remain `None` and
+    /// inherit from the cascade.
+    pub margin: PartialMargin,
+}
+
+/// Per-side optional margin override. Unset sides inherit from the cascade.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PartialMargin {
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+}
+
+impl PartialMargin {
+    /// All four sides set to the same value.
+    pub fn from_uniform(v: f32) -> Self {
+        Self::from_sides(v, v, v, v)
+    }
+
+    /// All four sides set explicitly.
+    pub fn from_sides(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        Self {
+            top: Some(top),
+            right: Some(right),
+            bottom: Some(bottom),
+            left: Some(left),
+        }
+    }
+
+    /// `true` when no side has been set.
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none() && self.right.is_none() && self.bottom.is_none() && self.left.is_none()
+    }
+
+    /// Overlay set sides onto `target`. Unset sides leave `target` untouched.
+    pub fn apply_to_margin(&self, target: &mut crate::config::Margin) {
+        if let Some(v) = self.top {
+            target.top = v;
+        }
+        if let Some(v) = self.right {
+            target.right = v;
+        }
+        if let Some(v) = self.bottom {
+            target.bottom = v;
+        }
+        if let Some(v) = self.left {
+            target.left = v;
+        }
+    }
+
+    /// Overlay sides set in `other` onto `self`. Later wins per side.
+    pub fn merge(&mut self, other: &PartialMargin) {
+        if let Some(v) = other.top {
+            self.top = Some(v);
+        }
+        if let Some(v) = other.right {
+            self.right = Some(v);
+        }
+        if let Some(v) = other.bottom {
+            self.bottom = Some(v);
+        }
+        if let Some(v) = other.left {
+            self.left = Some(v);
+        }
+    }
 }
 
 /// A single counter operation from counter-reset, counter-increment, or counter-set.

@@ -7,10 +7,9 @@ use super::bookmark::{BookmarkLevel, BookmarkMapping};
 use super::margin_box::MarginBoxPosition;
 use super::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle, ElementPolicy,
-    GcpmContext, MarginBoxRule, PageSettingsRule, PageSizeDecl, ParsedSelector, PseudoElement,
-    RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
+    GcpmContext, MarginBoxRule, PageSettingsRule, PageSizeDecl, ParsedSelector, PartialMargin,
+    PseudoElement, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
 };
-use crate::config::Margin;
 
 // ---------------------------------------------------------------------------
 // Top-level result types
@@ -89,7 +88,7 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
     ) -> Result<Self::AtRule, ParseError<'i, ()>> {
         let mut boxes = Vec::new();
         let mut size = None;
-        let mut margin = None;
+        let mut margin = PartialMargin::default();
         parse_page_block(input, &page_selector, &mut boxes, &mut size, &mut margin);
 
         // Record the full @page rule span for removal.
@@ -102,7 +101,7 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
 
         self.margin_boxes.extend(boxes);
 
-        if size.is_some() || margin.is_some() {
+        if size.is_some() || !margin.is_empty() {
             self.page_settings.push(PageSettingsRule {
                 page_selector,
                 size,
@@ -356,25 +355,26 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
     result
 }
 
-/// Parse the value of an `@page { margin: ... }` declaration (CSS shorthand).
+/// Parse a single CSS length token (dimensioned or `0`) into points.
+fn parse_length_pt_token<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+    let tok = input.next()?.clone();
+    match tok {
+        Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
+            .ok_or_else(|| input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+        Token::Number { value: 0.0, .. } => Ok(0.0_f32),
+        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
+/// Parse the value of an `@page { margin: ... }` shorthand into a
+/// [`PartialMargin`] with all four sides set.
 ///
 /// Returns `None` if the value is invalid or has trailing tokens
 /// (CSS requires invalid declarations to be ignored entirely).
-fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<Margin> {
+fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PartialMargin> {
     let mut values = Vec::new();
     loop {
-        let result = input.try_parse(|input| {
-            let tok = input.next()?.clone();
-            match tok {
-                Token::Dimension { value, unit, .. } => {
-                    css_unit_to_pt(value, &unit).ok_or_else(|| {
-                        input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
-                    })
-                }
-                Token::Number { value: 0.0, .. } => Ok(0.0_f32),
-                _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
-            }
-        });
+        let result = input.try_parse(parse_length_pt_token);
         match result {
             Ok(v) => values.push(v),
             Err(_) => break,
@@ -390,32 +390,27 @@ fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<Margin> {
     }
 
     match values.len() {
-        1 => Some(Margin {
-            top: values[0],
-            right: values[0],
-            bottom: values[0],
-            left: values[0],
-        }),
-        2 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[0],
-            left: values[1],
-        }),
-        3 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[2],
-            left: values[1],
-        }),
-        4 => Some(Margin {
-            top: values[0],
-            right: values[1],
-            bottom: values[2],
-            left: values[3],
-        }),
+        1 => Some(PartialMargin::from_uniform(values[0])),
+        2 => Some(PartialMargin::from_sides(
+            values[0], values[1], values[0], values[1],
+        )),
+        3 => Some(PartialMargin::from_sides(
+            values[0], values[1], values[2], values[1],
+        )),
+        4 => Some(PartialMargin::from_sides(
+            values[0], values[1], values[2], values[3],
+        )),
         _ => None,
     }
+}
+
+/// Parse a single longhand `margin-<side>` value into points.
+fn parse_page_margin_longhand_value(input: &mut Parser<'_, '_>) -> Option<f32> {
+    let v = input.try_parse(parse_length_pt_token).ok()?;
+    if input.next().is_ok() {
+        return None;
+    }
+    Some(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +422,7 @@ fn parse_page_block(
     page_selector: &Option<String>,
     boxes: &mut Vec<MarginBoxRule>,
     size: &mut Option<PageSizeDecl>,
-    margin: &mut Option<Margin>,
+    margin: &mut PartialMargin,
 ) {
     let mut parser = PageRuleParser {
         page_selector,
@@ -445,7 +440,7 @@ struct PageRuleParser<'a> {
     page_selector: &'a Option<String>,
     boxes: &'a mut Vec<MarginBoxRule>,
     size: &'a mut Option<PageSizeDecl>,
-    margin: &'a mut Option<Margin>,
+    margin: &'a mut PartialMargin,
 }
 
 impl<'i, 'a> AtRuleParser<'i> for PageRuleParser<'a> {
@@ -507,7 +502,23 @@ impl<'i, 'a> DeclarationParser<'i> for PageRuleParser<'a> {
             }
         } else if name.eq_ignore_ascii_case("margin") {
             if let Some(v) = parse_page_margin_value(input) {
-                *self.margin = Some(v);
+                self.margin.merge(&v);
+            }
+        } else if name.eq_ignore_ascii_case("margin-top") {
+            if let Some(v) = parse_page_margin_longhand_value(input) {
+                self.margin.top = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("margin-right") {
+            if let Some(v) = parse_page_margin_longhand_value(input) {
+                self.margin.right = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("margin-bottom") {
+            if let Some(v) = parse_page_margin_longhand_value(input) {
+                self.margin.bottom = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("margin-left") {
+            if let Some(v) = parse_page_margin_longhand_value(input) {
+                self.margin.left = Some(v);
             }
         } else {
             // Skip unknown declarations
@@ -1975,14 +1986,43 @@ mod tests {
         assert_eq!(ctx.page_settings.len(), 1, "expected 1 PageSettingsRule");
         let rule = &ctx.page_settings[0];
         assert!(rule.page_selector.is_none());
-        let m = rule.margin.as_ref().expect("margin should be parsed");
-        assert_eq!(m.top, 0.0);
-        assert_eq!(m.bottom, 0.0);
-        assert_eq!(m.left, 0.0);
-        assert_eq!(m.right, 0.0);
+        assert_eq!(rule.margin.top, Some(0.0));
+        assert_eq!(rule.margin.bottom, Some(0.0));
+        assert_eq!(rule.margin.left, Some(0.0));
+        assert_eq!(rule.margin.right, Some(0.0));
         assert!(
             !ctx.is_empty(),
             "gcpm should not be empty with page_settings"
         );
+    }
+
+    #[test]
+    fn test_page_margin_longhand_parsed() {
+        // Each longhand declaration should set only its own side; the other
+        // sides remain `None` and inherit from the cascade at resolve time.
+        let css = "@page :right { margin-top: 200px; margin-right: 500px; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.page_settings.len(), 1);
+        let rule = &ctx.page_settings[0];
+        assert_eq!(rule.page_selector, Some(":right".to_string()));
+        // 200px = 150pt, 500px = 375pt at 0.75 px-to-pt
+        assert_eq!(rule.margin.top, Some(150.0));
+        assert_eq!(rule.margin.right, Some(375.0));
+        assert_eq!(rule.margin.bottom, None);
+        assert_eq!(rule.margin.left, None);
+    }
+
+    #[test]
+    fn test_page_margin_longhand_overrides_shorthand_in_same_rule() {
+        // Within a single @page rule, declarations cascade in source order:
+        // longhand after shorthand should overwrite only the named side.
+        let css = "@page { margin: 10px; margin-top: 50px; }";
+        let ctx = parse_gcpm(css);
+        let rule = &ctx.page_settings[0];
+        // 10px = 7.5pt, 50px = 37.5pt
+        assert_eq!(rule.margin.top, Some(37.5));
+        assert_eq!(rule.margin.right, Some(7.5));
+        assert_eq!(rule.margin.bottom, Some(7.5));
+        assert_eq!(rule.margin.left, Some(7.5));
     }
 }
