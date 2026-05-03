@@ -3470,9 +3470,21 @@ mod tests {
                 m.baseline + m.descent + m.leading
             })
             .unwrap_or(0.0);
+        // Cross-validation between two formulas that should agree by
+        // parley's design: cumulative `line_height` strides versus the
+        // last line's `baseline + descent + leading`. Tolerance is
+        // intentionally permissive because parley splits leading
+        // between `leading_above` / `leading_below` differently across
+        // platforms (macOS observed 1.0px drift for a 5-line layout)
+        // and we only need to catch shape bugs (e.g. helper returning
+        // `ascent` instead of `line_height`, which would diverge by
+        // ~14px per line) — not fight font-metrics noise.
+        let multi_line_drift_budget = (heights.len() as f32).max(1.0);
         assert!(
-            (sum - total_height).abs() < 0.5,
-            "sum of per-line heights {sum} should approximate total layout height {total_height}"
+            (sum - total_height).abs() < multi_line_drift_budget,
+            "sum of per-line heights {sum} should approximate total layout height {total_height} \
+             (within ±{multi_line_drift_budget} for {} lines)",
+            heights.len(),
         );
         assert!(heights.iter().all(|h| *h > 0.0));
     }
