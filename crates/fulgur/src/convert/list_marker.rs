@@ -355,3 +355,257 @@ pub(super) fn shape_marker_with_skrifa(
         link: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asset::AssetBundle;
+    use crate::blitz_adapter::Marker;
+    use crate::drawables::{Drawables, ParagraphEntry};
+    use crate::image::ImageFormat;
+
+    // Minimal 1×1 red PNG (same bytes as in convert/replaced.rs tests).
+    const TEST_PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn sample_png_arc() -> Arc<Vec<u8>> {
+        Arc::new(TEST_PNG_1X1.to_vec())
+    }
+
+    /// Load NotoSans-Regular WOFF2 and return decoded TTF bytes — the same
+    /// format that `AssetBundle::fonts` stores after `add_font_bytes`.
+    fn load_noto_sans_ttf() -> Arc<Vec<u8>> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fonts/NotoSans-Regular.woff2");
+        let woff2 =
+            std::fs::read(&fixture).expect("NotoSans-Regular.woff2 missing from test fixtures");
+        let mut bundle = AssetBundle::new();
+        bundle.add_font_bytes(woff2).expect("WOFF2 decode failed");
+        Arc::clone(&bundle.fonts[0])
+    }
+
+    // ── size_raster_marker ────────────────────────────────────────────────────
+
+    #[test]
+    fn size_raster_marker_valid_png_within_line_height_passes_through() {
+        // 1×1 px PNG → intrinsic 0.75×0.75 pt; line_height=12 → no downscale.
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0);
+        assert!(result.is_some());
+        let (w, h) = result.unwrap();
+        assert!((w - 0.75).abs() < 1e-4, "expected w≈0.75, got {w}");
+        assert!((h - 0.75).abs() < 1e-4, "expected h≈0.75, got {h}");
+    }
+
+    #[test]
+    fn size_raster_marker_invalid_bytes_returns_none() {
+        let bad = Arc::new(vec![0u8; 8]);
+        let result = size_raster_marker(&bad, ImageFormat::Png, 12.0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn size_raster_marker_small_line_height_scales_down() {
+        // Intrinsic 0.75×0.75 pt, line_height=0.5 → scale=0.5/0.75≈0.667
+        // → result height clamped to line_height, width scaled proportionally.
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5);
+        assert!(result.is_some());
+        let (w, h) = result.unwrap();
+        assert!((h - 0.5).abs() < 1e-4, "expected h≈0.5, got {h}");
+        assert!((w - 0.5).abs() < 1e-4, "expected w≈0.5, got {w}");
+    }
+
+    // ── find_marker_font ──────────────────────────────────────────────────────
+
+    #[test]
+    fn find_marker_font_no_assets_empty_drawables_returns_none() {
+        let drawables = Drawables::new();
+        let result = find_marker_font(&Marker::Char('•'), None, &drawables);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_marker_font_empty_bundle_empty_drawables_returns_none() {
+        let bundle = AssetBundle::new();
+        let drawables = Drawables::new();
+        let result = find_marker_font(&Marker::Char('•'), Some(&bundle), &drawables);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_marker_font_bundle_covering_char_returns_font() {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = AssetBundle::new();
+        bundle.fonts.push(Arc::clone(&font_data));
+        let drawables = Drawables::new();
+
+        let result = find_marker_font(&Marker::Char('•'), Some(&bundle), &drawables);
+        assert!(result.is_some(), "NotoSans must cover U+2022");
+        let (fd, idx) = result.unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(fd.len(), font_data.len());
+    }
+
+    #[test]
+    fn find_marker_font_bundle_covering_string_marker() {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = AssetBundle::new();
+        bundle.fonts.push(Arc::clone(&font_data));
+        let drawables = Drawables::new();
+
+        // "1. " — whitespace chars are filtered out before the charmap check,
+        // so only '1' and '.' must be covered.
+        let result = find_marker_font(
+            &Marker::String("1. ".to_string()),
+            Some(&bundle),
+            &drawables,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn find_marker_font_fallback_from_drawables_paragraph() {
+        let font_data = load_noto_sans_ttf();
+        let empty_bundle = AssetBundle::new();
+
+        let glyph_run = ShapedGlyphRun {
+            font_data: Arc::clone(&font_data),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 1,
+                x_advance: 0.5,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".to_string(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 12.0,
+            baseline: 9.0,
+            items: vec![LineItem::Text(glyph_run)],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+
+        let result = find_marker_font(&Marker::Char('•'), Some(&empty_bundle), &drawables);
+        assert!(
+            result.is_some(),
+            "should fall back to NotoSans from drawables"
+        );
+        let (_, idx) = result.unwrap();
+        assert_eq!(idx, 0);
+    }
+
+    // ── shape_marker_with_skrifa ──────────────────────────────────────────────
+
+    #[test]
+    fn shape_marker_with_skrifa_invalid_font_returns_none() {
+        let bad_font = Arc::new(vec![0u8; 16]);
+        let result =
+            shape_marker_with_skrifa(&Marker::Char('•'), &bad_font, 0, 12.0, [0, 0, 0, 255]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn shape_marker_with_skrifa_char_produces_two_glyphs() {
+        // Marker::Char('•') → skrifa text "• " (2 chars = 2 glyphs).
+        let font_data = load_noto_sans_ttf();
+        let result =
+            shape_marker_with_skrifa(&Marker::Char('•'), &font_data, 0, 12.0, [255, 0, 0, 255]);
+        assert!(result.is_some());
+        let run = result.unwrap();
+        assert_eq!(run.glyphs.len(), 2, "bullet + trailing space = 2 glyphs");
+        assert_eq!(run.text, "• ");
+        assert_eq!(run.font_size, 12.0);
+        assert_eq!(run.color, [255, 0, 0, 255]);
+        assert_eq!(run.font_index, 0);
+        assert_eq!(run.x_offset, 0.0);
+    }
+
+    #[test]
+    fn shape_marker_with_skrifa_string_marker_matches_char_count() {
+        // Marker::String("1. ") → skrifa text "1. " (3 chars = 3 glyphs).
+        let font_data = load_noto_sans_ttf();
+        let result = shape_marker_with_skrifa(
+            &Marker::String("1. ".to_string()),
+            &font_data,
+            0,
+            10.0,
+            [0, 0, 0, 255],
+        );
+        assert!(result.is_some());
+        let run = result.unwrap();
+        assert_eq!(run.glyphs.len(), 3, "\"1. \" = 3 chars = 3 glyphs");
+        assert_eq!(run.text, "1. ");
+    }
+
+    #[test]
+    fn shape_marker_with_skrifa_x_advance_is_normalised_by_font_size() {
+        // x_advance values are stored as advance / font_size (unit-less ratio),
+        // so they should be in [0, ~2] for typical Latin glyphs.
+        let font_data = load_noto_sans_ttf();
+        let result = shape_marker_with_skrifa(
+            &Marker::String("A".to_string()),
+            &font_data,
+            0,
+            12.0,
+            [0, 0, 0, 255],
+        );
+        let run = result.unwrap();
+        for g in &run.glyphs {
+            assert!(g.x_advance >= 0.0, "x_advance must be non-negative");
+            assert!(
+                g.x_advance < 5.0,
+                "x_advance should be a unit-less ratio, got {}",
+                g.x_advance
+            );
+        }
+    }
+
+    #[test]
+    fn shape_marker_with_skrifa_text_ranges_cover_full_string() {
+        let font_data = load_noto_sans_ttf();
+        let result = shape_marker_with_skrifa(
+            &Marker::String("AB".to_string()),
+            &font_data,
+            0,
+            12.0,
+            [0, 0, 0, 255],
+        );
+        let run = result.unwrap();
+        // Each glyph covers exactly one character's byte span; together they
+        // tile the full text.  Check ranges are non-empty and within bounds.
+        let text_len = run.text.len();
+        for g in &run.glyphs {
+            assert!(
+                g.text_range.start < g.text_range.end,
+                "range must be non-empty"
+            );
+            assert!(g.text_range.end <= text_len, "range must stay within text");
+        }
+        // The last glyph's range should reach the end of the string.
+        let last = run.glyphs.last().unwrap();
+        assert_eq!(
+            last.text_range.end, text_len,
+            "last glyph must reach text end"
+        );
+    }
+}
