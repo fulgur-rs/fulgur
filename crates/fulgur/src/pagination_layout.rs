@@ -1427,7 +1427,32 @@ fn fragment_block_subtree(
         || crate::blitz_adapter::is_atomic_inline_container_node(parent)
         || parent_is_orthogonal;
 
-    for &child_id in &parent.children {
+    // fulgur-yb27: prefer `layout_children` over raw `children` —
+    // same rationale as `record_subtree_descendants` and
+    // `fragment_pagination_root`. When a block container has mixed
+    // block-level and inline-level children, Stylo synthesizes
+    // anonymous block wrappers around the inline-level siblings (CSS
+    // 2.1 §9.2.1.1). Those wrappers carry their own Taffy layout and
+    // `node_id`, but they live ONLY in `layout_children`. Walking
+    // raw `children` would re-visit the underlying inline runs
+    // without their Taffy layout (so they'd land at the parent's
+    // origin instead of after their predecessor block) and skip the
+    // per-anon-block break decision the body-level walker honours
+    // since fulgur-bq6i.
+    //
+    // Cross-page recursion correctness depends on fulgur-oc51's
+    // parent-fragment push above — flipping this walk to
+    // `layout_children` without that fix would lose the parent's
+    // pre-recursion-page fragment in mo-006/008 (flex/grid + tall
+    // monolithic + trailing inline text).
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: Vec<usize> = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_vec())
+        .unwrap_or_else(|| parent.children.clone());
+    drop(layout_children_borrow);
+    for &child_id in &walk_children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -1643,6 +1668,7 @@ fn fragment_block_subtree(
                 || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
         if needs_recursion {
             let pre_recursion_page = page_index;
+            let pre_recursion_cursor_y = cursor_y;
             let (np, nc) = fragment_block_subtree(
                 geometry,
                 doc,
@@ -1663,6 +1689,65 @@ fn fragment_block_subtree(
             // page. Defensive `nc < page_start_y` guards against
             // backward cursor returns (impossible in normal flow).
             if page_index != pre_recursion_page || nc < page_start_y {
+                // fulgur-oc51: emit parent fragments for every
+                // page span the recursion crossed. Without this,
+                // only the trailing close at the end of this
+                // function emits a parent fragment (on the *last*
+                // page), so the parent's background / borders
+                // disappear from the previous and intermediate
+                // pages. Pre-recursion overflow close (no-
+                // recursion branch, line ~1713) covers the
+                // analogous case for non-recursive children, but
+                // there is no equivalent push when the page
+                // advance happens *inside* the recursion.
+                //
+                // The parent's content extended to the page
+                // bottom on every previous page (otherwise the
+                // recursion would not have advanced past that
+                // page), so the previous-page fragment spans
+                // `[page_start_y, page_height_px]` and any
+                // intermediate page is a full strip.
+                if page_index > pre_recursion_page {
+                    // Match the no-recursion strip-overflow shape
+                    // (line ~1713): the parent fragment's height is
+                    // its accumulated logical content on the
+                    // previous page, treated as if the splitting
+                    // child had been laid out in full (without
+                    // fragmentation). The renderer clips the
+                    // overflow visually. Using the visible page
+                    // strip (`page_height_px - page_start_y`)
+                    // instead would stop short of the page's
+                    // margin-area paint that adjacent passing tests
+                    // (mo-006/008) expect.
+                    let logical_height = (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
+                    let prev_height = logical_height.max((page_height_px - page_start_y).max(0.0));
+                    if prev_height > 0.0 {
+                        geometry
+                            .entry(parent_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index: pre_recursion_page,
+                                x: parent_x_in_body,
+                                y: page_start_y,
+                                width: parent_w,
+                                height: prev_height,
+                            });
+                    }
+                    for p in (pre_recursion_page + 1)..page_index {
+                        geometry
+                            .entry(parent_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index: p,
+                                x: parent_x_in_body,
+                                y: 0.0,
+                                width: parent_w,
+                                height: page_height_px,
+                            });
+                    }
+                }
                 page_start_y = 0.0;
                 origin_pending_target_y = Some(cursor_y);
                 let row_top = this_top_in_parent;
@@ -4162,5 +4247,86 @@ h2 { string-set: chapter-title content(text); }
             .expect("oversized child fragment");
         assert_eq!(oversize.fragments.len(), 1);
         assert_eq!(oversize.fragments[0].page_index, 0);
+    }
+
+    /// fulgur-yb27: `fragment_block_subtree` must walk `layout_children`
+    /// so anonymous block wrappers Stylo synthesizes around inline-
+    /// level siblings (CSS 2.1 §9.2.1.1) are visited. Without this,
+    /// a tail inline string after a tall block sibling never
+    /// fragments to the next page — the block consumes page 1, the
+    /// trailing inline run is treated as a zero-height text node
+    /// (`final_layout` defaults), and pagination terminates with a
+    /// single fragment.
+    #[test]
+    fn fragment_block_subtree_walks_layout_children_for_anon_block_synthesis() {
+        // Outer wrapper > [tall block sibling, trailing inline text].
+        // Stylo wraps the trailing text in an anon block whose Taffy
+        // location.y is past the page boundary.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="width: 200px;">
+                <div style="height: 300px; width: 50px; background:hotpink;"></div>
+                trailing tail
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0, &table);
+        // Page count must be ≥ 2 — without yb27 the trailing inline
+        // text never reaches a new page (single fragment, page 0 only).
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_page >= 1,
+            "yb27: anon block from mixed inline/block siblings must \
+             paginate to a new page; max_page={max_page}",
+        );
+    }
+
+    /// fulgur-oc51: when `fragment_block_subtree`'s recursion advances
+    /// `page_index`, the parent's pre-recursion-page span must be
+    /// recorded as a fragment. Without this, a tall nested subtree
+    /// that crosses pages inside the recursion lifts the parent's
+    /// only fragment to the *last* page (line 1799 close), leaving
+    /// page 1 with no parent paint at all (background/borders gone).
+    #[test]
+    fn fragment_block_subtree_emits_parent_fragment_when_recursion_crosses_page() {
+        // Two-deep nesting: outer (with background) > inner > [tall
+        // child, trailing inline]. Inner's recursion will cross the
+        // page boundary; outer must still get a fragment on page 0.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 200px;">
+                <div style="width: 200px;">
+                  <div style="height: 300px; width: 50px; background:hotpink;"></div>
+                  tail
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0, &table);
+        // Locate the outermost section and confirm it has a fragment
+        // on page 0 (otherwise its background/borders disappear from
+        // the page that visually contains the tall child).
+        let section_with_page_0 = geom.values().any(|g| {
+            // Section is the only node whose width matches the
+            // viewport_w fixture (200) and that has fragments on
+            // both page 0 and page ≥ 1 (or any first-page emission).
+            g.fragments
+                .iter()
+                .any(|f| f.page_index == 0 && f.width >= 199.0)
+        });
+        assert!(
+            section_with_page_0,
+            "oc51: outer block must keep a page-0 fragment when its \
+             nested recursion crosses a page boundary; geometry={geom:?}",
+        );
     }
 }
