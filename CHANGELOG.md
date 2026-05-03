@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-05-03
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(gradient): CSS Images 3 §3.5.3 interpolation hint (linear/radial) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/256
+* feat(pagination_layout): resolve @page size / margin before driving spike (fulgur-s67g Phase 2.6) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/279
+* feat(pagination_layout): mid-element split for oversized blocks (fulgur-g9e3.1 Phase 3.1) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/283
+* feat(pagination_layout): forced-break-below recursion + break-* in fragment_block_subtree (fulgur-a36m Phase 3.1.5b) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/285
+* feat(pagination_layout): in-place mid-element split + multicol skip + would_split pre-flight (fulgur-7hf5 Phase 3.1.5c) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/286
+* feat(pageable): partition helper core + slice_for_page for plain types (fulgur-r6we Phase 3.2.a) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/287
+* feat(pageable): slice_for_page for wrappers and special-split impls (fulgur-3vwx Phase 3.2.b) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/288
+* feat(render): partition_pageable_by_geometry replaces paginate() in render_to_pdf_with_gcpm (fulgur-4ltp Phase 3.2.c) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/291
+* feat(render_v2): Phase 4 PR 5 — Table / ListItem + body offset propagation (fulgur-9t3z.2) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/304
+* feat(render_v2): Phase 4 PR 4 — Block migration (fulgur-9t3z.1) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/303
+* feat(render_v2): Phase 4 PR 2 — Image / SVG / Bookmark draw migration (fulgur-w9bs) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/301
+* feat(render): Phase 4 PR 1 — Drawables skeleton + render_v2 + shadow harness (fulgur-s9qd) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/300
+* feat(render_v2): Phase 4 PR 3-6 — Pageable migration stack (paragraph → block → table/list-item → transform/multicol → GCPM margin box → overflow clip) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/302
+* feat(render_v2): per-page repetition for position:fixed by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/319
+* feat(render_v2): overflow:hidden|clip support for tables by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/320
+* feat(engine): flip render_html default to v2 path (Phase 4 PR 7) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/321
+* feat(render): inline-box draw migration to Drawables (Phase 4 PR 8g) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/329
+* feat: replace Pageable pagination with Taffy-driven fragmenter (epic fulgur-z2mg) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/290
+* feat(page-css): implement CSS `page` property for named-page forced breaks by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/336
+* feat(pyfulgur): add PEP 561 type stubs and Google-style docstrings by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/346
+### Bug Fixes
+* fix(pageable): hoist non-pseudo position:absolute children out of flow by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/260
+* fix(layout): relayout position:fixed against the viewport by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/262
+* fix(pagination_layout): zero-height body-direct child honours break-before/after (fulgur-p3uf Phase 3.1.5a) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/284
+* fix(pagination_layout): grid/flex parallel siblings share page-local y in fragment_block_subtree (fulgur-kv0r) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/292
+* fix(pagination_layout): admit multicol with column-span:all to recursion gate (fulgur-916y) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/293
+* fix(render): wire no-GCPM render_html through partition (fulgur-frmj) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/294
+* fix(fragmenter): walk body.layout_children for anonymous-block siblings (fulgur-bq6i:wasm-demo) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/318
+* fix(render_v2): per-slice block height for split fragments (fulgur-bq6i:break-inside) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/316
+* fix(fragmenter): walk layout_children for anonymous-block descendants (fulgur-bq6i) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/315
+* fix(render_v2): cross-node_id opacity grouping (fulgur-gdb9) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/314
+* fix(parity): document f32 chain non-associativity (fulgur-g7a1) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/312
+* fix(viewport): resolve vh/vw against @page-resolved content area by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/338
+* fix(pagination): viewport-CB resolution for body-direct abs/fixed (fulgur-a8m5) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/339
+* fix(pagination): emit per-page fragments for fixed-root descendants (fulgur-4m16) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/341
+* fix(layout): shrink-to-fit position:fixed auto-width with end-side inset (fulgur-6wap) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/342
+* fix(background): align corner gradient angles by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/345
+### Documentation
+* docs: Phase 4 Pageable inventory (fulgur-9t3z prerequisite) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/298
+* docs: Phase 4 architecture design (fulgur-9t3z) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/299
+* docs(plans): Phase 4 PR 8g design — inline-box draw migration to Drawables by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/328
+### Other Changes
+* Phase 4 PR 6 follow-up — html / body background pre-pass by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/307
+* Phase 4 PR 6 follow-up — overflow clip scope tracking via BlockEntry.clip_descendants by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/310
+* Phase 4 PR 6 follow-up — drop InlineBox recurse to prevent double-paint by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/308
+* Phase 4 PR 6 — Transform + MulticolRule migration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/305
+* Phase 4 PR 6 follow-up — port GCPM @page margin box rendering to render_v2 by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/309
+* Fix review pagination footer overlap by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/344
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.11.0...v0.12.0
+
 ## [0.11.0] - 2026-04-27
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
