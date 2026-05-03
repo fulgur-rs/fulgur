@@ -209,6 +209,49 @@ pub struct MulticolRuleEntry {
     pub groups: Vec<crate::multicol_layout::ColumnGroupGeometry>,
 }
 
+/// One source paragraph distributed across columns of a multicol
+/// container. Built from `multicol_layout::ParagraphSplitEntry`. The
+/// per-slice `lines` are pre-rebased so each slice's first line has
+/// `baseline = ascent` (i.e. `y=0` is the slice's top edge), matching
+/// the rebase convention `paragraph::ParagraphPageable::split` uses
+/// for second fragments after a page-break (see commit 9c0e092).
+#[derive(Debug, Clone, Default)]
+pub struct ParagraphSlicesEntry {
+    /// Multicol container's NodeId. `render_v2` looks up the
+    /// container's body-relative position via `block_styles[container_node_id]`
+    /// to anchor the slices at correct page coordinates.
+    pub container_node_id: NodeId,
+    /// One slice per non-empty column. Empty columns are filtered out
+    /// at construction time (Task 7), so iterating `slices` skips
+    /// holes that `multicol_layout::ParagraphSplitEntry::column_slices`
+    /// padded with `Default`.
+    pub slices: Vec<ParagraphSlice>,
+}
+
+/// One column-bound slice of a paragraph rendered inside a multicol.
+#[derive(Clone)]
+pub struct ParagraphSlice {
+    /// Slice top-left in PDF pt, relative to the multicol container's
+    /// border-box top-left. Render adds the container's body-relative
+    /// position to obtain final page coordinates.
+    pub origin_pt: (f32, f32),
+    /// Slice size — `col_w × Σ line_height(slice_lines)` in pt.
+    pub size_pt: (f32, f32),
+    /// Lines of this slice, baseline-rebased so the slice's first line
+    /// renders at `y = baseline` from the slice top.
+    pub lines: Vec<crate::paragraph::ShapedLine>,
+}
+
+impl std::fmt::Debug for ParagraphSlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParagraphSlice")
+            .field("origin_pt", &self.origin_pt)
+            .field("size_pt", &self.size_pt)
+            .field("lines", &self.lines.len())
+            .finish()
+    }
+}
+
 /// CSS transform matrix + origin for a node (and its descendants).
 ///
 /// Mirrors `TransformWrapperPageable`. v1 pushes the surface transform
@@ -286,6 +329,13 @@ pub struct Drawables {
     pub body_id: Option<NodeId>,
     pub block_styles: BTreeMap<NodeId, BlockEntry>,
     pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
+    /// Per-source-paragraph multicol slicing emitted by
+    /// `convert::convert_multicol_paragraph_slices` from
+    /// `multicol_layout::MulticolGeometry::paragraph_splits`. When a
+    /// `NodeId` has an entry, `render_v2`'s paragraph dispatcher renders
+    /// one entry per non-empty column slice at the slice origin instead of
+    /// the default single-rectangle path that uses `paragraphs[node_id]`.
+    pub paragraph_slices: BTreeMap<NodeId, ParagraphSlicesEntry>,
     pub images: BTreeMap<NodeId, ImageEntry>,
     pub svgs: BTreeMap<NodeId, SvgEntry>,
     pub tables: BTreeMap<NodeId, TableEntry>,
@@ -335,6 +385,7 @@ impl Drawables {
     pub fn is_empty(&self) -> bool {
         self.block_styles.is_empty()
             && self.paragraphs.is_empty()
+            && self.paragraph_slices.is_empty()
             && self.images.is_empty()
             && self.svgs.is_empty()
             && self.tables.is_empty()
@@ -357,6 +408,13 @@ mod tests {
         assert!(d.is_empty());
         assert_eq!(d.block_styles.len(), 0);
         assert_eq!(d.link_spans.len(), 0);
+    }
+
+    #[test]
+    fn drawables_default_paragraph_slices_is_empty() {
+        let d = Drawables::new();
+        assert!(d.paragraph_slices.is_empty());
+        assert!(d.is_empty());
     }
 
     #[test]
