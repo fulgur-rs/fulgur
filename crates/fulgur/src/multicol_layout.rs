@@ -1077,6 +1077,18 @@ fn layout_column_group(
     }
 
     let mut items: Vec<DistItem> = Vec::with_capacity(measured.len());
+    // fulgur-6q5 Fix 3: pre-slicing assumed every InlineRootSlice
+    // sequence started in a fresh column (col_y = 0). When earlier
+    // atomic siblings have already consumed `virt_col_y > 0` of the
+    // current column, the slicer's per-column budgets no longer match
+    // what the distribute loop will actually grant — the first slice
+    // could be bumped to col 1, then two slices end up in the same
+    // output column, and the per-column `by_col` collector clobbers
+    // earlier ones. Track a virtual cursor that mirrors the distribute
+    // loop's column-advance rule, and feed the slicer the accurate
+    // (first_col_remainder, remaining_cols) pair.
+    let mut virt_col_idx: u32 = 0;
+    let mut virt_col_y: f32 = 0.0;
     for (id, size) in &measured {
         let id_u: usize = (*id).into();
         // Borrow the post-measure parley layout for this child if it is an
@@ -1100,30 +1112,68 @@ fn layout_column_group(
             // renders intact in column 0.
             Some(layout) if size.height > budget && parley_layout_is_glyph_run_only(layout) => {
                 let line_heights = crate::blitz_adapter::parley_line_heights(layout);
-                let slices = slice_lines_by_budget(&line_heights, budget, n);
-                debug_assert!(
-                    slices.first().is_some_and(|(range, _)| !range.is_empty()),
-                    "slice_lines_by_budget must populate col 0 (monolithic-line rule); \
-                     surrounding-sibling positioning depends on the first DistItem::InlineRootSlice \
-                     for a source landing in col 0",
+                let first_remainder = (budget - virt_col_y).max(0.0);
+                let remaining_cols = n.saturating_sub(virt_col_idx);
+                let slices = slice_lines_with_first_col_remainder(
+                    &line_heights,
+                    first_remainder,
+                    budget,
+                    remaining_cols,
                 );
-                for (line_range, slice_h) in slices {
+                // Track the last non-empty slice's offset within
+                // `slices` (= relative column index from `virt_col_idx`)
+                // and its consumed height, so we can advance the virtual
+                // cursor to mirror the distribute loop's actual landing
+                // point for the next sibling.
+                let mut last_non_empty_col_offset: Option<usize> = None;
+                let mut last_non_empty_height: f32 = 0.0;
+                for (offset, (line_range, slice_h)) in slices.iter().enumerate() {
                     if !line_range.is_empty() {
                         items.push(DistItem::InlineRootSlice {
                             source_id: *id,
-                            line_range,
+                            line_range: line_range.clone(),
                             size: Size {
                                 width: col_w,
-                                height: slice_h,
+                                height: *slice_h,
                             },
                         });
+                        last_non_empty_col_offset = Some(offset);
+                        last_non_empty_height = *slice_h;
+                    }
+                }
+                match last_non_empty_col_offset {
+                    Some(offset) => {
+                        if offset == 0 {
+                            // Landed in the same column the cursor was
+                            // already in; accumulate height.
+                            virt_col_y += last_non_empty_height;
+                        } else {
+                            // Advanced to a fresh column; restart at
+                            // that slice's height.
+                            virt_col_idx += offset as u32;
+                            virt_col_y = last_non_empty_height;
+                        }
+                    }
+                    None => {
+                        // No non-empty slices placed (degenerate: empty
+                        // inline-root). Cursor stays put.
                     }
                 }
             }
-            _ => items.push(DistItem::Atomic {
-                id: *id,
-                size: *size,
-            }),
+            _ => {
+                // Atomic — mirror the distribute loop's column-advance
+                // check on the virtual cursor so subsequent slicing
+                // decisions see the right "remaining" state.
+                if virt_col_y > 0.0 && virt_col_y + size.height > budget && virt_col_idx + 1 < n {
+                    virt_col_idx += 1;
+                    virt_col_y = 0.0;
+                }
+                items.push(DistItem::Atomic {
+                    id: *id,
+                    size: *size,
+                });
+                virt_col_y += size.height;
+            }
         }
     }
 
@@ -1316,6 +1366,66 @@ fn slice_lines_by_budget(
             // Otherwise stop when adding this line would overflow,
             // unless we are the final column (absorb remainder).
             if line_count > 0 && consumed + h > budget && !last_col {
+                break;
+            }
+            consumed += h;
+            end += 1;
+        }
+        out.push((start..end, consumed));
+        start = end;
+    }
+    out
+}
+
+/// fulgur-6q5 Fix 3: variant of [`slice_lines_by_budget`] that
+/// distributes lines into a sequence of columns where the first column
+/// has a smaller-than-`full_budget` remainder (because earlier siblings
+/// already consumed part of it). The non-first columns continue to use
+/// `full_budget`.
+///
+/// Returns one `(line_range, slice_height)` pair per *remaining* column
+/// (i.e. the slice has length `remaining_cols`).
+///
+/// The first column's budget is `first_col_remainder`, which may be
+/// zero or negative — in that case the first column produces an empty
+/// range (no line forced in, since the column has no room) unless it's
+/// also the only / last remaining column. All subsequent columns use
+/// `full_budget`. The same monolithic-line rule (first non-skipped line
+/// always fits) and "last column absorbs overflow" rule from
+/// [`slice_lines_by_budget`] apply.
+fn slice_lines_with_first_col_remainder(
+    line_heights: &[f32],
+    first_col_remainder: f32,
+    full_budget: f32,
+    remaining_cols: u32,
+) -> Vec<(std::ops::Range<usize>, f32)> {
+    let n = remaining_cols.max(1) as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut start = 0_usize;
+    for col in 0..n {
+        let mut consumed = 0.0_f32;
+        let mut end = start;
+        let last_col = col == n - 1;
+        let this_budget = if col == 0 {
+            first_col_remainder.max(0.0)
+        } else {
+            full_budget
+        };
+        // First column with zero remainder: emit an empty slice so the
+        // existing column carries no extra lines, and let the next
+        // column take its first line at full budget. Skip this guard
+        // for the last column to keep the "absorb remainder" rule.
+        if this_budget <= 0.0 && !last_col {
+            out.push((start..start, 0.0));
+            continue;
+        }
+        while end < line_heights.len() {
+            let h = line_heights[end];
+            let line_count = end - start;
+            // First line in this column always fits (monolithic-line rule).
+            // Otherwise stop when adding this line would overflow,
+            // unless we are the final column (absorb remainder).
+            if line_count > 0 && consumed + h > this_budget && !last_col {
                 break;
             }
             consumed += h;
@@ -1868,6 +1978,77 @@ mod tests {
     #[test]
     fn slice_lines_by_budget_empty_input_returns_n_empty_slices() {
         let slices = slice_lines_by_budget(&[], 100.0, 3);
+        assert_eq!(slices.len(), 3);
+        for (range, h) in &slices {
+            assert!(range.is_empty());
+            assert_eq!(*h, 0.0);
+        }
+    }
+
+    // ── slice_lines_with_first_col_remainder (fulgur-6q5 Fix 3) ──────
+
+    #[test]
+    fn slice_lines_with_remainder_full_remainder_matches_basic_slice() {
+        // When the first column has a fresh budget (remainder == full
+        // budget), the helper must agree with `slice_lines_by_budget`.
+        let heights = [10.0_f32; 10];
+        let slices_basic = slice_lines_by_budget(&heights, /*budget*/ 50.0, /*n*/ 2);
+        let slices_rem = slice_lines_with_first_col_remainder(
+            &heights, /*first_remainder*/ 50.0, /*full_budget*/ 50.0,
+            /*remaining_cols*/ 2,
+        );
+        assert_eq!(slices_basic, slices_rem);
+    }
+
+    #[test]
+    fn slice_lines_with_remainder_zero_first_col_is_empty() {
+        // First column already full → zero remainder. The helper must
+        // emit an empty col-0 slice and let col-1 pick up at full
+        // budget (without forcing a line into the empty col 0).
+        let heights = [10.0_f32; 5];
+        let slices = slice_lines_with_first_col_remainder(
+            &heights, /*first_remainder*/ 0.0, /*full_budget*/ 30.0,
+            /*remaining_cols*/ 2,
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0], (0..0, 0.0));
+        // Last column absorbs all remaining lines.
+        assert_eq!(slices[1].0, 0..5);
+    }
+
+    #[test]
+    fn slice_lines_with_remainder_partial_first_col_smaller_share() {
+        // First column has a smaller budget (15 vs 30). It can fit one
+        // 10-line; the second line would push consumed to 20 > 15, so
+        // it advances. Subsequent columns at full budget take the rest.
+        let heights = [10.0_f32; 5]; // total 50
+        let slices = slice_lines_with_first_col_remainder(
+            &heights, /*first_remainder*/ 15.0, /*full_budget*/ 30.0,
+            /*remaining_cols*/ 3,
+        );
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0], (0..1, 10.0));
+        assert_eq!(slices[1], (1..4, 30.0));
+        assert_eq!(slices[2], (4..5, 10.0));
+    }
+
+    #[test]
+    fn slice_lines_with_remainder_last_col_absorbs_overflow() {
+        // 5 lines × 20pt = 100pt total. First-col remainder 20, full
+        // budget 20, only 2 remaining columns — the second column must
+        // still absorb the rest (overflow), never silently drop.
+        let heights = [20.0_f32; 5];
+        let slices = slice_lines_with_first_col_remainder(
+            &heights, /*first_remainder*/ 20.0, /*full_budget*/ 20.0,
+            /*remaining_cols*/ 2,
+        );
+        assert_eq!(slices[0], (0..1, 20.0));
+        assert_eq!(slices[1].0, 1..5);
+    }
+
+    #[test]
+    fn slice_lines_with_remainder_empty_input_returns_n_empty_slices() {
+        let slices = slice_lines_with_first_col_remainder(&[], 50.0, 100.0, 3);
         assert_eq!(slices.len(), 3);
         for (range, h) in &slices {
             assert!(range.is_empty());
@@ -2834,6 +3015,92 @@ mod tests {
         assert_eq!(split.column_slices.len(), 2);
         assert!(!split.column_slices[0].line_range.is_empty());
         assert!(!split.column_slices[1].line_range.is_empty());
+    }
+
+    /// fulgur-6q5 Fix 3: when an inline-root paragraph follows an atomic
+    /// sibling that already consumed part of column 0, the slicer must
+    /// see the reduced first-column remainder so its per-column line
+    /// distribution lines up with where the distribute loop will actually
+    /// place each slice. Otherwise the placement loop reroutes slices
+    /// across columns and the per-column accumulator overwrites them —
+    /// silently dropping lines.
+    ///
+    /// Regression invariant: total lines emitted across `column_slices`
+    /// must equal the source parley layout's line count. Pre-fix the
+    /// total would be smaller than the line count whenever the bug
+    /// triggered.
+    #[test]
+    fn multicol_split_inline_root_after_atomic_sibling_does_not_drop_lines() {
+        // Two children: a tall atomic <p> followed by a long inline-root
+        // <p>. With column-count: 2 and the atomic child filling roughly
+        // half of column 0, the inline-root paragraph's pre-slice must
+        // start at the reduced first-column remainder (not a fresh
+        // budget).
+        let html = r#"<!doctype html><html><body>
+            <div id="mc" style="column-count: 2; column-gap: 0;">
+              <p style="height: 60px; background: #eee; margin: 0;">short</p>
+              <p style="font-size: 16px; margin: 0;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 200.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let mc_id = collect_multicol_node_ids(&doc)[0];
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let geometry_table = run_pass(&mut doc, &column_styles);
+        let mc_geom = geometry_table
+            .get(&mc_id)
+            .expect("multicol container should have a geometry entry");
+        let group = &mc_geom.groups[0];
+
+        // Both columns must end up with content (the long paragraph
+        // straddles them after the atomic sibling fills part of col 0).
+        assert!(
+            group.col_heights[0] > 0.0,
+            "col 0 must be filled, got {:?}",
+            group.col_heights,
+        );
+        assert!(
+            group.col_heights[1] > 0.0,
+            "col 1 must be filled, got {:?}",
+            group.col_heights,
+        );
+
+        // Exactly one paragraph_split entry (for the long inline-root).
+        assert_eq!(
+            group.paragraph_splits.len(),
+            1,
+            "expected one ParagraphSplitEntry for the long inline-root, got {}",
+            group.paragraph_splits.len(),
+        );
+        let split = &group.paragraph_splits[0];
+
+        // The total number of lines distributed across columns must
+        // equal the source parley layout's line count. If the slicer
+        // didn't track the first-column remainder, two slices would
+        // collide on the same column and the BTreeMap-backed
+        // `by_col[idx] = Some(...)` collector would clobber the earlier
+        // one, dropping its lines.
+        let source_node = doc.get_node(split.source_node_id).expect("source node");
+        let elem = source_node.element_data().expect("element data");
+        let text_layout = elem
+            .inline_layout_data
+            .as_ref()
+            .expect("inline layout data");
+        let parley_line_count = text_layout.layout.lines().count();
+        let total_lines: usize = split.column_slices.iter().map(|s| s.line_range.len()).sum();
+        assert_eq!(
+            total_lines,
+            parley_line_count,
+            "no lines may be dropped by slice placement: \
+             column_slices={:?}, parley_line_count={}",
+            split
+                .column_slices
+                .iter()
+                .map(|s| s.line_range.clone())
+                .collect::<Vec<_>>(),
+            parley_line_count,
+        );
     }
 
     #[test]
