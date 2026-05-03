@@ -859,40 +859,29 @@ mod semantics_tests {
 
     #[test]
     fn dom_to_drawables_skips_unrecognised_elements() {
-        // <a>, <body>, <html>, <script>, <style>, custom-tag must
-        // never appear in `semantics` because `classify_element`
-        // returns None for them. <p> is included so we know the test
-        // exercised a non-empty pipeline.
+        // Fixture intentionally contains only one classifiable element
+        // (`<p>`). Everything else (`<script>`, `<a>`, `<custom-tag>`,
+        // `<body>`, `<html>`) must produce no `SemanticEntry`. The
+        // assertions below pin the *exact* contents of `semantics` so
+        // any future regression that synthesises an extra entry from
+        // an unrecognised element fails immediately, regardless of
+        // which tag variant it picks.
         let html = "<!DOCTYPE html><html><body><script>x=1</script><a href='#'>link</a><custom-tag>y</custom-tag><p>z</p></body></html>";
         let d = build_drawables(html);
 
-        for entry in d.semantics.values() {
-            assert_ne!(entry.tag, PdfTag::Span, "no span fixture used");
-        }
-        // Confirm the recognised tags actually landed.
-        assert_eq!(entries_by_tag(&d, &PdfTag::P).len(), 1);
-        // No anchor / custom / script / body / html should ever map.
-        // `classify_element` returning None for those is unit-tested
-        // in `tagging::tests`; here we additionally confirm the convert
-        // post-pass does not synthesise any extra entries from them.
-        let recognised_tags = d.semantics.values().map(|e| &e.tag).collect::<Vec<_>>();
-        assert!(
-            recognised_tags.iter().all(|t| matches!(
-                t,
-                PdfTag::P
-                    | PdfTag::H { .. }
-                    | PdfTag::Div
-                    | PdfTag::Span
-                    | PdfTag::Figure
-                    | PdfTag::L
-                    | PdfTag::Li
-                    | PdfTag::Table
-                    | PdfTag::TRowGroup
-                    | PdfTag::Tr
-                    | PdfTag::Th
-                    | PdfTag::Td
-            )),
-            "unexpected tag variant in {recognised_tags:?}"
+        let tags: Vec<&PdfTag> = d.semantics.values().map(|e| &e.tag).collect();
+        assert_eq!(
+            d.semantics.len(),
+            1,
+            "expected exactly one semantic entry for the <p>, got {} entries: {tags:?}",
+            d.semantics.len()
+        );
+        let only_entry = d.semantics.values().next().expect("one entry asserted");
+        assert_eq!(
+            only_entry.tag,
+            PdfTag::P,
+            "the single entry must be the <p>, got {:?}",
+            only_entry.tag
         );
     }
 }

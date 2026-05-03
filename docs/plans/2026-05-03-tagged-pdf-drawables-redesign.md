@@ -41,8 +41,9 @@ In:
    intend to support.
 2. New `Drawables` field `semantics: BTreeMap<NodeId, SemanticEntry>`
    carrying `(tag, parent: Option<NodeId>)`.
-3. `convert::convert_node` post-pass that classifies the current
-   element and inserts a `SemanticEntry` when the tag is recognised.
+3. A standalone `record_semantics_pass` invoked from
+   `dom_to_drawables` that classifies elements and inserts
+   `SemanticEntry` records for recognised tags.
 4. `Drawables::is_empty()` updated to include the new map (mirrors
    the existing `bookmark_anchors` precedent).
 5. Convert-layer unit tests asserting the map content for an HTML
