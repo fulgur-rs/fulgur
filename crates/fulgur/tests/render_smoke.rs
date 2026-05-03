@@ -2238,3 +2238,130 @@ fn multicol_with_inline_box_paragraph_falls_back_to_atomic() {
     let pdf = engine.render_html(html).expect("render must succeed");
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+/// fulgur-6q5 Fix 4: when a multicol container straddles a page
+/// boundary, `paint_multicol_paragraph_slices` must partition slices
+/// per fragment. A slice's `origin_pt.y` is measured from the
+/// container's border-box top (= the start of the FIRST fragment), so
+/// on a page that owns the container's second fragment we have to
+/// subtract the consumed height of prior fragments before placing the
+/// slice. Without this, slices on page 2+ would render at impossibly
+/// large y positions (the un-rebased pre-fix value could be many times
+/// the page height).
+///
+/// Pre-fix, `paint_multicol_paragraph_slices` painted **every** slice
+/// against the **current** page's container fragment origin — meaning
+/// page 1 slices were also replayed on every subsequent page (at
+/// off-page coordinates) and the page-2 fragment's slices were placed
+/// at their original (page-1-relative) y values, far below the page
+/// bottom on page 2.
+///
+/// The acceptance test exercises the per-fragment partition by
+/// rendering a tight page that forces a multi-fragment multicol
+/// container, then asserting:
+///
+/// 1. Render does not panic.
+/// 2. The output PDF has more than one page (confirming the multi-page
+///    case is exercised).
+/// 3. The PDF parses cleanly via `lopdf`.
+///
+/// A tighter visual check is hard because Krilla embeds glyphs as
+/// CIDs and `inspect.rs` filters out runs whose ToUnicode CMap doesn't
+/// decode to non-empty text. The combination of "renders without
+/// panic" + "produces multi-page output" is the same level of
+/// assurance other multi-page smoke tests in this file rely on.
+#[test]
+fn multicol_inline_root_split_skips_slices_outside_current_page() {
+    use fulgur::PageSize;
+
+    // Multicol containers only paginate across pages when they include
+    // a `column-span: all` child (see `pagination_layout.rs:818`).
+    // Otherwise the container is atomic and stays on one page. Combine
+    // an inline-root paragraph that splits across columns (Fix 4's
+    // target) with a column-span block tall enough to force the
+    // *post-span* group onto page 2 — that produces a 2-fragment
+    // multicol container.
+    let html = r#"<!doctype html><html><body style="margin: 0">
+        <div style="column-count: 2; column-gap: 0;">
+          <p style="font-size: 16px; margin: 0;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p>
+          <h1 style="column-span: all; font-size: 16px; margin: 0;">SPAN</h1>
+          <p style="font-size: 16px; margin: 0;">beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta beta</p>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 100.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let pdf = engine.render_html(html).expect("render must succeed");
+    assert!(!pdf.is_empty(), "render produced empty PDF");
+    assert!(pdf.starts_with(b"%PDF"));
+
+    // Confirm the fixture actually produces paragraph_slices entries
+    // (without that, the test exercises nothing). We re-run the
+    // engine via the Drawables-only helper so we can inspect the
+    // intermediate state directly.
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert!(
+        !drawables.paragraph_slices.is_empty(),
+        "fixture must produce paragraph_slices to exercise Fix 4",
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multicol-multipage.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let doc = lopdf::Document::load(&path).expect("PDF must parse");
+    let pages = doc.get_pages();
+    assert!(
+        pages.len() >= 2,
+        "fixture must produce a multi-page document to exercise Fix 4 \
+         (pre-fix would mis-position slices on pages > 1); got {} page(s)",
+        pages.len(),
+    );
+
+    // Walk every page's content stream and check that no text-matrix
+    // (Tm) operator places text at a y coordinate outside the visible
+    // page area. PDF coordinate space is Y-up with origin at the
+    // bottom-left (ISO 32000), so on a 100pt-tall page a Tm y operand
+    // sitting at y=0 is the bottom of the page and y=100 is the top —
+    // any value below 0 or above ~110 (slack for font ascent above
+    // baseline) means the text is invisible / off page.
+    //
+    // Pre-fix `paint_multicol_paragraph_slices` painted slices on
+    // page-2+ at their original (page-1-relative) origins because it
+    // never subtracted `consumed = sum of prior fragment heights`. On
+    // a 100pt page, that produced Tm y operands far above the page
+    // top (e.g. y > 100 = above the page). The strict bound below
+    // catches that drift.
+    const PAGE_HEIGHT_PT: f32 = 100.0;
+    // Slack above page top: a glyph baseline sits up to ~font_size
+    // above the line top in Y-up space; 16pt font + safety = 25pt.
+    const Y_TOP_SLACK: f32 = 25.0;
+    let y_max = PAGE_HEIGHT_PT + Y_TOP_SLACK;
+    let y_min = -Y_TOP_SLACK;
+    for (&page_num, &page_id) in &pages {
+        let bytes = doc
+            .get_page_content(page_id)
+            .expect("page content stream readable");
+        let content =
+            lopdf::content::Content::decode(&bytes).expect("page content stream decodable");
+        for op in &content.operations {
+            if op.operator == "Tm" && op.operands.len() >= 6 {
+                let y = match &op.operands[5] {
+                    lopdf::Object::Integer(i) => *i as f32,
+                    lopdf::Object::Real(f) => *f,
+                    _ => continue,
+                };
+                assert!(
+                    y >= y_min && y <= y_max,
+                    "page {page_num}: Tm operator placed text at y={y:.1}, \
+                     outside the visible page area [{y_min:.0}, {y_max:.0}] \
+                     (page height {PAGE_HEIGHT_PT}pt) — Fix 4 regressed",
+                );
+            }
+        }
+    }
+}
