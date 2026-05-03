@@ -32,6 +32,14 @@ path = "layout/multicol-2.html"
 margin_pt = 0.0
 
 [[fixture]]
+path = "layout/multicol-inline-root-split-case-a.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-inline-root-split-case-b.html"
+margin_pt = 0.0
+
+[[fixture]]
 path = "layout/overflow-hidden.html"
 margin_pt = 0.0
 
