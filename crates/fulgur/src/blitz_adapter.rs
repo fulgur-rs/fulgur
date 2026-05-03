@@ -84,6 +84,24 @@ pub fn list_position_outside_layout(
 pub fn is_list_position_inside(pos: &ListItemLayoutPosition) -> bool {
     matches!(pos, ListItemLayoutPosition::Inside)
 }
+
+/// Extract per-line height (CSS px) from a `parley::Layout`.
+///
+/// Returns one `f32` per line, matching `layout.lines().count()`. The
+/// height is parley's absolute `LineMetrics::line_height` field — the
+/// pen-advance the renderer applies when stacking the line below the
+/// previous one. This matches what `convert::inline_root` already reads
+/// in `crates/fulgur/src/convert/inline_root.rs:458` (which uses
+/// `line.metrics()` for its own per-line render math).
+///
+/// Used by `multicol_layout::slice_lines_by_budget` to split an
+/// inline-root paragraph across multicol columns (fulgur-6q5).
+pub fn parley_line_heights(layout: &parley::Layout<blitz_dom::node::TextBrush>) -> Vec<f32> {
+    layout
+        .lines()
+        .map(|line| line.metrics().line_height)
+        .collect()
+}
 use blitz_traits::net::NetProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use blitz_traits::net::Url;
@@ -3406,6 +3424,57 @@ mod tests {
             props.break_inside,
             Some(crate::draw_primitives::BreakInside::Avoid)
         );
+    }
+
+    #[test]
+    fn parley_layout_line_heights_matches_lines_count_and_sum() {
+        // Render a fixed paragraph at a fixed width through Blitz, recover
+        // the parley layout via the inline-root NodeId, and inspect the
+        // helper's output against parley::Line::metrics directly.
+        let html = r#"<!doctype html><html><body><p style="width: 80px; font-size: 16px;">alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha</p></body></html>"#;
+        let mut doc = parse(html, 200.0, &[]);
+        resolve(&mut doc);
+
+        fn find_p(doc: &HtmlDocument, node_id: usize) -> Option<usize> {
+            let n = doc.get_node(node_id)?;
+            if let Some(elem) = n.element_data()
+                && elem.name.local.as_ref() == "p"
+            {
+                return Some(node_id);
+            }
+            for &c in &n.children {
+                if let Some(found) = find_p(doc, c) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let p_id = find_p(&doc, doc.root_element().id).expect("<p> must exist");
+        let parley_layout = &doc
+            .get_node(p_id)
+            .unwrap()
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let heights = parley_line_heights(parley_layout);
+        assert_eq!(heights.len(), parley_layout.lines().count());
+        let sum: f32 = heights.iter().sum();
+        let total_height = parley_layout
+            .lines()
+            .last()
+            .map(|l| {
+                let m = l.metrics();
+                m.baseline + m.descent + m.leading
+            })
+            .unwrap_or(0.0);
+        assert!(
+            (sum - total_height).abs() < 0.5,
+            "sum of per-line heights {sum} should approximate total layout height {total_height}"
+        );
+        assert!(heights.iter().all(|h| *h > 0.0));
     }
 }
 
