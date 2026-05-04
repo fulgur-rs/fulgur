@@ -1742,6 +1742,412 @@ mod dp_unit_tests {
         assert!((w - 20.0).abs() < 1e-5);
         assert!((h - 10.0).abs() < 1e-5);
     }
+
+    // ── Affine2D math ───────────────────────────────────────
+
+    #[test]
+    fn affine2d_identity_is_recognized() {
+        assert!(Affine2D::IDENTITY.is_identity());
+    }
+
+    #[test]
+    fn affine2d_translation_is_not_identity() {
+        assert!(!Affine2D::translation(1.0, 0.0).is_identity());
+    }
+
+    #[test]
+    fn affine2d_scale_is_not_identity() {
+        assert!(!Affine2D::scale(2.0, 1.0).is_identity());
+    }
+
+    #[test]
+    fn affine2d_rotation_90_maps_x_to_y() {
+        use std::f32::consts::FRAC_PI_2;
+        let r = Affine2D::rotation(FRAC_PI_2);
+        let (x, y) = r.transform_point(1.0, 0.0);
+        assert!((x - 0.0).abs() < 1e-5, "x={x}");
+        assert!((y - 1.0).abs() < 1e-5, "y={y}");
+    }
+
+    #[test]
+    fn affine2d_rotation_is_not_identity() {
+        use std::f32::consts::FRAC_PI_4;
+        assert!(!Affine2D::rotation(FRAC_PI_4).is_identity());
+    }
+
+    #[test]
+    fn affine2d_skew_x_shears_y_axis() {
+        use std::f32::consts::FRAC_PI_4;
+        // skew(π/4, 0) → b=tan(0)=0, c=tan(π/4)=1
+        let s = Affine2D::skew(FRAC_PI_4, 0.0);
+        let (x, y) = s.transform_point(0.0, 1.0);
+        assert!((x - 1.0).abs() < 1e-5, "x={x}");
+        assert!((y - 1.0).abs() < 1e-5, "y={y}");
+    }
+
+    #[test]
+    fn affine2d_mul_two_translations_add() {
+        let t1 = Affine2D::translation(3.0, 4.0);
+        let t2 = Affine2D::translation(1.0, -2.0);
+        let composed = t1 * t2;
+        assert!((composed.e - 4.0).abs() < 1e-5);
+        assert!((composed.f - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn affine2d_mul_scale_then_translate() {
+        let s = Affine2D::scale(2.0, 3.0);
+        let t = Affine2D::translation(10.0, 5.0);
+        // (s * t) * p = s * (t * p): translate first, then scale
+        let composed = s * t;
+        let (x, y) = composed.transform_point(1.0, 1.0);
+        // translate: (1+10, 1+5) = (11, 6); scale: (22, 18)
+        assert!((x - 22.0).abs() < 1e-5, "x={x}");
+        assert!((y - 18.0).abs() < 1e-5, "y={y}");
+    }
+
+    #[test]
+    fn affine2d_transform_rect_identity_is_noop() {
+        let r = Rect {
+            x: 2.0,
+            y: 3.0,
+            width: 4.0,
+            height: 5.0,
+        };
+        let q = Affine2D::IDENTITY.transform_rect(&r);
+        // bottom-left, bottom-right, top-right, top-left in Y-down coords
+        assert!((q.points[0][0] - 2.0).abs() < 1e-5); // bl.x
+        assert!((q.points[0][1] - 8.0).abs() < 1e-5); // bl.y = y+h
+        assert!((q.points[1][0] - 6.0).abs() < 1e-5); // br.x = x+w
+        assert!((q.points[1][1] - 8.0).abs() < 1e-5); // br.y = y+h
+        assert!((q.points[2][0] - 6.0).abs() < 1e-5); // tr.x
+        assert!((q.points[2][1] - 3.0).abs() < 1e-5); // tr.y = y
+        assert!((q.points[3][0] - 2.0).abs() < 1e-5); // tl.x
+        assert!((q.points[3][1] - 3.0).abs() < 1e-5); // tl.y = y
+    }
+
+    #[test]
+    fn affine2d_transform_rect_translation_shifts_all_corners() {
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 5.0,
+        };
+        let t = Affine2D::translation(2.0, 3.0);
+        let q = t.transform_rect(&r);
+        for pt in &q.points {
+            assert!(pt[0] >= 2.0 - 1e-5 && pt[0] <= 12.0 + 1e-5, "x={}", pt[0]);
+            assert!(pt[1] >= 3.0 - 1e-5 && pt[1] <= 8.0 + 1e-5, "y={}", pt[1]);
+        }
+    }
+
+    // ── Quad ────────────────────────────────────────────────
+
+    #[test]
+    fn quad_non_degenerate_has_positive_area() {
+        let q = Quad {
+            points: [[0.0, 5.0], [5.0, 5.0], [5.0, 0.0], [0.0, 0.0]],
+        };
+        assert!(!q.is_degenerate());
+    }
+
+    #[test]
+    fn quad_collapsed_to_line_is_degenerate() {
+        // All points on the same horizontal line → zero area.
+        let q = Quad {
+            points: [[0.0, 0.0], [5.0, 0.0], [5.0, 0.0], [0.0, 0.0]],
+        };
+        assert!(q.is_degenerate());
+    }
+
+    #[test]
+    fn quad_single_point_is_degenerate() {
+        let q = Quad {
+            points: [[3.0, 3.0]; 4],
+        };
+        assert!(q.is_degenerate());
+    }
+
+    // ── BlockStyle predicates ────────────────────────────────
+
+    #[test]
+    fn block_style_has_radius_false_for_default() {
+        let s = BlockStyle::default();
+        assert!(!s.has_radius());
+    }
+
+    #[test]
+    fn block_style_has_radius_true_when_any_nonzero() {
+        let mut s = BlockStyle::default();
+        s.border_radii[2] = [0.0, 5.0];
+        assert!(s.has_radius());
+    }
+
+    #[test]
+    fn block_style_has_visual_style_background_color() {
+        let s = BlockStyle {
+            background_color: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        assert!(s.has_visual_style());
+    }
+
+    #[test]
+    fn block_style_has_visual_style_border_width() {
+        let s = BlockStyle {
+            border_widths: [0.0, 1.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        assert!(s.has_visual_style());
+    }
+
+    #[test]
+    fn block_style_has_visual_style_padding() {
+        let s = BlockStyle {
+            padding: [0.0, 0.0, 0.0, 3.0],
+            ..Default::default()
+        };
+        assert!(s.has_visual_style());
+    }
+
+    #[test]
+    fn block_style_has_visual_style_box_shadow() {
+        let s = BlockStyle {
+            box_shadows: vec![BoxShadow::default()],
+            ..Default::default()
+        };
+        assert!(s.has_visual_style());
+    }
+
+    #[test]
+    fn block_style_has_visual_style_false_for_default() {
+        assert!(!BlockStyle::default().has_visual_style());
+    }
+
+    #[test]
+    fn block_style_content_inset_sums_left_border_and_left_padding() {
+        let s = BlockStyle {
+            border_widths: [5.0, 0.0, 0.0, 3.0], // top, right, bottom, left
+            padding: [7.0, 0.0, 0.0, 2.0],       // top, right, bottom, left
+            ..Default::default()
+        };
+        let (left, top) = s.content_inset();
+        assert!((left - 5.0).abs() < 1e-5, "left={left}"); // bl(3)+pl(2)=5
+        assert!((top - 12.0).abs() < 1e-5, "top={top}"); // bt(5)+pt(7)=12
+    }
+
+    #[test]
+    fn block_style_has_overflow_clip_x_only() {
+        let s = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Visible,
+            ..Default::default()
+        };
+        assert!(s.has_overflow_clip());
+    }
+
+    #[test]
+    fn block_style_has_overflow_clip_y_only() {
+        let s = BlockStyle {
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Clip,
+            ..Default::default()
+        };
+        assert!(s.has_overflow_clip());
+    }
+
+    #[test]
+    fn block_style_has_overflow_clip_false_for_visible() {
+        let s = BlockStyle::default(); // both Visible
+        assert!(!s.has_overflow_clip());
+    }
+
+    #[test]
+    fn block_style_needs_block_wrapper_from_radius_alone() {
+        let s = BlockStyle {
+            border_radii: [[5.0, 5.0]; 4],
+            ..Default::default()
+        };
+        assert!(s.needs_block_wrapper());
+    }
+
+    #[test]
+    fn block_style_needs_block_wrapper_from_overflow_clip_alone() {
+        let s = BlockStyle {
+            overflow_x: Overflow::Clip,
+            ..Default::default()
+        };
+        assert!(s.needs_block_wrapper());
+    }
+
+    #[test]
+    fn block_style_needs_block_wrapper_false_for_default() {
+        assert!(!BlockStyle::default().needs_block_wrapper());
+    }
+
+    // ── BookmarkCollector ────────────────────────────────────
+
+    #[test]
+    fn bookmark_collector_records_on_correct_page() {
+        let mut bc = BookmarkCollector::new();
+        bc.set_current_page(2);
+        bc.record(1, "Chapter One".to_string(), 100.0);
+        bc.set_current_page(5);
+        bc.record(2, "Section 5.1".to_string(), 42.0);
+
+        let entries = bc.into_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].page_idx, 2);
+        assert_eq!(entries[0].level, 1);
+        assert_eq!(entries[0].label, "Chapter One");
+        assert!((entries[0].y_pt - 100.0).abs() < 1e-5);
+        assert_eq!(entries[1].page_idx, 5);
+        assert_eq!(entries[1].level, 2);
+        assert_eq!(entries[1].label, "Section 5.1");
+    }
+
+    #[test]
+    fn bookmark_collector_empty_by_default() {
+        let bc = BookmarkCollector::new();
+        assert!(bc.into_entries().is_empty());
+    }
+
+    // ── alpha_to_opacity ─────────────────────────────────────
+
+    #[test]
+    fn alpha_to_opacity_255_is_one() {
+        let v = alpha_to_opacity(255);
+        assert!((v.get() - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn alpha_to_opacity_0_is_zero() {
+        let v = alpha_to_opacity(0);
+        assert!(v.get() < 1e-3);
+    }
+
+    #[test]
+    fn alpha_to_opacity_128_is_near_half() {
+        let v = alpha_to_opacity(128);
+        assert!((v.get() - 128.0 / 255.0).abs() < 1e-3);
+    }
+
+    // ── LinkCollector::take_page ─────────────────────────────
+
+    #[test]
+    fn link_collector_take_page_removes_and_returns_entries() {
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        collector.set_current_page(1);
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 5.0,
+            },
+        );
+        collector.set_current_page(2);
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 5.0,
+            },
+        );
+
+        let page1 = collector.take_page(1);
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page1[0].page_idx, 1);
+
+        // Page 1 entries are gone; page 2 still present.
+        assert!(collector.take_page(1).is_empty());
+        let page2 = collector.take_page(2);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].page_idx, 2);
+    }
+
+    #[test]
+    fn link_collector_take_missing_page_returns_empty() {
+        let mut collector = LinkCollector::new();
+        assert!(collector.take_page(99).is_empty());
+    }
+
+    // ── LinkCollector: same-link multiple pages → separate occurrences ──
+
+    #[test]
+    fn link_collector_same_link_different_pages_produces_separate_occurrences() {
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        collector.set_current_page(0);
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 5.0,
+            },
+        );
+        collector.set_current_page(1);
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 5.0,
+                y: 0.0,
+                width: 10.0,
+                height: 5.0,
+            },
+        );
+
+        let all = collector.into_occurrences();
+        assert_eq!(all.len(), 2, "expected one occurrence per page");
+    }
+
+    // ── DestinationRegistry: first-write-wins ────────────────
+
+    #[test]
+    fn destination_registry_first_write_wins_for_duplicate_ids() {
+        let mut reg = DestinationRegistry::new();
+        reg.set_current_page(0);
+        reg.record("anchor", 10.0, 20.0);
+        reg.set_current_page(1);
+        reg.record("anchor", 99.0, 99.0); // duplicate — should be ignored
+        let (page, x, y) = reg.get("anchor").expect("recorded");
+        assert_eq!(page, 0, "first write should win");
+        assert!((x - 10.0).abs() < 1e-5);
+        assert!((y - 20.0).abs() < 1e-5);
+    }
+
+    // ── compute_overflow_clip_path: y-only clip branch ───────
+
+    #[test]
+    fn compute_overflow_clip_y_clip_x_visible_returns_path() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Clip,
+            border_widths: [1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
+
+    // ── compute_overflow_clip_path: both-axes, no-radius branch ──
+
+    #[test]
+    fn compute_overflow_clip_both_axes_no_radius_returns_path() {
+        let style = BlockStyle {
+            overflow_x: Overflow::Clip,
+            overflow_y: Overflow::Clip,
+            border_widths: [1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
 }
 
 /// Float-tolerance helpers shared across the in-crate transform test

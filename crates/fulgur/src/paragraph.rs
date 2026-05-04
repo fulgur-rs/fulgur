@@ -1352,3 +1352,104 @@ mod link_span_tests {
 // (PDF byte / `/Link` substring assertions) and the VRT byte-identical
 // fixtures. The Pageable trait + `LinkCollector` are slated for full
 // removal in PR 8j.
+
+#[cfg(test)]
+mod text_decoration_tests {
+    use super::*;
+
+    // ── TextDecorationLine ───────────────────────────────────
+
+    #[test]
+    fn text_decoration_line_none_is_none() {
+        assert!(TextDecorationLine::NONE.is_none());
+    }
+
+    #[test]
+    fn text_decoration_line_underline_is_not_none() {
+        assert!(!TextDecorationLine::UNDERLINE.is_none());
+    }
+
+    #[test]
+    fn text_decoration_line_contains_self() {
+        assert!(TextDecorationLine::UNDERLINE.contains(TextDecorationLine::UNDERLINE));
+    }
+
+    #[test]
+    fn text_decoration_line_contains_returns_false_when_missing() {
+        assert!(!TextDecorationLine::UNDERLINE.contains(TextDecorationLine::OVERLINE));
+    }
+
+    #[test]
+    fn text_decoration_line_bitor_combines_flags() {
+        let combined = TextDecorationLine::UNDERLINE | TextDecorationLine::OVERLINE;
+        assert!(combined.contains(TextDecorationLine::UNDERLINE));
+        assert!(combined.contains(TextDecorationLine::OVERLINE));
+        assert!(!combined.contains(TextDecorationLine::LINE_THROUGH));
+        assert!(!combined.is_none());
+    }
+
+    #[test]
+    fn text_decoration_line_line_through_is_not_none() {
+        assert!(!TextDecorationLine::LINE_THROUGH.is_none());
+    }
+
+    // ── TextDecoration::same_appearance ─────────────────────
+
+    #[test]
+    fn text_decoration_same_appearance_identical() {
+        let d = TextDecoration {
+            line: TextDecorationLine::UNDERLINE,
+            style: TextDecorationStyle::Solid,
+            color: [0, 0, 0, 255],
+        };
+        assert!(d.same_appearance(&d));
+    }
+
+    #[test]
+    fn text_decoration_same_appearance_differs_on_color() {
+        let a = TextDecoration {
+            line: TextDecorationLine::UNDERLINE,
+            style: TextDecorationStyle::Solid,
+            color: [0, 0, 0, 255],
+        };
+        let b = TextDecoration {
+            color: [255, 0, 0, 255],
+            ..a
+        };
+        assert!(!a.same_appearance(&b));
+    }
+
+    #[test]
+    fn text_decoration_same_appearance_differs_on_style() {
+        let a = TextDecoration {
+            line: TextDecorationLine::UNDERLINE,
+            style: TextDecorationStyle::Solid,
+            color: [0, 0, 0, 255],
+        };
+        let b = TextDecoration {
+            style: TextDecorationStyle::Dashed,
+            ..a
+        };
+        assert!(!a.same_appearance(&b));
+    }
+
+    #[test]
+    fn text_decoration_same_appearance_differs_on_line() {
+        let a = TextDecoration {
+            line: TextDecorationLine::UNDERLINE,
+            style: TextDecorationStyle::Solid,
+            color: [0, 0, 0, 255],
+        };
+        let b = TextDecoration {
+            line: TextDecorationLine::LINE_THROUGH,
+            ..a
+        };
+        assert!(!a.same_appearance(&b));
+    }
+
+    #[test]
+    fn text_decoration_default_has_no_line() {
+        let d = TextDecoration::default();
+        assert!(d.line.is_none());
+    }
+}
