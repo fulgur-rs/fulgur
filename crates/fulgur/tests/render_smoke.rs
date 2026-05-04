@@ -2647,4 +2647,8 @@ fn tagged_figure_alt_text_appears_in_pdf() {
         s.contains("/Alt"),
         "PDF StructTree must contain /Alt for <img alt=...>"
     );
+    assert!(
+        s.contains("fulgur logo"),
+        "PDF must embed the alt text value in the /Alt entry"
+    );
 }
