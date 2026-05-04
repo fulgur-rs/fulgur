@@ -12,11 +12,11 @@
   "bin": { "fulgur": "bin/fulgur" },
   "files": ["bin/"],
   "optionalDependencies": {
-    "@fulgur-rs/cli-linux-x64":      "0.0.0",
-    "@fulgur-rs/cli-linux-x64-musl": "0.0.0",
-    "@fulgur-rs/cli-linux-arm64":    "0.0.0",
-    "@fulgur-rs/cli-darwin-arm64":   "0.0.0",
-    "@fulgur-rs/cli-darwin-x64":     "0.0.0",
-    "@fulgur-rs/cli-win32-x64":      "0.0.0"
+    "@fulgur-rs/cli-linux-x64":      "0.9.0",
+    "@fulgur-rs/cli-linux-x64-musl": "0.9.0",
+    "@fulgur-rs/cli-linux-arm64":    "0.9.0",
+    "@fulgur-rs/cli-darwin-arm64":   "0.9.0",
+    "@fulgur-rs/cli-darwin-x64":     "0.9.0",
+    "@fulgur-rs/cli-win32-x64":      "0.9.0"
   }
 }
