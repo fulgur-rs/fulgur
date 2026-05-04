@@ -2626,3 +2626,25 @@ fn tagged_pdf_is_deterministic() {
         "tagged PDF must be byte-identical across renders"
     );
 }
+
+#[test]
+fn tagged_figure_alt_text_appears_in_pdf() {
+    // 1x1 GIF の data URI（外部ファイル不要）
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{margin:0}</style></head>
+<body><img src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="fulgur logo"></body>
+</html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("render");
+
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/Alt"),
+        "PDF StructTree must contain /Alt for <img alt=...>"
+    );
+}
