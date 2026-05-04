@@ -2499,6 +2499,16 @@ fn tagged_pdf_multipage_does_not_panic() {
     assert!(!pdf.is_empty());
     let s = String::from_utf8_lossy(&pdf);
     assert!(s.contains("/StructTreeRoot"));
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tagged-multipage.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let doc = lopdf::Document::load(&path).expect("PDF must parse");
+    assert!(
+        doc.get_pages().len() >= 2,
+        "fixture must produce a multi-page document; got {} page(s)",
+        doc.get_pages().len()
+    );
 }
 
 #[test]
