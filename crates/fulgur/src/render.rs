@@ -1541,30 +1541,7 @@ fn draw_under_clip(
         if let Some(li) = list_item
             && li.visible
         {
-            // outside marker を Lbl タグで囲む
-            let lbl_id = canvas
-                .tag_collector
-                .as_ref()
-                .and_then(|_| drawables.li_lbl_ids.get(&node_id).copied());
-            let marker_tag_id = lbl_id.map(|_| {
-                canvas
-                    .surface
-                    .start_tagged(krilla::tagging::ContentTag::Span(
-                        krilla::tagging::SpanTag::empty(),
-                    ))
-            });
-
-            draw_list_item_marker(canvas, li, x_pt, y_pt);
-
-            if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
-                canvas.surface.end_tagged();
-                canvas.tag_collector.as_mut().unwrap().record(
-                    lid,
-                    crate::tagging::PdfTag::Lbl,
-                    id,
-                    None,
-                );
-            }
+            draw_list_item_marker_tagged(canvas, li, node_id, drawables, x_pt, y_pt);
         }
 
         // bg / border / shadow outside the clip — same as
@@ -2873,30 +2850,7 @@ fn draw_list_item_with_block(
 
     draw_with_opacity(canvas, list_item.opacity, |canvas| {
         if list_item.visible {
-            // outside marker を Lbl タグで囲む
-            let lbl_id = canvas
-                .tag_collector
-                .as_ref()
-                .and_then(|_| drawables.li_lbl_ids.get(&node_id).copied());
-            let marker_tag_id = lbl_id.map(|_| {
-                canvas
-                    .surface
-                    .start_tagged(krilla::tagging::ContentTag::Span(
-                        krilla::tagging::SpanTag::empty(),
-                    ))
-            });
-
-            draw_list_item_marker(canvas, list_item, x, y);
-
-            if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
-                canvas.surface.end_tagged();
-                canvas.tag_collector.as_mut().unwrap().record(
-                    lid,
-                    crate::tagging::PdfTag::Lbl,
-                    id,
-                    None,
-                );
-            }
+            draw_list_item_marker_tagged(canvas, list_item, node_id, drawables, x, y);
         }
         if let Some(b) = block {
             draw_block_inner_paint(canvas, b, x, y, frag, is_split);
@@ -2950,6 +2904,39 @@ fn draw_list_item_marker(
             }
         }
         _ => {}
+    }
+}
+
+/// List-item marker を描画し、タグ付きモードでは Lbl 構造要素でラップする。
+fn draw_list_item_marker_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    li: &crate::drawables::ListItemEntry,
+    node_id: usize,
+    drawables: &Drawables,
+    x: f32,
+    y: f32,
+) {
+    let lbl_id = canvas
+        .tag_collector
+        .as_ref()
+        .and_then(|_| drawables.li_lbl_ids.get(&node_id).copied());
+    let marker_tag_id = lbl_id.map(|_| {
+        canvas
+            .surface
+            .start_tagged(krilla::tagging::ContentTag::Span(
+                krilla::tagging::SpanTag::empty(),
+            ))
+    });
+
+    draw_list_item_marker(canvas, li, x, y);
+
+    if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
+        canvas.surface.end_tagged();
+        canvas
+            .tag_collector
+            .as_mut()
+            .expect("tag_collector is Some because marker_tag_id was issued from it")
+            .record(lid, crate::tagging::PdfTag::Lbl, id, None);
     }
 }
 
