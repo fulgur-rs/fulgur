@@ -97,15 +97,15 @@ pub fn pdf_tag_to_krilla_tag(
         }
         PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
         PdfTag::Div => krilla::tagging::Tag::<krilla::tagging::kind::Div>::Div.into(),
-        PdfTag::Figure => krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(None).into(), // alt text: fulgur-izp.6
+        PdfTag::Figure => {
+            krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(None).into()
+        } // alt text: fulgur-izp.6
         PdfTag::L => {
             krilla::tagging::Tag::L(krilla::tagging::ListNumbering::None).into() // numbering: fulgur-izp.7
         }
         PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
         PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
-        PdfTag::TRowGroup => {
-            krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into()
-        }
+        PdfTag::TRowGroup => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
         PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
         PdfTag::Th => {
             krilla::tagging::Tag::TH(krilla::tagging::TableHeaderScope::Both).into() // scope attr: fulgur-izp.8
@@ -190,14 +190,41 @@ mod tests {
     #[test]
     fn pdf_tag_to_krilla_tag_covers_all_variants() {
         use krilla::tagging::TagKind;
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Div, None), TagKind::Div(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Figure, None), TagKind::Figure(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::L, None), TagKind::L(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Li, None), TagKind::LI(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Table, None), TagKind::Table(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::TRowGroup, None), TagKind::TBody(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Tr, None), TagKind::TR(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Th, None), TagKind::TH(_)));
-        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Td, None), TagKind::TD(_)));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Div, None),
+            TagKind::Div(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Figure, None),
+            TagKind::Figure(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::L, None),
+            TagKind::L(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Li, None),
+            TagKind::LI(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Table, None),
+            TagKind::Table(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::TRowGroup, None),
+            TagKind::TBody(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Tr, None),
+            TagKind::TR(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Th, None),
+            TagKind::TH(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Td, None),
+            TagKind::TD(_)
+        ));
     }
 }
