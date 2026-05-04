@@ -793,9 +793,7 @@ fn try_start_tagged(
     node_id: usize,
     drawables: &Drawables,
 ) -> Option<(crate::tagging::PdfTag, krilla::tagging::Identifier)> {
-    if canvas.tag_collector.is_none() {
-        return None;
-    }
+    canvas.tag_collector.as_ref()?;
     let semantic = drawables.semantics.get(&node_id)?;
     if !matches!(
         semantic.tag,
@@ -807,7 +805,9 @@ fn try_start_tagged(
         return None;
     }
     use krilla::tagging::{ContentTag, SpanTag};
-    let id = canvas.surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    let id = canvas
+        .surface
+        .start_tagged(ContentTag::Span(SpanTag::empty()));
     Some((semantic.tag.clone(), id))
 }
 
