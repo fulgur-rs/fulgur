@@ -129,7 +129,10 @@ fn tagged_struct_tree_reflects_dom_nesting() {
 <body><section><h1>Title</h1><p>Body.</p></section></body></html>"#;
 
     let mut assets = AssetBundle::default();
-    assets.add_font_file("examples/.fonts/NotoSans-Regular.ttf").unwrap();
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    assets.add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
     assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
 
     let pdf = Engine::builder()
@@ -319,7 +322,10 @@ fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
 
 fn tagged_render_with_noto(html: &str) -> Vec<u8> {
     let mut assets = AssetBundle::default();
-    assets.add_font_file("examples/.fonts/NotoSans-Regular.ttf").unwrap();
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    assets.add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
     assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
     Engine::builder()
         .tagged(true)
