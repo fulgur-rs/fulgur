@@ -40,7 +40,9 @@ pub enum PdfTag {
     TBody,
     TFoot,
     Tr,
-    Th { scope: krilla::tagging::TableHeaderScope },
+    Th {
+        scope: krilla::tagging::TableHeaderScope,
+    },
     Td,
 }
 

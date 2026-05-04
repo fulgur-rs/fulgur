@@ -2704,6 +2704,9 @@ fn tagged_th_scope_attribute_preserved() {
     let pdf = tagged_render_with_noto(html);
     let s = String::from_utf8_lossy(&pdf);
     // Krilla writes /Scope /Column and /Scope /Row in the PDF stream
-    assert!(s.contains("/Column"), "must have Column scope for col-scoped TH");
+    assert!(
+        s.contains("/Column"),
+        "must have Column scope for col-scoped TH"
+    );
     assert!(s.contains("/Row"), "must have Row scope for row-scoped TH");
 }
