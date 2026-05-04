@@ -780,6 +780,54 @@ pub(crate) fn dispatch_inline_box_content(
     }
 }
 
+/// Start a Krilla tagged content sequence for a paragraph-bearing node when
+/// tagging is enabled and the node has a P / H / Span semantic entry.
+///
+/// Returns `Some((tag, id))` on success so that `finish_tagged` can close it.
+/// Returns `None` when tagging is disabled, the node has no recognised
+/// semantic entry, or the node carries no paragraph content (pure containers
+/// must not call `start_tagged` — it is not nestable and would panic on a
+/// second call before `end_tagged`).
+fn try_start_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    drawables: &Drawables,
+) -> Option<(crate::tagging::PdfTag, krilla::tagging::Identifier)> {
+    if canvas.tag_collector.is_none() {
+        return None;
+    }
+    let semantic = drawables.semantics.get(&node_id)?;
+    if !matches!(
+        semantic.tag,
+        crate::tagging::PdfTag::P | crate::tagging::PdfTag::H { .. } | crate::tagging::PdfTag::Span
+    ) {
+        return None;
+    }
+    if !drawables.paragraphs.contains_key(&node_id) {
+        return None;
+    }
+    use krilla::tagging::{ContentTag, SpanTag};
+    let id = canvas.surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    Some((semantic.tag.clone(), id))
+}
+
+/// Close a tagged content sequence opened by `try_start_tagged` and record
+/// the resulting `Identifier` in the `TagCollector` for StructTree assembly.
+///
+/// No-op when `tag_info` is `None` (tagging disabled or not applicable).
+fn finish_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    tag_info: Option<(crate::tagging::PdfTag, krilla::tagging::Identifier)>,
+) {
+    if let Some((tag, id)) = tag_info {
+        canvas.surface.end_tagged();
+        if let Some(tc) = canvas.tag_collector.as_mut() {
+            tc.record(node_id, tag, id);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_fragment(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -856,6 +904,11 @@ pub(crate) fn dispatch_fragment(
         let img_for_block = drawables.images.get(&node_id);
         let svg_for_block = drawables.svgs.get(&node_id);
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
+            let tag_info = if para_for_block.is_some() {
+                try_start_tagged(canvas, node_id, drawables)
+            } else {
+                None
+            };
             draw_block_with_inner_content(
                 canvas,
                 block,
@@ -884,6 +937,7 @@ pub(crate) fn dispatch_fragment(
                     page_index,
                 );
             }
+            finish_tagged(canvas, node_id, tag_info);
             return;
         }
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
@@ -909,6 +963,7 @@ pub(crate) fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
+        let tag_info = try_start_tagged(canvas, node_id, drawables);
         draw_paragraph_v2(
             canvas,
             para,
@@ -922,6 +977,7 @@ pub(crate) fn dispatch_fragment(
             margin_left_pt,
             margin_top_pt,
         );
+        finish_tagged(canvas, node_id, tag_info);
     }
 }
 
