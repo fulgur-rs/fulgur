@@ -551,20 +551,22 @@ impl Engine {
         // render emits (see the `append_position_fixed_fragments` block
         // in `render_html`). Without this, the helper would diverge
         // from `render_html` for documents with `position: fixed`.
+        let content_w_px = crate::convert::pt_to_px(self.config.content_width());
+        let content_h_px = crate::convert::pt_to_px(self.config.content_height());
         let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
         crate::pagination_layout::append_position_fixed_fragments(
             &mut pagination_geometry,
             doc.deref_mut(),
             total_pages,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.content_height()),
+            content_w_px,
+            content_h_px,
         );
         crate::pagination_layout::append_position_absolute_body_direct_fragments(
             &mut pagination_geometry,
             doc.deref_mut(),
             total_pages,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.content_height()),
+            content_w_px,
+            content_h_px,
             None,
         );
         let expanded_total_pages =
@@ -574,8 +576,8 @@ impl Engine {
                 &mut pagination_geometry,
                 doc.deref_mut(),
                 expanded_total_pages,
-                crate::convert::pt_to_px(self.config.content_width()),
-                crate::convert::pt_to_px(self.config.content_height()),
+                content_w_px,
+                content_h_px,
             );
         }
 
@@ -591,10 +593,7 @@ impl Engine {
             multicol_geometry,
             pagination_geometry,
             link_cache: Default::default(),
-            viewport_size_px: Some((
-                crate::convert::pt_to_px(self.config.content_width()),
-                crate::convert::pt_to_px(self.config.content_height()),
-            )),
+            viewport_size_px: Some((content_w_px, content_h_px)),
         };
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         // PR 8i regression fix: read geometry AFTER convert. Convert

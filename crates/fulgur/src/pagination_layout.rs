@@ -2573,7 +2573,7 @@ pub fn append_position_absolute_body_direct_fragments(
         if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
             return false;
         }
-        !is_out_of_flow_positioned(child)
+        !is_out_of_flow_positioned(child) && !crate::blitz_adapter::node_is_floating(child)
     });
     for child_id in body_children {
         let Some(child) = doc.get_node(child_id) else {
@@ -2614,7 +2614,6 @@ pub fn append_position_absolute_body_direct_fragments(
         );
     }
 
-    // Don't allocate empty entries for nodes without fragments.
     geometry.retain(|_, geom| !geom.fragments.is_empty());
 }
 
@@ -2651,7 +2650,6 @@ fn record_subtree_fragments_at_offset(
         may_extend_pages: bool,
         depth: usize,
     ) {
-        use ::style::properties::longhands::position::computed_value::T as Pos;
         if depth >= crate::MAX_DOM_DEPTH {
             return;
         }
@@ -2680,22 +2678,11 @@ fn record_subtree_fragments_at_offset(
         let stored_x = root_xy_for_paging.0 + offset_in_subtree.0 - body_offset.0;
         let w = node.final_layout.size.width;
         let h = node.final_layout.size.height;
-        let is_size_contained = node.primary_styles().is_some_and(|s| {
-            s.get_box()
-                .clone_contain()
-                .contains(::style::values::computed::box_::Contain::SIZE)
-        });
+        let is_size_contained = has_contain_size(node);
         let monolithic_adjust: f32 = children
             .iter()
             .filter_map(|child_id| doc.get_node(*child_id))
-            .filter(|child| {
-                !is_out_of_flow_positioned(child)
-                    && child.primary_styles().is_some_and(|s| {
-                        s.get_box()
-                            .clone_contain()
-                            .contains(::style::values::computed::box_::Contain::SIZE)
-                    })
-            })
+            .filter(|child| !is_out_of_flow_positioned(child) && has_contain_size(child))
             .map(|child| (child.final_layout.size.height - page_h_px).max(0.0))
             .sum();
         let h_for_paging = (h - monolithic_adjust).max(0.0);
@@ -2784,10 +2771,7 @@ fn record_subtree_fragments_at_offset(
             // Skip out-of-flow descendants (handled by their own
             // pass — `append_position_fixed_fragments` for fixed,
             // separate body-direct walk for abs).
-            let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_oof {
+            if is_out_of_flow_positioned(child) {
                 continue;
             }
             // Skip whitespace-only text (matches fragmenter).
@@ -2812,11 +2796,7 @@ fn record_subtree_fragments_at_offset(
                 may_extend_pages,
                 depth + 1,
             );
-            if child.primary_styles().is_some_and(|s| {
-                s.get_box()
-                    .clone_contain()
-                    .contains(::style::values::computed::box_::Contain::SIZE)
-            }) {
+            if has_contain_size(child) {
                 monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
             }
         }
@@ -2841,6 +2821,14 @@ fn is_out_of_flow_positioned(node: &blitz_dom::Node) -> bool {
 
     node.primary_styles()
         .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
+}
+
+fn has_contain_size(node: &blitz_dom::Node) -> bool {
+    node.primary_styles().is_some_and(|s| {
+        s.get_box()
+            .clone_contain()
+            .contains(::style::values::computed::box_::Contain::SIZE)
+    })
 }
 
 /// CSS-px (x, y) of `<body>`'s top-left in its containing block (html).
