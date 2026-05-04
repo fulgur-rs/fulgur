@@ -1596,6 +1596,14 @@ fn draw_under_clip(
         // Inner content sharing `node_id` (inline-root paragraph,
         // replaced image / svg) paints at the content-box top-left,
         // not the border-box. Mirrors `draw_block_with_inner_content`.
+        //
+        // Known limitation (fulgur-izp.7): when this node is a list-item
+        // (`li_lbody_ids` contains `node_id`), the inline-root paragraph here
+        // is not wrapped in `try_start_tagged`/`finish_tagged`, so its content
+        // identifiers land under the wrong StructTree node instead of LBody.
+        // Strictly typed PDF/UA validators may flag the empty LBody element.
+        // Fix: mirror the `try_start_tagged`/`finish_tagged` wrap from
+        // `draw_list_item_with_block` here too.
         let inner_x = x_pt + inner_inset.0;
         let inner_y = y_pt + inner_inset.1;
         if let Some(p) = para_for_block {
