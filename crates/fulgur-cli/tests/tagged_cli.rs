@@ -81,4 +81,9 @@ fn cli_pdf_ua_flag_succeeds() {
     assert!(out.status.success(), "CLI --pdf-ua failed: {stderr}");
     let pdf = std::fs::read(&pdf_path).unwrap();
     assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/StructTreeRoot"),
+        "pdf-ua PDF must contain /StructTreeRoot"
+    );
 }
