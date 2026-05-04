@@ -395,11 +395,17 @@ fn walk_semantics(
                 }
                 parent = doc.get_node(pid).and_then(|p| p.parent);
             };
+            let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
+                get_attr(elem, "alt").map(|v| std::sync::Arc::from(v))
+            } else {
+                None
+            };
             out.semantics.insert(
                 node_id,
                 crate::tagging::SemanticEntry {
                     tag,
                     parent: parent_node_id,
+                    alt_text,
                 },
             );
         }
@@ -1180,5 +1186,46 @@ mod semantics_tests {
             "the single entry must be the <p>, got {:?}",
             only_entry.tag
         );
+    }
+
+    #[test]
+    fn dom_to_drawables_records_alt_text_on_figure() {
+        // alt あり
+        let d = build_drawables(
+            "<!DOCTYPE html><html><body><img src='a.png' alt='photo of cat'></body></html>",
+        );
+        let figures: Vec<_> = d
+            .semantics
+            .values()
+            .filter(|e| e.tag == PdfTag::Figure)
+            .collect();
+        assert_eq!(figures.len(), 1);
+        assert_eq!(
+            figures[0].alt_text.as_deref(),
+            Some("photo of cat"),
+            "alt text should be captured"
+        );
+
+        // alt="" decorative
+        let d2 = build_drawables(
+            "<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>",
+        );
+        let figs2: Vec<_> = d2
+            .semantics
+            .values()
+            .filter(|e| e.tag == PdfTag::Figure)
+            .collect();
+        assert_eq!(figs2[0].alt_text.as_deref(), Some(""), "empty alt should be Some(\"\")");
+
+        // alt 未指定
+        let d3 = build_drawables(
+            "<!DOCTYPE html><html><body><img src='a.png'></body></html>",
+        );
+        let figs3: Vec<_> = d3
+            .semantics
+            .values()
+            .filter(|e| e.tag == PdfTag::Figure)
+            .collect();
+        assert_eq!(figs3[0].alt_text, None, "missing alt should be None");
     }
 }

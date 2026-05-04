@@ -42,6 +42,9 @@ pub enum PdfTag {
 pub struct SemanticEntry {
     pub tag: PdfTag,
     pub parent: Option<NodeId>,
+    /// Alt text for `Figure` nodes (`<img alt="...">`).
+    /// `Some("")` = decorative image; `None` = alt attribute absent.
+    pub alt_text: Option<std::sync::Arc<str>>,
 }
 
 /// Map an HTML element local name to a `PdfTag` when the element has a
