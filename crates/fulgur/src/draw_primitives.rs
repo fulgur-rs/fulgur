@@ -440,12 +440,44 @@ impl LinkCollector {
     }
 }
 
+/// Per-render accumulator for tagged-content identifiers.
+///
+/// Each `record` call stores one (NodeId, PdfTag, Identifier) triple
+/// produced by `surface.start_tagged` during a single page draw. After
+/// all pages are rendered, `render_v2` groups entries by NodeId and
+/// builds a `krilla::tagging::TagTree`.
+pub struct TagCollector {
+    entries: Vec<(crate::drawables::NodeId, crate::tagging::PdfTag, krilla::tagging::Identifier)>,
+}
+
+impl TagCollector {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn record(
+        &mut self,
+        node_id: crate::drawables::NodeId,
+        tag: crate::tagging::PdfTag,
+        id: krilla::tagging::Identifier,
+    ) {
+        self.entries.push((node_id, tag, id));
+    }
+
+    pub fn into_entries(
+        self,
+    ) -> Vec<(crate::drawables::NodeId, crate::tagging::PdfTag, krilla::tagging::Identifier)> {
+        self.entries
+    }
+}
+
 /// Wrapper around Krilla Surface for drawing commands.
 /// This decouples Pageable types from Krilla's concrete Surface type.
 pub struct Canvas<'a, 'b> {
     pub surface: &'a mut krilla::surface::Surface<'b>,
     pub bookmark_collector: Option<&'a mut BookmarkCollector>,
     pub link_collector: Option<&'a mut LinkCollector>,
+    pub tag_collector: Option<&'a mut TagCollector>,
 }
 
 /// Run a draw closure wrapped in opacity guards.

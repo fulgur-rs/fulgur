@@ -155,6 +155,7 @@ pub fn render_v2(
                     surface: &mut surface,
                     bookmark_collector: bookmark_collector.as_mut(),
                     link_collector: Some(&mut link_collector),
+                    tag_collector: None,
                 };
                 // Root `<html>` + `<body>` background pre-pass. v1's
                 // `BlockPageable::draw` for these elements paints
@@ -216,6 +217,7 @@ pub fn render_v2(
                 surface: &mut surface,
                 bookmark_collector: None,
                 link_collector: Some(&mut link_collector),
+                tag_collector: None,
             };
             let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
             margin_box_renderer.render_page(
