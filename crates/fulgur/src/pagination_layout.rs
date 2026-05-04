@@ -4122,7 +4122,13 @@ h2 { string-set: chapter-title content(text); }
             .filter(|(_, x, _)| x.abs() < 0.5)
             .map(|(_, _, y)| *y)
             .collect();
-        assert_eq!(left_ys, vec![0.0, 50.0], "left column y, inner={inner:?}");
+        let approx_eq = |a: &[f32], b: &[f32]| -> bool {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.5)
+        };
+        assert!(
+            approx_eq(&left_ys, &[0.0, 50.0]),
+            "left column y, inner={inner:?}"
+        );
 
         // 右 column (x=100): y=0 と y=50 の 2 個 (block flow になっていれば
         // y=100, y=150 になる)
@@ -4131,9 +4137,8 @@ h2 { string-set: chapter-title content(text); }
             .filter(|(_, x, _)| (x - 100.0).abs() < 0.5)
             .map(|(_, _, y)| *y)
             .collect();
-        assert_eq!(
-            right_ys,
-            vec![0.0, 50.0],
+        assert!(
+            approx_eq(&right_ys, &[0.0, 50.0]),
             "right column y must match left column (parallel siblings, not stacked), inner={inner:?}"
         );
     }
@@ -4186,10 +4191,15 @@ h2 { string-set: chapter-title content(text); }
             .filter(|(_, x, _)| (x - 100.0).abs() < 0.5)
             .map(|(_, _, y)| *y)
             .collect();
-        assert_eq!(left_ys, vec![0.0, 50.0], "left column y, inner={inner:?}");
-        assert_eq!(
-            right_ys,
-            vec![0.0, 50.0],
+        let approx_eq = |a: &[f32], b: &[f32]| -> bool {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.5)
+        };
+        assert!(
+            approx_eq(&left_ys, &[0.0, 50.0]),
+            "left column y, inner={inner:?}"
+        );
+        assert!(
+            approx_eq(&right_ys, &[0.0, 50.0]),
             "right column y must match left column (parallel siblings, not stacked), inner={inner:?}"
         );
     }
