@@ -240,25 +240,7 @@ pub fn render_v2(
 
     if let Some(tc) = tag_collector {
         let mut tree = TagTree::new().with_lang(config.lang.clone());
-        let mut groups: BTreeMap<
-            crate::drawables::NodeId,
-            (crate::tagging::PdfTag, Vec<Identifier>, Option<String>),
-        > = BTreeMap::new();
-        for (node_id, tag, id, heading_title) in tc.into_entries() {
-            groups
-                .entry(node_id)
-                .or_insert_with(|| (tag, Vec::new(), heading_title))
-                .1
-                .push(id);
-        }
-        for (_, (tag, ids, heading_title)) in groups {
-            let mut group =
-                TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&tag, heading_title));
-            for id in ids {
-                group.push(Node::Leaf(id));
-            }
-            tree.push(group);
-        }
+        build_struct_tree(tc, drawables, &mut tree);
         document.set_tag_tree(tree);
     }
 
@@ -3530,6 +3512,88 @@ fn escape_attr(s: &str) -> String {
 /// Used to build margin-box CSS where running elements need to be visible.
 fn strip_display_none(css: &str) -> String {
     css.replace("display: none", "").replace("display:none", "")
+}
+
+/// Build a hierarchical [`TagTree`] from [`TagCollector`] entries and
+/// the `semantics` map in [`Drawables`].
+///
+/// The flat approach used before fulgur-izp.5 created one top-level
+/// [`TagGroup`] per tagged NodeId. This function instead uses
+/// [`crate::tagging::SemanticEntry::parent`] to nest groups, so that
+/// `<section><h1>…</h1></section>` produces a Div group containing an
+/// Hn group rather than two sibling groups.
+fn build_struct_tree(
+    tc: crate::draw_primitives::TagCollector,
+    drawables: &Drawables,
+    tree: &mut TagTree,
+) {
+    let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
+    let mut heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
+    for (node_id, _tag, id, heading_title) in tc.into_entries() {
+        identifiers.entry(node_id).or_default().push(id);
+        if let Some(title) = heading_title {
+            heading_titles.entry(node_id).or_insert(title);
+        }
+    }
+
+    let mut children_map: BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>> =
+        BTreeMap::new();
+    for (&node_id, entry) in &drawables.semantics {
+        if let Some(parent_id) = entry.parent {
+            children_map.entry(parent_id).or_default().push(node_id);
+        }
+    }
+
+    let roots: Vec<crate::drawables::NodeId> = drawables
+        .semantics
+        .iter()
+        .filter(|(_, e)| e.parent.is_none())
+        .map(|(&id, _)| id)
+        .collect();
+
+    for root_id in roots {
+        let group = build_tag_group(
+            root_id,
+            drawables,
+            &identifiers,
+            &heading_titles,
+            &children_map,
+        );
+        tree.push(Node::Group(group));
+    }
+}
+
+fn build_tag_group(
+    node_id: crate::drawables::NodeId,
+    drawables: &Drawables,
+    identifiers: &BTreeMap<crate::drawables::NodeId, Vec<Identifier>>,
+    heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
+    children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
+) -> TagGroup {
+    let entry = &drawables.semantics[&node_id];
+    let title = heading_titles.get(&node_id).cloned();
+    let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&entry.tag, title));
+
+    if let Some(ids) = identifiers.get(&node_id) {
+        for &id in ids {
+            group.push(Node::Leaf(id));
+        }
+    }
+
+    if let Some(children) = children_map.get(&node_id) {
+        for &child_id in children {
+            let child = build_tag_group(
+                child_id,
+                drawables,
+                identifiers,
+                heading_titles,
+                children_map,
+            );
+            group.push(Node::Group(child));
+        }
+    }
+
+    group
 }
 
 #[cfg(test)]

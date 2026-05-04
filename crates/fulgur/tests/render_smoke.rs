@@ -2541,3 +2541,22 @@ fn pdf_ua_fails_ua1_validation_until_full_compliance_lands() {
         "expected UA1 validation error until full compliance lands"
     );
 }
+
+#[test]
+fn tagged_struct_tree_reflects_dom_nesting() {
+    // section > h1 + p の2階層構造が StructTree に反映されることを確認。
+    // 現在の flat ビルダーでは section(Div) が top-level に出ず失敗する。
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body.</p></section></body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("render");
+
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/Div"), "StructTree must contain /Div for <section>");
+}
