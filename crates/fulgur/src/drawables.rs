@@ -499,4 +499,23 @@ mod tests {
         assert!(s.contains("opacity"));
         assert!(s.contains("visible"));
     }
+
+    #[test]
+    fn alloc_synthetic_id_starts_at_usize_max_div_2() {
+        let mut d = Drawables::default();
+        let first = d.alloc_synthetic_id();
+        assert_eq!(first, usize::MAX / 2);
+    }
+
+    #[test]
+    fn alloc_synthetic_id_returns_unique_decreasing_ids() {
+        let mut d = Drawables::default();
+        let id1 = d.alloc_synthetic_id();
+        let id2 = d.alloc_synthetic_id();
+        let id3 = d.alloc_synthetic_id();
+        assert!(id1 > id2, "IDs must decrease");
+        assert!(id2 > id3, "IDs must decrease");
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+    }
 }
