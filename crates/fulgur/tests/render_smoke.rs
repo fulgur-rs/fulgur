@@ -2457,3 +2457,60 @@ fn tagged_render_produces_pdf() {
         "tagged PDF must have StructTreeRoot"
     );
 }
+
+#[test]
+fn tagged_pdf_headings_and_paragraphs_produce_struct_tree() {
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <h1>Heading One</h1>
+        <p>First paragraph.</p>
+        <h2>Heading Two</h2>
+        <p>Second paragraph.</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("render tagged headings");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/StructTreeRoot"),
+        "tagged PDF must contain /StructTreeRoot"
+    );
+}
+
+#[test]
+fn tagged_pdf_multipage_does_not_panic() {
+    let mut html = String::from("<!DOCTYPE html><html><body>");
+    for i in 0..40 {
+        html.push_str(&format!("<h2>Section {i}</h2><p>Content line for section {i}. This is a longer paragraph to ensure we get multi-page output from the renderer.</p>"));
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(&html)
+        .expect("render multi-page tagged");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+}
+
+#[test]
+fn untagged_pdf_has_no_struct_tree_root() {
+    let pdf = Engine::builder()
+        .build()
+        .render_html("<html><body><h1>Hello</h1><p>World</p></body></html>")
+        .expect("render untagged");
+
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        !s.contains("/StructTreeRoot"),
+        "untagged PDF must not contain /StructTreeRoot"
+    );
+}
