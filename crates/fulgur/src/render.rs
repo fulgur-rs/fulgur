@@ -809,6 +809,12 @@ fn try_start_tagged(
 /// the resulting `Identifier` in the `TagCollector` for StructTree assembly.
 ///
 /// No-op when `tag_info` is `None` (tagging disabled or not applicable).
+///
+/// # Invariant
+/// `tag_info` must only hold values produced by `try_start_tagged` on the
+/// same `canvas`. `try_start_tagged` returns `None` when `tag_collector` is
+/// absent, so if `tag_info` is `Some`, `canvas.tag_collector` is guaranteed
+/// to be `Some` as well.
 fn finish_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,

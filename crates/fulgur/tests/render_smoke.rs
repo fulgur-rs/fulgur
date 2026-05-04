@@ -2514,3 +2514,20 @@ fn untagged_pdf_has_no_struct_tree_root() {
         "untagged PDF must not contain /StructTreeRoot"
     );
 }
+
+#[test]
+fn pdf_ua_fails_ua1_validation_until_full_compliance_lands() {
+    // pdf_ua=true enables UA1 validation which requires structural
+    // attributes (document title, heading /Title entries) beyond
+    // what this issue wires. Full PDF/UA-1 compliance is out of scope
+    // for fulgur-izp.4; this test documents the known failure mode so
+    // regressions (e.g. a panic instead of a clean Err) are visible.
+    let result = Engine::builder()
+        .pdf_ua(true)
+        .build()
+        .render_html("<html><body><h1>Hello</h1><p>World</p></body></html>");
+    assert!(
+        result.is_err(),
+        "expected UA1 validation error until full compliance lands"
+    );
+}
