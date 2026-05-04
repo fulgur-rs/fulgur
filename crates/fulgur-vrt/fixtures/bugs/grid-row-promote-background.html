@@ -7,7 +7,9 @@
   /* Spacer pushes the grid to overflow the first page so card 1 must split
      internally. Without the fulgur-86fo fix card 2 (the parallel sibling
      promoted to page 2) loses its background and border. */
-  .spacer { height: 800pt; background: #eef; }
+  /* Reduced from 800pt so the grid row straddles the first page boundary,
+     visually demonstrating cross-page co-split (fulgur-ysms). */
+  .spacer { height: 660pt; background: #eef; }
   .grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
