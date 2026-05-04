@@ -78,6 +78,26 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
     }
 }
 
+/// Convert a fulgur `PdfTag` to the corresponding Krilla `TagKind`.
+///
+/// Called by `render_v2` when building the flat TagTree after all pages
+/// are drawn. Only P / H{n} / Span are supported in fulgur-izp.4; all
+/// other variants fall back to `Tag::P` as a safe placeholder until later
+/// issues wire lists, tables, and figures.
+pub fn pdf_tag_to_krilla_tag(tag: &PdfTag) -> krilla::tagging::TagKind {
+    use std::num::NonZeroU16;
+    match tag {
+        PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
+        PdfTag::H { level } => {
+            let level = NonZeroU16::new((*level).max(1) as u16)
+                .unwrap_or_else(|| NonZeroU16::new(1).unwrap());
+            krilla::tagging::Tag::Hn(level, None).into()
+        }
+        PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
+        _ => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +146,25 @@ mod tests {
         assert_eq!(classify_element("a"), None);
         assert_eq!(classify_element("body"), None);
         assert_eq!(classify_element("html"), None);
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_p() {
+        let k = pdf_tag_to_krilla_tag(&PdfTag::P);
+        assert!(matches!(k, krilla::tagging::TagKind::P(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_headings() {
+        for level in 1u8..=6 {
+            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level });
+            assert!(matches!(k, krilla::tagging::TagKind::Hn(_)), "level={level}");
+        }
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_span() {
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Span);
+        assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
     }
 }
