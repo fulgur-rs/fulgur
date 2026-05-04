@@ -9,8 +9,48 @@
 //! When you add a new draw path (e.g. a `draw_background_layer` match arm),
 //! also add a smoke test here — see CLAUDE.md "Coverage scope" Gotcha.
 
+use std::path::PathBuf;
+
 use fulgur::{AssetBundle, Engine};
 use tempfile::tempdir;
+
+fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.pdf"));
+
+    if std::env::var("FULGUR_UPDATE_SNAPSHOTS").is_ok() {
+        std::fs::write(&path, pdf).unwrap();
+        return;
+    }
+
+    if !path.exists() {
+        std::fs::write(&path, pdf).unwrap();
+        panic!("new snapshot created: {name}.pdf — review the file, then re-run the test");
+    }
+
+    let expected = std::fs::read(&path).unwrap();
+    if pdf != expected.as_slice() {
+        panic!(
+            "PDF snapshot mismatch: {name}\nRun with FULGUR_UPDATE_SNAPSHOTS=1 to update."
+        );
+    }
+}
+
+fn tagged_render_with_noto(html: &str) -> Vec<u8> {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets.add_font_file(&font_path).unwrap();
+    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
+    Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .assets(assets)
+        .build()
+        .render_html(html)
+        .expect("tagged render")
+}
 
 #[test]
 fn test_render_html_resolves_link_stylesheet() {
@@ -2559,4 +2599,23 @@ fn tagged_struct_tree_reflects_dom_nesting() {
 
     let s = String::from_utf8_lossy(&pdf);
     assert!(s.contains("/Div"), "StructTree must contain /Div for <section>");
+}
+
+#[test]
+fn snapshot_tagged_struct_tree_nested() {
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{font-family:'Noto Sans',sans-serif;margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body text.</p></section></body></html>"#;
+    let pdf = tagged_render_with_noto(html);
+    check_pdf_snapshot("tagged_struct_tree_nested", &pdf);
+}
+
+#[test]
+fn tagged_pdf_is_deterministic() {
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{font-family:'Noto Sans',sans-serif;margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body text.</p></section></body></html>"#;
+    let pdf1 = tagged_render_with_noto(html);
+    let pdf2 = tagged_render_with_noto(html);
+    assert_eq!(pdf1, pdf2, "tagged PDF must be byte-identical across renders");
 }
