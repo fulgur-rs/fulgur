@@ -5044,10 +5044,17 @@ h2 { string-set: chapter-title content(text); }
             .iter()
             .filter(|(p, _, y)| *p == 0 && *y > 60.0)
             .collect();
+        // The critical assertion: the RIGHT column's first inner div must also
+        // appear on page 0 (at x=100, y≈70). Pre-fix: cell 2's recursion starts
+        // from page 1, so its inner divs land at x=100 only on page 1.
+        let right_col_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
+            .collect();
         assert_eq!(
-            first_divs_page0.len(),
-            2,
-            "both columns' first inner divs must appear on page 0 (pre-fix: only 1); inner={inner:?}"
+            right_col_page0.len(),
+            1,
+            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
         );
     }
 
@@ -5080,14 +5087,14 @@ h2 { string-set: chapter-title content(text); }
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let first_divs_page0: Vec<_> = inner
+        let right_col_page0: Vec<_> = inner
             .iter()
-            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
+            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
             .collect();
         assert_eq!(
-            first_divs_page0.len(),
-            2,
-            "both columns' first inner divs must appear on page 0 (pre-fix: only 1); inner={inner:?}"
+            right_col_page0.len(),
+            1,
+            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
         );
     }
 }
