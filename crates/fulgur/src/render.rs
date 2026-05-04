@@ -3570,7 +3570,7 @@ fn build_tag_group(
     heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
     children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
 ) -> TagGroup {
-    let entry = &drawables.semantics[&node_id];
+    let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
     let title = heading_titles.get(&node_id).cloned();
     let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&entry.tag, title));
 

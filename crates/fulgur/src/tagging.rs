@@ -92,8 +92,7 @@ pub fn pdf_tag_to_krilla_tag(
     match tag {
         PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
         PdfTag::H { level } => {
-            let level = NonZeroU16::new((*level).max(1) as u16)
-                .unwrap_or_else(|| NonZeroU16::new(1).unwrap());
+            let level = NonZeroU16::new((*level).clamp(1, 6) as u16).unwrap();
             krilla::tagging::Tag::Hn(level, heading_title).into()
         }
         PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),

@@ -2585,8 +2585,9 @@ fn pdf_ua_fails_ua1_validation_until_full_compliance_lands() {
 
 #[test]
 fn tagged_struct_tree_reflects_dom_nesting() {
-    // section > h1 + p の2階層構造が StructTree に反映されることを確認。
-    // 現在の flat ビルダーでは section(Div) が top-level に出ず失敗する。
+    // Smoke test: /Div appears in the PDF StructTree bytes (font-agnostic).
+    // Deep structural verification (that /Div nests /Hn and /P as children
+    // rather than siblings) is tracked in fulgur-izp.5 follow-up.
     let html = r#"<!DOCTYPE html><html lang="en">
 <head><style>body{margin:0}</style></head>
 <body><section><h1>Title</h1><p>Body.</p></section></body></html>"#;
