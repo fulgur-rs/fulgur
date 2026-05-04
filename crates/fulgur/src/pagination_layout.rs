@@ -4046,6 +4046,55 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    #[test]
+    fn fragment_block_subtree_grid_row_co_splits_at_same_y() {
+        // 1 row の 2 cell が 1 page strip を超える case。
+        // pre-fix: card1 が page 0 内で split → card2 は page 1 へ promote
+        //   (page 0 に card2 上半分が出ない / page 1 上部に空白)
+        // post-fix: 両 cell とも page 0 + page 1 に同じ y で co-split
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 100px; width: 200px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="height: 250px; width: 100px"></div>
+                <div style="height: 250px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+
+        let mut cells: Vec<(u32, f32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y, f.height))
+            .collect();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let page0_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 0).collect();
+        let page1_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 1).collect();
+        assert_eq!(
+            page0_cells.len(),
+            2,
+            "expected both grid cells to have a page-0 fragment (co-split), got {cells:?}"
+        );
+        assert_eq!(
+            page1_cells.len(),
+            2,
+            "expected both grid cells to have a page-1 fragment (co-split), got {cells:?}"
+        );
+        assert!(
+            (page0_cells[0].2 - page0_cells[1].2).abs() < 0.5,
+            "page-0 co-split cells must share y, got {cells:?}"
+        );
+        assert!(
+            (page1_cells[0].2 - page1_cells[1].2).abs() < 0.5,
+            "page-1 co-split cells must share y, got {cells:?}"
+        );
+    }
+
     /// fulgur-916y: a multicol container with a `column-span: all`
     /// child whose subtree exceeds one page must split across pages
     /// in the partition path. Pre-fix, the multicol gate
