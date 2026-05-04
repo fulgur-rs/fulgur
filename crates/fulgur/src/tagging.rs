@@ -78,14 +78,12 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
     }
 }
 
-/// Convert a fulgur `PdfTag` to the corresponding Krilla `TagKind`.
+/// Map a fulgur-internal [`PdfTag`] to the Krilla [`TagKind`] used when
+/// building the PDF StructTree.
 ///
-/// `heading_title` is forwarded to `Tag::Hn` so PDF/UA-1 validators find the
-/// required `/T` (Title) attribute on heading tags. Pass `None` for non-heading
+/// `heading_title` is forwarded to [`krilla::tagging::Tag::Hn`] as the
+/// `/T` (Title) attribute required by PDF/UA-1. Pass `None` for non-heading
 /// tags or when the text is unavailable.
-///
-/// Only P / H{n} / Span are fully wired; all other variants fall back to
-/// `Tag::P` as a placeholder until list, table, and figure tagging lands.
 pub fn pdf_tag_to_krilla_tag(
     tag: &PdfTag,
     heading_title: Option<String>,
@@ -99,7 +97,21 @@ pub fn pdf_tag_to_krilla_tag(
             krilla::tagging::Tag::Hn(level, heading_title).into()
         }
         PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
-        _ => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
+        PdfTag::Div => krilla::tagging::Tag::<krilla::tagging::kind::Div>::Div.into(),
+        PdfTag::Figure => krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(None).into(),
+        PdfTag::L => {
+            krilla::tagging::Tag::L(krilla::tagging::ListNumbering::None).into()
+        }
+        PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
+        PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
+        PdfTag::TRowGroup => {
+            krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into()
+        }
+        PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
+        PdfTag::Th => {
+            krilla::tagging::Tag::TH(krilla::tagging::TableHeaderScope::Both).into()
+        }
+        PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
     }
 }
 
@@ -174,5 +186,19 @@ mod tests {
     fn pdf_tag_to_krilla_tag_span() {
         let k = pdf_tag_to_krilla_tag(&PdfTag::Span, None);
         assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_covers_all_variants() {
+        use krilla::tagging::TagKind;
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Div, None), TagKind::Div(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Figure, None), TagKind::Figure(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::L, None), TagKind::L(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Li, None), TagKind::LI(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Table, None), TagKind::Table(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::TRowGroup, None), TagKind::TBody(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Tr, None), TagKind::TR(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Th, None), TagKind::TH(_)));
+        assert!(matches!(pdf_tag_to_krilla_tag(&PdfTag::Td, None), TagKind::TD(_)));
     }
 }
