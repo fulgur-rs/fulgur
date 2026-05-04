@@ -2674,3 +2674,36 @@ fn tagged_table_basic_structure() {
     assert!(s.contains("/TD"), "must have /TD tag");
     assert!(s.contains("/TR"), "must have /TR tag");
 }
+
+#[test]
+fn tagged_table_thead_tbody_tfoot_distinction() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <table>
+            <thead><tr><th>Header</th></tr></thead>
+            <tbody><tr><td>Body</td></tr></tbody>
+            <tfoot><tr><td>Footer</td></tr></tfoot>
+        </table>
+    </body></html>"#;
+    let pdf = tagged_render_with_noto(html);
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/THead"), "must have /THead");
+    assert!(s.contains("/TBody"), "must have /TBody");
+    assert!(s.contains("/TFoot"), "must have /TFoot");
+}
+
+#[test]
+fn tagged_th_scope_attribute_preserved() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <table>
+            <tr>
+                <th scope="col">Column Header</th>
+                <th scope="row">Row Header</th>
+            </tr>
+        </table>
+    </body></html>"#;
+    let pdf = tagged_render_with_noto(html);
+    let s = String::from_utf8_lossy(&pdf);
+    // Krilla writes /Scope /Column and /Scope /Row in the PDF stream
+    assert!(s.contains("/Column"), "must have Column scope for col-scoped TH");
+    assert!(s.contains("/Row"), "must have Row scope for row-scoped TH");
+}
