@@ -1294,27 +1294,28 @@ mod semantics_tests {
     }
 
     #[test]
-    fn walk_semantics_li_paragraph_parent_is_lbody() {
-        // li 直下のテキスト（inline-root）は lbody_id を親に持つ
-        let html = "<!DOCTYPE html><html><body><ul><li>item</li></ul></body></html>";
+    fn walk_semantics_li_child_span_parent_is_lbody() {
+        // li 直下の <span> は lbody_id を親に持つ
+        let html = "<!DOCTYPE html><html><body><ul><li><span>text</span></li></ul></body></html>";
         let d = build_drawables(html);
         let (&li_id, _) = d.li_lbl_ids.iter().next().unwrap();
         let lbody_id = d.li_lbody_ids[&li_id];
 
-        // P タグを探す
-        let p_entries: Vec<_> = d
+        let span_entries: Vec<_> = d
             .semantics
             .iter()
-            .filter(|(_, e)| e.tag == PdfTag::P)
+            .filter(|(_, e)| e.tag == PdfTag::Span)
             .collect();
-        // li 直下テキストは <p> タグがないため P がない場合もある
-        // その場合は lbody_id が semantics に存在すること自体を確認
-        let _ = d.semantics.get(&lbody_id).expect("lbody in semantics");
-        // P がある場合は parent が li_id 直接ではなく lbody_id であること
-        for (_, entry) in &p_entries {
-            if entry.parent == Some(li_id) {
-                panic!("P's parent should be lbody_id, not li_id directly");
-            }
+        assert!(
+            !span_entries.is_empty(),
+            "span inside li should be in semantics"
+        );
+        for (_, entry) in &span_entries {
+            assert_eq!(
+                entry.parent,
+                Some(lbody_id),
+                "span inside li should have lbody_id as parent, not li_id"
+            );
         }
     }
 
