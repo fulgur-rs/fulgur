@@ -4048,16 +4048,17 @@ h2 { string-set: chapter-title content(text); }
 
     #[test]
     fn fragment_block_subtree_grid_row_co_splits_at_same_y() {
-        // 1 row の 2 cell が 1 page strip を超える case。
-        // pre-fix: card1 が page 0 内で split → card2 は page 1 へ promote
-        //   (page 0 に card2 上半分が出ない / page 1 上部に空白)
-        // post-fix: 両 cell とも page 0 + page 1 に同じ y で co-split
+        // 1 row の 2 cell が 1 page strip を超える case (cell が inner
+        // content を持つ — fragment_block_subtree が recursion 経路を
+        // 通る). pre-fix: card1 だけ split (or page promote), card2 は
+        // 別ページに promote されて co-split しない. post-fix: 両 cell
+        // とも page 0 + page 1 に同じ y で co-split.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 100px; width: 200px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
-                <div style="height: 250px; width: 100px"></div>
-                <div style="height: 250px; width: 100px"></div>
+                <div style="width: 100px"><div style="height: 250px; width: 100px"></div></div>
+                <div style="width: 100px"><div style="height: 250px; width: 100px"></div></div>
               </div>
             </body></html>
         "#;
@@ -4065,6 +4066,10 @@ h2 { string-set: chapter-title content(text); }
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
 
+        // 100×100 もしくは 100×NN の inner div fragment を集める。
+        // (cell wrapper も width=100 になるが、co-split が動けば inner
+        // div 側も両ページに fragment を持つので両者で OK)
+        // height のフィルタは外し、page index と y で同 row を識別する。
         let mut cells: Vec<(u32, f32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
@@ -4073,25 +4078,41 @@ h2 { string-set: chapter-title content(text); }
             .collect();
         cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let page0_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 0).collect();
-        let page1_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 1).collect();
-        assert_eq!(
-            page0_cells.len(),
-            2,
-            "expected both grid cells to have a page-0 fragment (co-split), got {cells:?}"
-        );
-        assert_eq!(
-            page1_cells.len(),
-            2,
-            "expected both grid cells to have a page-1 fragment (co-split), got {cells:?}"
+        // x は cell wrapper も inner div も同じ (0 か 100). 同じ x の
+        // fragments のうち各 page の最も上の y を取る — これが「その
+        // 列の cell の page-local 開始 y」。
+        let column_top_y = |page: u32, x_target: f32| -> Option<f32> {
+            cells
+                .iter()
+                .filter(|(p, x, _, _)| *p == page && (*x - x_target).abs() < 0.5)
+                .map(|(_, _, y, _)| *y)
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+        };
+
+        let p0_left = column_top_y(0, 0.0);
+        let p0_right = column_top_y(0, 100.0);
+        let p1_left = column_top_y(1, 0.0);
+        let p1_right = column_top_y(1, 100.0);
+
+        assert!(
+            p0_left.is_some() && p0_right.is_some(),
+            "expected both columns to have a page-0 fragment, cells={cells:?}"
         );
         assert!(
-            (page0_cells[0].2 - page0_cells[1].2).abs() < 0.5,
-            "page-0 co-split cells must share y, got {cells:?}"
+            p1_left.is_some() && p1_right.is_some(),
+            "expected both columns to have a page-1 fragment (co-split), cells={cells:?}"
         );
         assert!(
-            (page1_cells[0].2 - page1_cells[1].2).abs() < 0.5,
-            "page-1 co-split cells must share y, got {cells:?}"
+            (p0_left.unwrap() - p0_right.unwrap()).abs() < 0.5,
+            "page-0 row top must share y across columns, got left={:?} right={:?}",
+            p0_left,
+            p0_right
+        );
+        assert!(
+            (p1_left.unwrap() - p1_right.unwrap()).abs() < 0.5,
+            "page-1 row top must share y across columns, got left={:?} right={:?}",
+            p1_left,
+            p1_right
         );
     }
 
@@ -4101,8 +4122,8 @@ h2 { string-set: chapter-title content(text); }
             <html><body style="margin: 0; padding: 0">
               <div style="height: 100px; width: 200px"></div>
               <div style="display: flex; width: 200px;">
-                <div style="height: 250px; width: 100px; flex: 0 0 100px"></div>
-                <div style="height: 250px; width: 100px; flex: 0 0 100px"></div>
+                <div style="width: 100px; flex: 0 0 100px"><div style="height: 250px; width: 100px"></div></div>
+                <div style="width: 100px; flex: 0 0 100px"><div style="height: 250px; width: 100px"></div></div>
               </div>
             </body></html>
         "#;
@@ -4118,17 +4139,38 @@ h2 { string-set: chapter-title content(text); }
             .collect();
         cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let page0_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 0).collect();
-        let page1_cells: Vec<_> = cells.iter().filter(|(p, _, _, _)| *p == 1).collect();
-        assert_eq!(page0_cells.len(), 2, "{cells:?}");
-        assert_eq!(page1_cells.len(), 2, "{cells:?}");
+        let column_top_y = |page: u32, x_target: f32| -> Option<f32> {
+            cells
+                .iter()
+                .filter(|(p, x, _, _)| *p == page && (*x - x_target).abs() < 0.5)
+                .map(|(_, _, y, _)| *y)
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+        };
+
+        let p0_left = column_top_y(0, 0.0);
+        let p0_right = column_top_y(0, 100.0);
+        let p1_left = column_top_y(1, 0.0);
+        let p1_right = column_top_y(1, 100.0);
+
         assert!(
-            (page0_cells[0].2 - page0_cells[1].2).abs() < 0.5,
-            "{cells:?}"
+            p0_left.is_some() && p0_right.is_some(),
+            "expected both columns to have a page-0 fragment, cells={cells:?}"
         );
         assert!(
-            (page1_cells[0].2 - page1_cells[1].2).abs() < 0.5,
-            "{cells:?}"
+            p1_left.is_some() && p1_right.is_some(),
+            "expected both columns to have a page-1 fragment (co-split), cells={cells:?}"
+        );
+        assert!(
+            (p0_left.unwrap() - p0_right.unwrap()).abs() < 0.5,
+            "page-0 row top must share y across columns, got left={:?} right={:?}",
+            p0_left,
+            p0_right
+        );
+        assert!(
+            (p1_left.unwrap() - p1_right.unwrap()).abs() < 0.5,
+            "page-1 row top must share y across columns, got left={:?} right={:?}",
+            p1_left,
+            p1_right
         );
     }
 
