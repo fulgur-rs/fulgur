@@ -2652,3 +2652,25 @@ fn tagged_figure_alt_text_appears_in_pdf() {
         "PDF must embed the alt text value in the /Alt entry"
     );
 }
+
+#[test]
+fn tagged_table_basic_structure() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <table>
+            <thead><tr><th>Name</th><th>Score</th></tr></thead>
+            <tbody>
+                <tr><td>Alice</td><td>95</td></tr>
+                <tr><td>Bob</td><td>87</td></tr>
+            </tbody>
+        </table>
+    </body></html>"#;
+    let pdf = tagged_render_with_noto(html);
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"), "must have StructTreeRoot");
+    assert!(s.contains("/Table"), "must have /Table tag");
+    assert!(s.contains("/THead"), "must have /THead tag");
+    assert!(s.contains("/TBody"), "must have /TBody tag");
+    assert!(s.contains("/TH"), "must have /TH tag");
+    assert!(s.contains("/TD"), "must have /TD tag");
+    assert!(s.contains("/TR"), "must have /TR tag");
+}
