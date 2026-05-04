@@ -14,10 +14,12 @@ use crate::drawables::NodeId;
 /// HTML semantics to. Render-side translation to the Krilla type
 /// happens in `fulgur-izp.5`; until then this enum is convert-side
 /// only, so it intentionally avoids carrying Krilla-specific types
-/// (`TableHeaderScope`, alt text, heading title) —
-/// those flow from the DOM at render time once the wire-up lands.
+/// (alt text, heading title) — those flow from the DOM at render time
+/// once the wire-up lands.
 /// `ListNumbering` is carried here because `ul`/`ol` distinction is
 /// known at classify time from the element local name.
+/// `TableHeaderScope` is carried here because it is determined by the
+/// `scope` HTML attribute (defaulting to `Both` when absent).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfTag {
     P,
@@ -34,9 +36,11 @@ pub enum PdfTag {
     LBody,
     Li,
     Table,
-    TRowGroup,
+    THead,
+    TBody,
+    TFoot,
     Tr,
-    Th,
+    Th { scope: krilla::tagging::TableHeaderScope },
     Td,
 }
 
@@ -61,9 +65,9 @@ pub struct SemanticEntry {
 /// `<script>`, `<style>`, etc.).
 ///
 /// Heading levels are encoded as `PdfTag::H { level }` with `level` in
-/// `1..=6`. `<thead>` / `<tbody>` / `<tfoot>` collapse into
-/// `TRowGroup`; render-side may emit them as `Tag::TBody` etc. when the
-/// distinction matters for PDF/UA.
+/// `1..=6`. `<th>` defaults to `TableHeaderScope::Both`; callers that
+/// read the `scope` HTML attribute should override this field after the
+/// initial classification (fulgur-izp.8).
 pub fn classify_element(local_name: &str) -> Option<PdfTag> {
     match local_name {
         "p" => Some(PdfTag::P),
@@ -86,9 +90,13 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
         }),
         "li" => Some(PdfTag::Li),
         "table" => Some(PdfTag::Table),
-        "thead" | "tbody" | "tfoot" => Some(PdfTag::TRowGroup),
+        "thead" => Some(PdfTag::THead),
+        "tbody" => Some(PdfTag::TBody),
+        "tfoot" => Some(PdfTag::TFoot),
         "tr" => Some(PdfTag::Tr),
-        "th" => Some(PdfTag::Th),
+        "th" => Some(PdfTag::Th {
+            scope: krilla::tagging::TableHeaderScope::Both,
+        }),
         "td" => Some(PdfTag::Td),
         _ => None,
     }
@@ -125,11 +133,11 @@ pub fn pdf_tag_to_krilla_tag(
         PdfTag::LBody => krilla::tagging::Tag::<krilla::tagging::kind::LBody>::LBody.into(),
         PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
         PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
-        PdfTag::TRowGroup => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
+        PdfTag::THead => krilla::tagging::Tag::<krilla::tagging::kind::THead>::THead.into(),
+        PdfTag::TBody => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
+        PdfTag::TFoot => krilla::tagging::Tag::<krilla::tagging::kind::TFoot>::TFoot.into(),
         PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
-        PdfTag::Th => {
-            krilla::tagging::Tag::TH(krilla::tagging::TableHeaderScope::Both).into() // scope attr: fulgur-izp.8
-        }
+        PdfTag::Th { scope } => krilla::tagging::Tag::TH(*scope).into(),
         PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
     }
 }

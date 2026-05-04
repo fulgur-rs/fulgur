@@ -1209,11 +1209,22 @@ mod semantics_tests {
 
         let tables = entries_by_tag(&d, &PdfTag::Table);
         assert_eq!(tables.len(), 1);
-        let row_groups = entries_by_tag(&d, &PdfTag::TRowGroup);
+        let theads = entries_by_tag(&d, &PdfTag::THead);
+        assert_eq!(theads.len(), 1, "one thead");
+        let tbodies = entries_by_tag(&d, &PdfTag::TBody);
+        assert_eq!(tbodies.len(), 1, "one tbody");
+        // Collect thead + tbody together so the parent-check loop below works
+        // the same way as before (both must parent to the table).
+        let row_groups: Vec<_> = theads.iter().chain(tbodies.iter()).copied().collect();
         assert_eq!(row_groups.len(), 2, "thead + tbody");
         let rows = entries_by_tag(&d, &PdfTag::Tr);
         assert_eq!(rows.len(), 2);
-        let ths = entries_by_tag(&d, &PdfTag::Th);
+        let ths = entries_by_tag(
+            &d,
+            &PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Both,
+            },
+        );
         assert_eq!(ths.len(), 1);
         let tds = entries_by_tag(&d, &PdfTag::Td);
         assert_eq!(tds.len(), 1);
