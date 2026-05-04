@@ -2529,10 +2529,9 @@ fn record_fixed_subtree_descendants(
 /// never reaches `pagination_geometry` and the v2 dispatch loop drops
 /// the element entirely (WPT `fixedpos-00{1,2,8}` ref-side breakage).
 ///
-/// Each emitted Fragment lives on the page where its resolved y lands
-/// (`page_index = floor(y / page_h)`); off-page elements (e.g.
-/// `bottom: -100vh` in a single-page document) are dropped because no
-/// page can paint them.
+/// Each visited in-flow node emits fragments for every page intersected
+/// by its resolved y range; off-page elements (e.g. `bottom: -100vh` in
+/// a single-page document) are dropped because no page can paint them.
 pub fn append_position_absolute_body_direct_fragments(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
@@ -2577,10 +2576,10 @@ pub fn append_position_absolute_body_direct_fragments(
             resolve_viewport_cb_location(child, w, h, viewport_w_px, viewport_h_px)
                 .unwrap_or((layout.location.x, layout.location.y));
 
-        // Walk the subtree and emit a fragment for every in-flow node
-        // (block, paragraph, anonymous wrapper). Without this the
-        // dispatch loop drops descendants whose node_id is not the
-        // root abs id (anonymous block wrappers around mixed
+        // Walk the subtree and emit fragments for every page each
+        // in-flow node intersects (block, paragraph, anonymous wrapper).
+        // Without this the dispatch loop drops descendants whose node_id
+        // is not the root abs id (anonymous block wrappers around mixed
         // text/element content — fixedpos-002 / fixedpos-008 ref-side
         // pattern). Out-of-flow descendants are skipped because they
         // are handled by their own pass. The render path adds
@@ -2603,11 +2602,12 @@ pub fn append_position_absolute_body_direct_fragments(
     geometry.retain(|_, geom| !geom.fragments.is_empty());
 }
 
-/// Walk a body-direct out-of-flow subtree and emit a single Fragment for
-/// each in-flow node (the subtree root + every block / paragraph /
-/// anonymous wrapper inside it). Each fragment's body-relative
-/// location = the subtree root's resolved viewport-CB location plus the
-/// node's accumulated `final_layout.location` offset from that root.
+/// Walk a body-direct out-of-flow subtree and emit Fragments on every
+/// intersected page for each in-flow node (the subtree root + every
+/// block / paragraph / anonymous wrapper inside it). Each fragment's
+/// body-relative location = the subtree root's resolved viewport-CB
+/// location plus the node's accumulated `final_layout.location` offset
+/// from that root.
 ///
 /// Skips out-of-flow descendants (their own pass handles them) and
 /// whitespace-only text nodes (mirrors `fragment_pagination_root`).
@@ -2639,49 +2639,6 @@ fn record_subtree_fragments_at_offset(
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
-        // Page assignment is based on the un-compensated viewport-CB
-        // resolved position (the actual paint location). Storage is
-        // body-relative because the dispatch path adds `body_offset_pt`
-        // back at draw time.
-        let final_y_for_paging = root_xy_for_paging.1 + offset_in_subtree.1;
-        let stored_x = root_xy_for_paging.0 + offset_in_subtree.0 - body_offset.0;
-        let w = node.final_layout.size.width;
-        let h = node.final_layout.size.height;
-
-        if final_y_for_paging.is_finite() && page_h_px > 0.0 && final_y_for_paging >= 0.0 {
-            // Stylo computes `Nvh` against the viewport snapshot taken
-            // at parse time, which can differ from `page_h_px` by a
-            // sub-px amount (the @page resolution uses the resolved
-            // content area; Stylo's computed `100vh` rounds elsewhere).
-            // Without tolerance, `top: 100vh` on a 1-page render
-            // becomes `final_y = 971.0` against `page_h_px = 971.34`,
-            // which floor()s to page 0 and renders the off-page text
-            // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
-            // toward integer multiples of page_h before paging.
-            let raw_ratio = final_y_for_paging / page_h_px;
-            let snapped_ratio = if (raw_ratio - raw_ratio.round()).abs() < 1e-3 {
-                raw_ratio.round()
-            } else {
-                raw_ratio
-            };
-            let page_index_f = snapped_ratio.floor();
-            if page_index_f.is_finite() && page_index_f < total_pages as f32 {
-                let page_index = page_index_f as u32;
-                let y_in_page = final_y_for_paging - (page_index as f32) * page_h_px;
-                let stored_y = y_in_page - body_offset.1;
-                let entry = geometry.entry(node_id).or_default();
-                entry.fragments.clear();
-                entry.is_repeat = false;
-                entry.fragments.push(Fragment {
-                    page_index,
-                    x: stored_x,
-                    y: stored_y,
-                    width: w,
-                    height: h,
-                });
-            }
-        }
-
         // Prefer `layout_children` so anonymous block wrappers Stylo
         // synthesizes around mixed inline/block content are visited
         // (CSS 2.1 §9.2.1.1 — see `fragment_pagination_root` for the
@@ -2696,7 +2653,106 @@ fn record_subtree_fragments_at_offset(
                 node.children.clone()
             }
         };
+        // Page assignment is based on the un-compensated viewport-CB
+        // resolved position (the actual paint location). Storage is
+        // body-relative because the dispatch path adds `body_offset_pt`
+        // back at draw time.
+        let final_y_for_paging = root_xy_for_paging.1 + offset_in_subtree.1;
+        let stored_x = root_xy_for_paging.0 + offset_in_subtree.0 - body_offset.0;
+        let w = node.final_layout.size.width;
+        let h = node.final_layout.size.height;
+        let is_size_contained = node.primary_styles().is_some_and(|s| {
+            s.get_box()
+                .clone_contain()
+                .contains(::style::values::computed::box_::Contain::SIZE)
+        });
+        let monolithic_adjust: f32 = children
+            .iter()
+            .filter_map(|child_id| doc.get_node(*child_id))
+            .filter(|child| {
+                child.primary_styles().is_some_and(|s| {
+                    s.get_box()
+                        .clone_contain()
+                        .contains(::style::values::computed::box_::Contain::SIZE)
+                })
+            })
+            .map(|child| (child.final_layout.size.height - page_h_px).max(0.0))
+            .sum();
+        let h_for_paging = (h - monolithic_adjust).max(0.0);
+        let mut descendant_total_pages = total_pages;
 
+        if final_y_for_paging.is_finite()
+            && h.is_finite()
+            && h_for_paging.is_finite()
+            && page_h_px > 0.0
+            && h_for_paging > 0.0
+        {
+            // Stylo computes `Nvh` against the viewport snapshot taken
+            // at parse time, which can differ from `page_h_px` by a
+            // sub-px amount (the @page resolution uses the resolved
+            // content area; Stylo's computed `100vh` rounds elsewhere).
+            // Without tolerance, `top: 100vh` on a 1-page render
+            // becomes `final_y = 971.0` against `page_h_px = 971.34`,
+            // which floor()s to page 0 and renders the off-page text
+            // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
+            // toward integer multiples of page_h before paging.
+            let start_ratio = final_y_for_paging / page_h_px;
+            let snapped_start_ratio = if (start_ratio - start_ratio.round()).abs() < 1e-3 {
+                start_ratio.round()
+            } else {
+                start_ratio
+            };
+            let bottom_y_for_paging = final_y_for_paging + h_for_paging;
+            let bottom_ratio = bottom_y_for_paging / page_h_px;
+            let mut last_page_f =
+                if bottom_y_for_paging.is_infinite() && bottom_y_for_paging.is_sign_positive() {
+                    total_pages.saturating_sub(1) as f32
+                } else if (bottom_ratio - bottom_ratio.round()).abs() < 1e-6 {
+                    bottom_ratio.round() - 1.0
+                } else {
+                    bottom_ratio.floor()
+                };
+            let first_page_f = snapped_start_ratio.floor().max(0.0);
+            if is_size_contained {
+                last_page_f = first_page_f;
+            }
+            if first_page_f.is_finite()
+                && last_page_f.is_finite()
+                && first_page_f <= last_page_f
+                && first_page_f < total_pages as f32
+            {
+                let first_page = first_page_f as u32;
+                let last_page = last_page_f as u32;
+                let entry = geometry.entry(node_id).or_default();
+                entry.fragments.clear();
+                entry.is_repeat = false;
+                for page_index in first_page..=last_page {
+                    let is_monolithic_continuation =
+                        monolithic_adjust > 0.0 && page_index > first_page;
+                    let stored_y = if is_monolithic_continuation {
+                        -body_offset.1
+                    } else {
+                        final_y_for_paging - (page_index as f32) * page_h_px - body_offset.1
+                    };
+                    let stored_h = if is_monolithic_continuation {
+                        let consumed = (page_index - first_page) as f32 * page_h_px;
+                        (h_for_paging - consumed).clamp(0.0, page_h_px)
+                    } else {
+                        h
+                    };
+                    entry.fragments.push(Fragment {
+                        page_index,
+                        x: stored_x,
+                        y: stored_y,
+                        width: w,
+                        height: stored_h,
+                    });
+                }
+                descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
+            }
+        }
+
+        let mut monolithic_y_adjust = 0.0;
         for child_id in children {
             let Some(child) = doc.get_node(child_id) else {
                 continue;
@@ -2718,7 +2774,7 @@ fn record_subtree_fragments_at_offset(
             }
             let child_offset = (
                 offset_in_subtree.0 + child.final_layout.location.x,
-                offset_in_subtree.1 + child.final_layout.location.y,
+                offset_in_subtree.1 + child.final_layout.location.y - monolithic_y_adjust,
             );
             walk(
                 geometry,
@@ -2728,9 +2784,16 @@ fn record_subtree_fragments_at_offset(
                 root_xy_for_paging,
                 body_offset,
                 page_h_px,
-                total_pages,
+                descendant_total_pages,
                 depth + 1,
             );
+            if child.primary_styles().is_some_and(|s| {
+                s.get_box()
+                    .clone_contain()
+                    .contains(::style::values::computed::box_::Contain::SIZE)
+            }) {
+                monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
+            }
         }
     }
 
@@ -3713,6 +3776,206 @@ h2 { string-set: chapter-title content(text); }
             "abs body-direct bottom:0 should land at y=770; got {}",
             frag.y
         );
+    }
+
+    /// fulgur-z4zc: a body-direct `position:absolute` subtree whose
+    /// viewport-CB y range crosses page boundaries must emit geometry on
+    /// every intersected page. The main fragmenter skips absolute OOF
+    /// children, so `append_position_absolute_body_direct_fragments` is
+    /// responsible for recording these page-local placements.
+    #[test]
+    fn position_absolute_body_direct_overflow_emits_fragments_on_each_page() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 0; width: 100px; height: 1800px">
+                <div style="width: 50px; height: 1800px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+        );
+
+        let mut tall_entries: Vec<Vec<u32>> = geom
+            .values()
+            .filter(|g| g.fragments.iter().any(|f| (f.height - 1800.0).abs() < 0.5))
+            .map(|g| {
+                let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
+                pages.sort_unstable();
+                pages
+            })
+            .collect();
+        tall_entries.sort();
+
+        assert_eq!(
+            tall_entries,
+            vec![vec![0, 1, 2], vec![0, 1, 2]],
+            "expected absolute root and in-flow child to emit fragments on pages 0, 1, and 2; got {tall_entries:?}"
+        );
+    }
+
+    #[test]
+    fn position_absolute_body_direct_expanded_pages_reach_later_text() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 0; width: 100%; background: yellow">
+                <div style="contain: size; width: 50px; height: 1800px"></div>
+                This text should land after the contained child.
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+        );
+
+        let has_later_text_fragment = geom.values().any(|g| {
+            g.fragments
+                .iter()
+                .any(|f| f.page_index == 1 && f.height > 0.0 && f.height < 100.0)
+        });
+
+        assert!(
+            has_later_text_fragment,
+            "expected later text/anonymous fragment on page 1; got {geom:?}"
+        );
+    }
+
+    #[test]
+    fn position_fixed_repeats_on_pages_added_by_body_direct_absolute() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; top: 0; width: 10px; height: 20px"></div>
+              <div style="position: absolute; top: 0; width: 100px; height: 1200px"></div>
+            </body></html>
+        "#;
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+
+        let fixed_pages = geom
+            .values()
+            .find(|g| {
+                g.is_repeat
+                    && g.fragments
+                        .iter()
+                        .any(|f| (f.width - 10.0).abs() < 0.5 && (f.height - 20.0).abs() < 0.5)
+            })
+            .map(|g| {
+                let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
+                pages.sort_unstable();
+                pages
+            });
+
+        assert_eq!(fixed_pages, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn position_absolute_body_direct_tiny_overflow_reaches_next_page() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div id="tiny" style="position: absolute; top: 0; width: 100px; height: 801px"></div>
+              <div id="exact" style="position: absolute; top: 0; width: 100px; height: 800px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
+            fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
+                let node = doc.get_node(node_id)?;
+                if let Some(ed) = node.element_data()
+                    && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                    && attr_id.value.as_str() == target
+                {
+                    return Some(node_id);
+                }
+                for &child in &node.children {
+                    if let Some(found) = walk(doc, child, target) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, id)
+        }
+        let tiny_id = find_by_id(doc.deref_mut(), "tiny").expect("tiny abs node");
+        doc.deref_mut()
+            .get_node_mut(tiny_id)
+            .expect("tiny abs node")
+            .final_layout
+            .size
+            .height = 800.1;
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            2,
+            600.0,
+            800.0,
+        );
+
+        let mut tiny_overflow_pages = None;
+        let mut exact_boundary_pages = None;
+        for g in geom.values() {
+            if g.fragments.iter().any(|f| (f.height - 800.1).abs() < 0.05) {
+                let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
+                pages.sort_unstable();
+                tiny_overflow_pages = Some(pages);
+            }
+            if g.fragments.iter().any(|f| (f.height - 800.0).abs() < 0.05) {
+                let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
+                pages.sort_unstable();
+                exact_boundary_pages = Some(pages);
+            }
+        }
+
+        assert_eq!(tiny_overflow_pages, Some(vec![0, 1]));
+        assert_eq!(exact_boundary_pages, Some(vec![0]));
+    }
+
+    #[test]
+    fn position_absolute_body_direct_height_overflow_extends_to_last_page() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 0; width: 100px; height: 1px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let abs_id = find_node_by_local_name(&doc, "div").expect("abs div");
+        doc.deref_mut()
+            .get_node_mut(abs_id)
+            .expect("abs div")
+            .final_layout
+            .size
+            .height = f32::MAX;
+        let mut geom = PaginationGeometryTable::new();
+        super::record_subtree_fragments_at_offset(
+            &mut geom,
+            doc.deref_mut(),
+            abs_id,
+            (0.0, f32::MAX),
+            (0.0, 0.0),
+            f32::MAX,
+            3,
+        );
+
+        let pages: Vec<u32> = geom
+            .get(&abs_id)
+            .expect("abs div geometry")
+            .fragments
+            .iter()
+            .map(|f| f.page_index)
+            .collect();
+        assert_eq!(pages, vec![1, 2]);
     }
 
     /// Exercises `PaginationLayoutTree`'s `LayoutPartialTree` /
