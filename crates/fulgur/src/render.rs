@@ -790,7 +790,11 @@ fn try_start_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
     drawables: &Drawables,
-) -> Option<(crate::tagging::PdfTag, krilla::tagging::Identifier, Option<String>)> {
+) -> Option<(
+    crate::tagging::PdfTag,
+    krilla::tagging::Identifier,
+    Option<String>,
+)> {
     canvas.tag_collector.as_ref()?;
     let semantic = drawables.semantics.get(&node_id)?;
     if !matches!(
@@ -835,7 +839,11 @@ fn try_start_tagged(
 fn finish_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
-    tag_info: Option<(crate::tagging::PdfTag, krilla::tagging::Identifier, Option<String>)>,
+    tag_info: Option<(
+        crate::tagging::PdfTag,
+        krilla::tagging::Identifier,
+        Option<String>,
+    )>,
 ) {
     if let Some((tag, id, heading_title)) = tag_info {
         canvas.surface.end_tagged();

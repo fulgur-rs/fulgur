@@ -86,7 +86,10 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
 ///
 /// Only P / H{n} / Span are fully wired; all other variants fall back to
 /// `Tag::P` as a placeholder until list, table, and figure tagging lands.
-pub fn pdf_tag_to_krilla_tag(tag: &PdfTag, heading_title: Option<String>) -> krilla::tagging::TagKind {
+pub fn pdf_tag_to_krilla_tag(
+    tag: &PdfTag,
+    heading_title: Option<String>,
+) -> krilla::tagging::TagKind {
     use std::num::NonZeroU16;
     match tag {
         PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
