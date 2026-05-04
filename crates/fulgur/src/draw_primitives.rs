@@ -447,12 +447,18 @@ impl LinkCollector {
 /// all pages are rendered, `render_v2` groups entries by NodeId and
 /// builds a `krilla::tagging::TagTree`.
 pub struct TagCollector {
-    entries: Vec<(crate::drawables::NodeId, crate::tagging::PdfTag, krilla::tagging::Identifier)>,
+    entries: Vec<(
+        crate::drawables::NodeId,
+        crate::tagging::PdfTag,
+        krilla::tagging::Identifier,
+    )>,
 }
 
 impl TagCollector {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn record(
@@ -466,8 +472,18 @@ impl TagCollector {
 
     pub fn into_entries(
         self,
-    ) -> Vec<(crate::drawables::NodeId, crate::tagging::PdfTag, krilla::tagging::Identifier)> {
+    ) -> Vec<(
+        crate::drawables::NodeId,
+        crate::tagging::PdfTag,
+        krilla::tagging::Identifier,
+    )> {
         self.entries
+    }
+}
+
+impl Default for TagCollector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

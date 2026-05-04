@@ -158,7 +158,10 @@ mod tests {
     fn pdf_tag_to_krilla_tag_headings() {
         for level in 1u8..=6 {
             let k = pdf_tag_to_krilla_tag(&PdfTag::H { level });
-            assert!(matches!(k, krilla::tagging::TagKind::Hn(_)), "level={level}");
+            assert!(
+                matches!(k, krilla::tagging::TagKind::Hn(_)),
+                "level={level}"
+            );
         }
     }
 
