@@ -427,6 +427,18 @@ fn walk_semantics(
             };
 
             let is_li = matches!(tag, crate::tagging::PdfTag::Li);
+
+            if matches!(tag, crate::tagging::PdfTag::Th { .. }) {
+                let scope = get_attr(elem, "scope")
+                    .and_then(|s| match s {
+                        "row" => Some(krilla::tagging::TableHeaderScope::Row),
+                        "col" | "column" => Some(krilla::tagging::TableHeaderScope::Column),
+                        _ => None,
+                    })
+                    .unwrap_or(krilla::tagging::TableHeaderScope::Both);
+                tag = crate::tagging::PdfTag::Th { scope };
+            }
+
             out.semantics.insert(
                 node_id,
                 crate::tagging::SemanticEntry {
