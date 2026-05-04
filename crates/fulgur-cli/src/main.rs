@@ -445,15 +445,9 @@ fn main() {
             if let Some(creation_date) = creation_date {
                 builder = builder.creation_date(creation_date);
             }
-            if bookmarks {
-                builder = builder.bookmarks(true);
-            }
-            if tagged {
-                builder = builder.tagged(true);
-            }
-            if pdf_ua {
-                builder = builder.pdf_ua(true);
-            }
+            builder = builder.bookmarks(bookmarks);
+            builder = builder.tagged(tagged);
+            builder = builder.pdf_ua(pdf_ua);
             if let Some(ref base_path) = base_path {
                 builder = builder.base_path(base_path);
             }
