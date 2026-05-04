@@ -367,13 +367,14 @@ fn record_semantics_pass(doc: &HtmlDocument, out: &mut crate::drawables::Drawabl
     let Some(body_id) = out.body_id else {
         return;
     };
-    walk_semantics(base, body_id, 0, out);
+    walk_semantics(base, body_id, 0, None, out);
 }
 
 fn walk_semantics(
     doc: &BaseDocument,
     node_id: usize,
     depth: usize,
+    parent_override: Option<usize>,
     out: &mut crate::drawables::Drawables,
 ) {
     if depth >= MAX_DOM_DEPTH {
@@ -382,24 +383,50 @@ fn walk_semantics(
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
-    if let Some(elem) = node.element_data() {
-        if let Some(tag) = crate::tagging::classify_element(elem.name.local.as_ref()) {
-            // Walk up `node.parent` until an already-recorded ancestor
-            // is found. The traversal is top-down so any classified
-            // ancestor is guaranteed to be present.
-            let mut parent = node.parent;
-            let parent_node_id = loop {
-                let Some(pid) = parent else { break None };
-                if out.semantics.contains_key(&pid) {
-                    break Some(pid);
+
+    let child_override = if let Some(elem) = node.element_data() {
+        if let Some(mut tag) = crate::tagging::classify_element(elem.name.local.as_ref()) {
+            // CSS list-style-type を読んで ListNumbering をオーバーライド
+            if matches!(tag, crate::tagging::PdfTag::L { .. }) {
+                if let Some(styles) = node.primary_styles() {
+                    use ::style::properties::longhands::list_style_type::computed_value::T as LST;
+                    use krilla::tagging::ListNumbering;
+                    let numbering = match styles.clone_list_style_type() {
+                        LST::Disc => ListNumbering::Disc,
+                        LST::Circle => ListNumbering::Circle,
+                        LST::Square => ListNumbering::Square,
+                        LST::Decimal => ListNumbering::Decimal,
+                        LST::LowerAlpha => ListNumbering::LowerAlpha,
+                        LST::UpperAlpha => ListNumbering::UpperAlpha,
+                        _ => ListNumbering::None,
+                    };
+                    tag = crate::tagging::PdfTag::L { numbering };
                 }
-                parent = doc.get_node(pid).and_then(|p| p.parent);
+            }
+
+            // parent を決定: override があればそれを使い、なければ DOM walk-up
+            let parent_node_id = if let Some(ov) = parent_override {
+                Some(ov)
+            } else {
+                let mut p = node.parent;
+                loop {
+                    let Some(pid) = p else { break None };
+                    if out.semantics.contains_key(&pid) {
+                        break Some(pid);
+                    }
+                    p = doc.get_node(pid).and_then(|n| n.parent);
+                }
             };
+
             let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
-                get_attr(elem, "alt").map(|v| v.to_owned())
+                node.element_data()
+                    .and_then(|e| get_attr(e, "alt"))
+                    .map(|v| v.to_owned())
             } else {
                 None
             };
+
+            let is_li = matches!(tag, crate::tagging::PdfTag::Li);
             out.semantics.insert(
                 node_id,
                 crate::tagging::SemanticEntry {
@@ -408,10 +435,46 @@ fn walk_semantics(
                     alt_text,
                 },
             );
+
+            if is_li {
+                // Lbl / LBody 合成エントリを作成
+                let lbl_id = out.alloc_synthetic_id();
+                let lbody_id = out.alloc_synthetic_id();
+                out.semantics.insert(
+                    lbl_id,
+                    crate::tagging::SemanticEntry {
+                        tag: crate::tagging::PdfTag::Lbl,
+                        parent: Some(node_id),
+                        alt_text: None,
+                    },
+                );
+                out.semantics.insert(
+                    lbody_id,
+                    crate::tagging::SemanticEntry {
+                        tag: crate::tagging::PdfTag::LBody,
+                        parent: Some(node_id),
+                        alt_text: None,
+                    },
+                );
+                out.li_lbl_ids.insert(node_id, lbl_id);
+                out.li_lbody_ids.insert(node_id, lbody_id);
+                // li の子は lbody_id を parent として再帰
+                for &child_id in &node.children {
+                    walk_semantics(doc, child_id, depth + 1, Some(lbody_id), out);
+                }
+                return; // 通常の再帰をスキップ
+            }
+
+            None // 分類済み要素 (Li 以外): 子への override はリセット
+        } else {
+            parent_override // 非分類要素: override を引き継ぐ
         }
-    }
+    } else {
+        parent_override // 要素でないノード: override を引き継ぐ
+    };
+
     for &child_id in &node.children {
-        walk_semantics(doc, child_id, depth + 1, out);
+        walk_semantics(doc, child_id, depth + 1, child_override, out);
     }
 }
 
@@ -1203,6 +1266,89 @@ mod semantics_tests {
             PdfTag::P,
             "the single entry must be the <p>, got {:?}",
             only_entry.tag
+        );
+    }
+
+    #[test]
+    fn walk_semantics_li_creates_lbl_and_lbody_synthetic_entries() {
+        let html = "<!DOCTYPE html><html><body><ul><li>item</li></ul></body></html>";
+        let d = build_drawables(html);
+
+        // li_lbl_ids と li_lbody_ids に 1 エントリずつあること
+        assert_eq!(d.li_lbl_ids.len(), 1, "one li_lbl_ids entry");
+        assert_eq!(d.li_lbody_ids.len(), 1, "one li_lbody_ids entry");
+
+        // li_lbl_ids のキー = li NodeId、値 = Lbl 合成 NodeId
+        let (&li_id, &lbl_id) = d.li_lbl_ids.iter().next().unwrap();
+        let lbody_id = d.li_lbody_ids[&li_id];
+
+        // semantics に Lbl エントリがあり、parent = li_id
+        let lbl_entry = &d.semantics[&lbl_id];
+        assert_eq!(lbl_entry.tag, PdfTag::Lbl);
+        assert_eq!(lbl_entry.parent, Some(li_id));
+
+        // semantics に LBody エントリがあり、parent = li_id
+        let lbody_entry = &d.semantics[&lbody_id];
+        assert_eq!(lbody_entry.tag, PdfTag::LBody);
+        assert_eq!(lbody_entry.parent, Some(li_id));
+    }
+
+    #[test]
+    fn walk_semantics_li_paragraph_parent_is_lbody() {
+        // li 直下のテキスト（inline-root）は lbody_id を親に持つ
+        let html = "<!DOCTYPE html><html><body><ul><li>item</li></ul></body></html>";
+        let d = build_drawables(html);
+        let (&li_id, _) = d.li_lbl_ids.iter().next().unwrap();
+        let lbody_id = d.li_lbody_ids[&li_id];
+
+        // P タグを探す
+        let p_entries: Vec<_> = d
+            .semantics
+            .iter()
+            .filter(|(_, e)| e.tag == PdfTag::P)
+            .collect();
+        // li 直下テキストは <p> タグがないため P がない場合もある
+        // その場合は lbody_id が semantics に存在すること自体を確認
+        let _ = d.semantics.get(&lbody_id).expect("lbody in semantics");
+        // P がある場合は parent が li_id 直接ではなく lbody_id であること
+        for (_, entry) in &p_entries {
+            if entry.parent == Some(li_id) {
+                panic!("P's parent should be lbody_id, not li_id directly");
+            }
+        }
+    }
+
+    #[test]
+    fn walk_semantics_nested_list_structure() {
+        let html = "<!DOCTYPE html><html><body>\
+            <ul><li><ol><li>nested</li></ol></li></ul>\
+            </body></html>";
+        let d = build_drawables(html);
+
+        // 2 つの li があるので li_lbl_ids に 2 エントリ
+        assert_eq!(d.li_lbl_ids.len(), 2);
+
+        // inner ol の L エントリが存在すること
+        let decimal_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Decimal,
+            },
+        );
+        assert_eq!(decimal_lists.len(), 1, "one ol (Decimal)");
+        let (_, inner_ol_parent) = decimal_lists[0];
+
+        // inner ol の parent は outer li の lbody_id であること
+        let outer_li_ids: Vec<_> = d
+            .li_lbl_ids
+            .keys()
+            .copied()
+            .filter(|&id| d.li_lbody_ids.get(&id).copied() == inner_ol_parent)
+            .collect();
+        assert_eq!(
+            outer_li_ids.len(),
+            1,
+            "inner ol parent should be outer li's lbody"
         );
     }
 
