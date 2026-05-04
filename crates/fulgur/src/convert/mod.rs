@@ -396,7 +396,7 @@ fn walk_semantics(
                 parent = doc.get_node(pid).and_then(|p| p.parent);
             };
             let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
-                get_attr(elem, "alt").map(|v| std::sync::Arc::from(v))
+                get_attr(elem, "alt").map(|v| v.to_owned())
             } else {
                 None
             };
@@ -1215,6 +1215,7 @@ mod semantics_tests {
             .values()
             .filter(|e| e.tag == PdfTag::Figure)
             .collect();
+        assert_eq!(figs2.len(), 1);
         assert_eq!(figs2[0].alt_text.as_deref(), Some(""), "empty alt should be Some(\"\")");
 
         // alt 未指定
@@ -1226,6 +1227,7 @@ mod semantics_tests {
             .values()
             .filter(|e| e.tag == PdfTag::Figure)
             .collect();
+        assert_eq!(figs3.len(), 1);
         assert_eq!(figs3[0].alt_text, None, "missing alt should be None");
     }
 }

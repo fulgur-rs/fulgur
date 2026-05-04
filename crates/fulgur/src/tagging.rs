@@ -44,7 +44,7 @@ pub struct SemanticEntry {
     pub parent: Option<NodeId>,
     /// Alt text for `Figure` nodes (`<img alt="...">`).
     /// `Some("")` = decorative image; `None` = alt attribute absent.
-    pub alt_text: Option<std::sync::Arc<str>>,
+    pub alt_text: Option<String>,
 }
 
 /// Map an HTML element local name to a `PdfTag` when the element has a
