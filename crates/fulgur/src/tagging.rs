@@ -78,6 +78,42 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
     }
 }
 
+/// Map a fulgur-internal [`PdfTag`] to the Krilla [`TagKind`] used when
+/// building the PDF StructTree.
+///
+/// `heading_title` is forwarded to [`krilla::tagging::Tag::Hn`] as the
+/// `/T` (Title) attribute required by PDF/UA-1. Pass `None` for non-heading
+/// tags or when the text is unavailable.
+pub fn pdf_tag_to_krilla_tag(
+    tag: &PdfTag,
+    heading_title: Option<String>,
+) -> krilla::tagging::TagKind {
+    use std::num::NonZeroU16;
+    match tag {
+        PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
+        PdfTag::H { level } => {
+            let level = NonZeroU16::new((*level).clamp(1, 6) as u16).unwrap();
+            krilla::tagging::Tag::Hn(level, heading_title).into()
+        }
+        PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
+        PdfTag::Div => krilla::tagging::Tag::<krilla::tagging::kind::Div>::Div.into(),
+        PdfTag::Figure => {
+            krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(None).into()
+        } // alt text: fulgur-izp.6
+        PdfTag::L => {
+            krilla::tagging::Tag::L(krilla::tagging::ListNumbering::None).into() // numbering: fulgur-izp.7
+        }
+        PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
+        PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
+        PdfTag::TRowGroup => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
+        PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
+        PdfTag::Th => {
+            krilla::tagging::Tag::TH(krilla::tagging::TableHeaderScope::Both).into() // scope attr: fulgur-izp.8
+        }
+        PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +162,69 @@ mod tests {
         assert_eq!(classify_element("a"), None);
         assert_eq!(classify_element("body"), None);
         assert_eq!(classify_element("html"), None);
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_p() {
+        let k = pdf_tag_to_krilla_tag(&PdfTag::P, None);
+        assert!(matches!(k, krilla::tagging::TagKind::P(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_headings() {
+        for level in 1u8..=6 {
+            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level }, None);
+            assert!(
+                matches!(k, krilla::tagging::TagKind::Hn(_)),
+                "level={level}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_span() {
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Span, None);
+        assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_covers_all_variants() {
+        use krilla::tagging::TagKind;
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Div, None),
+            TagKind::Div(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Figure, None),
+            TagKind::Figure(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::L, None),
+            TagKind::L(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Li, None),
+            TagKind::LI(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Table, None),
+            TagKind::Table(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::TRowGroup, None),
+            TagKind::TBody(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Tr, None),
+            TagKind::TR(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Th, None),
+            TagKind::TH(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Td, None),
+            TagKind::TD(_)
+        ));
     }
 }

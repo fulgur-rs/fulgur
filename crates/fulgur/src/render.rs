@@ -8,7 +8,7 @@ use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_ed
 use crate::gcpm::running::RunningElementStore;
 use krilla::SerializeSettings;
 use krilla::configure::{Configuration, Validator};
-use krilla::tagging::TagTree;
+use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -40,19 +40,23 @@ pub fn render_v2(
         } else {
             Configuration::new()
         };
-        let mut doc = krilla::Document::new_with(SerializeSettings {
+        krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
             configuration,
             ..Default::default()
-        });
-        doc.set_tag_tree(TagTree::new());
-        doc
+        })
     } else {
         krilla::Document::new()
     };
 
     let mut bookmark_collector = if config.effective_bookmarks() {
         Some(crate::draw_primitives::BookmarkCollector::new())
+    } else {
+        None
+    };
+
+    let mut tag_collector = if config.effective_tagging() {
+        Some(crate::draw_primitives::TagCollector::new())
     } else {
         None
     };
@@ -155,6 +159,7 @@ pub fn render_v2(
                     surface: &mut surface,
                     bookmark_collector: bookmark_collector.as_mut(),
                     link_collector: Some(&mut link_collector),
+                    tag_collector: tag_collector.as_mut(),
                 };
                 // Root `<html>` + `<body>` background pre-pass. v1's
                 // `BlockPageable::draw` for these elements paints
@@ -216,6 +221,7 @@ pub fn render_v2(
                 surface: &mut surface,
                 bookmark_collector: None,
                 link_collector: Some(&mut link_collector),
+                tag_collector: None,
             };
             let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
             margin_box_renderer.render_page(
@@ -230,6 +236,12 @@ pub fn render_v2(
         }
         let per_page = link_collector.take_page(page_idx);
         crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
+    }
+
+    if let Some(tc) = tag_collector {
+        let mut tree = TagTree::new().with_lang(config.lang.clone());
+        build_struct_tree(tc, drawables, &mut tree);
+        document.set_tag_tree(tree);
     }
 
     if let Some(c) = bookmark_collector {
@@ -748,6 +760,83 @@ pub(crate) fn dispatch_inline_box_content(
     }
 }
 
+/// Start a Krilla tagged content sequence for a paragraph-bearing node when
+/// tagging is enabled and the node has a P / H / Span semantic entry.
+///
+/// Returns `Some((tag, id))` on success so that `finish_tagged` can close it.
+/// Returns `None` when tagging is disabled, the node has no recognised
+/// semantic entry, or the node carries no paragraph content (pure containers
+/// must not call `start_tagged` — it is not nestable and would panic on a
+/// second call before `end_tagged`).
+fn try_start_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    drawables: &Drawables,
+) -> Option<(
+    crate::tagging::PdfTag,
+    krilla::tagging::Identifier,
+    Option<String>,
+)> {
+    canvas.tag_collector.as_ref()?;
+    let semantic = drawables.semantics.get(&node_id)?;
+    if !matches!(
+        semantic.tag,
+        crate::tagging::PdfTag::P | crate::tagging::PdfTag::H { .. } | crate::tagging::PdfTag::Span
+    ) {
+        return None;
+    }
+    // For heading tags, extract the plain text so Tag::Hn gets the /T (Title)
+    // attribute that PDF/UA-1 validators require.
+    let heading_title = if matches!(semantic.tag, crate::tagging::PdfTag::H { .. }) {
+        drawables.paragraphs.get(&node_id).map(|para| {
+            para.lines
+                .iter()
+                .flat_map(|line| line.items.iter())
+                .filter_map(|item| match item {
+                    crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+    } else {
+        None
+    };
+    use krilla::tagging::{ContentTag, SpanTag};
+    let id = canvas
+        .surface
+        .start_tagged(ContentTag::Span(SpanTag::empty()));
+    Some((semantic.tag.clone(), id, heading_title))
+}
+
+/// Close a tagged content sequence opened by `try_start_tagged` and record
+/// the resulting `Identifier` in the `TagCollector` for StructTree assembly.
+///
+/// No-op when `tag_info` is `None` (tagging disabled or not applicable).
+///
+/// # Invariant
+/// `tag_info` must only hold values produced by `try_start_tagged` on the
+/// same `canvas`. `try_start_tagged` returns `None` when `tag_collector` is
+/// absent, so if `tag_info` is `Some`, `canvas.tag_collector` is guaranteed
+/// to be `Some` as well.
+fn finish_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    tag_info: Option<(
+        crate::tagging::PdfTag,
+        krilla::tagging::Identifier,
+        Option<String>,
+    )>,
+) {
+    if let Some((tag, id, heading_title)) = tag_info {
+        canvas.surface.end_tagged();
+        canvas
+            .tag_collector
+            .as_mut()
+            .expect("tag_collector is Some when tag_info is Some")
+            .record(node_id, tag, id, heading_title);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_fragment(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -824,6 +913,11 @@ pub(crate) fn dispatch_fragment(
         let img_for_block = drawables.images.get(&node_id);
         let svg_for_block = drawables.svgs.get(&node_id);
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
+            let tag_info = if para_for_block.is_some() {
+                try_start_tagged(canvas, node_id, drawables)
+            } else {
+                None
+            };
             draw_block_with_inner_content(
                 canvas,
                 block,
@@ -852,6 +946,7 @@ pub(crate) fn dispatch_fragment(
                     page_index,
                 );
             }
+            finish_tagged(canvas, node_id, tag_info);
             return;
         }
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
@@ -877,6 +972,7 @@ pub(crate) fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
+        let tag_info = try_start_tagged(canvas, node_id, drawables);
         draw_paragraph_v2(
             canvas,
             para,
@@ -890,6 +986,7 @@ pub(crate) fn dispatch_fragment(
             margin_left_pt,
             margin_top_pt,
         );
+        finish_tagged(canvas, node_id, tag_info);
     }
 }
 
@@ -3415,6 +3512,88 @@ fn escape_attr(s: &str) -> String {
 /// Used to build margin-box CSS where running elements need to be visible.
 fn strip_display_none(css: &str) -> String {
     css.replace("display: none", "").replace("display:none", "")
+}
+
+/// Build a hierarchical [`TagTree`] from [`TagCollector`] entries and
+/// the `semantics` map in [`Drawables`].
+///
+/// The flat approach used before fulgur-izp.5 created one top-level
+/// [`TagGroup`] per tagged NodeId. This function instead uses
+/// [`crate::tagging::SemanticEntry::parent`] to nest groups, so that
+/// `<section><h1>…</h1></section>` produces a Div group containing an
+/// Hn group rather than two sibling groups.
+fn build_struct_tree(
+    tc: crate::draw_primitives::TagCollector,
+    drawables: &Drawables,
+    tree: &mut TagTree,
+) {
+    let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
+    let mut heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
+    for (node_id, _tag, id, heading_title) in tc.into_entries() {
+        identifiers.entry(node_id).or_default().push(id);
+        if let Some(title) = heading_title {
+            heading_titles.entry(node_id).or_insert(title);
+        }
+    }
+
+    let mut children_map: BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>> =
+        BTreeMap::new();
+    for (&node_id, entry) in &drawables.semantics {
+        if let Some(parent_id) = entry.parent {
+            children_map.entry(parent_id).or_default().push(node_id);
+        }
+    }
+
+    let roots: Vec<crate::drawables::NodeId> = drawables
+        .semantics
+        .iter()
+        .filter(|(_, e)| e.parent.is_none())
+        .map(|(&id, _)| id)
+        .collect();
+
+    for root_id in roots {
+        let group = build_tag_group(
+            root_id,
+            drawables,
+            &identifiers,
+            &heading_titles,
+            &children_map,
+        );
+        tree.push(Node::Group(group));
+    }
+}
+
+fn build_tag_group(
+    node_id: crate::drawables::NodeId,
+    drawables: &Drawables,
+    identifiers: &BTreeMap<crate::drawables::NodeId, Vec<Identifier>>,
+    heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
+    children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
+) -> TagGroup {
+    let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
+    let title = heading_titles.get(&node_id).cloned();
+    let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&entry.tag, title));
+
+    if let Some(ids) = identifiers.get(&node_id) {
+        for &id in ids {
+            group.push(Node::Leaf(id));
+        }
+    }
+
+    if let Some(children) = children_map.get(&node_id) {
+        for &child_id in children {
+            let child = build_tag_group(
+                child_id,
+                drawables,
+                identifiers,
+                heading_titles,
+                children_map,
+            );
+            group.push(Node::Group(child));
+        }
+    }
+
+    group
 }
 
 #[cfg(test)]

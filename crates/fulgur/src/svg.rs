@@ -99,6 +99,7 @@ mod tests {
                     surface: &mut surface,
                     bookmark_collector: None,
                     link_collector: None,
+                    tag_collector: None,
                 };
                 svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
             }

@@ -9,8 +9,48 @@
 //! When you add a new draw path (e.g. a `draw_background_layer` match arm),
 //! also add a smoke test here — see CLAUDE.md "Coverage scope" Gotcha.
 
+use std::path::PathBuf;
+
 use fulgur::{AssetBundle, Engine};
 use tempfile::tempdir;
+
+fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.pdf"));
+
+    if std::env::var("FULGUR_UPDATE_SNAPSHOTS").is_ok() {
+        std::fs::write(&path, pdf).unwrap();
+        return;
+    }
+
+    if !path.exists() {
+        std::fs::write(&path, pdf).unwrap();
+        panic!("new snapshot created: {name}.pdf — review the file, then re-run the test");
+    }
+
+    let expected = std::fs::read(&path).unwrap();
+    if pdf != expected.as_slice() {
+        panic!("PDF snapshot mismatch: {name}\nRun with FULGUR_UPDATE_SNAPSHOTS=1 to update.");
+    }
+}
+
+fn tagged_render_with_noto(html: &str) -> Vec<u8> {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
+    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
+    Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .assets(assets)
+        .build()
+        .render_html(html)
+        .expect("tagged render")
+}
 
 #[test]
 fn test_render_html_resolves_link_stylesheet() {
@@ -2455,5 +2495,134 @@ fn tagged_render_produces_pdf() {
     assert!(
         s.contains("/StructTreeRoot"),
         "tagged PDF must have StructTreeRoot"
+    );
+}
+
+#[test]
+fn tagged_pdf_headings_and_paragraphs_produce_struct_tree() {
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <h1>Heading One</h1>
+        <p>First paragraph.</p>
+        <h2>Heading Two</h2>
+        <p>Second paragraph.</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("render tagged headings");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/StructTreeRoot"),
+        "tagged PDF must contain /StructTreeRoot"
+    );
+}
+
+#[test]
+fn tagged_pdf_multipage_does_not_panic() {
+    let mut html = String::from("<!DOCTYPE html><html><body>");
+    for i in 0..40 {
+        html.push_str(&format!("<h2>Section {i}</h2><p>Content line for section {i}. This is a longer paragraph to ensure we get multi-page output from the renderer.</p>"));
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(&html)
+        .expect("render multi-page tagged");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tagged-multipage.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let doc = lopdf::Document::load(&path).expect("PDF must parse");
+    assert!(
+        doc.get_pages().len() >= 2,
+        "fixture must produce a multi-page document; got {} page(s)",
+        doc.get_pages().len()
+    );
+}
+
+#[test]
+fn untagged_pdf_has_no_struct_tree_root() {
+    let pdf = Engine::builder()
+        .build()
+        .render_html("<html><body><h1>Hello</h1><p>World</p></body></html>")
+        .expect("render untagged");
+
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        !s.contains("/StructTreeRoot"),
+        "untagged PDF must not contain /StructTreeRoot"
+    );
+}
+
+#[test]
+fn pdf_ua_fails_ua1_validation_until_full_compliance_lands() {
+    // pdf_ua=true enables UA1 validation which requires structural
+    // attributes (document title, heading /Title entries) beyond
+    // what this issue wires. Full PDF/UA-1 compliance is out of scope
+    // for fulgur-izp.4; this test documents the known failure mode so
+    // regressions (e.g. a panic instead of a clean Err) are visible.
+    let result = Engine::builder()
+        .pdf_ua(true)
+        .build()
+        .render_html("<html><body><h1>Hello</h1><p>World</p></body></html>");
+    assert!(
+        result.is_err(),
+        "expected UA1 validation error until full compliance lands"
+    );
+}
+
+#[test]
+fn tagged_struct_tree_reflects_dom_nesting() {
+    // Smoke test: /Div appears in the PDF StructTree bytes (font-agnostic).
+    // Deep structural verification (that /Div nests /Hn and /P as children
+    // rather than siblings) is tracked in fulgur-izp.5 follow-up.
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body.</p></section></body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("render");
+
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/Div"),
+        "StructTree must contain /Div for <section>"
+    );
+}
+
+#[test]
+fn snapshot_tagged_struct_tree_nested() {
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{font-family:'Noto Sans',sans-serif;margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body text.</p></section></body></html>"#;
+    let pdf = tagged_render_with_noto(html);
+    check_pdf_snapshot("tagged_struct_tree_nested", &pdf);
+}
+
+#[test]
+fn tagged_pdf_is_deterministic() {
+    let html = r#"<!DOCTYPE html><html lang="en">
+<head><style>body{font-family:'Noto Sans',sans-serif;margin:0}</style></head>
+<body><section><h1>Title</h1><p>Body text.</p></section></body></html>"#;
+    let pdf1 = tagged_render_with_noto(html);
+    let pdf2 = tagged_render_with_noto(html);
+    assert_eq!(
+        pdf1, pdf2,
+        "tagged PDF must be byte-identical across renders"
     );
 }
