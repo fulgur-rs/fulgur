@@ -437,9 +437,12 @@ fn walk_semantics(
             );
 
             if is_li {
-                // Lbl / LBody 合成エントリを作成
-                let lbl_id = out.alloc_synthetic_id();
+                // Lbl / LBody 合成エントリを作成。
+                // alloc_synthetic_id() は降順に ID を払い出すため、先に lbody_id を取ると
+                // lbl_id > lbody_id となり、BTreeMap のキー昇順イテレーション
+                // (build_struct_tree) で Lbl → LBody の正しい PDF/UA 順序が得られる。
                 let lbody_id = out.alloc_synthetic_id();
+                let lbl_id = out.alloc_synthetic_id();
                 out.semantics.insert(
                     lbl_id,
                     crate::tagging::SemanticEntry {
