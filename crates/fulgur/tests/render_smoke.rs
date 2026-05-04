@@ -41,7 +41,8 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
     let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/.fonts/NotoSans-Regular.ttf");
     let mut assets = AssetBundle::default();
-    assets.add_font_file(&font_path).unwrap();
+    assets.add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
     assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
     Engine::builder()
         .tagged(true)
