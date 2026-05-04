@@ -295,7 +295,7 @@ pub struct LinkSpanEntry;
 /// Phase 4 PR 1 ships this with all maps empty — the v2 render path
 /// walks geometry but emits no content for any node. Subsequent PRs
 /// fill each map by migrating one Pageable type at a time.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Drawables {
     /// `body_layout.location.x/y` in pt. Captures the html → body
     /// offset that CSS margin collapsing folds onto the body element.
@@ -367,11 +367,53 @@ pub struct Drawables {
     /// `inline_box_subtree_skip`. `BTreeMap`/`Vec` keep iteration
     /// deterministic for PDF byte-equality.
     pub inline_box_subtree_descendants: BTreeMap<NodeId, Vec<NodeId>>,
+    /// 合成 NodeId カウンタ。usize::MAX / 2 から降順に割り当て。
+    /// DOM NodeId（通常 < 100_000）との衝突を避けるため大きな値から開始する。
+    pub synthetic_id_counter: usize,
+    /// li NodeId → Lbl 合成 NodeId（render pass のマーカータグ付け用）
+    pub li_lbl_ids: BTreeMap<NodeId, NodeId>,
+    /// li NodeId → LBody 合成 NodeId（inline-root li の body タグ付け用）
+    pub li_lbody_ids: BTreeMap<NodeId, NodeId>,
+}
+
+impl Default for Drawables {
+    fn default() -> Self {
+        Self {
+            body_offset_pt: (0.0, 0.0),
+            root_id: None,
+            body_id: None,
+            block_styles: BTreeMap::new(),
+            paragraphs: BTreeMap::new(),
+            paragraph_slices: BTreeMap::new(),
+            images: BTreeMap::new(),
+            svgs: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            list_items: BTreeMap::new(),
+            multicol_rules: BTreeMap::new(),
+            transforms: BTreeMap::new(),
+            bookmark_anchors: BTreeMap::new(),
+            link_spans: Vec::new(),
+            semantics: BTreeMap::new(),
+            inline_box_subtree_skip: std::collections::BTreeSet::new(),
+            inline_box_subtree_descendants: BTreeMap::new(),
+            synthetic_id_counter: usize::MAX / 2,
+            li_lbl_ids: BTreeMap::new(),
+            li_lbody_ids: BTreeMap::new(),
+        }
+    }
 }
 
 impl Drawables {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 合成 NodeId を 1 つ割り当てる。
+    /// `usize::MAX / 2` から始まり降順に割り当てるので DOM NodeId と衝突しない。
+    pub fn alloc_synthetic_id(&mut self) -> NodeId {
+        let id = self.synthetic_id_counter;
+        self.synthetic_id_counter = self.synthetic_id_counter.saturating_sub(1);
+        id
     }
 
     /// `true` when no draw payload has been registered for any node.
@@ -456,5 +498,24 @@ mod tests {
         assert!(s.contains("marker_line_height"));
         assert!(s.contains("opacity"));
         assert!(s.contains("visible"));
+    }
+
+    #[test]
+    fn alloc_synthetic_id_starts_at_usize_max_div_2() {
+        let mut d = Drawables::default();
+        let first = d.alloc_synthetic_id();
+        assert_eq!(first, usize::MAX / 2);
+    }
+
+    #[test]
+    fn alloc_synthetic_id_returns_unique_decreasing_ids() {
+        let mut d = Drawables::default();
+        let id1 = d.alloc_synthetic_id();
+        let id2 = d.alloc_synthetic_id();
+        let id3 = d.alloc_synthetic_id();
+        assert!(id1 > id2, "IDs must decrease");
+        assert!(id2 > id3, "IDs must decrease");
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
     }
 }

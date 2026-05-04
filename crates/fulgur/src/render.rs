@@ -773,39 +773,51 @@ fn try_start_tagged(
     node_id: usize,
     drawables: &Drawables,
 ) -> Option<(
+    usize, // record_id (TagCollector.record() に渡す NodeId)
     crate::tagging::PdfTag,
     krilla::tagging::Identifier,
     Option<String>,
 )> {
     canvas.tag_collector.as_ref()?;
     let semantic = drawables.semantics.get(&node_id)?;
-    if !matches!(
-        semantic.tag,
-        crate::tagging::PdfTag::P | crate::tagging::PdfTag::H { .. } | crate::tagging::PdfTag::Span
-    ) {
-        return None;
+    match &semantic.tag {
+        crate::tagging::PdfTag::P | crate::tagging::PdfTag::Span => {
+            use krilla::tagging::{ContentTag, SpanTag};
+            let id = canvas
+                .surface
+                .start_tagged(ContentTag::Span(SpanTag::empty()));
+            Some((node_id, semantic.tag.clone(), id, None))
+        }
+        crate::tagging::PdfTag::H { .. } => {
+            // For heading tags, extract the plain text so Tag::Hn gets the /T (Title)
+            // attribute that PDF/UA-1 validators require.
+            let heading_title = drawables.paragraphs.get(&node_id).map(|para| {
+                para.lines
+                    .iter()
+                    .flat_map(|line| line.items.iter())
+                    .filter_map(|item| match item {
+                        crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            });
+            use krilla::tagging::{ContentTag, SpanTag};
+            let id = canvas
+                .surface
+                .start_tagged(ContentTag::Span(SpanTag::empty()));
+            Some((node_id, semantic.tag.clone(), id, heading_title))
+        }
+        crate::tagging::PdfTag::Li => {
+            // inline-root li: コンテンツを lbody_id で記録（LBody 配下に収める）
+            let &lbody_id = drawables.li_lbody_ids.get(&node_id)?;
+            use krilla::tagging::{ContentTag, SpanTag};
+            let id = canvas
+                .surface
+                .start_tagged(ContentTag::Span(SpanTag::empty()));
+            Some((lbody_id, crate::tagging::PdfTag::LBody, id, None))
+        }
+        _ => None,
     }
-    // For heading tags, extract the plain text so Tag::Hn gets the /T (Title)
-    // attribute that PDF/UA-1 validators require.
-    let heading_title = if matches!(semantic.tag, crate::tagging::PdfTag::H { .. }) {
-        drawables.paragraphs.get(&node_id).map(|para| {
-            para.lines
-                .iter()
-                .flat_map(|line| line.items.iter())
-                .filter_map(|item| match item {
-                    crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>()
-        })
-    } else {
-        None
-    };
-    use krilla::tagging::{ContentTag, SpanTag};
-    let id = canvas
-        .surface
-        .start_tagged(ContentTag::Span(SpanTag::empty()));
-    Some((semantic.tag.clone(), id, heading_title))
 }
 
 /// Close a tagged content sequence opened by `try_start_tagged` and record
@@ -820,20 +832,20 @@ fn try_start_tagged(
 /// to be `Some` as well.
 fn finish_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
-    node_id: usize,
     tag_info: Option<(
+        usize, // record_id
         crate::tagging::PdfTag,
         krilla::tagging::Identifier,
         Option<String>,
     )>,
 ) {
-    if let Some((tag, id, heading_title)) = tag_info {
+    if let Some((record_id, tag, id, heading_title)) = tag_info {
         canvas.surface.end_tagged();
         canvas
             .tag_collector
             .as_mut()
             .expect("tag_collector is Some when tag_info is Some")
-            .record(node_id, tag, id, heading_title);
+            .record(record_id, tag, id, heading_title);
     }
 }
 
@@ -870,6 +882,7 @@ pub(crate) fn dispatch_fragment(
         let para_for_li = drawables.paragraphs.get(&node_id);
         draw_list_item_with_block(
             canvas,
+            node_id,
             li,
             block_for_li,
             para_for_li,
@@ -946,7 +959,7 @@ pub(crate) fn dispatch_fragment(
                     page_index,
                 );
             }
-            finish_tagged(canvas, node_id, tag_info);
+            finish_tagged(canvas, tag_info);
             return;
         }
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
@@ -986,7 +999,7 @@ pub(crate) fn dispatch_fragment(
             margin_left_pt,
             margin_top_pt,
         );
-        finish_tagged(canvas, node_id, tag_info);
+        finish_tagged(canvas, tag_info);
     }
 }
 
@@ -1528,7 +1541,7 @@ fn draw_under_clip(
         if let Some(li) = list_item
             && li.visible
         {
-            draw_list_item_marker(canvas, li, x_pt, y_pt);
+            draw_list_item_marker_tagged(canvas, li, node_id, drawables, x_pt, y_pt);
         }
 
         // bg / border / shadow outside the clip — same as
@@ -1586,6 +1599,7 @@ fn draw_under_clip(
         let inner_x = x_pt + inner_inset.0;
         let inner_y = y_pt + inner_inset.1;
         if let Some(p) = para_for_block {
+            let tag_info = try_start_tagged(canvas, node_id, drawables);
             draw_paragraph_inner_paint(
                 canvas,
                 p,
@@ -1599,6 +1613,7 @@ fn draw_under_clip(
                 margin_left_pt,
                 margin_top_pt,
             );
+            finish_tagged(canvas, tag_info);
         }
         if let Some(i) = img_for_block {
             draw_image_inner_paint(canvas, i, inner_x, inner_y);
@@ -2810,6 +2825,7 @@ fn draw_block_with_inner_content(
 #[allow(clippy::too_many_arguments)]
 fn draw_list_item_with_block(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
     list_item: &crate::drawables::ListItemEntry,
     block: Option<&crate::drawables::BlockEntry>,
     paragraph: Option<&crate::drawables::ParagraphEntry>,
@@ -2836,12 +2852,14 @@ fn draw_list_item_with_block(
 
     draw_with_opacity(canvas, list_item.opacity, |canvas| {
         if list_item.visible {
-            draw_list_item_marker(canvas, list_item, x, y);
+            draw_list_item_marker_tagged(canvas, list_item, node_id, drawables, x, y);
         }
         if let Some(b) = block {
             draw_block_inner_paint(canvas, b, x, y, frag, is_split);
         }
         if let Some(p) = paragraph {
+            // inline-root li の段落コンテンツを LBody 配下に記録する
+            let tag_info = try_start_tagged(canvas, node_id, drawables);
             draw_paragraph_inner_paint(
                 canvas,
                 p,
@@ -2855,6 +2873,7 @@ fn draw_list_item_with_block(
                 margin_left_pt,
                 margin_top_pt,
             );
+            finish_tagged(canvas, tag_info);
         }
     });
 }
@@ -2887,6 +2906,39 @@ fn draw_list_item_marker(
             }
         }
         _ => {}
+    }
+}
+
+/// List-item marker を描画し、タグ付きモードでは Lbl 構造要素でラップする。
+fn draw_list_item_marker_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    li: &crate::drawables::ListItemEntry,
+    node_id: usize,
+    drawables: &Drawables,
+    x: f32,
+    y: f32,
+) {
+    let lbl_id = canvas
+        .tag_collector
+        .as_ref()
+        .and_then(|_| drawables.li_lbl_ids.get(&node_id).copied());
+    let marker_tag_id = lbl_id.map(|_| {
+        canvas
+            .surface
+            .start_tagged(krilla::tagging::ContentTag::Span(
+                krilla::tagging::SpanTag::empty(),
+            ))
+    });
+
+    draw_list_item_marker(canvas, li, x, y);
+
+    if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
+        canvas.surface.end_tagged();
+        canvas
+            .tag_collector
+            .as_mut()
+            .expect("tag_collector is Some because marker_tag_id was issued from it")
+            .record(lid, crate::tagging::PdfTag::Lbl, id, None);
     }
 }
 
