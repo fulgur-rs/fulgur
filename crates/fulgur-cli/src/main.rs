@@ -225,7 +225,7 @@ enum Commands {
         #[arg(long)]
         tagged: bool,
 
-        /// Enable PDF/UA-1 conformance (implies --tagged and --bookmarks).
+        /// Enable PDF/UA-1 conformance (implies --tagged and --bookmarks). [WIP: content tagging not yet implemented]
         #[arg(long = "pdf-ua")]
         pdf_ua: bool,
     },
