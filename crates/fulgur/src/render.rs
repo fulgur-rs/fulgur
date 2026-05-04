@@ -6,9 +6,9 @@ use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
+use krilla::SerializeSettings;
 use krilla::configure::{Configuration, Validator};
 use krilla::tagging::TagTree;
-use krilla::SerializeSettings;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

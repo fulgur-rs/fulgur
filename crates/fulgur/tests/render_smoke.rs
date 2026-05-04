@@ -2452,5 +2452,8 @@ fn tagged_render_produces_pdf() {
         .expect("render tagged");
     assert!(!pdf.is_empty());
     let s = String::from_utf8_lossy(&pdf);
-    assert!(s.contains("/StructTreeRoot"), "tagged PDF must have StructTreeRoot");
+    assert!(
+        s.contains("/StructTreeRoot"),
+        "tagged PDF must have StructTreeRoot"
+    );
 }
