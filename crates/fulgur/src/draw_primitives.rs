@@ -451,6 +451,7 @@ pub struct TagCollector {
         crate::drawables::NodeId,
         crate::tagging::PdfTag,
         krilla::tagging::Identifier,
+        Option<String>,
     )>,
 }
 
@@ -466,8 +467,9 @@ impl TagCollector {
         node_id: crate::drawables::NodeId,
         tag: crate::tagging::PdfTag,
         id: krilla::tagging::Identifier,
+        heading_title: Option<String>,
     ) {
-        self.entries.push((node_id, tag, id));
+        self.entries.push((node_id, tag, id, heading_title));
     }
 
     pub fn into_entries(
@@ -476,6 +478,7 @@ impl TagCollector {
         crate::drawables::NodeId,
         crate::tagging::PdfTag,
         krilla::tagging::Identifier,
+        Option<String>,
     )> {
         self.entries
     }

@@ -242,17 +242,18 @@ pub fn render_v2(
         let mut tree = TagTree::new().with_lang(config.lang.clone());
         let mut groups: BTreeMap<
             crate::drawables::NodeId,
-            (crate::tagging::PdfTag, Vec<Identifier>),
+            (crate::tagging::PdfTag, Vec<Identifier>, Option<String>),
         > = BTreeMap::new();
-        for (node_id, tag, id) in tc.into_entries() {
+        for (node_id, tag, id, heading_title) in tc.into_entries() {
             groups
                 .entry(node_id)
-                .or_insert_with(|| (tag, Vec::new()))
+                .or_insert_with(|| (tag, Vec::new(), heading_title))
                 .1
                 .push(id);
         }
-        for (_, (tag, ids)) in groups {
-            let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&tag));
+        for (_, (tag, ids, heading_title)) in groups {
+            let mut group =
+                TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&tag, heading_title));
             for id in ids {
                 group.push(Node::Leaf(id));
             }
@@ -789,7 +790,7 @@ fn try_start_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
     drawables: &Drawables,
-) -> Option<(crate::tagging::PdfTag, krilla::tagging::Identifier)> {
+) -> Option<(crate::tagging::PdfTag, krilla::tagging::Identifier, Option<String>)> {
     canvas.tag_collector.as_ref()?;
     let semantic = drawables.semantics.get(&node_id)?;
     if !matches!(
@@ -798,11 +799,27 @@ fn try_start_tagged(
     ) {
         return None;
     }
+    // For heading tags, extract the plain text so Tag::Hn gets the /T (Title)
+    // attribute that PDF/UA-1 validators require.
+    let heading_title = if matches!(semantic.tag, crate::tagging::PdfTag::H { .. }) {
+        drawables.paragraphs.get(&node_id).map(|para| {
+            para.lines
+                .iter()
+                .flat_map(|line| line.items.iter())
+                .filter_map(|item| match item {
+                    crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+    } else {
+        None
+    };
     use krilla::tagging::{ContentTag, SpanTag};
     let id = canvas
         .surface
         .start_tagged(ContentTag::Span(SpanTag::empty()));
-    Some((semantic.tag.clone(), id))
+    Some((semantic.tag.clone(), id, heading_title))
 }
 
 /// Close a tagged content sequence opened by `try_start_tagged` and record
@@ -818,15 +835,15 @@ fn try_start_tagged(
 fn finish_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
-    tag_info: Option<(crate::tagging::PdfTag, krilla::tagging::Identifier)>,
+    tag_info: Option<(crate::tagging::PdfTag, krilla::tagging::Identifier, Option<String>)>,
 ) {
-    if let Some((tag, id)) = tag_info {
+    if let Some((tag, id, heading_title)) = tag_info {
         canvas.surface.end_tagged();
         canvas
             .tag_collector
             .as_mut()
             .expect("tag_collector is Some when tag_info is Some")
-            .record(node_id, tag, id);
+            .record(node_id, tag, id, heading_title);
     }
 }
 

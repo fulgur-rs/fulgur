@@ -80,18 +80,20 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
 
 /// Convert a fulgur `PdfTag` to the corresponding Krilla `TagKind`.
 ///
-/// Called by `render_v2` when building the flat TagTree after all pages
-/// are drawn. Only P / H{n} / Span are supported in fulgur-izp.4; all
-/// other variants fall back to `Tag::P` as a safe placeholder until later
-/// issues wire lists, tables, and figures.
-pub fn pdf_tag_to_krilla_tag(tag: &PdfTag) -> krilla::tagging::TagKind {
+/// `heading_title` is forwarded to `Tag::Hn` so PDF/UA-1 validators find the
+/// required `/T` (Title) attribute on heading tags. Pass `None` for non-heading
+/// tags or when the text is unavailable.
+///
+/// Only P / H{n} / Span are fully wired; all other variants fall back to
+/// `Tag::P` as a placeholder until list, table, and figure tagging lands.
+pub fn pdf_tag_to_krilla_tag(tag: &PdfTag, heading_title: Option<String>) -> krilla::tagging::TagKind {
     use std::num::NonZeroU16;
     match tag {
         PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
         PdfTag::H { level } => {
             let level = NonZeroU16::new((*level).max(1) as u16)
                 .unwrap_or_else(|| NonZeroU16::new(1).unwrap());
-            krilla::tagging::Tag::Hn(level, None).into()
+            krilla::tagging::Tag::Hn(level, heading_title).into()
         }
         PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
         _ => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
@@ -150,14 +152,14 @@ mod tests {
 
     #[test]
     fn pdf_tag_to_krilla_tag_p() {
-        let k = pdf_tag_to_krilla_tag(&PdfTag::P);
+        let k = pdf_tag_to_krilla_tag(&PdfTag::P, None);
         assert!(matches!(k, krilla::tagging::TagKind::P(_)));
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_headings() {
         for level in 1u8..=6 {
-            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level });
+            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level }, None);
             assert!(
                 matches!(k, krilla::tagging::TagKind::Hn(_)),
                 "level={level}"
@@ -167,7 +169,7 @@ mod tests {
 
     #[test]
     fn pdf_tag_to_krilla_tag_span() {
-        let k = pdf_tag_to_krilla_tag(&PdfTag::Span);
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Span, None);
         assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
     }
 }
