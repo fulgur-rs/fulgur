@@ -2623,6 +2623,7 @@ pub fn append_position_absolute_body_direct_fragments(
 ///
 /// Skips out-of-flow descendants (their own pass handles them) and
 /// whitespace-only text nodes (mirrors `fragment_pagination_root`).
+#[allow(clippy::too_many_arguments)]
 fn record_subtree_fragments_at_offset(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
