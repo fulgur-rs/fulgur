@@ -62,7 +62,7 @@
 //! on the resulting `PaginationGeometry`).
 
 use blitz_dom::BaseDocument;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use taffy::{
     AvailableSpace, CacheTree, LayoutPartialTree, NodeId, RoundTree, Size, TraversePartialTree,
     TraverseTree,
@@ -1359,6 +1359,33 @@ fn has_page_name_change_below(
 /// Returns `(final_page_index, final_cursor_y)`: the page and y where
 /// the parent's last child finished. The caller resumes its outer
 /// cursor from these values.
+/// Row-level state for grid/flex parallel-sibling co-split (fulgur-ysms).
+///
+/// Saved once at the first cell of each row; subsequent cells in the same
+/// row restore from `start_*` so their recursion begins at the same
+/// (page, cursor) as the first cell did. After all cells in the row are
+/// processed the outer cursor advances to `max_end_*`.
+struct RowState {
+    start_page: u32,
+    start_cursor_y: f32,
+    start_page_start_y: f32,
+    start_page_taffy_origin: f32,
+    max_end_page: u32,
+    max_end_cursor_y: f32,
+    /// Taffy `location.y` of the first cell in this row (reserved for future use).
+    _row_top: f32,
+    /// Max `location.y + height` seen across cells in this row.
+    row_bottom: f32,
+    /// Pages for which a parent fragment has already been emitted this row,
+    /// to avoid duplicate entries when multiple cells cross the same boundary.
+    emitted_parent_pages: BTreeSet<u32>,
+    /// True when at least one cell in this row has crossed a page boundary via
+    /// recursion. Only in this case do subsequent same-row cells need the full
+    /// state-restore (co-split); non-recursion page advances are already handled
+    /// by the existing `origin_pending_same_row` mechanism.
+    crossed_by_recursion: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fragment_block_subtree(
     geometry: &mut PaginationGeometryTable,
@@ -1420,6 +1447,7 @@ fn fragment_block_subtree(
     // for implicit forced-break detection; see `fragment_pagination_root`
     // for the rationale and the outer-Option semantics.
     let mut prev_used_page: Option<Option<String>> = None;
+    let mut row_state: Option<RowState> = None;
     // fulgur-uebl: flex / grid containers establish a flex/grid
     // formatting context where children are not class A break points
     // (CSS Fragmentation 3 §3.2). The `page` property doesn't apply to
@@ -1527,6 +1555,76 @@ fn fragment_block_subtree(
         // it (and break-before / break-after rebases the
         // `page_taffy_origin` against it on page advance).
         let this_top_in_parent = layout.location.y;
+
+        // fulgur-ysms: row-level co-split for flex/grid containers.
+        // Must run BEFORE origin_pending_target_y is consumed so that
+        // restoring page_taffy_origin is consistent.
+        if allow_same_row_rebase {
+            let same_row = row_state
+                .as_ref()
+                .map(|rs| this_top_in_parent < rs.row_bottom - 0.5);
+            match same_row {
+                Some(true) => {
+                    let rs = row_state.as_ref().unwrap();
+                    if rs.crossed_by_recursion {
+                        // Co-split: a previous cell in this row crossed a page
+                        // boundary via recursion. Restore to the row-start state
+                        // so this cell's recursion begins at the same (page,
+                        // cursor) — both cells will independently fragment and
+                        // their results are merged via max_end_*.
+                        //
+                        // Also clear origin_pending_* set by the previous cell's
+                        // recursion: the restored page_taffy_origin is the one
+                        // that puts THIS cell at the correct row-start y, and the
+                        // previous cell's pending origin would incorrectly shift
+                        // page_taffy_origin again.
+                        page_index = rs.start_page;
+                        cursor_y = rs.start_cursor_y;
+                        page_start_y = rs.start_page_start_y;
+                        page_taffy_origin = rs.start_page_taffy_origin;
+                        origin_pending_target_y = None;
+                        origin_pending_same_row = None;
+                    }
+                    // If crossed_by_recursion is false (e.g., a previous cell
+                    // crossed via the non-recursion strip-overflow path), the
+                    // existing origin_pending_same_row mechanism already handles
+                    // correct placement — no additional restore is needed.
+                }
+                Some(false) => {
+                    // New row: advance outer cursor to the max end reached
+                    // across all cells in the previous row.
+                    let rs = row_state.take().unwrap();
+                    page_index = rs.max_end_page;
+                    cursor_y = rs.max_end_cursor_y;
+                    if rs.max_end_page > rs.start_page {
+                        page_start_y = 0.0;
+                        origin_pending_target_y = Some(rs.max_end_cursor_y);
+                        origin_pending_same_row = None;
+                    } else {
+                        page_start_y = rs.start_page_start_y;
+                    }
+                }
+                None => {}
+            }
+            if row_state.is_none() {
+                // First cell in a new row: snapshot current state.
+                row_state = Some(RowState {
+                    start_page: page_index,
+                    start_cursor_y: cursor_y,
+                    start_page_start_y: page_start_y,
+                    start_page_taffy_origin: page_taffy_origin,
+                    max_end_page: page_index,
+                    max_end_cursor_y: cursor_y,
+                    _row_top: this_top_in_parent,
+                    row_bottom: this_top_in_parent + child_h,
+                    emitted_parent_pages: BTreeSet::new(),
+                    crossed_by_recursion: false,
+                });
+            } else if let Some(ref mut rs) = row_state {
+                rs.row_bottom = rs.row_bottom.max(this_top_in_parent + child_h);
+            }
+        }
+
         if let Some(mut target_y) = origin_pending_target_y.take() {
             if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
                 && this_top_in_parent < row_bottom - 0.5
@@ -1756,30 +1854,42 @@ fn fragment_block_subtree(
                     let logical_height = (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
                     let prev_height = logical_height.max((page_height_px - page_start_y).max(0.0));
                     if prev_height > 0.0 {
-                        geometry
-                            .entry(parent_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index: pre_recursion_page,
-                                x: parent_x_in_body,
-                                y: page_start_y,
-                                width: parent_w,
-                                height: prev_height,
-                            });
+                        let should_emit = row_state
+                            .as_mut()
+                            .map(|rs| rs.emitted_parent_pages.insert(pre_recursion_page))
+                            .unwrap_or(true);
+                        if should_emit {
+                            geometry
+                                .entry(parent_id)
+                                .or_default()
+                                .fragments
+                                .push(Fragment {
+                                    page_index: pre_recursion_page,
+                                    x: parent_x_in_body,
+                                    y: page_start_y,
+                                    width: parent_w,
+                                    height: prev_height,
+                                });
+                        }
                     }
                     for p in (pre_recursion_page + 1)..page_index {
-                        geometry
-                            .entry(parent_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index: p,
-                                x: parent_x_in_body,
-                                y: 0.0,
-                                width: parent_w,
-                                height: page_height_px,
-                            });
+                        let should_emit = row_state
+                            .as_mut()
+                            .map(|rs| rs.emitted_parent_pages.insert(p))
+                            .unwrap_or(true);
+                        if should_emit {
+                            geometry
+                                .entry(parent_id)
+                                .or_default()
+                                .fragments
+                                .push(Fragment {
+                                    page_index: p,
+                                    x: parent_x_in_body,
+                                    y: 0.0,
+                                    width: parent_w,
+                                    height: page_height_px,
+                                });
+                        }
                     }
                 }
                 page_start_y = 0.0;
@@ -1788,6 +1898,11 @@ fn fragment_block_subtree(
                 let row_bottom = row_top + child_h;
                 origin_pending_same_row =
                     allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+                // fulgur-ysms: mark that this row had a recursion-driven page
+                // cross so subsequent same-row cells know to co-split.
+                if let Some(ref mut rs) = row_state {
+                    rs.crossed_by_recursion = true;
+                }
             }
 
             // Honour `break-after: page` after recursion.
@@ -1811,6 +1926,14 @@ fn fragment_block_subtree(
             if !is_float {
                 prev_used_page = Some(used_end.clone());
             }
+            if let Some(ref mut rs) = row_state {
+                if page_index > rs.max_end_page
+                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
+                {
+                    rs.max_end_page = page_index;
+                    rs.max_end_cursor_y = cursor_y;
+                }
+            }
             continue;
         }
 
@@ -1822,17 +1945,23 @@ fn fragment_block_subtree(
         // rather than `cursor_y + child_h` so a parallel sibling
         // returning to a smaller page-local y is checked correctly.
         if child_page_y > page_start_y && child_page_y + child_h > page_height_px {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body,
-                    y: page_start_y,
-                    width: parent_w,
-                    height: cursor_y - page_start_y,
-                });
+            let should_emit = row_state
+                .as_mut()
+                .map(|rs| rs.emitted_parent_pages.insert(page_index))
+                .unwrap_or(true);
+            if should_emit {
+                geometry
+                    .entry(parent_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body,
+                        y: page_start_y,
+                        width: parent_w,
+                        height: cursor_y - page_start_y,
+                    });
+            }
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -1896,6 +2025,24 @@ fn fragment_block_subtree(
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
+        }
+        if let Some(ref mut rs) = row_state {
+            if page_index > rs.max_end_page
+                || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
+            {
+                rs.max_end_page = page_index;
+                rs.max_end_cursor_y = cursor_y;
+            }
+        }
+    }
+
+    // fulgur-ysms: finalize any open row — advance to the max end state
+    // reached across all parallel sibling cells.
+    if let Some(rs) = row_state.take() {
+        page_index = rs.max_end_page;
+        cursor_y = rs.max_end_cursor_y;
+        if rs.max_end_page > rs.start_page {
+            page_start_y = 0.0;
         }
     }
 
@@ -4913,6 +5060,186 @@ h2 { string-set: chapter-title content(text); }
         assert!(
             max_page.is_some_and(|p| p >= 2),
             "abs div at top:1600px with 800px pages should land on page 2; max_page={max_page:?}"
+        );
+    }
+
+    #[test]
+    fn grid_row_leaf_cells_cosplit_across_page_boundary() {
+        // 2-col grid, each leaf cell 60px tall.
+        // spacer 80px pushes grid to y=80 on a 100px page.
+        // pre-fix: cell 2 pushed to page 1 at y=0 (whole cell).
+        // post-fix: both cells split — page 0 y=80..100 (20px),
+        //           page 1 y=0..40 (40px).
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="height: 60px; width: 100px"></div>
+                <div style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
+        let mut frags: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
+        assert_eq!(
+            on_page0.len(),
+            2,
+            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
+        );
+        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        assert!(
+            (ys[0] - ys[1]).abs() < 0.5,
+            "page-0 fragments must share the same y (parallel row); ys={ys:?}"
+        );
+    }
+
+    #[test]
+    fn flex_row_leaf_cells_cosplit_across_page_boundary() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: flex; width: 200px;">
+                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        let mut frags: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
+        assert_eq!(
+            on_page0.len(),
+            2,
+            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
+        );
+        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        assert!(
+            (ys[0] - ys[1]).abs() < 0.5,
+            "page-0 fragments must share the same y; ys={ys:?}"
+        );
+    }
+
+    #[test]
+    fn grid_row_recursive_cells_cosplit_across_page_boundary() {
+        // 2-col grid, each cell has 2 inner divs (40px each) = 80px total.
+        // spacer 70px, page_height 100px → grid starts at y=70.
+        // Row bottom = 70 + 80 = 150 > 100 → crosses page boundary.
+        //
+        // pre-fix: cell 2 recursion starts at page 1 cursor=0 (because
+        //   cell 1's recursion advanced page_index to 1) → both inner
+        //   divs of cell 2 land entirely on page 1.
+        // post-fix: both cells start recursion at page 0 cursor=70 →
+        //   first inner div (40px) splits at page boundary, landing
+        //   partly on page 0 (y=70..100) and partly on page 1 (y=0..10).
+        //   Specifically: both columns' first inner divs must appear on page 0.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="width: 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+                <div style="width: 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        // inner divs: 40px tall, 100px wide
+        let mut inner: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Each column has 2 inner divs (40px each).
+        // After the fix, both columns' FIRST inner div must appear on page 0
+        // (at y≈70, since the grid row starts there).
+        // Pre-fix: only cell 1's first inner div is on page 0; cell 2's
+        // recursion starts from page 1 so its inner divs are at y=0,40 on page 1.
+        let _first_divs_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
+            .collect();
+        // The critical assertion: the RIGHT column's first inner div must also
+        // appear on page 0 (at x=100, y≈70). Pre-fix: cell 2's recursion starts
+        // from page 1, so its inner divs land at x=100 only on page 1.
+        let right_col_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
+            .collect();
+        assert!(
+            !right_col_page0.is_empty(),
+            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
+        );
+    }
+
+    #[test]
+    fn flex_row_recursive_cells_cosplit_across_page_boundary() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 70px"></div>
+              <div style="display: flex; width: 200px;">
+                <div style="width: 100px; flex: 0 0 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+                <div style="width: 100px; flex: 0 0 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        let mut inner: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let right_col_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
+            .collect();
+        assert!(
+            !right_col_page0.is_empty(),
+            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
         );
     }
 }
