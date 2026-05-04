@@ -4,7 +4,7 @@
 
 **Goal:** `<img alt="...">` の代替テキストを Tagged PDF の Figure タグの `/Alt` エントリとして PDF に埋め込む。
 
-**Architecture:** `SemanticEntry` に `alt_text: Option<Arc<str>>` を追加し、`walk_semantics` で DOM の `alt` 属性を読んで格納する。`pdf_tag_to_krilla_tag` にも `alt_text` パラメータを追加し、`build_tag_group` から渡す。
+**Architecture:** `SemanticEntry` に `alt_text: Option<String>` を追加し、`walk_semantics` で DOM の `alt` 属性を読んで格納する。`pdf_tag_to_krilla_tag` にも `alt_text` パラメータを追加し、`build_tag_group` から渡す。
 
 **Tech Stack:** Rust, Krilla PDF library, Blitz DOM (`blitz_dom::node::ElementData`)
 
@@ -97,7 +97,7 @@ pub struct SemanticEntry {
     pub parent: Option<NodeId>,
     /// Alt text for `Figure` nodes (`<img alt="...">`).
     /// `Some("")` = decorative image; `None` = alt attribute absent.
-    pub alt_text: Option<std::sync::Arc<str>>,
+    pub alt_text: Option<String>,
 }
 ```
 
@@ -107,7 +107,7 @@ pub struct SemanticEntry {
 
 ```rust
 let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
-    get_attr(elem, "alt").map(|v| std::sync::Arc::from(v))
+    get_attr(elem, "alt").map(|v| v.to_owned())
 } else {
     None
 };
@@ -209,7 +209,7 @@ Expected: FAIL（`/Alt` が PDF に含まれない）
 pub fn pdf_tag_to_krilla_tag(
     tag: &PdfTag,
     heading_title: Option<String>,
-    alt_text: Option<std::sync::Arc<str>>,
+    alt_text: Option<String>,
 ) -> krilla::tagging::TagKind {
     use std::num::NonZeroU16;
     match tag {
@@ -259,7 +259,7 @@ pdf_tag_to_krilla_tag(&PdfTag::P, None, None)
 ```rust
 // pdf_tag_to_krilla_tag_covers_all_variants テスト内
 assert!(matches!(
-    pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some(std::sync::Arc::from("logo"))),
+    pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some("logo".to_owned())),
     TagKind::Figure(_)
 ));
 ```
@@ -270,8 +270,11 @@ assert!(matches!(
 
 ```rust
 let title = heading_titles.get(&node_id).cloned();
-let alt = entry.alt_text.clone();
-let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&entry.tag, title, alt));
+let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
+    &entry.tag,
+    title,
+    entry.alt_text.clone(),
+));
 ```
 
 **Step 6: コンパイルが通ることを確認**
