@@ -2538,6 +2538,7 @@ pub fn append_position_absolute_body_direct_fragments(
     total_pages: u32,
     viewport_w_px: f32,
     viewport_h_px: f32,
+    running_store: Option<&crate::gcpm::running::RunningElementStore>,
 ) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
@@ -2567,6 +2568,9 @@ pub fn append_position_absolute_body_direct_fragments(
         if let Some(text) = child.text_data()
             && text.content.chars().all(char::is_whitespace)
         {
+            return false;
+        }
+        if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
             return false;
         }
         !is_out_of_flow_positioned(child)
@@ -2735,7 +2739,7 @@ fn record_subtree_fragments_at_offset(
             if first_page_f.is_finite()
                 && last_page_f.is_finite()
                 && first_page_f <= last_page_f
-                && first_page_f < total_pages as f32
+                && (may_extend_pages || first_page_f < total_pages as f32)
             {
                 let first_page = first_page_f as u32;
                 let last_page = if may_extend_pages {
@@ -3784,6 +3788,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             600.0,
             800.0,
+            None,
         );
 
         // Locate the abs div by height=30.
@@ -3829,6 +3834,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             600.0,
             800.0,
+            None,
         );
 
         let mut tall_entries: Vec<Vec<u32>> = geom
@@ -3867,6 +3873,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             600.0,
             800.0,
+            None,
         );
 
         let has_later_text_fragment = geom.values().any(|g| {
@@ -3950,6 +3957,7 @@ h2 { string-set: chapter-title content(text); }
             2,
             600.0,
             800.0,
+            None,
         );
 
         let mut tiny_overflow_pages = None;
@@ -4677,5 +4685,88 @@ h2 { string-set: chapter-title content(text); }
             None
         }
         walk(base, root_id, tag)
+    }
+
+    /// coderabbit: body containing only a `position: running()` element
+    /// plus a tall `position: absolute` div must treat the body as
+    /// having no in-flow content so `may_extend_pages = true`.
+    /// Without the running_store guard, the running child increments
+    /// `body_has_in_flow_content` and truncates the abs subtree.
+    #[test]
+    fn position_absolute_body_direct_running_only_body_extends_pages() {
+        use crate::blitz_adapter;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::sync::Arc;
+
+        let css = ".header { position: running(pageHeader); }";
+        let html = r#"<!DOCTYPE html>
+<html><head></head>
+<body style="margin:0">
+<div class="header">Doc Header</div>
+<div style="position: absolute; top: 0; width: 100px; height: 1800px">x</div>
+</body></html>"#;
+
+        let gcpm = parse_gcpm(css);
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+        blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
+        let store = pass.into_running_store();
+        blitz_adapter::resolve(&mut doc);
+
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            Some(&store),
+        );
+
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 1800.0).abs() < 0.5)
+            .map(|f| f.page_index)
+            .max();
+        assert!(
+            max_page.is_some_and(|p| p >= 2),
+            "tall abs div in running-only body should extend to page 2; max_page={max_page:?}"
+        );
+    }
+
+    /// coderabbit: abs subtree starting beyond the current page budget
+    /// must still emit fragments when `may_extend_pages` is true.
+    /// Regression for the condition `first_page_f < total_pages` that
+    /// blocked fragment emission even when the absolute pass is
+    /// responsible for extending the page count.
+    #[test]
+    fn position_absolute_body_direct_beyond_page_budget_extends_pages() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 1600px; width: 100px; height: 100px">x</div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            None,
+        );
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max();
+        assert!(
+            max_page.is_some_and(|p| p >= 2),
+            "abs div at top:1600px with 800px pages should land on page 2; max_page={max_page:?}"
+        );
     }
 }
