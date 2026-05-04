@@ -395,11 +395,17 @@ fn walk_semantics(
                 }
                 parent = doc.get_node(pid).and_then(|p| p.parent);
             };
+            let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
+                get_attr(elem, "alt").map(|v| v.to_owned())
+            } else {
+                None
+            };
             out.semantics.insert(
                 node_id,
                 crate::tagging::SemanticEntry {
                     tag,
                     parent: parent_node_id,
+                    alt_text,
                 },
             );
         }
@@ -1179,6 +1185,40 @@ mod semantics_tests {
             PdfTag::P,
             "the single entry must be the <p>, got {:?}",
             only_entry.tag
+        );
+    }
+
+    #[test]
+    fn dom_to_drawables_records_alt_text_on_figure() {
+        let figure_alt = |html: &str| {
+            let d = build_drawables(html);
+            let figures: Vec<_> = d
+                .semantics
+                .values()
+                .filter(|e| e.tag == PdfTag::Figure)
+                .collect();
+            assert_eq!(figures.len(), 1);
+            figures[0].alt_text.clone()
+        };
+
+        assert_eq!(
+            figure_alt(
+                "<!DOCTYPE html><html><body><img src='a.png' alt='photo of cat'></body></html>"
+            )
+            .as_deref(),
+            Some("photo of cat"),
+            "alt text should be captured"
+        );
+        assert_eq!(
+            figure_alt("<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>")
+                .as_deref(),
+            Some(""),
+            "empty alt should be Some(\"\")"
+        );
+        assert_eq!(
+            figure_alt("<!DOCTYPE html><html><body><img src='a.png'></body></html>"),
+            None,
+            "missing alt should be None"
         );
     }
 }
