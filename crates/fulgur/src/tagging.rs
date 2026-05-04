@@ -177,11 +177,16 @@ mod tests {
         );
         assert_eq!(classify_element("li"), Some(PdfTag::Li));
         assert_eq!(classify_element("table"), Some(PdfTag::Table));
-        assert_eq!(classify_element("thead"), Some(PdfTag::TRowGroup));
-        assert_eq!(classify_element("tbody"), Some(PdfTag::TRowGroup));
-        assert_eq!(classify_element("tfoot"), Some(PdfTag::TRowGroup));
+        assert_eq!(classify_element("thead"), Some(PdfTag::THead));
+        assert_eq!(classify_element("tbody"), Some(PdfTag::TBody));
+        assert_eq!(classify_element("tfoot"), Some(PdfTag::TFoot));
         assert_eq!(classify_element("tr"), Some(PdfTag::Tr));
-        assert_eq!(classify_element("th"), Some(PdfTag::Th));
+        assert_eq!(
+            classify_element("th"),
+            Some(PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Both
+            })
+        );
         assert_eq!(classify_element("td"), Some(PdfTag::Td));
     }
 
@@ -256,15 +261,29 @@ mod tests {
             TagKind::Table(_)
         ));
         assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::TRowGroup, None, None),
+            pdf_tag_to_krilla_tag(&PdfTag::THead, None, None),
+            TagKind::THead(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::TBody, None, None),
             TagKind::TBody(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::TFoot, None, None),
+            TagKind::TFoot(_)
         ));
         assert!(matches!(
             pdf_tag_to_krilla_tag(&PdfTag::Tr, None, None),
             TagKind::TR(_)
         ));
         assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Th, None, None),
+            pdf_tag_to_krilla_tag(
+                &PdfTag::Th {
+                    scope: krilla::tagging::TableHeaderScope::Both
+                },
+                None,
+                None
+            ),
             TagKind::TH(_)
         ));
         assert!(matches!(
