@@ -631,6 +631,16 @@ impl EngineBuilder {
         self
     }
 
+    pub fn tagged(mut self, enabled: bool) -> Self {
+        self.config_builder = self.config_builder.tagged(enabled);
+        self
+    }
+
+    pub fn pdf_ua(mut self, enabled: bool) -> Self {
+        self.config_builder = self.config_builder.pdf_ua(enabled);
+        self
+    }
+
     pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config_builder = self.config_builder.authors(authors);
         self
@@ -849,5 +859,35 @@ mod tests {
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn builder_tagged_defaults_to_false() {
+        let engine = Engine::builder().build();
+        assert!(!engine.config().enable_tagging);
+    }
+
+    #[test]
+    fn builder_pdf_ua_defaults_to_false() {
+        let engine = Engine::builder().build();
+        assert!(!engine.config().pdf_ua);
+    }
+
+    #[test]
+    fn builder_tagged_opt_in() {
+        let engine = Engine::builder().tagged(true).build();
+        assert!(engine.config().enable_tagging);
+    }
+
+    #[test]
+    fn builder_pdf_ua_opt_in() {
+        let engine = Engine::builder().pdf_ua(true).build();
+        assert!(engine.config().pdf_ua);
+    }
+
+    #[test]
+    fn builder_pdf_ua_implies_effective_tagging() {
+        let engine = Engine::builder().pdf_ua(true).build();
+        assert!(engine.config().effective_tagging());
     }
 }
