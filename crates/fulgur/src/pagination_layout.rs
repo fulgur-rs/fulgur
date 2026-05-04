@@ -4993,4 +4993,101 @@ h2 { string-set: chapter-title content(text); }
             "page-0 fragments must share the same y; ys={ys:?}"
         );
     }
+
+    #[test]
+    fn grid_row_recursive_cells_cosplit_across_page_boundary() {
+        // 2-col grid, each cell has 2 inner divs (40px each) = 80px total.
+        // spacer 70px, page_height 100px → grid starts at y=70.
+        // Row bottom = 70 + 80 = 150 > 100 → crosses page boundary.
+        //
+        // pre-fix: cell 2 recursion starts at page 1 cursor=0 (because
+        //   cell 1's recursion advanced page_index to 1) → both inner
+        //   divs of cell 2 land entirely on page 1.
+        // post-fix: both cells start recursion at page 0 cursor=70 →
+        //   first inner div (40px) splits at page boundary, landing
+        //   partly on page 0 (y=70..100) and partly on page 1 (y=0..10).
+        //   Specifically: both columns' first inner divs must appear on page 0.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="width: 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+                <div style="width: 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        // inner divs: 40px tall, 100px wide
+        let mut inner: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Each column has 2 inner divs (40px each).
+        // After the fix, both columns' FIRST inner div must appear on page 0
+        // (at y≈70, since the grid row starts there).
+        // Pre-fix: only cell 1's first inner div is on page 0; cell 2's
+        // recursion starts from page 1 so its inner divs are at y=0,40 on page 1.
+        let first_divs_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
+            .collect();
+        assert_eq!(
+            first_divs_page0.len(),
+            2,
+            "both columns' first inner divs must appear on page 0 (pre-fix: only 1); inner={inner:?}"
+        );
+    }
+
+    #[test]
+    fn flex_row_recursive_cells_cosplit_across_page_boundary() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 70px"></div>
+              <div style="display: flex; width: 200px;">
+                <div style="width: 100px; flex: 0 0 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+                <div style="width: 100px; flex: 0 0 100px">
+                  <div style="height: 40px; width: 100px"></div>
+                  <div style="height: 40px; width: 100px"></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        let mut inner: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let first_divs_page0: Vec<_> = inner
+            .iter()
+            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
+            .collect();
+        assert_eq!(
+            first_divs_page0.len(),
+            2,
+            "both columns' first inner divs must appear on page 0 (pre-fix: only 1); inner={inner:?}"
+        );
+    }
 }
