@@ -14,8 +14,10 @@ use crate::drawables::NodeId;
 /// HTML semantics to. Render-side translation to the Krilla type
 /// happens in `fulgur-izp.5`; until then this enum is convert-side
 /// only, so it intentionally avoids carrying Krilla-specific types
-/// (`ListNumbering`, `TableHeaderScope`, alt text, heading title) —
+/// (`TableHeaderScope`, alt text, heading title) —
 /// those flow from the DOM at render time once the wire-up lands.
+/// `ListNumbering` is carried here because `ul`/`ol` distinction is
+/// known at classify time from the element local name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfTag {
     P,
@@ -23,7 +25,9 @@ pub enum PdfTag {
     Div,
     Span,
     Figure,
-    L,
+    L { numbering: krilla::tagging::ListNumbering },
+    Lbl,
+    LBody,
     Li,
     Table,
     TRowGroup,
@@ -70,7 +74,8 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
         }
         "span" => Some(PdfTag::Span),
         "img" => Some(PdfTag::Figure),
-        "ul" | "ol" => Some(PdfTag::L),
+        "ul" => Some(PdfTag::L { numbering: krilla::tagging::ListNumbering::Disc }),
+        "ol" => Some(PdfTag::L { numbering: krilla::tagging::ListNumbering::Decimal }),
         "li" => Some(PdfTag::Li),
         "table" => Some(PdfTag::Table),
         "thead" | "tbody" | "tfoot" => Some(PdfTag::TRowGroup),
@@ -107,9 +112,11 @@ pub fn pdf_tag_to_krilla_tag(
         PdfTag::Figure => {
             krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(alt_text).into()
         }
-        PdfTag::L => {
-            krilla::tagging::Tag::L(krilla::tagging::ListNumbering::None).into() // numbering: fulgur-izp.7
+        PdfTag::L { numbering } => {
+            krilla::tagging::Tag::L(*numbering).into()
         }
+        PdfTag::Lbl => krilla::tagging::Tag::<krilla::tagging::kind::Lbl>::Lbl.into(),
+        PdfTag::LBody => krilla::tagging::Tag::<krilla::tagging::kind::LBody>::LBody.into(),
         PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
         PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
         PdfTag::TRowGroup => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
@@ -149,8 +156,15 @@ mod tests {
 
     #[test]
     fn classify_element_recognises_lists_and_tables() {
-        assert_eq!(classify_element("ul"), Some(PdfTag::L));
-        assert_eq!(classify_element("ol"), Some(PdfTag::L));
+        use krilla::tagging::ListNumbering;
+        assert_eq!(
+            classify_element("ul"),
+            Some(PdfTag::L { numbering: ListNumbering::Disc })
+        );
+        assert_eq!(
+            classify_element("ol"),
+            Some(PdfTag::L { numbering: ListNumbering::Decimal })
+        );
         assert_eq!(classify_element("li"), Some(PdfTag::Li));
         assert_eq!(classify_element("table"), Some(PdfTag::Table));
         assert_eq!(classify_element("thead"), Some(PdfTag::TRowGroup));
@@ -206,8 +220,20 @@ mod tests {
             TagKind::Figure(_)
         ));
         assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::L, None, None),
+            pdf_tag_to_krilla_tag(
+                &PdfTag::L { numbering: krilla::tagging::ListNumbering::Disc },
+                None,
+                None
+            ),
             TagKind::L(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Lbl, None, None),
+            TagKind::Lbl(_)
+        ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::LBody, None, None),
+            TagKind::LBody(_)
         ));
         assert!(matches!(
             pdf_tag_to_krilla_tag(&PdfTag::Li, None, None),
