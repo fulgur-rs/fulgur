@@ -21,11 +21,15 @@ use crate::drawables::NodeId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfTag {
     P,
-    H { level: u8 },
+    H {
+        level: u8,
+    },
     Div,
     Span,
     Figure,
-    L { numbering: krilla::tagging::ListNumbering },
+    L {
+        numbering: krilla::tagging::ListNumbering,
+    },
     Lbl,
     LBody,
     Li,
@@ -74,8 +78,12 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
         }
         "span" => Some(PdfTag::Span),
         "img" => Some(PdfTag::Figure),
-        "ul" => Some(PdfTag::L { numbering: krilla::tagging::ListNumbering::Disc }),
-        "ol" => Some(PdfTag::L { numbering: krilla::tagging::ListNumbering::Decimal }),
+        "ul" => Some(PdfTag::L {
+            numbering: krilla::tagging::ListNumbering::Disc,
+        }),
+        "ol" => Some(PdfTag::L {
+            numbering: krilla::tagging::ListNumbering::Decimal,
+        }),
         "li" => Some(PdfTag::Li),
         "table" => Some(PdfTag::Table),
         "thead" | "tbody" | "tfoot" => Some(PdfTag::TRowGroup),
@@ -112,9 +120,7 @@ pub fn pdf_tag_to_krilla_tag(
         PdfTag::Figure => {
             krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(alt_text).into()
         }
-        PdfTag::L { numbering } => {
-            krilla::tagging::Tag::L(*numbering).into()
-        }
+        PdfTag::L { numbering } => krilla::tagging::Tag::L(*numbering).into(),
         PdfTag::Lbl => krilla::tagging::Tag::<krilla::tagging::kind::Lbl>::Lbl.into(),
         PdfTag::LBody => krilla::tagging::Tag::<krilla::tagging::kind::LBody>::LBody.into(),
         PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
@@ -159,11 +165,15 @@ mod tests {
         use krilla::tagging::ListNumbering;
         assert_eq!(
             classify_element("ul"),
-            Some(PdfTag::L { numbering: ListNumbering::Disc })
+            Some(PdfTag::L {
+                numbering: ListNumbering::Disc
+            })
         );
         assert_eq!(
             classify_element("ol"),
-            Some(PdfTag::L { numbering: ListNumbering::Decimal })
+            Some(PdfTag::L {
+                numbering: ListNumbering::Decimal
+            })
         );
         assert_eq!(classify_element("li"), Some(PdfTag::Li));
         assert_eq!(classify_element("table"), Some(PdfTag::Table));
@@ -221,7 +231,9 @@ mod tests {
         ));
         assert!(matches!(
             pdf_tag_to_krilla_tag(
-                &PdfTag::L { numbering: krilla::tagging::ListNumbering::Disc },
+                &PdfTag::L {
+                    numbering: krilla::tagging::ListNumbering::Disc
+                },
                 None,
                 None
             ),

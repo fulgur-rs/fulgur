@@ -1103,7 +1103,12 @@ mod semantics_tests {
     fn dom_to_drawables_records_semantic_entries_for_lists() {
         let html = "<!DOCTYPE html><html><body><ul><li>a</li><li>b</li></ul></body></html>";
         let d = build_drawables(html);
-        let lists = entries_by_tag(&d, &PdfTag::L { numbering: krilla::tagging::ListNumbering::Disc });
+        let lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Disc,
+            },
+        );
         assert_eq!(lists.len(), 1, "expected one ul entry");
         let items = entries_by_tag(&d, &PdfTag::Li);
         assert_eq!(items.len(), 2, "expected two li entries");
@@ -1116,6 +1121,19 @@ mod semantics_tests {
                 "li {li_id} parent should be ul {ul_id}, got {parent:?}"
             );
         }
+    }
+
+    #[test]
+    fn dom_to_drawables_records_semantic_entries_for_ordered_lists() {
+        let html = "<!DOCTYPE html><html><body><ol><li>item</li></ol></body></html>";
+        let d = build_drawables(html);
+        let lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Decimal,
+            },
+        );
+        assert_eq!(lists.len(), 1, "one ol in semantics");
     }
 
     #[test]
