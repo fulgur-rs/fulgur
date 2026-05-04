@@ -4915,4 +4915,82 @@ h2 { string-set: chapter-title content(text); }
             "abs div at top:1600px with 800px pages should land on page 2; max_page={max_page:?}"
         );
     }
+
+    #[test]
+    fn grid_row_leaf_cells_cosplit_across_page_boundary() {
+        // 2-col grid, each leaf cell 60px tall.
+        // spacer 80px pushes grid to y=80 on a 100px page.
+        // pre-fix: cell 2 pushed to page 1 at y=0 (whole cell).
+        // post-fix: both cells split — page 0 y=80..100 (20px),
+        //           page 1 y=0..40 (40px).
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="height: 60px; width: 100px"></div>
+                <div style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
+        let mut frags: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
+        assert_eq!(
+            on_page0.len(),
+            2,
+            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
+        );
+        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        assert!(
+            (ys[0] - ys[1]).abs() < 0.5,
+            "page-0 fragments must share the same y (parallel row); ys={ys:?}"
+        );
+    }
+
+    #[test]
+    fn flex_row_leaf_cells_cosplit_across_page_boundary() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: flex; width: 200px;">
+                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+
+        let mut frags: Vec<(u32, f32, f32)> = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
+            .map(|f| (f.page_index, f.x, f.y))
+            .collect();
+        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
+        assert_eq!(
+            on_page0.len(),
+            2,
+            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
+        );
+        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        assert!(
+            (ys[0] - ys[1]).abs() < 0.5,
+            "page-0 fragments must share the same y; ys={ys:?}"
+        );
+    }
 }
