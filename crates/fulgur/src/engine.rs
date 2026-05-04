@@ -145,7 +145,7 @@ impl Engine {
         // later in `bookmark_mappings`) override them via last-match
         // cascade. Skipped when bookmarks are disabled to avoid unnecessary
         // CSS parsing and DOM traversal.
-        if self.config.bookmarks {
+        if self.config.effective_bookmarks() {
             let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
             let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
             combined_bookmarks.extend(gcpm.bookmark_mappings);
@@ -183,7 +183,7 @@ impl Engine {
         };
 
         let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
-            if self.config.bookmarks && !gcpm.bookmark_mappings.is_empty() {
+            if self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty() {
                 let pass = crate::blitz_adapter::BookmarkPass::new(gcpm.bookmark_mappings.clone());
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
                 pass.into_results().into_iter().collect()
@@ -631,6 +631,16 @@ impl EngineBuilder {
         self
     }
 
+    pub fn tagged(mut self, enabled: bool) -> Self {
+        self.config_builder = self.config_builder.tagged(enabled);
+        self
+    }
+
+    pub fn pdf_ua(mut self, enabled: bool) -> Self {
+        self.config_builder = self.config_builder.pdf_ua(enabled);
+        self
+    }
+
     pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config_builder = self.config_builder.authors(authors);
         self
@@ -849,5 +859,35 @@ mod tests {
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn builder_tagged_defaults_to_false() {
+        let engine = Engine::builder().build();
+        assert!(!engine.config().enable_tagging);
+    }
+
+    #[test]
+    fn builder_pdf_ua_defaults_to_false() {
+        let engine = Engine::builder().build();
+        assert!(!engine.config().pdf_ua);
+    }
+
+    #[test]
+    fn builder_tagged_opt_in() {
+        let engine = Engine::builder().tagged(true).build();
+        assert!(engine.config().enable_tagging);
+    }
+
+    #[test]
+    fn builder_pdf_ua_opt_in() {
+        let engine = Engine::builder().pdf_ua(true).build();
+        assert!(engine.config().pdf_ua);
+    }
+
+    #[test]
+    fn builder_pdf_ua_implies_effective_tagging() {
+        let engine = Engine::builder().pdf_ua(true).build();
+        assert!(engine.config().effective_tagging());
     }
 }

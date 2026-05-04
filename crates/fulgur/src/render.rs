@@ -6,6 +6,9 @@ use crate::gcpm::GcpmContext;
 use crate::gcpm::counter::resolve_content_to_html;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
+use krilla::SerializeSettings;
+use krilla::configure::{Configuration, Validator};
+use krilla::tagging::TagTree;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -31,9 +34,24 @@ pub fn render_v2(
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
 ) -> Result<Vec<u8>> {
-    let mut document = krilla::Document::new();
+    let mut document = if config.effective_tagging() {
+        let configuration = if config.pdf_ua {
+            Configuration::new_with_validator(Validator::UA1)
+        } else {
+            Configuration::new()
+        };
+        let mut doc = krilla::Document::new_with(SerializeSettings {
+            enable_tagging: true,
+            configuration,
+            ..Default::default()
+        });
+        doc.set_tag_tree(TagTree::new());
+        doc
+    } else {
+        krilla::Document::new()
+    };
 
-    let mut bookmark_collector = if config.bookmarks {
+    let mut bookmark_collector = if config.effective_bookmarks() {
         Some(crate::draw_primitives::BookmarkCollector::new())
     } else {
         None

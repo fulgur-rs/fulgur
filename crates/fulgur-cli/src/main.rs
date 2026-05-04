@@ -220,6 +220,14 @@ enum Commands {
         /// Generate PDF bookmarks (outline) from h1-h6 headings.
         #[arg(long)]
         bookmarks: bool,
+
+        /// Enable Tagged PDF output (structure tree).
+        #[arg(long)]
+        tagged: bool,
+
+        /// Enable PDF/UA-1 conformance (implies --tagged and --bookmarks). [WIP: content tagging not yet implemented]
+        #[arg(long = "pdf-ua")]
+        pdf_ua: bool,
     },
     /// Inspect a PDF and extract text positions, images, and metadata as JSON
     Inspect {
@@ -327,6 +335,8 @@ fn main() {
             images,
             data,
             bookmarks,
+            tagged,
+            pdf_ua,
         } => {
             if stdin && data.as_ref().is_some_and(|p| p.as_os_str() == "-") {
                 eprintln!("Error: cannot use --stdin and --data - together (both read stdin)");
@@ -435,9 +445,9 @@ fn main() {
             if let Some(creation_date) = creation_date {
                 builder = builder.creation_date(creation_date);
             }
-            if bookmarks {
-                builder = builder.bookmarks(true);
-            }
+            builder = builder.bookmarks(bookmarks);
+            builder = builder.tagged(tagged);
+            builder = builder.pdf_ua(pdf_ua);
             if let Some(ref base_path) = base_path {
                 builder = builder.base_path(base_path);
             }

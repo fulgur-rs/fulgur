@@ -2442,3 +2442,18 @@ fn multicol_inline_root_split_skips_slices_outside_current_page() {
         }
     }
 }
+
+#[test]
+fn tagged_render_produces_pdf() {
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html("<html><body><p>hello tagged</p></body></html>")
+        .expect("render tagged");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/StructTreeRoot"),
+        "tagged PDF must have StructTreeRoot"
+    );
+}
