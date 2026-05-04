@@ -1207,21 +1207,22 @@ mod semantics_tests {
         );
 
         // alt="" decorative
-        let d2 = build_drawables(
-            "<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>",
-        );
+        let d2 =
+            build_drawables("<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>");
         let figs2: Vec<_> = d2
             .semantics
             .values()
             .filter(|e| e.tag == PdfTag::Figure)
             .collect();
         assert_eq!(figs2.len(), 1);
-        assert_eq!(figs2[0].alt_text.as_deref(), Some(""), "empty alt should be Some(\"\")");
+        assert_eq!(
+            figs2[0].alt_text.as_deref(),
+            Some(""),
+            "empty alt should be Some(\"\")"
+        );
 
         // alt 未指定
-        let d3 = build_drawables(
-            "<!DOCTYPE html><html><body><img src='a.png'></body></html>",
-        );
+        let d3 = build_drawables("<!DOCTYPE html><html><body><img src='a.png'></body></html>");
         let figs3: Vec<_> = d3
             .semantics
             .values()
