@@ -99,6 +99,10 @@ pub struct Config {
     pub lang: Option<String>,
     /// Generate PDF bookmarks (outline) from h1–h6 headings.
     pub bookmarks: bool,
+    /// Enable Tagged PDF output (PDF structure tree).
+    pub enable_tagging: bool,
+    /// Enable PDF/UA-1 conformance (implies enable_tagging).
+    pub pdf_ua: bool,
 }
 
 impl Default for Config {
@@ -117,6 +121,8 @@ impl Default for Config {
             creation_date: None,
             lang: None,
             bookmarks: false,
+            enable_tagging: false,
+            pdf_ua: false,
         }
     }
 }
@@ -158,6 +164,12 @@ impl Config {
         } else {
             self.page_size.height
         }
+    }
+
+    /// Returns true if tagging should be enabled in the PDF output.
+    /// pdf_ua implies tagging.
+    pub fn effective_tagging(&self) -> bool {
+        self.enable_tagging || self.pdf_ua
     }
 }
 
@@ -239,6 +251,16 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn tagged(mut self, enabled: bool) -> Self {
+        self.config.enable_tagging = enabled;
+        self
+    }
+
+    pub fn pdf_ua(mut self, enabled: bool) -> Self {
+        self.config.pdf_ua = enabled;
+        self
+    }
+
     pub fn build(self) -> Config {
         self.config
     }
@@ -315,5 +337,47 @@ mod tests {
         let producer = config.producer.as_deref().unwrap_or("");
         assert_eq!(producer, "fulgur");
         assert!(!producer.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn config_enable_tagging_defaults_to_false() {
+        let config = Config::default();
+        assert!(!config.enable_tagging);
+    }
+
+    #[test]
+    fn config_pdf_ua_defaults_to_false() {
+        let config = Config::default();
+        assert!(!config.pdf_ua);
+    }
+
+    #[test]
+    fn config_effective_tagging_both_false() {
+        let config = Config::default();
+        assert!(!config.effective_tagging());
+    }
+
+    #[test]
+    fn config_effective_tagging_enable_tagging() {
+        let config = Config::builder().tagged(true).build();
+        assert!(config.effective_tagging());
+    }
+
+    #[test]
+    fn config_effective_tagging_pdf_ua() {
+        let config = Config::builder().pdf_ua(true).build();
+        assert!(config.effective_tagging());
+    }
+
+    #[test]
+    fn config_builder_tagged_sets_flag() {
+        let config = Config::builder().tagged(true).build();
+        assert!(config.enable_tagging);
+    }
+
+    #[test]
+    fn config_builder_pdf_ua_sets_flag() {
+        let config = Config::builder().pdf_ua(true).build();
+        assert!(config.pdf_ua);
     }
 }
