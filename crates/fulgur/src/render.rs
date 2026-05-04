@@ -239,10 +239,7 @@ pub fn render_v2(
     }
 
     if let Some(tc) = tag_collector {
-        let mut tree = TagTree::new();
-        if config.lang.is_some() {
-            tree = tree.with_lang(config.lang.clone());
-        }
+        let mut tree = TagTree::new().with_lang(config.lang.clone());
         let mut groups: BTreeMap<
             crate::drawables::NodeId,
             (crate::tagging::PdfTag, Vec<Identifier>),
@@ -801,9 +798,6 @@ fn try_start_tagged(
     ) {
         return None;
     }
-    if !drawables.paragraphs.contains_key(&node_id) {
-        return None;
-    }
     use krilla::tagging::{ContentTag, SpanTag};
     let id = canvas
         .surface
@@ -822,9 +816,11 @@ fn finish_tagged(
 ) {
     if let Some((tag, id)) = tag_info {
         canvas.surface.end_tagged();
-        if let Some(tc) = canvas.tag_collector.as_mut() {
-            tc.record(node_id, tag, id);
-        }
+        canvas
+            .tag_collector
+            .as_mut()
+            .expect("tag_collector is Some when tag_info is Some")
+            .record(node_id, tag, id);
     }
 }
 
