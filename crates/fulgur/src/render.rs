@@ -8,7 +8,7 @@ use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_ed
 use crate::gcpm::running::RunningElementStore;
 use krilla::SerializeSettings;
 use krilla::configure::{Configuration, Validator};
-use krilla::tagging::TagTree;
+use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -40,19 +40,23 @@ pub fn render_v2(
         } else {
             Configuration::new()
         };
-        let mut doc = krilla::Document::new_with(SerializeSettings {
+        krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
             configuration,
             ..Default::default()
-        });
-        doc.set_tag_tree(TagTree::new());
-        doc
+        })
     } else {
         krilla::Document::new()
     };
 
     let mut bookmark_collector = if config.effective_bookmarks() {
         Some(crate::draw_primitives::BookmarkCollector::new())
+    } else {
+        None
+    };
+
+    let mut tag_collector = if config.effective_tagging() {
+        Some(crate::draw_primitives::TagCollector::new())
     } else {
         None
     };
@@ -155,7 +159,7 @@ pub fn render_v2(
                     surface: &mut surface,
                     bookmark_collector: bookmark_collector.as_mut(),
                     link_collector: Some(&mut link_collector),
-                    tag_collector: None,
+                    tag_collector: tag_collector.as_mut(),
                 };
                 // Root `<html>` + `<body>` background pre-pass. v1's
                 // `BlockPageable::draw` for these elements paints
@@ -232,6 +236,32 @@ pub fn render_v2(
         }
         let per_page = link_collector.take_page(page_idx);
         crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
+    }
+
+    if let Some(tc) = tag_collector {
+        let mut tree = TagTree::new();
+        if config.lang.is_some() {
+            tree = tree.with_lang(config.lang.clone());
+        }
+        let mut groups: std::collections::BTreeMap<
+            crate::drawables::NodeId,
+            (crate::tagging::PdfTag, Vec<Identifier>),
+        > = std::collections::BTreeMap::new();
+        for (node_id, tag, id) in tc.into_entries() {
+            groups
+                .entry(node_id)
+                .or_insert_with(|| (tag, Vec::new()))
+                .1
+                .push(id);
+        }
+        for (_, (tag, ids)) in groups {
+            let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(&tag));
+            for id in ids {
+                group.push(Node::Leaf(id));
+            }
+            tree.push(group);
+        }
+        document.set_tag_tree(tree);
     }
 
     if let Some(c) = bookmark_collector {
