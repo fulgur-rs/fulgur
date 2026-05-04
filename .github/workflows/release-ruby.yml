@@ -292,7 +292,7 @@ jobs:
       # (repo + workflow + environment) is matched against the Trusted
       # Publisher registered on rubygems.org/gems/fulgur/trusted_publishers.
       # No role-to-assume needed. See docs/RELEASE_SETUP.md.
-      - uses: rubygems/configure-rubygems-credentials@cb088735f97e735ff769f8f7c24158151cc9ca6b  # main
+      - uses: rubygems/configure-rubygems-credentials@762a4b77c3300434bb57c7ce80b20e36231927aa  # main
       - name: List gems to publish
         shell: bash
         run: ls -la dist/*.gem
