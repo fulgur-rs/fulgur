@@ -4119,7 +4119,7 @@ h2 { string-set: chapter-title content(text); }
         // 左 column (x=0): y=0 と y=50 の 2 個
         let left_ys: Vec<f32> = inner
             .iter()
-            .filter(|(_, x, _)| (x - 0.0).abs() < 0.5)
+            .filter(|(_, x, _)| x.abs() < 0.5)
             .map(|(_, _, y)| *y)
             .collect();
         assert_eq!(left_ys, vec![0.0, 50.0], "left column y, inner={inner:?}");
@@ -4166,12 +4166,19 @@ h2 { string-set: chapter-title content(text); }
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        assert_eq!(inner.len(), 4, "inner={inner:?}");
-        assert!(inner.iter().all(|(p, _, _)| *p == 0), "inner={inner:?}");
+        assert_eq!(
+            inner.len(),
+            4,
+            "expected 4 inner divs (2 per column × 2 columns), got inner={inner:?}"
+        );
+        assert!(
+            inner.iter().all(|(p, _, _)| *p == 0),
+            "all 4 inner divs must be on page 0, inner={inner:?}"
+        );
 
         let left_ys: Vec<f32> = inner
             .iter()
-            .filter(|(_, x, _)| (x - 0.0).abs() < 0.5)
+            .filter(|(_, x, _)| x.abs() < 0.5)
             .map(|(_, _, y)| *y)
             .collect();
         let right_ys: Vec<f32> = inner
@@ -4183,7 +4190,7 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(
             right_ys,
             vec![0.0, 50.0],
-            "right column y must match left column, inner={inner:?}"
+            "right column y must match left column (parallel siblings, not stacked), inner={inner:?}"
         );
     }
 
