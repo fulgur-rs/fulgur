@@ -333,7 +333,19 @@ impl Engine {
             total_pages,
             resolved_content_width_px,
             resolved_content_height_px,
+            Some(&running_store),
         );
+        let expanded_total_pages =
+            crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
+        if expanded_total_pages > total_pages {
+            crate::pagination_layout::append_position_fixed_fragments(
+                &mut pagination_geometry,
+                doc.deref_mut(),
+                expanded_total_pages,
+                resolved_content_width_px,
+                resolved_content_height_px,
+            );
+        }
 
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
@@ -553,7 +565,19 @@ impl Engine {
             total_pages,
             crate::convert::pt_to_px(self.config.content_width()),
             crate::convert::pt_to_px(self.config.content_height()),
+            None,
         );
+        let expanded_total_pages =
+            crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
+        if expanded_total_pages > total_pages {
+            crate::pagination_layout::append_position_fixed_fragments(
+                &mut pagination_geometry,
+                doc.deref_mut(),
+                expanded_total_pages,
+                crate::convert::pt_to_px(self.config.content_width()),
+                crate::convert::pt_to_px(self.config.content_height()),
+            );
+        }
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
         let mut convert_ctx = ConvertContext {
