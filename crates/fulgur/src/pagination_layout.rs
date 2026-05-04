@@ -2560,6 +2560,17 @@ pub fn append_position_absolute_body_direct_fragments(
     let body_offset_xy = body_origin_in_px(doc);
 
     let body_children = body.children.clone();
+    let body_has_in_flow_content = body_children.iter().any(|&child_id| {
+        let Some(child) = doc.get_node(child_id) else {
+            return false;
+        };
+        if let Some(text) = child.text_data()
+            && text.content.chars().all(char::is_whitespace)
+        {
+            return false;
+        }
+        !is_out_of_flow_positioned(child)
+    });
     for child_id in body_children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
@@ -2595,6 +2606,7 @@ pub fn append_position_absolute_body_direct_fragments(
             body_offset_xy,
             viewport_h_px,
             pages,
+            !body_has_in_flow_content,
         );
     }
 
@@ -2619,6 +2631,7 @@ fn record_subtree_fragments_at_offset(
     body_offset: (f32, f32),
     page_h_px: f32,
     total_pages: u32,
+    may_extend_pages: bool,
 ) {
     #[allow(clippy::too_many_arguments)]
     fn walk(
@@ -2630,6 +2643,7 @@ fn record_subtree_fragments_at_offset(
         body_offset: (f32, f32),
         page_h_px: f32,
         total_pages: u32,
+        may_extend_pages: bool,
         depth: usize,
     ) {
         use ::style::properties::longhands::position::computed_value::T as Pos;
@@ -2670,11 +2684,12 @@ fn record_subtree_fragments_at_offset(
             .iter()
             .filter_map(|child_id| doc.get_node(*child_id))
             .filter(|child| {
-                child.primary_styles().is_some_and(|s| {
-                    s.get_box()
-                        .clone_contain()
-                        .contains(::style::values::computed::box_::Contain::SIZE)
-                })
+                !is_out_of_flow_positioned(child)
+                    && child.primary_styles().is_some_and(|s| {
+                        s.get_box()
+                            .clone_contain()
+                            .contains(::style::values::computed::box_::Contain::SIZE)
+                    })
             })
             .map(|child| (child.final_layout.size.height - page_h_px).max(0.0))
             .sum();
@@ -2722,7 +2737,11 @@ fn record_subtree_fragments_at_offset(
                 && first_page_f < total_pages as f32
             {
                 let first_page = first_page_f as u32;
-                let last_page = last_page_f as u32;
+                let last_page = if may_extend_pages {
+                    last_page_f as u32
+                } else {
+                    (last_page_f as u32).min(total_pages.saturating_sub(1))
+                };
                 let entry = geometry.entry(node_id).or_default();
                 entry.fragments.clear();
                 entry.is_repeat = false;
@@ -2785,6 +2804,7 @@ fn record_subtree_fragments_at_offset(
                 body_offset,
                 page_h_px,
                 descendant_total_pages,
+                may_extend_pages,
                 depth + 1,
             );
             if child.primary_styles().is_some_and(|s| {
@@ -2806,8 +2826,16 @@ fn record_subtree_fragments_at_offset(
         body_offset,
         page_h_px,
         total_pages,
+        may_extend_pages,
         0,
     );
+}
+
+fn is_out_of_flow_positioned(node: &blitz_dom::Node) -> bool {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+
+    node.primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
 }
 
 /// CSS-px (x, y) of `<body>`'s top-left in its containing block (html).
@@ -3966,6 +3994,7 @@ h2 { string-set: chapter-title content(text); }
             (0.0, 0.0),
             f32::MAX,
             3,
+            true,
         );
 
         let pages: Vec<u32> = geom
