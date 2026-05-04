@@ -243,10 +243,10 @@ pub fn render_v2(
         if config.lang.is_some() {
             tree = tree.with_lang(config.lang.clone());
         }
-        let mut groups: std::collections::BTreeMap<
+        let mut groups: BTreeMap<
             crate::drawables::NodeId,
             (crate::tagging::PdfTag, Vec<Identifier>),
-        > = std::collections::BTreeMap::new();
+        > = BTreeMap::new();
         for (node_id, tag, id) in tc.into_entries() {
             groups
                 .entry(node_id)
