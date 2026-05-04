@@ -3572,9 +3572,10 @@ fn build_tag_group(
 ) -> TagGroup {
     let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
     let title = heading_titles.get(&node_id).cloned();
-    let alt_text = entry.alt_text.clone();
     let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
-        &entry.tag, title, alt_text,
+        &entry.tag,
+        title,
+        entry.alt_text.clone(),
     ));
 
     if let Some(ids) = identifiers.get(&node_id) {

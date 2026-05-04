@@ -1190,45 +1190,35 @@ mod semantics_tests {
 
     #[test]
     fn dom_to_drawables_records_alt_text_on_figure() {
-        // alt あり
-        let d = build_drawables(
-            "<!DOCTYPE html><html><body><img src='a.png' alt='photo of cat'></body></html>",
-        );
-        let figures: Vec<_> = d
-            .semantics
-            .values()
-            .filter(|e| e.tag == PdfTag::Figure)
-            .collect();
-        assert_eq!(figures.len(), 1);
+        let figure_alt = |html: &str| {
+            let d = build_drawables(html);
+            let figures: Vec<_> = d
+                .semantics
+                .values()
+                .filter(|e| e.tag == PdfTag::Figure)
+                .collect();
+            assert_eq!(figures.len(), 1);
+            figures[0].alt_text.clone()
+        };
+
         assert_eq!(
-            figures[0].alt_text.as_deref(),
+            figure_alt(
+                "<!DOCTYPE html><html><body><img src='a.png' alt='photo of cat'></body></html>"
+            )
+            .as_deref(),
             Some("photo of cat"),
             "alt text should be captured"
         );
-
-        // alt="" decorative
-        let d2 =
-            build_drawables("<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>");
-        let figs2: Vec<_> = d2
-            .semantics
-            .values()
-            .filter(|e| e.tag == PdfTag::Figure)
-            .collect();
-        assert_eq!(figs2.len(), 1);
         assert_eq!(
-            figs2[0].alt_text.as_deref(),
+            figure_alt("<!DOCTYPE html><html><body><img src='a.png' alt=''></body></html>")
+                .as_deref(),
             Some(""),
             "empty alt should be Some(\"\")"
         );
-
-        // alt 未指定
-        let d3 = build_drawables("<!DOCTYPE html><html><body><img src='a.png'></body></html>");
-        let figs3: Vec<_> = d3
-            .semantics
-            .values()
-            .filter(|e| e.tag == PdfTag::Figure)
-            .collect();
-        assert_eq!(figs3.len(), 1);
-        assert_eq!(figs3[0].alt_text, None, "missing alt should be None");
+        assert_eq!(
+            figure_alt("<!DOCTYPE html><html><body><img src='a.png'></body></html>"),
+            None,
+            "missing alt should be None"
+        );
     }
 }
