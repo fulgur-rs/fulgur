@@ -1684,6 +1684,16 @@ fn fragment_block_subtree(
         if needs_recursion {
             let pre_recursion_page = page_index;
             let pre_recursion_cursor_y = cursor_y;
+            // fulgur-u0p0: enter recursion from `child_page_y` (the rebased
+            // page-local y of THIS child) instead of the parent's running
+            // `cursor_y`. For block flow, `child_page_y == cursor_y` after
+            // the cursor_y update above, so this is a no-op. For grid / flex
+            // parallel siblings (same Taffy `location.y` as a previous
+            // sibling on this page), `cursor_y` still holds the previous
+            // sibling's bottom — passing it would stack the parallel cell
+            // below the previous one instead of beside it. Using
+            // `child_page_y` keeps each cell's recursion strip aligned to
+            // the row's y on the current page.
             let (np, nc) = fragment_block_subtree(
                 geometry,
                 doc,
@@ -1693,12 +1703,21 @@ fn fragment_block_subtree(
                 child_w,
                 child_x_in_body,
                 page_index,
-                cursor_y,
+                child_page_y,
                 page_height_px,
                 depth + 1,
             );
             page_index = np;
-            cursor_y = nc;
+            // fulgur-u0p0: when the recursion stayed on the same page,
+            // keep the larger of the parent's existing `cursor_y` (row max
+            // bottom from a previous parallel sibling) and the recursion's
+            // returned `nc`. When the recursion crossed pages, the previous
+            // page's `cursor_y` is stale — adopt `nc` directly.
+            cursor_y = if np == pre_recursion_page {
+                cursor_y.max(nc)
+            } else {
+                nc
+            };
             // If the recursion crossed a boundary, the parent's
             // current-page fragment must restart at y=0 on the new
             // page. Defensive `nc < page_start_y` guards against
@@ -4047,152 +4066,124 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
-    fn fragment_block_subtree_grid_row_co_splits_at_same_y() {
-        // 1 row の 2 cell が page boundary をまたぐ co-split case (cell
-        // 内に natural break point を持つよう inner div を 2 段重ねた).
+    fn fragment_block_subtree_grid_row_recursive_cells_share_page_y() {
+        // 2 cell の grid row で、両 cell が inner content を持ち
+        // recursion 経路を通る (`needs_recursion=true`) case。両 cell
+        // が page 内に収まるサイズなので page boundary は跨がない。
         //
-        // pre-fix (A だけ未修正): 右 column の cell の recursion 入り口
-        // が parent の cursor_y (= 左 column の bottom) になり、右 column
-        // が y=300 付近に積まれる block flow フォールバック挙動を示す。
+        // pre-fix: 右 cell の recursion が parent の `cursor_y`
+        // (= 左 cell の bottom = 200) を引きずり、右 column の inner
+        // div が y=200 (block flow stacking) に積まれる。
         //
-        // post-fix: 両 cell とも grid row として同じ y=100 から開始し、
-        // div1 は page 0 (y=100), div2 は page 1 (y=0) に co-split する。
+        // post-fix: 両 cell とも row top y=0 から開始し、各 inner div
+        // が y=0..50, y=50..100 に並ぶ。
         let html = r#"
             <html><body style="margin: 0; padding: 0">
-              <div style="height: 100px; width: 200px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
                 <div style="width: 100px">
-                  <div style="height: 100px; width: 100px"></div>
-                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
                 </div>
                 <div style="width: 100px">
-                  <div style="height: 100px; width: 100px"></div>
-                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
 
-        // 100×100 の inner div fragment だけを集めて (page, x, y) で
-        // 同 row co-split を検証する。cell wrapper (width 100, height 200)
-        // は除外して inner div (width 100, height 100) のみ見る。
+        // 100×50 の inner div fragment 4 個を集める。
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 100.0).abs() < 0.5)
+            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
             .map(|f| (f.page_index, f.x, f.y))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let count_at = |page: u32, x: f32| {
-            inner
-                .iter()
-                .filter(|(p, ix, _)| *p == page && (ix - x).abs() < 0.5)
-                .count()
-        };
-        let y_at = |page: u32, x: f32| {
-            inner
-                .iter()
-                .find(|(p, ix, _)| *p == page && (ix - x).abs() < 0.5)
-                .map(|(_, _, y)| *y)
-        };
-
-        // 各列に対し page 0 と page 1 にちょうど 1 個の inner div が並ぶ
-        // (div1 が page 0、div2 が page 1) ことを期待する。
         assert_eq!(
-            count_at(0, 0.0),
-            1,
-            "left column page-0 inner div, inner={inner:?}"
-        );
-        assert_eq!(
-            count_at(0, 100.0),
-            1,
-            "right column page-0 inner div, inner={inner:?}"
-        );
-        assert_eq!(
-            count_at(1, 0.0),
-            1,
-            "left column page-1 inner div, inner={inner:?}"
-        );
-        assert_eq!(
-            count_at(1, 100.0),
-            1,
-            "right column page-1 inner div, inner={inner:?}"
+            inner.len(),
+            4,
+            "expected 4 inner divs (2 per column × 2 columns), got inner={inner:?}"
         );
 
-        // page 0 の左右 column の上端 y が一致 (= row top)
-        assert_eq!(
-            y_at(0, 0.0),
-            y_at(0, 100.0),
-            "page 0 row top must share y across columns, inner={inner:?}"
+        // すべて page 0 に収まる
+        assert!(
+            inner.iter().all(|(p, _, _)| *p == 0),
+            "all 4 inner divs must be on page 0, inner={inner:?}"
         );
-        // page 1 の左右 column の上端 y が一致 (= 0)
+
+        // 左 column (x=0): y=0 と y=50 の 2 個
+        let left_ys: Vec<f32> = inner
+            .iter()
+            .filter(|(_, x, _)| (x - 0.0).abs() < 0.5)
+            .map(|(_, _, y)| *y)
+            .collect();
+        assert_eq!(left_ys, vec![0.0, 50.0], "left column y, inner={inner:?}");
+
+        // 右 column (x=100): y=0 と y=50 の 2 個 (block flow になっていれば
+        // y=100, y=150 になる)
+        let right_ys: Vec<f32> = inner
+            .iter()
+            .filter(|(_, x, _)| (x - 100.0).abs() < 0.5)
+            .map(|(_, _, y)| *y)
+            .collect();
         assert_eq!(
-            y_at(1, 0.0),
-            y_at(1, 100.0),
-            "page 1 row top must share y across columns, inner={inner:?}"
+            right_ys,
+            vec![0.0, 50.0],
+            "right column y must match left column (parallel siblings, not stacked), inner={inner:?}"
         );
     }
 
     #[test]
-    fn fragment_block_subtree_flex_row_co_splits_at_same_y() {
+    fn fragment_block_subtree_flex_row_recursive_cells_share_page_y() {
         let html = r#"
             <html><body style="margin: 0; padding: 0">
-              <div style="height: 100px; width: 200px"></div>
               <div style="display: flex; width: 200px;">
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 100px; width: 100px"></div>
-                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
                 </div>
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 100px; width: 100px"></div>
-                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
+                  <div style="height: 50px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
 
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 100.0).abs() < 0.5)
+            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
             .map(|f| (f.page_index, f.x, f.y))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let count_at = |page: u32, x: f32| {
-            inner
-                .iter()
-                .filter(|(p, ix, _)| *p == page && (ix - x).abs() < 0.5)
-                .count()
-        };
-        let y_at = |page: u32, x: f32| {
-            inner
-                .iter()
-                .find(|(p, ix, _)| *p == page && (ix - x).abs() < 0.5)
-                .map(|(_, _, y)| *y)
-        };
+        assert_eq!(inner.len(), 4, "inner={inner:?}");
+        assert!(inner.iter().all(|(p, _, _)| *p == 0), "inner={inner:?}");
 
-        assert_eq!(count_at(0, 0.0), 1, "left page-0, inner={inner:?}");
-        assert_eq!(count_at(0, 100.0), 1, "right page-0, inner={inner:?}");
-        assert_eq!(count_at(1, 0.0), 1, "left page-1, inner={inner:?}");
-        assert_eq!(count_at(1, 100.0), 1, "right page-1, inner={inner:?}");
-
+        let left_ys: Vec<f32> = inner
+            .iter()
+            .filter(|(_, x, _)| (x - 0.0).abs() < 0.5)
+            .map(|(_, _, y)| *y)
+            .collect();
+        let right_ys: Vec<f32> = inner
+            .iter()
+            .filter(|(_, x, _)| (x - 100.0).abs() < 0.5)
+            .map(|(_, _, y)| *y)
+            .collect();
+        assert_eq!(left_ys, vec![0.0, 50.0], "left column y, inner={inner:?}");
         assert_eq!(
-            y_at(0, 0.0),
-            y_at(0, 100.0),
-            "page 0 row top, inner={inner:?}"
-        );
-        assert_eq!(
-            y_at(1, 0.0),
-            y_at(1, 100.0),
-            "page 1 row top, inner={inner:?}"
+            right_ys,
+            vec![0.0, 50.0],
+            "right column y must match left column, inner={inner:?}"
         );
     }
 
