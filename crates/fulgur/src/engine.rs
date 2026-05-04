@@ -145,7 +145,7 @@ impl Engine {
         // later in `bookmark_mappings`) override them via last-match
         // cascade. Skipped when bookmarks are disabled to avoid unnecessary
         // CSS parsing and DOM traversal.
-        if self.config.bookmarks {
+        if self.config.effective_bookmarks() {
             let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
             let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
             combined_bookmarks.extend(gcpm.bookmark_mappings);
@@ -183,7 +183,7 @@ impl Engine {
         };
 
         let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
-            if self.config.bookmarks && !gcpm.bookmark_mappings.is_empty() {
+            if self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty() {
                 let pass = crate::blitz_adapter::BookmarkPass::new(gcpm.bookmark_mappings.clone());
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
                 pass.into_results().into_iter().collect()

@@ -58,14 +58,15 @@ fn cli_without_tagged_flag_has_no_struct_tree_root() {
 }
 
 #[test]
-fn cli_pdf_ua_flag_fails_with_validation_errors() {
-    // PDF/UA (Validator::UA1) is strict and rejects documents that lack required
-    // metadata such as a document title and outline. The CLI propagates the
-    // validation error and exits with a non-zero status.
+fn cli_pdf_ua_flag_succeeds() {
     let dir = TempDir::new().expect("create temp dir");
     let html_path = dir.path().join("doc.html");
     let pdf_path = dir.path().join("doc.pdf");
-    std::fs::write(&html_path, "<html><body><p>Hello PDF/UA</p></body></html>").unwrap();
+    std::fs::write(
+        &html_path,
+        "<html><head><title>Test Document</title></head><body><h1>Hello</h1><p>Hello PDF/UA</p></body></html>",
+    )
+    .unwrap();
 
     let out = run_cli(&[
         "render",
@@ -73,14 +74,11 @@ fn cli_pdf_ua_flag_fails_with_validation_errors() {
         "-o",
         pdf_path.to_str().unwrap(),
         "--pdf-ua",
+        "--title",
+        "Test Document",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "CLI should fail PDF/UA validation: {stderr}"
-    );
-    assert!(
-        stderr.contains("Validation"),
-        "stderr must mention Validation: {stderr}"
-    );
+    assert!(out.status.success(), "CLI --pdf-ua failed: {stderr}");
+    let pdf = std::fs::read(&pdf_path).unwrap();
+    assert!(!pdf.is_empty());
 }

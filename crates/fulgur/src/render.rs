@@ -51,7 +51,7 @@ pub fn render_v2(
         krilla::Document::new()
     };
 
-    let mut bookmark_collector = if config.bookmarks {
+    let mut bookmark_collector = if config.effective_bookmarks() {
         Some(crate::draw_primitives::BookmarkCollector::new())
     } else {
         None

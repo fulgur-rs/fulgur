@@ -171,6 +171,12 @@ impl Config {
     pub fn effective_tagging(&self) -> bool {
         self.enable_tagging || self.pdf_ua
     }
+
+    /// Returns true if bookmarks should be generated.
+    /// pdf_ua implies bookmarks (PDF/UA requires document outline).
+    pub fn effective_bookmarks(&self) -> bool {
+        self.bookmarks || self.pdf_ua
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -379,5 +385,23 @@ mod tests {
     fn config_builder_pdf_ua_sets_flag() {
         let config = Config::builder().pdf_ua(true).build();
         assert!(config.pdf_ua);
+    }
+
+    #[test]
+    fn config_effective_bookmarks_false_by_default() {
+        let config = Config::default();
+        assert!(!config.effective_bookmarks());
+    }
+
+    #[test]
+    fn config_effective_bookmarks_with_bookmarks_flag() {
+        let config = Config::builder().bookmarks(true).build();
+        assert!(config.effective_bookmarks());
+    }
+
+    #[test]
+    fn config_effective_bookmarks_with_pdf_ua() {
+        let config = Config::builder().pdf_ua(true).build();
+        assert!(config.effective_bookmarks());
     }
 }
