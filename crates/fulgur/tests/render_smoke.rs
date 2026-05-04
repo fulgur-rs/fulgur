@@ -31,9 +31,7 @@ fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
 
     let expected = std::fs::read(&path).unwrap();
     if pdf != expected.as_slice() {
-        panic!(
-            "PDF snapshot mismatch: {name}\nRun with FULGUR_UPDATE_SNAPSHOTS=1 to update."
-        );
+        panic!("PDF snapshot mismatch: {name}\nRun with FULGUR_UPDATE_SNAPSHOTS=1 to update.");
     }
 }
 
@@ -41,7 +39,8 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
     let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/.fonts/NotoSans-Regular.ttf");
     let mut assets = AssetBundle::default();
-    assets.add_font_file(&font_path)
+    assets
+        .add_font_file(&font_path)
         .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
     assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
     Engine::builder()
@@ -2600,7 +2599,10 @@ fn tagged_struct_tree_reflects_dom_nesting() {
         .expect("render");
 
     let s = String::from_utf8_lossy(&pdf);
-    assert!(s.contains("/Div"), "StructTree must contain /Div for <section>");
+    assert!(
+        s.contains("/Div"),
+        "StructTree must contain /Div for <section>"
+    );
 }
 
 #[test]
@@ -2619,5 +2621,8 @@ fn tagged_pdf_is_deterministic() {
 <body><section><h1>Title</h1><p>Body text.</p></section></body></html>"#;
     let pdf1 = tagged_render_with_noto(html);
     let pdf2 = tagged_render_with_noto(html);
-    assert_eq!(pdf1, pdf2, "tagged PDF must be byte-identical across renders");
+    assert_eq!(
+        pdf1, pdf2,
+        "tagged PDF must be byte-identical across renders"
+    );
 }
