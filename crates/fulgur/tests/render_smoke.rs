@@ -2901,3 +2901,35 @@ fn tagged_pdf_link_in_opacity_block_does_not_panic() {
     );
     assert!(s.contains("/Annots"), "must have link annotation on page");
 }
+
+#[test]
+fn tagged_pdf_link_in_opacity_block_with_inline_box_child() {
+    // Exercises the `use_run_tagging` branch inside `draw_under_opacity`
+    // (render.rs L2035/2036/2055) which is reached only when the opacity-
+    // scoped node is ALSO an inline root (has a ParagraphDraw at the same
+    // node_id) AND has `opacity_descendants` non-empty (i.e. it contains
+    // inline-box children that register their own drawable entries during
+    // `extract_paragraph`). The combination: visual-style + opacity +
+    // inline-box child + link run.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <div style="opacity:0.8;background:#fff;padding:4px">
+            Visit <a href="https://example.com">opacity link</a>
+            <span style="display:inline-block;width:10px;height:10px;background:#aaa;"></span>
+            here.
+        </div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("opacity inline-root with inline-box child and link in tagged PDF must not panic");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
