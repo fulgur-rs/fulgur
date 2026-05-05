@@ -650,7 +650,10 @@ pub fn extract_column_style_table(doc: &HtmlDocument) -> crate::column_css::Colu
 pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
     use std::ops::Deref;
 
-    fn find_title(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
+    fn find_title(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) -> Option<usize> {
+        if depth >= crate::MAX_DOM_DEPTH {
+            return None;
+        }
         let node = doc.get_node(node_id)?;
         if let Some(el) = node.element_data() {
             if el.name.local.as_ref() == "title" {
@@ -658,7 +661,7 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
             }
         }
         for &child_id in &node.children {
-            if let Some(found) = find_title(doc, child_id) {
+            if let Some(found) = find_title(doc, child_id, depth + 1) {
                 return Some(found);
             }
         }
@@ -666,7 +669,7 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
     }
 
     let base = doc.deref();
-    let title_id = find_title(base, doc.root_element().id)?;
+    let title_id = find_title(base, doc.root_element().id, 0)?;
     let title_node = base.get_node(title_id)?;
 
     let mut text = String::new();
