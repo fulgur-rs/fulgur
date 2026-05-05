@@ -761,7 +761,17 @@ pub fn draw_shaped_lines(
                     }
                 }
                 LineItem::InlineBox(ib) => {
+                    // Close any open per-run tag region and clear
+                    // `link_run_node_id` before dispatching inline-box
+                    // content. `start_tagged` is non-nestable in Krilla:
+                    // leaving a region open or having `link_run_node_id` set
+                    // while the sub-dispatch also calls `start_tagged` panics.
+                    if let Some(tracker) = run_region.as_mut() {
+                        tracker.close(canvas);
+                    }
+                    let saved_link_run_node_id = canvas.link_run_node_id.take();
                     if !ib.visible {
+                        canvas.link_run_node_id = saved_link_run_node_id;
                         continue;
                     }
                     let ox = x + ib.x_offset;
@@ -846,6 +856,7 @@ pub fn draw_shaped_lines(
                             collector.push_rect(link_span, rect);
                         }
                     }
+                    canvas.link_run_node_id = saved_link_run_node_id;
                 }
             }
         }

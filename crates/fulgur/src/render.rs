@@ -790,6 +790,22 @@ fn para_has_link_runs(entry: &crate::drawables::ParagraphEntry) -> bool {
     })
 }
 
+/// Collect the plain-text title from a paragraph's shaped lines.
+///
+/// Returns the concatenated text of all `Text` run items across all lines.
+/// Used to populate the `/T` (Title) attribute on heading tags required by
+/// PDF/UA-1.
+fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
+    para.lines
+        .iter()
+        .flat_map(|line| line.items.iter())
+        .filter_map(|item| match item {
+            crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Start a Krilla tagged content sequence for a paragraph-bearing node when
 /// tagging is enabled and the node has a P / H / Span semantic entry.
 ///
@@ -819,18 +835,10 @@ fn try_start_tagged(
             Some((node_id, semantic.tag.clone(), id, None))
         }
         crate::tagging::PdfTag::H { .. } => {
-            // For heading tags, extract the plain text so Tag::Hn gets the /T (Title)
-            // attribute that PDF/UA-1 validators require.
-            let heading_title = drawables.paragraphs.get(&node_id).map(|para| {
-                para.lines
-                    .iter()
-                    .flat_map(|line| line.items.iter())
-                    .filter_map(|item| match item {
-                        crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>()
-            });
+            let heading_title = drawables
+                .paragraphs
+                .get(&node_id)
+                .map(extract_heading_title);
             use krilla::tagging::{ContentTag, SpanTag};
             let id = canvas
                 .surface
@@ -3637,6 +3645,24 @@ fn build_struct_tree(
         identifiers.entry(node_id).or_default().push(id);
         if let Some(title) = heading_title {
             heading_titles.entry(node_id).or_insert(title);
+        }
+    }
+    // Nodes that use per-run tagging (run_entries) bypass try_start_tagged and
+    // therefore never record a heading_title through tc_entries. Backfill their
+    // titles here so <h1><a href>…</a></h1> still gets the /T attribute.
+    for &node_id in run_entries.keys() {
+        if heading_titles.contains_key(&node_id) {
+            continue;
+        }
+        if let Some(entry) = drawables.semantics.get(&node_id) {
+            if matches!(entry.tag, crate::tagging::PdfTag::H { .. }) {
+                if let Some(para) = drawables.paragraphs.get(&node_id) {
+                    let title = extract_heading_title(para);
+                    if !title.is_empty() {
+                        heading_titles.insert(node_id, title);
+                    }
+                }
+            }
         }
     }
 

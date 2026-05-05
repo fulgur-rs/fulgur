@@ -2726,7 +2726,10 @@ fn tagged_pdf_external_link_produces_link_struct_element() {
     assert!(!pdf.is_empty());
     let s = String::from_utf8_lossy(&pdf);
     assert!(s.contains("/StructTreeRoot"), "must have struct tree root");
-    assert!(s.contains("/Link"), "must have /Link structure element");
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
     assert!(s.contains("/Annots"), "must have link annotation on page");
 }
 
@@ -2745,7 +2748,10 @@ fn tagged_pdf_internal_anchor_link_produces_link_struct_element() {
 
     assert!(!pdf.is_empty());
     let s = String::from_utf8_lossy(&pdf);
-    assert!(s.contains("/Link"), "must have /Link structure element");
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
 }
 
 #[test]
@@ -2760,6 +2766,25 @@ fn tagged_pdf_image_link_does_not_panic() {
         .build()
         .render_html(html)
         .expect("image link tagged render must not panic");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/Annots"), "image link must produce annotation");
+}
+
+#[test]
+fn tagged_pdf_inline_box_after_link_does_not_panic() {
+    // Regression: InlineBox was not closing the per-run tag region before
+    // dispatching, causing a non-nestable start_tagged panic in Krilla.
+    let html = r##"<!DOCTYPE html><html lang="en"><body>
+        <p><a href="#x">link text</a><span style="display:inline-block">box</span></p>
+    </body></html>"##;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("inline box after link must not panic");
 
     assert!(!pdf.is_empty());
 }
