@@ -307,10 +307,4 @@ mod tests {
             TagKind::Link(_)
         ));
     }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_link() {
-        let k = pdf_tag_to_krilla_tag(&PdfTag::Link, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::Link(_)));
-    }
 }

@@ -114,7 +114,6 @@ pub fn render_v2(
 
     let mut link_collector = crate::draw_primitives::LinkCollector::new();
 
-    let tagging = config.effective_tagging();
     let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
     // Build the GCPM margin-box renderer once. Reused across pages so
@@ -240,28 +239,16 @@ pub fn render_v2(
             );
         }
         let per_page = link_collector.take_page(page_idx);
-        // Build the set of span_ptrs that are wired into the struct tree via
-        // ParagraphRunItem::LinkContent entries.  Only these ptrs should use
-        // add_tagged_annotation; others fall back to add_annotation so that
-        // Krilla's invariant (every tagged annotation appears in the tag tree)
-        // is not violated for link types not yet wired (e.g. InlineBox links).
-        let wired_ptrs: Option<std::collections::BTreeSet<usize>> =
-            tag_collector.as_ref().map(|tc| {
-                use crate::draw_primitives::ParagraphRunItem;
-                tc.run_entries
-                    .values()
-                    .flatten()
-                    .filter_map(|item| match item {
-                        ParagraphRunItem::LinkContent { span_ptr, .. } => Some(*span_ptr),
-                        ParagraphRunItem::Content(_) => None,
-                    })
-                    .collect()
-            });
+        // Only span_ptrs that are wired into the struct tree via
+        // ParagraphRunItem::LinkContent entries should use add_tagged_annotation;
+        // others fall back to add_annotation so that Krilla's invariant
+        // (every tagged annotation appears in the tag tree) is not violated for
+        // link types not yet wired (e.g. InlineBox links).
+        let wired_ptrs = tag_collector.as_ref().map(|tc| tc.wired_link_span_ptrs());
         for (ptr, id) in crate::link::emit_link_annotations(
             &mut page,
             &per_page,
             &dest_registry,
-            tagging,
             wired_ptrs.as_ref(),
         ) {
             link_annot_ids.entry(ptr).or_default().push(id);
@@ -1037,38 +1024,29 @@ pub(crate) fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
-        if canvas.tag_collector.is_some() && para_has_link_runs(para) {
+        let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(para);
+        let tag_info = if use_run_tagging {
             canvas.link_run_node_id = Some(node_id);
-            draw_paragraph_v2(
-                canvas,
-                para,
-                x_pt,
-                y_pt,
-                &geom.fragments,
-                page_index,
-                is_split,
-                drawables,
-                geometry,
-                margin_left_pt,
-                margin_top_pt,
-            );
-            canvas.link_run_node_id = None;
+            None
         } else {
-            let tag_info = try_start_tagged(canvas, node_id, drawables);
-            draw_paragraph_v2(
-                canvas,
-                para,
-                x_pt,
-                y_pt,
-                &geom.fragments,
-                page_index,
-                is_split,
-                drawables,
-                geometry,
-                margin_left_pt,
-                margin_top_pt,
-            );
-            finish_tagged(canvas, tag_info);
+            try_start_tagged(canvas, node_id, drawables)
+        };
+        draw_paragraph_v2(
+            canvas,
+            para,
+            x_pt,
+            y_pt,
+            &geom.fragments,
+            page_index,
+            is_split,
+            drawables,
+            geometry,
+            margin_left_pt,
+            margin_top_pt,
+        );
+        finish_tagged(canvas, tag_info);
+        if use_run_tagging {
+            canvas.link_run_node_id = None;
         }
     }
 }
@@ -3652,9 +3630,8 @@ fn build_struct_tree(
 ) {
     let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
     let mut heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
-    // Destructure tc to extract run_entries before consuming tc via
-    // into_entries() — a direct `tc.run_entries` move before calling
-    // tc.into_entries() would be a partial move error.
+    // `into_parts` returns `entries` and `run_entries` together so neither
+    // field needs to be borrowed before the other is moved.
     let (tc_entries, run_entries) = tc.into_parts();
     for (node_id, _tag, id, heading_title) in tc_entries {
         identifiers.entry(node_id).or_default().push(id);
@@ -3728,19 +3705,14 @@ fn build_tag_group(
                         None,
                     ));
                     // Collect all consecutive items with the same span_ptr.
-                    while i < run_items.len() {
-                        if let ParagraphRunItem::LinkContent {
-                            span_ptr: p,
-                            identifier: id,
-                        } = &run_items[i]
-                        {
-                            if *p == ptr {
-                                link_group.push(Node::Leaf(*id));
-                                i += 1;
-                                continue;
-                            }
-                        }
-                        break;
+                    while let Some(ParagraphRunItem::LinkContent {
+                        span_ptr: p,
+                        identifier: id,
+                    }) = run_items.get(i)
+                        && *p == ptr
+                    {
+                        link_group.push(Node::Leaf(*id));
+                        i += 1;
                     }
                     // Annotation identifiers (OBJR) follow content identifiers.
                     // A cross-page link produces one identifier per page.
@@ -3963,17 +3935,7 @@ mod tests {
 
     // --- build_tag_group: LinkContent branch ---
 
-    /// Helper that allocates a real [`Identifier`] from a scratch krilla document.
-    fn make_identifier() -> Identifier {
-        use krilla::tagging::{ContentTag, SpanTag};
-        let mut doc = krilla::Document::new();
-        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0).expect("valid page size");
-        let mut page = doc.start_page_with(settings);
-        let mut surface = page.surface();
-        let id = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
-        surface.end_tagged();
-        id
-    }
+    use crate::draw_primitives::run_tag_tests::make_identifier;
 
     /// Build a minimal [`Drawables`] with a single semantic paragraph node.
     fn drawables_with_para(node_id: crate::drawables::NodeId) -> Drawables {

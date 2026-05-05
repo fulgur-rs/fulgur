@@ -459,20 +459,25 @@ pub enum ParagraphRunItem {
     },
 }
 
+/// One entry recorded by [`TagCollector::record`] for whole-paragraph tagging:
+/// `(node_id, pdf_tag, content_identifier, heading_title)`.
+pub type TagEntry = (
+    crate::drawables::NodeId,
+    crate::tagging::PdfTag,
+    krilla::tagging::Identifier,
+    Option<String>,
+);
+
 /// Per-render accumulator for tagged-content identifiers.
 ///
-/// Each `record` call stores one (NodeId, PdfTag, Identifier) triple
-/// produced by `surface.start_tagged` during a single page draw. After
-/// all pages are rendered, `render_v2` groups entries by NodeId and
-/// builds a `krilla::tagging::TagTree`.
+/// `entries` stores one tuple per `surface.start_tagged` call made for
+/// whole-paragraph tagging. `run_entries` stores per-run identifiers for
+/// paragraphs that opened multiple regions (one per `<a>` link span). After
+/// all pages are rendered, `render_v2` consumes both via [`Self::into_parts`]
+/// and builds a `krilla::tagging::TagTree`.
 pub struct TagCollector {
-    entries: Vec<(
-        crate::drawables::NodeId,
-        crate::tagging::PdfTag,
-        krilla::tagging::Identifier,
-        Option<String>,
-    )>,
-    pub run_entries: BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
+    entries: Vec<TagEntry>,
+    run_entries: BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
 }
 
 impl TagCollector {
@@ -493,30 +498,15 @@ impl TagCollector {
         self.entries.push((node_id, tag, id, heading_title));
     }
 
-    pub fn into_entries(
-        self,
-    ) -> Vec<(
-        crate::drawables::NodeId,
-        crate::tagging::PdfTag,
-        krilla::tagging::Identifier,
-        Option<String>,
-    )> {
-        self.entries
-    }
-
-    /// Consume `self` and return `(entries, run_entries)` as separate owned
-    /// values. Used by `build_struct_tree` to avoid a partial-move error when
-    /// both fields are needed independently.
-    #[allow(clippy::type_complexity)]
+    /// Consume `self` and return the whole-paragraph entries and per-run
+    /// entries as separate owned values. Both fields are needed independently
+    /// by `build_struct_tree`; returning them together avoids the partial-move
+    /// error that `tc.run_entries` followed by a `tc`-consuming call would
+    /// cause.
     pub fn into_parts(
         self,
     ) -> (
-        Vec<(
-            crate::drawables::NodeId,
-            crate::tagging::PdfTag,
-            krilla::tagging::Identifier,
-            Option<String>,
-        )>,
+        Vec<TagEntry>,
         BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
     ) {
         (self.entries, self.run_entries)
@@ -527,14 +517,19 @@ impl TagCollector {
         self.run_entries.entry(node_id).or_default().push(item);
     }
 
-    /// Return a reference to run entries for `node_id` (empty slice if none).
-    pub fn run_entries_for(&self, node_id: crate::drawables::NodeId) -> &[ParagraphRunItem] {
-        self.run_entries.get(&node_id).map_or(&[], Vec::as_slice)
-    }
-
-    /// Remove and return run entries for `node_id`.
-    pub fn take_run_entries(&mut self, node_id: crate::drawables::NodeId) -> Vec<ParagraphRunItem> {
-        self.run_entries.remove(&node_id).unwrap_or_default()
+    /// Collect every `LinkContent::span_ptr` recorded across all paragraphs.
+    /// `emit_link_annotations` uses this set to decide whether a given link
+    /// occurrence is wired into the struct tree (and thus eligible for
+    /// `add_tagged_annotation`).
+    pub fn wired_link_span_ptrs(&self) -> std::collections::BTreeSet<usize> {
+        self.run_entries
+            .values()
+            .flatten()
+            .filter_map(|item| match item {
+                ParagraphRunItem::LinkContent { span_ptr, .. } => Some(*span_ptr),
+                ParagraphRunItem::Content(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -551,10 +546,11 @@ pub struct Canvas<'a, 'b> {
     pub bookmark_collector: Option<&'a mut BookmarkCollector>,
     pub link_collector: Option<&'a mut LinkCollector>,
     pub tag_collector: Option<&'a mut TagCollector>,
-    /// When `Some(node_id)`, `draw_shaped_lines` operates in per-run tagging mode:
-    /// each glyph-run cluster bounded by `Arc<LinkSpan>` identity gets its own
-    /// `start_tagged/end_tagged` region recorded as a `ParagraphRunItem`.
-    pub link_run_node_id: Option<usize>,
+    /// When `Some(node_id)` (a `drawables::NodeId`), `draw_shaped_lines`
+    /// operates in per-run tagging mode: each glyph-run cluster bounded by
+    /// `Arc<LinkSpan>` identity gets its own `start_tagged/end_tagged` region
+    /// recorded as a `ParagraphRunItem` under that paragraph's NodeId.
+    pub link_run_node_id: Option<crate::drawables::NodeId>,
 }
 
 /// Run a draw closure wrapped in opacity guards.
@@ -2260,11 +2256,11 @@ mod dp_unit_tests {
 }
 
 #[cfg(test)]
-mod run_tag_tests {
+pub(crate) mod run_tag_tests {
     use super::*;
     use krilla::tagging::{ContentTag, Identifier, SpanTag};
 
-    fn make_identifier() -> Identifier {
+    pub(crate) fn make_identifier() -> Identifier {
         let mut doc = krilla::Document::new();
         let settings = krilla::page::PageSettings::from_wh(100.0, 100.0).expect("valid page size");
         let mut page = doc.start_page_with(settings);
@@ -2278,7 +2274,7 @@ mod run_tag_tests {
     fn record_run_content_round_trips() {
         let mut tc = TagCollector::new();
         tc.record_run(42, ParagraphRunItem::Content(make_identifier()));
-        let runs = tc.take_run_entries(42);
+        let runs = tc.run_entries.get(&42).expect("run entry recorded");
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0], ParagraphRunItem::Content(_)));
     }
@@ -2293,7 +2289,7 @@ mod run_tag_tests {
                 identifier: make_identifier(),
             },
         );
-        let runs = tc.take_run_entries(7);
+        let runs = tc.run_entries.get(&7).expect("run entry recorded");
         assert_eq!(runs.len(), 1);
         assert!(matches!(
             runs[0],
@@ -2305,9 +2301,33 @@ mod run_tag_tests {
     }
 
     #[test]
-    fn run_entries_for_returns_empty_when_absent() {
+    fn run_entries_empty_by_default() {
         let tc = TagCollector::new();
-        assert!(tc.run_entries_for(99).is_empty());
+        assert!(tc.run_entries.is_empty());
+    }
+
+    #[test]
+    fn wired_link_span_ptrs_collects_link_content_only() {
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(make_identifier()));
+        tc.record_run(
+            1,
+            ParagraphRunItem::LinkContent {
+                span_ptr: 0x1234,
+                identifier: make_identifier(),
+            },
+        );
+        tc.record_run(
+            2,
+            ParagraphRunItem::LinkContent {
+                span_ptr: 0xabcd,
+                identifier: make_identifier(),
+            },
+        );
+        let wired = tc.wired_link_span_ptrs();
+        assert!(wired.contains(&0x1234));
+        assert!(wired.contains(&0xabcd));
+        assert_eq!(wired.len(), 2);
     }
 }
 
