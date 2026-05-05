@@ -738,7 +738,22 @@ impl EngineBuilder {
         self
     }
 
-    pub fn build(self) -> Engine {
+    pub fn build(mut self) -> Engine {
+        // When both base_path and assets are set, propagate the canonical
+        // file:// base URL to the bundle so get_image can normalize
+        // Stylo-resolved absolute file paths back to relative asset names.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(bundle), Some(path)) = (&mut self.assets, &self.base_path) {
+            if let Some(url_str) = path
+                .canonicalize()
+                .ok()
+                .and_then(|p| crate::blitz_adapter::net::Url::from_directory_path(&p).ok())
+                .map(|u| u.to_string())
+            {
+                bundle.set_base_url(&url_str);
+            }
+        }
+
         Engine {
             config: self.config_builder.build(),
             assets: self.assets,
