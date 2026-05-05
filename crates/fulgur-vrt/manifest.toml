@@ -196,6 +196,9 @@ path = "gcpm/page-counter-footer-over-body.html"
 [[fixture]]
 path = "gcpm/page-selector.html"
 
+[[fixture]]
+path = "gcpm/leader-toc.html"
+
 # fulgur-uebl: CSS Page 3 named-page implicit forced breaks.
 # Three siblings with `page: a`, `page: b`, and an unnamed (auto)
 # trailing div should produce three pages — the implicit break is

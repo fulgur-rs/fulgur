@@ -216,6 +216,30 @@ pub struct ContentCounterMapping {
     pub content: Vec<ContentItem>,
 }
 
+/// Leader type for `content: leader()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaderStyle {
+    Dotted,
+    Solid,
+    Space,
+    Custom(String),
+}
+
+impl LeaderStyle {
+    pub fn leader_char(&self) -> &str {
+        match self {
+            Self::Dotted => ".",
+            // U+005F LOW LINE — CSS GCPM does not prescribe a specific glyph for solid;
+            // ASCII underscore is a common baseline choice.
+            Self::Solid => "_",
+            // U+00A0 NO-BREAK SPACE — regular U+0020 spaces collapse in HTML and would
+            // produce a single gap; NBSP is preserved as-is, avoiding that folding.
+            Self::Space => "\u{00A0}",
+            Self::Custom(s) => s,
+        }
+    }
+}
+
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
@@ -255,6 +279,8 @@ pub enum ContentItem {
     /// Used inside `bookmark-label` and (indirectly, via `string-set`)
     /// named strings; mirrors `StringSetValue::Attr`.
     Attr(String),
+    /// A CSS leader, e.g. `leader(dotted)`.
+    Leader { style: LeaderStyle },
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
@@ -481,5 +507,20 @@ mod tests {
 
         // No leading newline when target was empty.
         assert_eq!(a.cleaned_css, "body { color: blue; }");
+    }
+
+    #[test]
+    fn test_leader_style_char_solid() {
+        assert_eq!(LeaderStyle::Solid.leader_char(), "_");
+    }
+
+    #[test]
+    fn test_leader_style_char_space() {
+        assert_eq!(LeaderStyle::Space.leader_char(), "\u{00A0}");
+    }
+
+    #[test]
+    fn test_leader_style_char_custom() {
+        assert_eq!(LeaderStyle::Custom("·".to_string()).leader_char(), "·");
     }
 }

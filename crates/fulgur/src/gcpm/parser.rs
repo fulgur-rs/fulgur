@@ -7,8 +7,8 @@ use super::bookmark::{BookmarkLevel, BookmarkMapping};
 use super::margin_box::MarginBoxPosition;
 use super::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle, ElementPolicy,
-    GcpmContext, MarginBoxRule, PageSettingsRule, PageSizeDecl, ParsedSelector, PartialMargin,
-    PseudoElement, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
+    GcpmContext, LeaderStyle, MarginBoxRule, PageSettingsRule, PageSizeDecl, ParsedSelector,
+    PartialMargin, PseudoElement, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
 };
 
 // ---------------------------------------------------------------------------
@@ -979,6 +979,31 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                 Token::Function(ref name) => {
                     let fn_name = name.clone();
                     input.parse_nested_block(|input| {
+                        // `leader()` is handled first because it does not
+                        // follow the ident-first grammar of the other functions.
+                        if fn_name.eq_ignore_ascii_case("leader") {
+                            let style = if input.is_exhausted() {
+                                LeaderStyle::Dotted
+                            } else if let Ok(s) =
+                                input.try_parse(|i| i.expect_string().map(|s| s.to_string()))
+                            {
+                                LeaderStyle::Custom(s)
+                            } else if let Ok(ident) =
+                                input.try_parse(|i| i.expect_ident().map(|s| s.to_string()))
+                            {
+                                match ident.to_ascii_lowercase().as_str() {
+                                    "dotted" => LeaderStyle::Dotted,
+                                    "solid" => LeaderStyle::Solid,
+                                    "space" => LeaderStyle::Space,
+                                    // Unknown idents (e.g. typos) fall back to dotted.
+                                    _ => LeaderStyle::Dotted,
+                                }
+                            } else {
+                                LeaderStyle::Dotted
+                            };
+                            items.push(ContentItem::Leader { style });
+                            return Ok(());
+                        }
                         // `content()` is special: GCPM allows a bare
                         // call with no arguments, which is equivalent to
                         // `content(text)`. Handle that before trying
@@ -2024,5 +2049,111 @@ mod tests {
         assert_eq!(rule.margin.right, Some(7.5));
         assert_eq!(rule.margin.bottom, Some(7.5));
         assert_eq!(rule.margin.left, Some(7.5));
+    }
+
+    #[test]
+    fn test_parse_leader_no_args() {
+        let css = "@page { @top-right { content: leader(); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_unknown_ident_falls_back_to_dotted() {
+        let css = "@page { @top-right { content: leader(banana); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_dotted() {
+        let css = "@page { @top-right { content: leader(dotted); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_solid() {
+        let css = "@page { @top-right { content: leader(solid); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Solid
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_space() {
+        let css = "@page { @top-right { content: leader(space); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Space
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_custom_string() {
+        let css = r#"@page { @top-right { content: leader("."); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Custom(".".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_with_surrounding_content() {
+        let css = r#"@page { @top-right { content: "Title" leader(dotted) counter(page); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![
+                ContentItem::String("Title".into()),
+                ContentItem::Leader {
+                    style: LeaderStyle::Dotted
+                },
+                ContentItem::Counter {
+                    name: "page".into(),
+                    style: CounterStyle::Decimal
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_non_ident_non_string_arg_falls_back_to_dotted() {
+        // A numeric token is neither a string nor an ident; the else-branch
+        // in the leader() handler returns Dotted as a fallback.
+        let css = "@page { @top-right { content: leader(123); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
     }
 }

@@ -39,6 +39,7 @@ pub fn draw_box_shadows(
 ///
 /// Used by box-shadow drawing to prevent shadow from bleeding through transparent elements
 /// (CSS Backgrounds §7.2).
+#[allow(clippy::too_many_arguments)]
 fn build_shadow_evenodd_clip(
     outer_x: f32,
     outer_y: f32,
@@ -4017,8 +4018,9 @@ fn blur_stops_mask(shadow_alpha_byte: u8, n: usize) -> Vec<krilla::paint::Stop> 
     (0..n)
         .map(|i| {
             let t = i as f32 / (n - 1) as f32;
-            let luma =
-                (blur_edge_alpha(t) * shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            let luma = (blur_edge_alpha(t) * shadow_a * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
             krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(t)
                     .unwrap_or(krilla::num::NormalizedF32::ONE),
@@ -4218,7 +4220,7 @@ mod conic_helpers_tests {
 
 #[cfg(test)]
 mod blur_stops_tests {
-    use super::{blur_stops_mask, blur_edge_alpha};
+    use super::{blur_edge_alpha, blur_stops_mask};
 
     #[test]
     fn blur_stops_mask_opaque_shadow_inner_edge() {
