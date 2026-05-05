@@ -225,7 +225,7 @@ fn draw_blur_box_shadow(
 
     // Top edge: x from (ix + r_tl_x) to (ix + iw - r_tr_x), y from oy to iy
     draw_edge_strip(
-        &mut canvas.surface,
+        canvas.surface,
         ix + r_tl_x,
         oy,
         iw - r_tl_x - r_tr_x,
@@ -238,7 +238,7 @@ fn draw_blur_box_shadow(
     );
     // Bottom edge
     draw_edge_strip(
-        &mut canvas.surface,
+        canvas.surface,
         ix + r_bl_x,
         iy + ih,
         iw - r_bl_x - r_br_x,
@@ -251,7 +251,7 @@ fn draw_blur_box_shadow(
     );
     // Left edge: y from (iy + r_tl_y) to (iy + ih - r_bl_y)
     draw_edge_strip(
-        &mut canvas.surface,
+        canvas.surface,
         ox,
         iy + r_tl_y,
         blur,
@@ -264,7 +264,7 @@ fn draw_blur_box_shadow(
     );
     // Right edge
     draw_edge_strip(
-        &mut canvas.surface,
+        canvas.surface,
         ix + iw,
         iy + r_tr_y,
         blur,
@@ -279,7 +279,7 @@ fn draw_blur_box_shadow(
     // ── Corners (RadialGradient)
     // TL corner: arc center = (ix + r_tl_x, iy + r_tl_y)
     draw_corner_patch(
-        &mut canvas.surface,
+        canvas.surface,
         ix + r_tl_x,
         iy + r_tl_y,
         r_tl_x.max(r_tl_y), // approx: use larger of rx/ry as circle radius
@@ -292,7 +292,7 @@ fn draw_blur_box_shadow(
     );
     // TR corner: arc center = (ix + iw - r_tr_x, iy + r_tr_y)
     draw_corner_patch(
-        &mut canvas.surface,
+        canvas.surface,
         ix + iw - r_tr_x,
         iy + r_tr_y,
         r_tr_x.max(r_tr_y),
@@ -305,7 +305,7 @@ fn draw_blur_box_shadow(
     );
     // BR corner: arc center = (ix + iw - r_br_x, iy + ih - r_br_y)
     draw_corner_patch(
-        &mut canvas.surface,
+        canvas.surface,
         ix + iw - r_br_x,
         iy + ih - r_br_y,
         r_br_x.max(r_br_y),
@@ -318,7 +318,7 @@ fn draw_blur_box_shadow(
     );
     // BL corner: arc center = (ix + r_bl_x, iy + ih - r_bl_y)
     draw_corner_patch(
-        &mut canvas.surface,
+        canvas.surface,
         ix + r_bl_x,
         iy + ih - r_bl_y,
         r_bl_x.max(r_bl_y),
@@ -339,6 +339,7 @@ fn draw_blur_box_shadow(
 /// `(gx1, gy1)` is the opaque end of the gradient (stop offset=0).
 /// `(gx2, gy2)` is the transparent (bg) end (stop offset=1).
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn draw_edge_strip(
     surface: &mut krilla::surface::Surface<'_>,
     rx: f32,
@@ -387,6 +388,7 @@ fn draw_edge_strip(
 /// `r_inner` is the inner radius (start of blur, opaque stop).
 /// `r_outer = r_inner + blur` is the outer radius (end of blur, bg stop).
 /// `(patch_x, patch_y, patch_w, patch_h)` is the rectangular bounding patch.
+#[allow(clippy::too_many_arguments)]
 fn draw_corner_patch(
     surface: &mut krilla::surface::Surface<'_>,
     cx: f32,
