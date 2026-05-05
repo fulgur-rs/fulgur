@@ -588,7 +588,7 @@ pub fn draw_shaped_lines(
                             .link
                             .as_ref()
                             .map(|l| std::sync::Arc::as_ptr(l) as usize);
-                        if cur_region_ptr.as_ref().map(|p| *p) != Some(new_ptr) {
+                        if cur_region_ptr != Some(new_ptr) {
                             // Close previous region
                             if cur_region_ptr.is_some() {
                                 canvas.surface.end_tagged();
@@ -691,7 +691,7 @@ pub fn draw_shaped_lines(
                             .link
                             .as_ref()
                             .map(|l| std::sync::Arc::as_ptr(l) as usize);
-                        if cur_region_ptr.as_ref().map(|p| *p) != Some(new_ptr) {
+                        if cur_region_ptr != Some(new_ptr) {
                             // Close previous region
                             if cur_region_ptr.is_some() {
                                 canvas.surface.end_tagged();

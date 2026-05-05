@@ -115,8 +115,7 @@ pub fn render_v2(
     let mut link_collector = crate::draw_primitives::LinkCollector::new();
 
     let tagging = config.effective_tagging();
-    let mut link_annot_ids: std::collections::BTreeMap<usize, krilla::tagging::Identifier> =
-        std::collections::BTreeMap::new();
+    let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
     // Build the GCPM margin-box renderer once. Reused across pages so
     // measure / layout / render caches survive between pages and the
@@ -265,7 +264,7 @@ pub fn render_v2(
             tagging,
             wired_ptrs.as_ref(),
         ) {
-            link_annot_ids.insert(ptr, id);
+            link_annot_ids.entry(ptr).or_default().push(id);
         }
     }
 
@@ -3648,7 +3647,7 @@ fn strip_display_none(css: &str) -> String {
 fn build_struct_tree(
     tc: crate::draw_primitives::TagCollector,
     drawables: &Drawables,
-    link_annot_ids: &std::collections::BTreeMap<usize, Identifier>,
+    link_annot_ids: &BTreeMap<usize, Vec<Identifier>>,
     tree: &mut TagTree,
 ) {
     let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
@@ -3700,7 +3699,7 @@ fn build_tag_group(
     heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
     children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
     run_entries: &BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::ParagraphRunItem>>,
-    link_annot_ids: &std::collections::BTreeMap<usize, Identifier>,
+    link_annot_ids: &BTreeMap<usize, Vec<Identifier>>,
 ) -> TagGroup {
     let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
     let title = heading_titles.get(&node_id).cloned();
@@ -3743,9 +3742,12 @@ fn build_tag_group(
                         }
                         break;
                     }
-                    // Annotation identifier (OBJR) follows content identifiers.
-                    if let Some(&annot_id) = link_annot_ids.get(&ptr) {
-                        link_group.push(Node::Leaf(annot_id));
+                    // Annotation identifiers (OBJR) follow content identifiers.
+                    // A cross-page link produces one identifier per page.
+                    if let Some(annot_ids) = link_annot_ids.get(&ptr) {
+                        for &annot_id in annot_ids {
+                            link_group.push(Node::Leaf(annot_id));
+                        }
                     }
                     group.push(Node::Group(link_group));
                 }
@@ -4010,9 +4012,8 @@ mod tests {
             ],
         );
 
-        let mut link_annot_ids: std::collections::BTreeMap<usize, Identifier> =
-            std::collections::BTreeMap::new();
-        link_annot_ids.insert(99, annot_id);
+        let mut link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        link_annot_ids.entry(99).or_default().push(annot_id);
 
         let drawables = drawables_with_para(node_id);
         let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
@@ -4057,8 +4058,7 @@ mod tests {
             }],
         );
 
-        let link_annot_ids: std::collections::BTreeMap<usize, Identifier> =
-            std::collections::BTreeMap::new(); // empty — no OBJR
+        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new(); // empty — no OBJR
 
         let drawables = drawables_with_para(node_id);
         let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
