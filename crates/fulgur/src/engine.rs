@@ -2,6 +2,7 @@ use crate::asset::AssetBundle;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
+use krilla::SerializeSettings;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ pub struct Engine {
     base_path: Option<PathBuf>,
     template: Option<(String, String)>,
     data: Option<serde_json::Value>,
+    serialize_settings: SerializeSettings,
 }
 
 impl Engine {
@@ -23,6 +25,7 @@ impl Engine {
             base_path: None,
             template: None,
             data: None,
+            serialize_settings: SerializeSettings::default(),
         }
     }
 
@@ -407,6 +410,7 @@ impl Engine {
             fonts,
             &string_set_for_render,
             &counter_ops_for_render,
+            self.serialize_settings.clone(),
         )
     }
 
@@ -616,6 +620,7 @@ pub struct EngineBuilder {
     base_path: Option<PathBuf>,
     template: Option<(String, String)>,
     data: Option<serde_json::Value>,
+    serialize_settings: SerializeSettings,
 }
 
 impl EngineBuilder {
@@ -714,6 +719,11 @@ impl EngineBuilder {
         self
     }
 
+    pub fn serialize_settings(mut self, settings: SerializeSettings) -> Self {
+        self.serialize_settings = settings;
+        self
+    }
+
     pub fn build(self) -> Engine {
         Engine {
             config: self.config_builder.build(),
@@ -721,6 +731,7 @@ impl EngineBuilder {
             base_path: self.base_path,
             template: self.template,
             data: self.data,
+            serialize_settings: self.serialize_settings,
         }
     }
 }
