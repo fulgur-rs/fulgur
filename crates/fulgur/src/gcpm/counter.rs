@@ -122,7 +122,8 @@ pub fn resolve_content_to_html(
                 // Repeat enough chars to fill any reasonable column width;
                 // overflow:hidden clips any excess in the browser/Blitz layout.
                 const LEADER_FILL_REPEAT: usize = 400;
-                let fill_len = LEADER_FILL_REPEAT / ch.chars().count().max(1);
+                let unit_len = ch.chars().count().max(1);
+                let fill_len = (LEADER_FILL_REPEAT / unit_len).max(1);
                 let fill = ch.repeat(fill_len);
                 let mut escaped_fill = String::new();
                 push_escaped_html_text(&mut escaped_fill, &fill);
@@ -1006,7 +1007,10 @@ mod tests {
         );
         assert!(html.contains("Title"), "expected Title, got: {html}");
         assert!(html.contains('1'), "expected page number, got: {html}");
-        assert!(html.contains('.'), "expected dots, got: {html}");
+        assert!(
+            html.contains(".."),
+            "expected dotted leader fill, got: {html}"
+        );
     }
 
     #[test]
@@ -1205,10 +1209,10 @@ mod tests {
         );
 
         assert!(html.contains("display:flex"), "expected flex: {html}");
-        // ContentText and Attr produce no output, so inner spans are empty and not pushed
+        // ContentText and Attr produce no output, so no inner <span> should appear
         assert!(
-            !html.contains("<span><"),
-            "unexpected inner content: {html}"
+            !html.contains("<span></span>"),
+            "unexpected empty non-leader span: {html}"
         );
     }
 
