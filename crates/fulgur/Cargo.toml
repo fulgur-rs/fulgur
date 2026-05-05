@@ -49,4 +49,4 @@ getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] 
 [dev-dependencies]
 tempfile = "3.27.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
-toml = "0.9"
+toml = "1.1"
