@@ -8,7 +8,8 @@
 マーカー（bullet/number）は `Lbl` グループへ、本文コンテンツは `LBody` グループへ入れる。
 
 期待する StructTree:
-```
+
+```text
 L (ul, ListNumbering::Disc)
 └── LI (li)
     ├── Lbl
@@ -19,7 +20,8 @@ L (ul, ListNumbering::Disc)
 ```
 
 ネストリスト例:
-```
+
+```text
 L (outer ul)
 └── LI
     ├── Lbl → [•]
@@ -50,6 +52,7 @@ pub enum PdfTag {
 ```
 
 **`classify_element` の変更:**
+
 ```rust
 "ul" => Some(PdfTag::L { numbering: ListNumbering::Disc }),    // デフォルト
 "ol" => Some(PdfTag::L { numbering: ListNumbering::Decimal }),  // デフォルト
@@ -58,6 +61,7 @@ pub enum PdfTag {
 CSS `list-style-type` の詳細マッピングは `walk_semantics` でオーバーライド。
 
 **`pdf_tag_to_krilla_tag` の変更:**
+
 ```rust
 PdfTag::L { numbering } => Tag::L(*numbering).into(),
 PdfTag::Lbl => Tag::<kind::Lbl>::Lbl.into(),
@@ -65,7 +69,8 @@ PdfTag::LBody => Tag::<kind::LBody>::LBody.into(),
 ```
 
 **CSS `list-style-type` → `ListNumbering` マッピング:**
-```
+
+```text
 Disc          → ListNumbering::Disc
 Circle        → ListNumbering::Circle
 Square        → ListNumbering::Square
@@ -103,6 +108,7 @@ impl Drawables {
 ### 3. `convert/mod.rs` — `walk_semantics` 再設計
 
 新しいシグネチャ:
+
 ```rust
 fn walk_semantics(
     doc: &BaseDocument,
@@ -114,6 +120,7 @@ fn walk_semantics(
 ```
 
 **ロジック:**
+
 1. 分類された場合: `parent = parent_override.or_else(|| DOM walk-up)`
 2. `PdfTag::L { .. }` の場合: `node.primary_styles().clone_list_style_type()` でオーバーライド
 3. **`PdfTag::Li` の場合（特別処理）:**
@@ -137,7 +144,8 @@ fn walk_semantics(
 | 分類なし | — | 引き継ぎ |
 
 **ネストリスト対応例:**
-```
+
+```text
 <li>                 → Li, parent=ul_id, override→children=lbody1_id
   <ul>               → L,  parent=lbody1_id (override使用), override→children=None
     <li>             → Li, DOM walk→ul2_id, override→children=lbody2_id
@@ -194,11 +202,13 @@ if let (Some(lbl_id), Some(id)) = (lbl_id, marker_tag_id) {
 ### 5. テスト
 
 **Unit tests (`convert/mod.rs`):**
+
 - `ul`/`ol` で `L { numbering: Disc/Decimal }` が記録されること
 - `li` ごとに `Lbl`/`LBody` 合成エントリが作られること
 - ネストリストで親子関係が正しいこと
 
 **Integration test (`tests/render_smoke.rs` or `tagged_cli.rs`):**
+
 - HTML: `<ul><li>item</li><li>item2</li></ul>` でタグ付き PDF を生成
 - `<ol><li>first</li><li>second</li></ol>` での `ListNumbering::Decimal`
 - ネストリスト `<ul><li><ol><li>nested</li></ol></li></ul>` で構造破綻なし

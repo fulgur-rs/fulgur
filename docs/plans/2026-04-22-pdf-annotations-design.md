@@ -111,6 +111,7 @@ Contents JSON schema:
 ```
 
 `source` values:
+
 - `"fulgur:semantic"` — embedded by `fulgur render --annotate`
 - `"user"` — added by `fulgur annotate` or any external tool
 

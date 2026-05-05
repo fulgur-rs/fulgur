@@ -150,7 +150,7 @@ Render multiple HTML documents in parallel.
 
 ## Architecture
 
-```
+```text
 fulgur mcp
   └─ stdio transport (rmcp crate)
        └─ MCP request router
