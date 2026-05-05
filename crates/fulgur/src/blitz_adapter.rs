@@ -643,6 +643,52 @@ pub fn extract_column_style_table(doc: &HtmlDocument) -> crate::column_css::Colu
     crate::column_css::build_column_style_table(doc, &rules)
 }
 
+/// Extract the text content of the HTML `<title>` element, if present.
+///
+/// Returns `None` when no `<title>` element exists or its text content is
+/// blank. The returned string is whitespace-trimmed.
+pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
+    use std::ops::Deref;
+
+    fn find_title(doc: &blitz_dom::BaseDocument, node_id: usize, depth: usize) -> Option<usize> {
+        if depth >= crate::MAX_DOM_DEPTH {
+            return None;
+        }
+        let node = doc.get_node(node_id)?;
+        if let Some(el) = node.element_data() {
+            if el.name.local.as_ref() == "title" && el.name.ns == blitz_dom::ns!(html) {
+                return Some(node_id);
+            }
+        }
+        for &child_id in &node.children {
+            if let Some(found) = find_title(doc, child_id, depth + 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let base = doc.deref();
+    let title_id = find_title(base, doc.root_element().id, 0)?;
+    let title_node = base.get_node(title_id)?;
+
+    let mut text = String::new();
+    for &child_id in &title_node.children {
+        if let Some(child) = base.get_node(child_id) {
+            if let blitz_dom::node::NodeData::Text(t) = &child.data {
+                text.push_str(&t.content);
+            }
+        }
+    }
+
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 /// Per-element used page-name endpoints (CSS Page 3 §5.3, fulgur-uebl).
 ///
 /// Each entry is `(start, end)`:
@@ -4068,5 +4114,70 @@ mod list_position_helper_tests {
     #[test]
     fn is_list_position_inside_returns_true_for_inside() {
         assert!(is_list_position_inside(&ListItemLayoutPosition::Inside));
+    }
+}
+
+#[cfg(test)]
+mod extract_html_title_tests {
+    use super::*;
+
+    fn parse(html: &str, width: f32, _resources: &[()]) -> HtmlDocument {
+        crate::blitz_adapter::parse(html, width, &[])
+    }
+
+    #[test]
+    fn extract_html_title_finds_title_element() {
+        let doc = parse(
+            r#"<html><head><title>My Document</title></head><body></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(
+            super::extract_html_title(&doc),
+            Some("My Document".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_html_title_returns_none_when_absent() {
+        let doc = parse(
+            r#"<html><head></head><body><p>No title here</p></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(super::extract_html_title(&doc), None);
+    }
+
+    #[test]
+    fn extract_html_title_trims_whitespace() {
+        let doc = parse(
+            r#"<html><head><title>  Padded Title  </title></head><body></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(
+            super::extract_html_title(&doc),
+            Some("Padded Title".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_html_title_returns_none_for_empty_title() {
+        let doc = parse(
+            r#"<html><head><title>   </title></head><body></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(super::extract_html_title(&doc), None);
+    }
+
+    #[test]
+    fn extract_html_title_ignores_svg_title() {
+        let doc = parse(
+            r#"<html><head></head><body><svg><title>SVG Title</title></svg></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(super::extract_html_title(&doc), None);
     }
 }
