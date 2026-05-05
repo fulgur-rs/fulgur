@@ -2819,7 +2819,7 @@ fn tagged_pdf_link_in_overflow_hidden_does_not_panic() {
     // causing a non-nestable start_tagged panic. Should use use_run_tagging instead.
     let html = r#"<!DOCTYPE html><html lang="en"><body>
         <div style="overflow:hidden;width:200px;height:50px">
-            <p>Visit <a href="https://example.com">clipped link</a> here.</p>
+            Visit <a href="https://example.com">clipped link</a> here.
         </div>
     </body></html>"#;
 
@@ -2883,7 +2883,7 @@ fn tagged_pdf_link_in_opacity_block_does_not_panic() {
     // no /Link entry in StructTree. The fix adds the full use_run_tagging chain.
     let html = r#"<!DOCTYPE html><html lang="en"><body>
         <div style="opacity:0.8">
-            <p>Visit <a href="https://example.com">opacity link</a> here.</p>
+            Visit <a href="https://example.com">opacity link</a> here.
         </div>
     </body></html>"#;
 
