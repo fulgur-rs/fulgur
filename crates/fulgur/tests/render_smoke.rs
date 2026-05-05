@@ -361,7 +361,7 @@ fn test_render_html_shadow_inset_logged_and_skipped() {
 
 #[test]
 fn test_render_html_shadow_blur_warning_path() {
-    // Non-zero blur radius hits the blur-warn arm in shadow::apply_to.
+    // Non-zero blur radius now routes through the gradient 9-slice path.
     let html = r#"<!DOCTYPE html><html><body>
         <div style="width:100px;height:100px;background:#fff;
                     box-shadow:0 0 8px red;"></div>
