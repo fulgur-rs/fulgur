@@ -2661,6 +2661,25 @@ fn pdf_ua_without_lang_succeeds() {
 }
 
 #[test]
+fn html_title_appears_in_untagged_pdf_metadata() {
+    // HTML <title> is used as PDF metadata title even for non-tagged PDFs.
+    let html = r#"<!DOCTYPE html>
+<html><head><title>Untagged Title</title></head>
+<body><p>Hello</p></body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("untagged render with title");
+
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(
+        text.contains("Untagged Title"),
+        "HTML <title> must appear in PDF metadata for non-tagged PDFs"
+    );
+}
+
+#[test]
 fn tagged_struct_tree_reflects_dom_nesting() {
     // Smoke test: /Div appears in the PDF StructTree bytes (font-agnostic).
     // Deep structural verification (that /Div nests /Hn and /P as children
