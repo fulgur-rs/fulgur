@@ -252,3 +252,431 @@ fn resolve_pseudo_size(size: &::style::values::computed::Size, parent_width: f32
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::image::ImageFormat;
+    use crate::paragraph::{
+        InlineBoxItem, InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine,
+        TextDecoration, VerticalAlign,
+    };
+    use std::sync::Arc;
+
+    fn make_image(width: f32) -> InlineImage {
+        InlineImage {
+            data: Arc::new(vec![]),
+            format: ImageFormat::Png,
+            width,
+            height: 10.0,
+            x_offset: 0.0,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        }
+    }
+
+    fn empty_line() -> ShapedLine {
+        ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![],
+        }
+    }
+
+    fn image_line(x_offset: f32, width: f32) -> ShapedLine {
+        ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Image(InlineImage {
+                data: Arc::new(vec![]),
+                format: ImageFormat::Png,
+                width,
+                height: 10.0,
+                x_offset,
+                vertical_align: VerticalAlign::Baseline,
+                opacity: 1.0,
+                visible: true,
+                computed_y: 0.0,
+                link: None,
+            })],
+        }
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.001
+    }
+
+    // ── empty-lines guards ───────────────────────────────────────────────────
+
+    #[test]
+    fn no_lines_both_none_is_noop() {
+        let mut lines: Vec<ShapedLine> = vec![];
+        super::inject_inline_pseudo_images(&mut lines, None, None);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn no_lines_before_some_is_noop() {
+        let mut lines: Vec<ShapedLine> = vec![];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn no_lines_after_some_is_noop() {
+        let mut lines: Vec<ShapedLine> = vec![];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
+        assert!(lines.is_empty());
+    }
+
+    // ── ::before insertion ───────────────────────────────────────────────────
+
+    #[test]
+    fn before_inserts_at_start_of_first_line() {
+        let mut lines = vec![empty_line()];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
+        assert_eq!(lines[0].items.len(), 1);
+        match &lines[0].items[0] {
+            LineItem::Image(img) => {
+                assert!(approx(img.x_offset, 0.0), "x_offset={}", img.x_offset);
+                assert!(approx(img.width, 20.0));
+            }
+            _ => panic!("expected Image at index 0"),
+        }
+    }
+
+    #[test]
+    fn before_shifts_existing_image_items() {
+        // Original image at x=5, w=10.  Before image w=15.
+        // After injection: before@x=0, original@x=20.
+        let mut lines = vec![image_line(5.0, 10.0)];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(15.0)), None);
+        assert_eq!(lines[0].items.len(), 2);
+        match &lines[0].items[0] {
+            LineItem::Image(img) => assert!(approx(img.x_offset, 0.0)),
+            _ => panic!("expected before Image at index 0"),
+        }
+        match &lines[0].items[1] {
+            LineItem::Image(img) => {
+                assert!(approx(img.x_offset, 20.0), "shifted x={}", img.x_offset);
+            }
+            _ => panic!("expected shifted Image at index 1"),
+        }
+    }
+
+    #[test]
+    fn before_shifts_text_items() {
+        // Text run at x_offset=3, font_size=10, glyph advance=5.
+        // Before image w=20 → text run shifts to x=23.
+        let run = ShapedGlyphRun {
+            font_data: Arc::new(vec![]),
+            font_index: 0,
+            font_size: 10.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: 5.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "a".to_string(),
+            x_offset: 3.0,
+            link: None,
+        };
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
+        assert_eq!(lines[0].items.len(), 2);
+        match &lines[0].items[1] {
+            LineItem::Text(r) => {
+                assert!(approx(r.x_offset, 23.0), "x_offset={}", r.x_offset);
+            }
+            _ => panic!("expected Text at index 1"),
+        }
+    }
+
+    #[test]
+    fn before_shifts_inline_box_items() {
+        let ib = InlineBoxItem {
+            node_id: None,
+            width: 30.0,
+            height: 10.0,
+            x_offset: 5.0,
+            computed_y: 0.0,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        };
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::InlineBox(ib)],
+        }];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(10.0)), None);
+        assert_eq!(lines[0].items.len(), 2);
+        match &lines[0].items[1] {
+            LineItem::InlineBox(b) => {
+                assert!(approx(b.x_offset, 15.0), "x_offset={}", b.x_offset);
+            }
+            _ => panic!("expected InlineBox at index 1"),
+        }
+    }
+
+    #[test]
+    fn before_only_affects_first_line() {
+        // Second line must not have its items shifted.
+        let mut lines = vec![image_line(0.0, 10.0), image_line(7.0, 10.0)];
+        super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
+        assert_eq!(lines[1].items.len(), 1);
+        match &lines[1].items[0] {
+            LineItem::Image(img) => {
+                assert!(
+                    approx(img.x_offset, 7.0),
+                    "second-line x_offset={}",
+                    img.x_offset
+                );
+            }
+            _ => panic!("expected untouched Image in second line"),
+        }
+    }
+
+    // ── ::after insertion ────────────────────────────────────────────────────
+
+    #[test]
+    fn after_appends_to_last_line_x_offset_from_image_item() {
+        // Existing image: x=5, w=10 → end=15.  After gets x_offset=15.
+        let mut lines = vec![image_line(5.0, 10.0)];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
+        assert_eq!(lines[0].items.len(), 2);
+        match &lines[0].items[1] {
+            LineItem::Image(img) => {
+                assert!(
+                    approx(img.x_offset, 15.0),
+                    "after x_offset={}",
+                    img.x_offset
+                );
+            }
+            _ => panic!("expected appended after Image"),
+        }
+    }
+
+    #[test]
+    fn after_x_offset_computed_from_text_run_glyphs() {
+        // x_offset=2, font_size=4, glyphs=[advance=3, advance=5]
+        // end_x = 2 + (3+5)*4 = 2 + 32 = 34
+        let run = ShapedGlyphRun {
+            font_data: Arc::new(vec![]),
+            font_index: 0,
+            font_size: 4.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![
+                ShapedGlyph {
+                    id: 0,
+                    x_advance: 3.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 0..1,
+                },
+                ShapedGlyph {
+                    id: 1,
+                    x_advance: 5.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    text_range: 1..2,
+                },
+            ],
+            text: "ab".to_string(),
+            x_offset: 2.0,
+            link: None,
+        };
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::Text(run)],
+        }];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
+        match &lines[0].items[1] {
+            LineItem::Image(img) => {
+                assert!(
+                    approx(img.x_offset, 34.0),
+                    "after x_offset={}",
+                    img.x_offset
+                );
+            }
+            _ => panic!("expected appended after Image"),
+        }
+    }
+
+    #[test]
+    fn after_x_offset_from_inline_box() {
+        // x_offset=3, width=7 → end=10
+        let ib = InlineBoxItem {
+            node_id: None,
+            width: 7.0,
+            height: 5.0,
+            x_offset: 3.0,
+            computed_y: 0.0,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        };
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![LineItem::InlineBox(ib)],
+        }];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(5.0)));
+        match &lines[0].items[1] {
+            LineItem::Image(img) => {
+                assert!(
+                    approx(img.x_offset, 10.0),
+                    "after x_offset={}",
+                    img.x_offset
+                );
+            }
+            _ => panic!("expected appended after Image"),
+        }
+    }
+
+    #[test]
+    fn after_empty_last_line_gets_zero_x_offset() {
+        let mut lines = vec![empty_line()];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
+        assert_eq!(lines[0].items.len(), 1);
+        match &lines[0].items[0] {
+            LineItem::Image(img) => {
+                assert!(approx(img.x_offset, 0.0), "x_offset={}", img.x_offset);
+            }
+            _ => panic!("expected after Image in empty line"),
+        }
+    }
+
+    #[test]
+    fn after_only_affects_last_line() {
+        let mut lines = vec![image_line(0.0, 10.0), image_line(0.0, 20.0)];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(5.0)));
+        assert_eq!(lines[0].items.len(), 1, "first line must be untouched");
+        assert_eq!(lines[1].items.len(), 2, "last line gets after image");
+    }
+
+    #[test]
+    fn after_uses_max_across_multiple_item_types() {
+        // item1: Image x=0 w=5 → end=5
+        // item2: InlineBox x=3 w=10 → end=13  (rightmost)
+        // item3: Image x=1 w=8 → end=9
+        // fold(f32::max) must yield 13
+        let mut lines = vec![ShapedLine {
+            height: 16.0,
+            baseline: 12.0,
+            items: vec![
+                LineItem::Image(InlineImage {
+                    data: Arc::new(vec![]),
+                    format: ImageFormat::Png,
+                    width: 5.0,
+                    height: 10.0,
+                    x_offset: 0.0,
+                    vertical_align: VerticalAlign::Baseline,
+                    opacity: 1.0,
+                    visible: true,
+                    computed_y: 0.0,
+                    link: None,
+                }),
+                LineItem::InlineBox(InlineBoxItem {
+                    node_id: None,
+                    width: 10.0,
+                    height: 5.0,
+                    x_offset: 3.0,
+                    computed_y: 0.0,
+                    link: None,
+                    opacity: 1.0,
+                    visible: true,
+                }),
+                LineItem::Image(InlineImage {
+                    data: Arc::new(vec![]),
+                    format: ImageFormat::Png,
+                    width: 8.0,
+                    height: 10.0,
+                    x_offset: 1.0,
+                    vertical_align: VerticalAlign::Baseline,
+                    opacity: 1.0,
+                    visible: true,
+                    computed_y: 0.0,
+                    link: None,
+                }),
+            ],
+        }];
+        super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
+        match lines[0].items.last().unwrap() {
+            LineItem::Image(img) => {
+                assert!(
+                    approx(img.x_offset, 13.0),
+                    "after x_offset={}",
+                    img.x_offset
+                );
+            }
+            _ => panic!("expected after Image appended"),
+        }
+    }
+
+    // ── before + after together ──────────────────────────────────────────────
+
+    #[test]
+    fn before_and_after_on_separate_lines() {
+        let mut lines = vec![image_line(0.0, 10.0), image_line(0.0, 20.0)];
+        super::inject_inline_pseudo_images(
+            &mut lines,
+            Some(make_image(5.0)),
+            Some(make_image(5.0)),
+        );
+        // First line: [before_img, shifted_original]
+        assert_eq!(lines[0].items.len(), 2);
+        match &lines[0].items[0] {
+            LineItem::Image(img) => assert!(approx(img.width, 5.0)),
+            _ => panic!("expected before Image"),
+        }
+        // Last line: [original, after_img]
+        assert_eq!(lines[1].items.len(), 2);
+        match lines[1].items.last().unwrap() {
+            LineItem::Image(img) => assert!(approx(img.width, 5.0)),
+            _ => panic!("expected after Image"),
+        }
+    }
+
+    #[test]
+    fn single_line_before_and_after_both_affect_it() {
+        // Line: image x=5 w=10.  Before w=3, after w=7.
+        // After before insertion: [before@x=0 w=3, original@x=8 w=10]
+        // After after insertion: x_offset = max(0+3, 8+10) = 18
+        let mut lines = vec![image_line(5.0, 10.0)];
+        super::inject_inline_pseudo_images(
+            &mut lines,
+            Some(make_image(3.0)),
+            Some(make_image(7.0)),
+        );
+        assert_eq!(lines[0].items.len(), 3);
+        match &lines[0].items[0] {
+            LineItem::Image(img) => assert!(approx(img.x_offset, 0.0)),
+            _ => panic!("expected before Image at 0"),
+        }
+        match &lines[0].items[1] {
+            LineItem::Image(img) => {
+                assert!(approx(img.x_offset, 8.0), "shifted x={}", img.x_offset);
+            }
+            _ => panic!("expected shifted Image at 1"),
+        }
+        match lines[0].items.last().unwrap() {
+            LineItem::Image(img) => {
+                assert!(approx(img.x_offset, 18.0), "after x={}", img.x_offset);
+            }
+            _ => panic!("expected after Image at end"),
+        }
+    }
+}
