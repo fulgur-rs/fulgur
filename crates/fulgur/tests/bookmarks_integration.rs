@@ -69,11 +69,10 @@ fn end_to_end_h1_gets_bookmark_via_ua_css() {
 
 /// Helper: build an Engine with author CSS delivered via AssetBundle.
 ///
-/// GCPM extraction (including `bookmark-level` / `bookmark-label`) only
-/// runs on CSS that arrives through AssetBundle or `<link>` stylesheets,
-/// not inline `<style>` blocks. These E2E tests therefore route their
-/// author CSS through `AssetBundle::add_css` — the same channel real
-/// library callers use.
+/// Inline `<style>` blocks are also supported since `fulgur-mq5` wired
+/// [`extract_gcpm_from_inline_styles`] into `engine.rs`. These tests use
+/// `AssetBundle::add_css` as the canonical caller channel; see
+/// `bookmarks_via_inline_style_block` for the inline-`<style>` variant.
 fn engine_with_css(css: &str) -> Engine {
     let mut assets = AssetBundle::new();
     assets.add_css(css);
