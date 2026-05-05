@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page {
+  size: A5;
+  margin: 50pt;
+  @top-right {
+    content: string(chapter-title, first) leader(dotted) counter(page);
+    font-size: 9pt;
+    font-family: sans-serif;
+    color: #333;
+  }
+}
+body { font-family: sans-serif; font-size: 11pt; line-height: 1.5; margin: 0; }
+h2 { string-set: chapter-title content(text); margin-top: 18pt; }
+p { margin: 6pt 0; }
+</style>
+</head>
+<body>
+<h2>Introduction</h2>
+<p>This fixture tests <code>content: leader(dotted)</code> inside a margin box. The top-right header should display the chapter title, a dot leader filling the available space, and the page number.</p>
+<p>Filler paragraph to ensure content flows onto a second page. The leader must appear on every page with the correct chapter title and page number.</p>
+<p>More filler text to push content to page 2. Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+<p>Additional content to ensure page break occurs.</p>
+<p>Even more content for the second page test.</p>
+<h2 style="page-break-before: always">Conclusion</h2>
+<p>Second chapter. The top-right should now show "Conclusion" followed by the leader and the current page number.</p>
+</body>
+</html>
