@@ -12,6 +12,7 @@ pub struct AssetBundle {
     pub css: Vec<String>,
     pub fonts: Vec<Arc<Vec<u8>>>,
     pub images: HashMap<String, Arc<Vec<u8>>>,
+    base_path_str: Option<String>,
 }
 
 impl AssetBundle {
@@ -20,6 +21,7 @@ impl AssetBundle {
             css: Vec::new(),
             fonts: Vec::new(),
             images: HashMap::new(),
+            base_path_str: None,
         }
     }
 
@@ -78,6 +80,25 @@ impl AssetBundle {
         Ok(())
     }
 
+    /// Set the base URL used by Blitz to resolve relative asset URLs.
+    ///
+    /// When Stylo resolves `content: url("icon.png")` against a real base URL
+    /// like `file:///path/to/project/`, the computed value is an absolute URL.
+    /// `extract_asset_name` strips the `file:///` prefix, leaving an absolute
+    /// path (`path/to/project/icon.png`). This method records the stripped
+    /// base path so `get_image` can strip it too and look up the relative name.
+    ///
+    /// Call this with the `file://` directory URL (trailing slash required).
+    /// Example: `"file:///home/user/project/examples/"`.
+    pub fn set_base_url(&mut self, url: &str) {
+        let stripped = url.strip_prefix("file:///").unwrap_or(url);
+        self.base_path_str = if stripped.is_empty() {
+            None
+        } else {
+            Some(stripped.to_string())
+        };
+    }
+
     /// Normalize an image key by stripping a leading `./` prefix.
     fn normalize_key(key: &mut String) {
         if key.starts_with("./") {
@@ -105,7 +126,19 @@ impl AssetBundle {
 
     pub fn get_image(&self, name: &str) -> Option<&Arc<Vec<u8>>> {
         let key = name.strip_prefix("./").unwrap_or(name);
-        self.images.get(key)
+        if let result @ Some(_) = self.images.get(key) {
+            return result;
+        }
+        // When Stylo resolves url("icon.png") against a real base URL, the
+        // computed value is an absolute path after extract_asset_name strips
+        // "file:///". Strip the base prefix to get the relative name.
+        if let Some(base) = &self.base_path_str {
+            if let Some(rel) = key.strip_prefix(base.as_str()) {
+                let rel = rel.strip_prefix("./").unwrap_or(rel);
+                return self.images.get(rel);
+            }
+        }
+        None
     }
 
     /// Build combined CSS from all added stylesheets.
