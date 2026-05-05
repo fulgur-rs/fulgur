@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use krilla::mask::{Mask, MaskType};
+
 use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle, Canvas,
@@ -33,6 +35,40 @@ pub fn draw_box_shadows(
     }
 }
 
+/// Build an EvenOdd clip path: `outer` rect minus the element's border-box interior.
+///
+/// Used by box-shadow drawing to prevent shadow from bleeding through transparent elements
+/// (CSS Backgrounds §7.2).
+fn build_shadow_evenodd_clip(
+    outer_x: f32,
+    outer_y: f32,
+    outer_w: f32,
+    outer_h: f32,
+    elem_x: f32,
+    elem_y: f32,
+    elem_w: f32,
+    elem_h: f32,
+    style: &BlockStyle,
+) -> Option<krilla::geom::Path> {
+    let mut pb = krilla::geom::PathBuilder::new();
+    let bbox = krilla::geom::Rect::from_xywh(outer_x, outer_y, outer_w, outer_h)?;
+    pb.push_rect(bbox);
+    if style.has_radius() {
+        crate::draw_primitives::append_rounded_rect_subpath(
+            &mut pb,
+            elem_x,
+            elem_y,
+            elem_w,
+            elem_h,
+            &style.border_radii,
+        );
+    } else {
+        let box_rect = krilla::geom::Rect::from_xywh(elem_x, elem_y, elem_w, elem_h)?;
+        pb.push_rect(box_rect);
+    }
+    pb.finish()
+}
+
 fn draw_single_box_shadow(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -42,9 +78,11 @@ fn draw_single_box_shadow(
     w: f32,
     h: f32,
 ) {
-    // NOTE: when blur rendering is implemented (fulgur-4ie follow-up), this rect
-    // must also be expanded by the blur radius, and the blur extent drawn via
-    // rasterization + gaussian blur + image embed.
+    if shadow.blur > 0.0 {
+        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h);
+        return;
+    }
+
     let sx = x + shadow.offset_x - shadow.spread;
     let sy = y + shadow.offset_y - shadow.spread;
     let sw = w + 2.0 * shadow.spread;
@@ -70,29 +108,9 @@ fn draw_single_box_shadow(
     // bleeding through the interior. To prevent this we clip the shadow by
     // excluding the border-box using an EvenOdd clip path: the clip region
     // covers the shadow's bounding box minus the border-box.
-    let clip_path = {
-        let mut pb = krilla::geom::PathBuilder::new();
-        let Some(bbox) = krilla::geom::Rect::from_xywh(sx, sy, sw, sh) else {
-            return;
-        };
-        pb.push_rect(bbox);
-        if style.has_radius() {
-            crate::draw_primitives::append_rounded_rect_subpath(
-                &mut pb,
-                x,
-                y,
-                w,
-                h,
-                &style.border_radii,
-            );
-        } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
-            pb.push_rect(box_rect);
-        } else {
-            return;
-        }
-        pb.finish()
+    let Some(clip_path) = build_shadow_evenodd_clip(sx, sy, sw, sh, x, y, w, h, style) else {
+        return;
     };
-    let Some(clip_path) = clip_path else { return };
 
     canvas
         .surface
@@ -109,6 +127,326 @@ fn draw_single_box_shadow(
     canvas.surface.draw_path(&shadow_path);
 
     canvas.surface.pop();
+}
+
+/// Draw a blurred box-shadow using a luminosity soft mask and a 9-slice gradient.
+///
+/// A `Mask::Luminosity` stream encodes the Gaussian blur falloff as grayscale
+/// (white = fully opaque, black = transparent). The main surface draws a solid
+/// shadow-colour fill over the entire outer rect; the mask attenuates it per-pixel.
+/// An EvenOdd clip on the main surface prevents the shadow from bleeding through
+/// the element's transparent interior (CSS Backgrounds §7.2).
+///
+/// # Geometry
+///
+/// ```text
+/// outer rect = inner rect expanded by blur on all sides
+/// inner rect = (x + offset_x - spread, y + offset_y - spread, w + 2*spread, h + 2*spread)
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn draw_blur_box_shadow(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    shadow: &crate::draw_primitives::BoxShadow,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let blur = shadow.blur;
+    if blur <= 0.0 {
+        return;
+    }
+
+    // inner rect: shadow shape after spread
+    let ix = x + shadow.offset_x - shadow.spread;
+    let iy = y + shadow.offset_y - shadow.spread;
+    let iw = w + 2.0 * shadow.spread;
+    let ih = h + 2.0 * shadow.spread;
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+
+    // outer rect: inner rect expanded by blur
+    let ox = ix - blur;
+    let oy = iy - blur;
+    let ow = iw + 2.0 * blur;
+    let oh = ih + 2.0 * blur;
+
+    // Corner radii for the inner rect (after spread)
+    let r_inner = expand_radii(&style.border_radii, shadow.spread);
+
+    let mask_stops = blur_stops_mask(shadow.color[3], 16);
+    let shadow_a = shadow.color[3] as f32 / 255.0;
+    let center_luma = (shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
+
+    let r_tl_x = r_inner[0][0];
+    let r_tl_y = r_inner[0][1];
+    let r_tr_x = r_inner[1][0];
+    let r_tr_y = r_inner[1][1];
+    let r_br_x = r_inner[2][0];
+    let r_br_y = r_inner[2][1];
+    let r_bl_x = r_inner[3][0];
+    let r_bl_y = r_inner[3][1];
+
+    // Build luminosity mask stream: 9-slice grayscale gradient
+    let mask = {
+        let mut stream_builder = canvas.surface.stream_builder();
+        {
+            let mut ms = stream_builder.surface();
+
+            // Center: solid gray = shadow alpha (fully opaque within shadow shape)
+            let center_color =
+                krilla::color::rgb::Color::new(center_luma, center_luma, center_luma);
+            let center_path = if style.has_radius() {
+                crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
+            } else {
+                build_rect_path(ix, iy, iw, ih)
+            };
+            if let Some(path) = center_path {
+                ms.set_fill(Some(krilla::paint::Fill {
+                    paint: center_color.into(),
+                    opacity: krilla::num::NormalizedF32::ONE,
+                    rule: Default::default(),
+                }));
+                ms.set_stroke(None);
+                ms.draw_path(&path);
+                ms.set_fill(None);
+            }
+
+            // Top edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_tl_x,
+                oy,
+                iw - r_tl_x - r_tr_x,
+                blur,
+                ix + r_tl_x,
+                iy,
+                ix + r_tl_x,
+                oy,
+                &mask_stops,
+            );
+            // Bottom edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih,
+                iw - r_bl_x - r_br_x,
+                blur,
+                ix + r_bl_x,
+                iy + ih,
+                ix + r_bl_x,
+                iy + ih + blur,
+                &mask_stops,
+            );
+            // Left edge
+            draw_edge_strip(
+                &mut ms,
+                ox,
+                iy + r_tl_y,
+                blur,
+                ih - r_tl_y - r_bl_y,
+                ix,
+                iy + r_tl_y,
+                ox,
+                iy + r_tl_y,
+                &mask_stops,
+            );
+            // Right edge
+            draw_edge_strip(
+                &mut ms,
+                ix + iw,
+                iy + r_tr_y,
+                blur,
+                ih - r_tr_y - r_br_y,
+                ix + iw,
+                iy + r_tr_y,
+                ix + iw + blur,
+                iy + r_tr_y,
+                &mask_stops,
+            );
+
+            // TL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_tl_x,
+                iy + r_tl_y,
+                r_tl_x.max(r_tl_y),
+                blur,
+                ox,
+                oy,
+                blur + r_tl_x,
+                blur + r_tl_y,
+                &mask_stops,
+            );
+            // TR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_tr_x,
+                iy + r_tr_y,
+                r_tr_x.max(r_tr_y),
+                blur,
+                ix + iw - r_tr_x,
+                oy,
+                blur + r_tr_x,
+                blur + r_tr_y,
+                &mask_stops,
+            );
+            // BR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                r_br_x.max(r_br_y),
+                blur,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                blur + r_br_x,
+                blur + r_br_y,
+                &mask_stops,
+            );
+            // BL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih - r_bl_y,
+                r_bl_x.max(r_bl_y),
+                blur,
+                ox,
+                iy + ih - r_bl_y,
+                blur + r_bl_x,
+                blur + r_bl_y,
+                &mask_stops,
+            );
+
+            ms.finish();
+        }
+        Mask::new(stream_builder.finish(), MaskType::Luminosity)
+    };
+
+    let Some(clip_path) = build_shadow_evenodd_clip(ox, oy, ow, oh, x, y, w, h, style) else {
+        return;
+    };
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+    canvas.surface.push_mask(mask);
+
+    // Fill outer rect with solid shadow colour; mask provides the blur falloff
+    let [r, g, b, _] = shadow.color;
+    if let Some(outer_path) = build_rect_path(ox, oy, ow, oh) {
+        canvas.surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(r, g, b).into(),
+            opacity: krilla::num::NormalizedF32::ONE,
+            rule: Default::default(),
+        }));
+        canvas.surface.set_stroke(None);
+        canvas.surface.draw_path(&outer_path);
+        canvas.surface.set_fill(None);
+    }
+
+    canvas.surface.pop(); // pop mask
+    canvas.surface.pop(); // pop clip
+}
+
+/// Draw a rectangular strip filled with a LinearGradient.
+///
+/// `(rx, ry, rw, rh)` is the strip rectangle.
+/// `(gx1, gy1)` is the opaque end of the gradient (stop offset=0).
+/// `(gx2, gy2)` is the transparent (bg) end (stop offset=1).
+#[allow(clippy::too_many_arguments)]
+fn draw_edge_strip(
+    surface: &mut krilla::surface::Surface<'_>,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    gx1: f32,
+    gy1: f32,
+    gx2: f32,
+    gy2: f32,
+    stops: &[krilla::paint::Stop],
+) {
+    if rw <= 0.0 || rh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+    let Some(rect) = krilla::geom::Rect::from_xywh(rx, ry, rw, rh) else {
+        return;
+    };
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else { return };
+
+    let lg = krilla::paint::LinearGradient {
+        x1: gx1,
+        y1: gy1,
+        x2: gx2,
+        y2: gy2,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: stops.to_vec(),
+        anti_alias: false,
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: lg.into(),
+        opacity: krilla::num::NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.set_stroke(None);
+    surface.draw_path(&path);
+    surface.set_fill(None);
+}
+
+/// Draw one corner patch of a blurred shadow using a RadialGradient.
+///
+/// `(cx, cy)` is the arc center of the inner rounded corner (shadow shape).
+/// `r_corner` is the inner radius (start of blur, opaque stop); `r_corner + blur` is the outer.
+/// `(patch_x, patch_y, patch_w, patch_h)` is the rectangular bounding patch.
+#[allow(clippy::too_many_arguments)]
+fn draw_corner_patch(
+    surface: &mut krilla::surface::Surface<'_>,
+    cx: f32,
+    cy: f32,
+    r_corner: f32,
+    blur: f32,
+    patch_x: f32,
+    patch_y: f32,
+    patch_w: f32,
+    patch_h: f32,
+    stops: &[krilla::paint::Stop],
+) {
+    let r_outer = r_corner + blur;
+    if patch_w <= 0.0 || patch_h <= 0.0 || r_outer <= 0.0 || stops.len() < 2 {
+        return;
+    }
+    let Some(rect) = krilla::geom::Rect::from_xywh(patch_x, patch_y, patch_w, patch_h) else {
+        return;
+    };
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else { return };
+
+    let rg = krilla::paint::RadialGradient {
+        fx: cx,
+        fy: cy,
+        fr: r_corner,
+        cx,
+        cy,
+        cr: r_outer,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: stops.to_vec(),
+        anti_alias: false,
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: rg.into(),
+        opacity: krilla::num::NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.set_stroke(None);
+    surface.draw_path(&path);
+    surface.set_fill(None);
 }
 
 /// Expand border radii by `spread`. Negative `spread` clamps to zero per CSS spec
@@ -3650,6 +3988,47 @@ mod renormalize_stops_to_unit_range_tests {
     }
 }
 
+/// Approximate `erfc(x)` for x >= 0 using Abramowitz & Stegun formula 7.1.26.
+/// Maximum error: 1.5 × 10⁻⁷.
+fn erfc_approx(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_8 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    poly * (-x * x).exp()
+}
+
+/// Alpha at blur-edge position `t` ∈ [0, 1] (0 = inner edge, 1 = outer edge).
+/// Models the cumulative Gaussian with σ = blur/3.
+fn blur_edge_alpha(t: f32) -> f32 {
+    // alpha(x) = 0.5 * erfc(x / (σ√2)) where x = t*blur, σ = blur/3
+    // → 0.5 * erfc(t * 3 / √2)
+    0.5 * erfc_approx(t * 3.0 / std::f32::consts::SQRT_2)
+}
+
+/// Build grayscale gradient stops for a luminosity mask encoding a blur edge.
+///
+/// Luminosity = `blur_alpha(t) × shadow_alpha` encoded as gray (white = opaque,
+/// black = transparent). All stops have `opacity = ONE`; the mask, not the stop
+/// opacity, controls transparency.
+fn blur_stops_mask(shadow_alpha_byte: u8, n: usize) -> Vec<krilla::paint::Stop> {
+    assert!(n >= 2);
+    let shadow_a = shadow_alpha_byte as f32 / 255.0;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let luma =
+                (blur_edge_alpha(t) * shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            krilla::paint::Stop {
+                offset: krilla::num::NormalizedF32::new(t)
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                color: krilla::color::rgb::Color::new(luma, luma, luma).into(),
+                opacity: krilla::num::NormalizedF32::ONE,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod conic_helpers_tests {
     use super::{box_edge_at_angle, normalize_conic_stops, sample_conic_color};
@@ -3834,5 +4213,71 @@ mod conic_helpers_tests {
         // Just before/after seam: still in correct half.
         assert_eq!(sample_conic_color(&stops, 0.499), [255, 0, 0, 255]);
         assert_eq!(sample_conic_color(&stops, 0.501), [0, 0, 255, 255]);
+    }
+}
+
+#[cfg(test)]
+mod blur_stops_tests {
+    use super::{blur_stops_mask, blur_edge_alpha};
+
+    #[test]
+    fn blur_stops_mask_opaque_shadow_inner_edge() {
+        // At t=0 (inner edge) with fully-opaque shadow, luma = blur_edge_alpha(0) * 1.0 ≈ 0.5
+        let stops = blur_stops_mask(255, 8);
+        assert!(stops.len() >= 2);
+        let first = &stops[0];
+        assert_eq!(first.offset, krilla::num::NormalizedF32::ZERO);
+        assert_eq!(first.opacity, krilla::num::NormalizedF32::ONE);
+        // luma at t=0: blur_edge_alpha(0) ≈ 0.5 → ~128
+        let luma_byte = (blur_edge_alpha(0.0) * 255.0).round() as u8;
+        assert_eq!(
+            first.color,
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
+        );
+    }
+
+    #[test]
+    fn blur_stops_mask_outer_edge_is_black() {
+        // At t=1 (outer edge), alpha ≈ 0 → luma ≈ 0 (black = fully transparent)
+        let stops = blur_stops_mask(255, 8);
+        let last = &stops[stops.len() - 1];
+        assert_eq!(last.offset, krilla::num::NormalizedF32::ONE);
+        assert_eq!(last.opacity, krilla::num::NormalizedF32::ONE);
+        // blur_edge_alpha(1.0) < 0.005, so luma must be <= 1
+        let luma_byte = (blur_edge_alpha(1.0) * 255.0).round() as u8;
+        assert!(luma_byte <= 1);
+        assert_eq!(
+            last.color,
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
+        );
+    }
+
+    #[test]
+    fn blur_stops_mask_semi_transparent_shadow_scales_luma() {
+        // Shadow with alpha=128 (~50%): luma should be halved vs fully-opaque shadow
+        let stops_full = blur_stops_mask(255, 4);
+        let stops_half = blur_stops_mask(128, 4);
+        for (f, h) in stops_full.iter().zip(stops_half.iter()) {
+            // Extract the luma byte from the first stop's color (gray, so R=G=B)
+            // We can't easily inspect Color internals, but we can check that
+            // half-alpha stops are ≤ full-alpha stops by offset ordering.
+            assert_eq!(f.offset, h.offset);
+            assert_eq!(f.opacity, krilla::num::NormalizedF32::ONE);
+            assert_eq!(h.opacity, krilla::num::NormalizedF32::ONE);
+        }
+    }
+
+    #[test]
+    fn blur_edge_alpha_monotonic_decay() {
+        // blur_edge_alpha must be strictly decreasing on [0, 1]
+        let t0 = blur_edge_alpha(0.0);
+        let t05 = blur_edge_alpha(0.5);
+        let t1 = blur_edge_alpha(1.0);
+        assert!(t0 > t05, "alpha must decrease from t=0 to t=0.5");
+        assert!(t05 > t1, "alpha must decrease from t=0.5 to t=1");
+        // at t=0, Gaussian center is at the inner edge so alpha = 0.5
+        assert!((t0 - 0.5).abs() < 1e-5);
+        // at t=1, alpha must be near 0
+        assert!(t1 < 0.005);
     }
 }

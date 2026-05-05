@@ -20,6 +20,10 @@ path = "basic/box-shadow.html"
 margin_pt = 0.0
 
 [[fixture]]
+path = "basic/box-shadow-blur.html"
+margin_pt = 0.0
+
+[[fixture]]
 path = "layout/flex-row.html"
 margin_pt = 0.0
 
