@@ -2752,6 +2752,7 @@ fn tagged_pdf_internal_anchor_link_produces_link_struct_element() {
         s.contains("/S /Link") || s.contains("/S/Link"),
         "must have /Link structure element"
     );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
 }
 
 #[test]
