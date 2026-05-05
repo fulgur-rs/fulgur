@@ -2142,4 +2142,18 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn test_parse_leader_non_ident_non_string_arg_falls_back_to_dotted() {
+        // A numeric token is neither a string nor an ident; the else-branch
+        // in the leader() handler returns Dotted as a fallback.
+        let css = "@page { @top-right { content: leader(123); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
+    }
 }

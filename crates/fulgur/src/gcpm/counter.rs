@@ -158,12 +158,7 @@ pub fn resolve_content_to_html(
                             );
                         }
                     }
-                    ContentItem::ContentText
-                    | ContentItem::ContentBefore
-                    | ContentItem::ContentAfter
-                    | ContentItem::Attr(_) => {}
-                    // unreachable: outer arm already matched Leader
-                    ContentItem::Leader { .. } => {}
+                    _ => {}
                 }
                 if !inner.is_empty() {
                     parts.push(format!("<span>{inner}</span>"));
@@ -1108,5 +1103,138 @@ mod tests {
 
         assert!(!html.contains("display:flex"), "unexpected flex: {html}");
         assert!(html.contains('7'), "expected section 7, got: {html}");
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_flex_pages_and_custom_counter() {
+        use crate::gcpm::{ContentItem, CounterStyle, LeaderStyle};
+
+        let mut custom = BTreeMap::new();
+        custom.insert("ch".to_string(), 3_i32);
+        let items = vec![
+            ContentItem::Counter {
+                name: "ch".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::Leader {
+                style: LeaderStyle::Dotted,
+            },
+            ContentItem::Counter {
+                name: "pages".into(),
+                style: CounterStyle::Decimal,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 7, 0, &custom);
+
+        assert!(html.contains("display:flex"), "expected flex: {html}");
+        assert!(html.contains('3'), "expected ch=3, got: {html}");
+        assert!(html.contains('7'), "expected total pages=7, got: {html}");
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_flex_with_element_and_string_ref() {
+        use crate::gcpm::{ContentItem, LeaderStyle, StringPolicy};
+        use crate::pagination_layout::StringSetPageState;
+
+        let (store, states) = single_page_store("hdr", "<b>Title</b>");
+        let mut str_states = BTreeMap::new();
+        str_states.insert(
+            "chap".to_string(),
+            StringSetPageState {
+                start: None,
+                first: Some("Intro".to_string()),
+                last: Some("Intro".to_string()),
+            },
+        );
+
+        let items = vec![
+            ContentItem::Element {
+                name: "hdr".into(),
+                policy: ElementPolicy::First,
+            },
+            ContentItem::Leader {
+                style: LeaderStyle::Solid,
+            },
+            ContentItem::StringRef {
+                name: "chap".into(),
+                policy: StringPolicy::First,
+            },
+        ];
+        let html = resolve_content_to_html(
+            &items,
+            &store,
+            &states,
+            &str_states,
+            1,
+            1,
+            0,
+            &BTreeMap::new(),
+        );
+
+        assert!(html.contains("display:flex"), "expected flex: {html}");
+        assert!(
+            html.contains("<b>Title</b>"),
+            "expected element html: {html}"
+        );
+        assert!(html.contains("Intro"), "expected string ref: {html}");
+        assert!(html.contains('_'), "expected solid leader: {html}");
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_flex_noop_variants() {
+        use crate::gcpm::{ContentItem, LeaderStyle};
+
+        let items = vec![
+            ContentItem::ContentText,
+            ContentItem::Attr("href".into()),
+            ContentItem::Leader {
+                style: LeaderStyle::Space,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            1,
+            0,
+            &BTreeMap::new(),
+        );
+
+        assert!(html.contains("display:flex"), "expected flex: {html}");
+        // ContentText and Attr produce no output, so inner spans are empty and not pushed
+        assert!(
+            !html.contains("<span><"),
+            "unexpected inner content: {html}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_flat_noop_variants() {
+        use crate::gcpm::ContentItem;
+
+        let items = vec![
+            ContentItem::ContentText,
+            ContentItem::ContentBefore,
+            ContentItem::ContentAfter,
+            ContentItem::Attr("href".into()),
+        ];
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            1,
+            0,
+            &BTreeMap::new(),
+        );
+
+        assert!(!html.contains("display:flex"), "unexpected flex: {html}");
+        assert_eq!(html, "", "expected empty output, got: {html}");
     }
 }

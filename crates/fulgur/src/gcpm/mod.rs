@@ -508,4 +508,19 @@ mod tests {
         // No leading newline when target was empty.
         assert_eq!(a.cleaned_css, "body { color: blue; }");
     }
+
+    #[test]
+    fn test_leader_style_char_solid() {
+        assert_eq!(LeaderStyle::Solid.leader_char(), "_");
+    }
+
+    #[test]
+    fn test_leader_style_char_space() {
+        assert_eq!(LeaderStyle::Space.leader_char(), "\u{00A0}");
+    }
+
+    #[test]
+    fn test_leader_style_char_custom() {
+        assert_eq!(LeaderStyle::Custom("·".to_string()).leader_char(), "·");
+    }
 }
