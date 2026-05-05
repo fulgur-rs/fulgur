@@ -3114,3 +3114,59 @@ body { font-family: sans-serif; }
     let pdf = Engine::builder().build().render_html(html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn content_url_resolves_image_when_base_path_set() {
+    // Regression: before the AssetBundle base_url fix, Stylo resolved
+    // url("dot.png") to an absolute file:// path, but get_image only
+    // accepted relative names, so the image was silently dropped.
+    let dir = tempfile::tempdir().unwrap();
+    // Minimal 1x1 red PNG. Supplied to the engine via AssetBundle, so we
+    // intentionally do NOT write it to disk — the bundle short-circuits
+    // the base_path lookup that Stylo would otherwise attempt, which is
+    // exactly the regression path this test exercises.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    // Write an external CSS file that uses content: url() for a pseudo
+    let css_path = dir.path().join("style.css");
+    std::fs::write(
+        &css_path,
+        r#"p::before { content: url("dot.png"); width: 8pt; height: 8pt; display: block; }"#,
+    )
+    .unwrap();
+
+    // Write the HTML with a <link> to the external stylesheet
+    let html_path = dir.path().join("index.html");
+    std::fs::write(
+        &html_path,
+        r#"<!DOCTYPE html><html><head><link rel="stylesheet" href="style.css"></head>
+<body><p>Hello</p></body></html>"#,
+    )
+    .unwrap();
+
+    let html = std::fs::read_to_string(&html_path).unwrap();
+    let mut bundle = fulgur::asset::AssetBundle::new();
+    bundle.add_image("dot.png", PNG_1X1.to_vec());
+
+    let pdf = fulgur::Engine::builder()
+        .base_path(dir.path())
+        .assets(bundle)
+        .build()
+        .render_html(&html)
+        .unwrap();
+
+    assert!(!pdf.is_empty(), "PDF must be generated");
+    // Verify at least one image object appears in the PDF byte stream.
+    // XObject images are referenced via "/Subtype /Image" in the PDF.
+    assert!(
+        pdf.windows(b"/Subtype /Image".len())
+            .any(|w| w == b"/Subtype /Image"),
+        "PDF must contain at least one image XObject (content: url() not resolved)"
+    );
+}

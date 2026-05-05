@@ -12,6 +12,7 @@ pub struct AssetBundle {
     pub css: Vec<String>,
     pub fonts: Vec<Arc<Vec<u8>>>,
     pub images: HashMap<String, Arc<Vec<u8>>>,
+    base_path_str: Option<String>,
 }
 
 impl AssetBundle {
@@ -20,6 +21,7 @@ impl AssetBundle {
             css: Vec::new(),
             fonts: Vec::new(),
             images: HashMap::new(),
+            base_path_str: None,
         }
     }
 
@@ -78,16 +80,34 @@ impl AssetBundle {
         Ok(())
     }
 
-    /// Normalize an image key by stripping a leading `./` prefix.
-    fn normalize_key(key: &mut String) {
-        if key.starts_with("./") {
-            key.drain(..2);
-        }
+    /// Set the base URL used by Blitz to resolve relative asset URLs.
+    ///
+    /// When Stylo resolves `content: url("icon.png")` against a real base URL
+    /// like `file:///path/to/project/`, the computed value is an absolute URL.
+    /// `extract_asset_name` strips the `file:///` prefix, leaving an absolute
+    /// path (`path/to/project/icon.png`). This method records the stripped
+    /// base path so `get_image` can strip it too and look up the relative name.
+    ///
+    /// Call this with the `file://` directory URL (trailing slash required).
+    /// Example: `"file:///home/user/project/examples/"`.
+    pub fn set_base_url(&mut self, url: &str) {
+        let stripped = url.strip_prefix("file:///").unwrap_or(url);
+        self.base_path_str = if stripped.is_empty() {
+            None
+        } else {
+            Some(stripped.to_string())
+        };
+    }
+
+    /// Strip a leading `./` from an image key. Single source of truth for
+    /// the rule used by `add_image`, `add_image_file`, and `get_image`.
+    fn normalize_key(key: &str) -> &str {
+        key.strip_prefix("./").unwrap_or(key)
     }
 
     pub fn add_image(&mut self, name: impl Into<String>, data: Vec<u8>) {
-        let mut key = name.into();
-        Self::normalize_key(&mut key);
+        let key = name.into();
+        let key = Self::normalize_key(&key).to_string();
         self.images.insert(key, Arc::new(data));
     }
 
@@ -97,15 +117,27 @@ impl AssetBundle {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let data = std::fs::read(path)?;
-        let mut key = name.into();
-        Self::normalize_key(&mut key);
+        let key = name.into();
+        let key = Self::normalize_key(&key).to_string();
         self.images.insert(key, Arc::new(data));
         Ok(())
     }
 
     pub fn get_image(&self, name: &str) -> Option<&Arc<Vec<u8>>> {
-        let key = name.strip_prefix("./").unwrap_or(name);
-        self.images.get(key)
+        let key = Self::normalize_key(name);
+        if let result @ Some(_) = self.images.get(key) {
+            return result;
+        }
+        // When the URL resolver hands `get_image` an absolute file path
+        // (Stylo resolves `content: url("icon.png")` against the engine's
+        // base URL), strip the recorded base prefix to recover the relative
+        // asset name.
+        if let Some(base) = &self.base_path_str {
+            if let Some(rel) = key.strip_prefix(base.as_str()) {
+                return self.images.get(Self::normalize_key(rel));
+            }
+        }
+        None
     }
 
     /// Build combined CSS from all added stylesheets.
@@ -432,5 +464,48 @@ mod tests {
         assert_eq!(cloned.fonts.len(), 1);
         // Arc の共有を確認（同じヒープ上の Vec を指している）
         assert!(Arc::ptr_eq(&bundle.fonts[0], &cloned.fonts[0]));
+    }
+
+    #[test]
+    fn get_image_resolves_absolute_file_url_when_base_url_set() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        bundle.set_base_url("file:///home/user/project/examples/demo/");
+        // Stylo resolves url("icon.png") to an absolute file:// path when a real base URL is configured.
+        // get_image must find the image by stripping the base prefix.
+        let resolved = "home/user/project/examples/demo/icon.png";
+        assert!(
+            bundle.get_image(resolved).is_some(),
+            "get_image must resolve the absolute path to icon.png when base_url is set"
+        );
+    }
+
+    #[test]
+    fn get_image_resolves_subdir_image_with_base_url() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("images/logo.png", vec![4, 5, 6]);
+        bundle.set_base_url("file:///base/");
+        // "images/logo.png" registered → lookup "base/images/logo.png" should work
+        assert!(
+            bundle.get_image("base/images/logo.png").is_some(),
+            "get_image must find images/logo.png via base_url prefix stripping"
+        );
+    }
+
+    #[test]
+    fn get_image_direct_lookup_still_works_without_base_url() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        // Regression guard: short-name lookup must not break when set_base_url is not called.
+        assert!(bundle.get_image("icon.png").is_some());
+    }
+
+    #[test]
+    fn get_image_returns_none_when_base_url_mismatch() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        bundle.set_base_url("file:///other/path/");
+        // Long path does NOT match the base → None
+        assert!(bundle.get_image("home/user/project/icon.png").is_none());
     }
 }

@@ -197,6 +197,27 @@ pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> Htm
 /// keeping the Blitz API surface fully encapsulated in
 /// `blitz_adapter.rs` (CLAUDE.md adapter-isolation rule).
 ///
+/// Canonicalise `path` and return its `file://` directory URL.
+///
+/// Returns `None` on WASM (no filesystem) or when canonicalisation fails.
+/// Used both by [`parse_html_with_local_resources`] (Blitz base URL) and
+/// by `EngineBuilder::build` (`AssetBundle::set_base_url`) so the two paths
+/// agree on the directory URL byte-for-byte.
+pub fn canonical_directory_url(path: &Path) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        path.canonicalize()
+            .ok()
+            .and_then(|p| Url::from_directory_path(&p).ok())
+            .map(|u| u.to_string())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// # Known limitation (tracked as beads fulgur-owa)
 ///
 /// Each `<link rel=stylesheet media=X>` that is rewritten to
@@ -225,22 +246,7 @@ pub fn parse_html_with_local_resources(
         base_path.map(|p| p.to_path_buf()),
     ));
     let provider: Arc<dyn NetProvider<Resource>> = net_provider.clone();
-    // `Url::from_directory_path` and `Path::canonicalize` are gated to
-    // non-wasm targets in `url`/`std`. On WASM, base-URL derivation is
-    // skipped because there is no native filesystem to canonicalise a
-    // path against; callers are expected to deliver pre-loaded bytes
-    // through `AssetBundle` (e.g. fed from JS `fetch` / `FileReader` /
-    // OPFS via a wasm-bindgen wrapper).
-    #[cfg(not(target_arch = "wasm32"))]
-    let base_url = base_path
-        .and_then(|p| p.canonicalize().ok())
-        .and_then(|p| Url::from_directory_path(&p).ok())
-        .map(|u| u.to_string());
-    #[cfg(target_arch = "wasm32")]
-    let base_url: Option<String> = {
-        let _ = base_path;
-        None
-    };
+    let base_url = base_path.and_then(canonical_directory_url);
 
     let mut doc = parse_inner(
         html,
