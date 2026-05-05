@@ -196,7 +196,16 @@ fn draw_blur_box_shadow(
 
     // ── Center: solid fill of inner rect (EvenOdd clip already excludes border-box)
     {
-        let center_color = stops[0].color.clone();
+        let shadow_a = shadow.color[3] as f32 / 255.0;
+        let blend_full = |s: u8, b: u8| -> u8 {
+            let r = s as f32 / 255.0 * shadow_a + b as f32 / 255.0 * (1.0 - shadow_a);
+            (r * 255.0).round().clamp(0.0, 255.0) as u8
+        };
+        let center_color = krilla::color::rgb::Color::new(
+            blend_full(shadow.color[0], bg_color[0]),
+            blend_full(shadow.color[1], bg_color[1]),
+            blend_full(shadow.color[2], bg_color[2]),
+        );
         let path = if style.has_radius() {
             crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
         } else {
@@ -4012,7 +4021,7 @@ pub(crate) fn blur_stops(shadow_rgba: [u8; 4], n: usize, bg: [u8; 4]) -> Vec<kri
             let b_ch = blend(shadow_rgba[2], bg[2]);
             krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(t)
-                    .unwrap_or(krilla::num::NormalizedF32::ZERO),
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
                 color: krilla::color::rgb::Color::new(r, g, b_ch).into(),
                 opacity: krilla::num::NormalizedF32::ONE,
             }
