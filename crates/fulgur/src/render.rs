@@ -114,6 +114,10 @@ pub fn render_v2(
 
     let mut link_collector = crate::draw_primitives::LinkCollector::new();
 
+    let tagging = config.effective_tagging();
+    let mut link_annot_ids: std::collections::BTreeMap<usize, krilla::tagging::Identifier> =
+        std::collections::BTreeMap::new();
+
     // Build the GCPM margin-box renderer once. Reused across pages so
     // measure / layout / render caches survive between pages and the
     // pre-computed `string_set_states` / `counter_states` /
@@ -237,12 +241,16 @@ pub fn render_v2(
             );
         }
         let per_page = link_collector.take_page(page_idx);
-        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry, false);
+        for (ptr, id) in
+            crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry, tagging)
+        {
+            link_annot_ids.insert(ptr, id);
+        }
     }
 
     if let Some(tc) = tag_collector {
         let mut tree = TagTree::new().with_lang(config.lang.clone());
-        build_struct_tree(tc, drawables, &mut tree);
+        build_struct_tree(tc, drawables, &link_annot_ids, &mut tree);
         document.set_tag_tree(tree);
     }
 
@@ -3619,11 +3627,16 @@ fn strip_display_none(css: &str) -> String {
 fn build_struct_tree(
     tc: crate::draw_primitives::TagCollector,
     drawables: &Drawables,
+    link_annot_ids: &std::collections::BTreeMap<usize, Identifier>,
     tree: &mut TagTree,
 ) {
     let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
     let mut heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
-    for (node_id, _tag, id, heading_title) in tc.into_entries() {
+    // Destructure tc to extract run_entries before consuming tc via
+    // into_entries() — a direct `tc.run_entries` move before calling
+    // tc.into_entries() would be a partial move error.
+    let (tc_entries, run_entries) = tc.into_parts();
+    for (node_id, _tag, id, heading_title) in tc_entries {
         identifiers.entry(node_id).or_default().push(id);
         if let Some(title) = heading_title {
             heading_titles.entry(node_id).or_insert(title);
@@ -3652,6 +3665,8 @@ fn build_struct_tree(
             &identifiers,
             &heading_titles,
             &children_map,
+            &run_entries,
+            link_annot_ids,
         );
         tree.push(Node::Group(group));
     }
@@ -3663,6 +3678,8 @@ fn build_tag_group(
     identifiers: &BTreeMap<crate::drawables::NodeId, Vec<Identifier>>,
     heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
     children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
+    run_entries: &BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::ParagraphRunItem>>,
+    link_annot_ids: &std::collections::BTreeMap<usize, Identifier>,
 ) -> TagGroup {
     let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
     let title = heading_titles.get(&node_id).cloned();
@@ -3672,7 +3689,48 @@ fn build_tag_group(
         entry.alt_text.clone(),
     ));
 
-    if let Some(ids) = identifiers.get(&node_id) {
+    // Paragraphs with per-run link tagging use run_entries instead of the
+    // single identifiers path.
+    if let Some(run_items) = run_entries.get(&node_id) {
+        let mut i = 0;
+        while i < run_items.len() {
+            use crate::draw_primitives::ParagraphRunItem;
+            match &run_items[i] {
+                ParagraphRunItem::Content(id) => {
+                    group.push(Node::Leaf(*id));
+                    i += 1;
+                }
+                ParagraphRunItem::LinkContent { span_ptr, .. } => {
+                    let ptr = *span_ptr;
+                    let mut link_group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
+                        &crate::tagging::PdfTag::Link,
+                        None,
+                        None,
+                    ));
+                    // Collect all consecutive items with the same span_ptr.
+                    while i < run_items.len() {
+                        if let ParagraphRunItem::LinkContent {
+                            span_ptr: p,
+                            identifier: id,
+                        } = &run_items[i]
+                        {
+                            if *p == ptr {
+                                link_group.push(Node::Leaf(*id));
+                                i += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    // Annotation identifier (OBJR) follows content identifiers.
+                    if let Some(&annot_id) = link_annot_ids.get(&ptr) {
+                        link_group.push(Node::Leaf(annot_id));
+                    }
+                    group.push(Node::Group(link_group));
+                }
+            }
+        }
+    } else if let Some(ids) = identifiers.get(&node_id) {
         for &id in ids {
             group.push(Node::Leaf(id));
         }
@@ -3686,6 +3744,8 @@ fn build_tag_group(
                 identifiers,
                 heading_titles,
                 children_map,
+                run_entries,
+                link_annot_ids,
             );
             group.push(Node::Group(child));
         }
@@ -3876,5 +3936,133 @@ mod tests {
     #[test]
     fn parse_datetime_invalid_non_numeric_second() {
         assert!(parse_datetime("2024-06-15T10:30:abc").is_none());
+    }
+
+    // --- build_tag_group: LinkContent branch ---
+
+    /// Helper that allocates a real [`Identifier`] from a scratch krilla document.
+    fn make_identifier() -> Identifier {
+        use krilla::tagging::{ContentTag, SpanTag};
+        let mut doc = krilla::Document::new();
+        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0).expect("valid page size");
+        let mut page = doc.start_page_with(settings);
+        let mut surface = page.surface();
+        let id = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+        surface.end_tagged();
+        id
+    }
+
+    /// Build a minimal [`Drawables`] with a single semantic paragraph node.
+    fn drawables_with_para(node_id: crate::drawables::NodeId) -> Drawables {
+        let mut d = Drawables::new();
+        d.semantics.insert(
+            node_id,
+            crate::tagging::SemanticEntry {
+                tag: crate::tagging::PdfTag::P,
+                parent: None,
+                alt_text: None,
+            },
+        );
+        d
+    }
+
+    #[test]
+    fn build_tag_group_link_content_creates_nested_link_group() {
+        // Paragraph node_id = 1 has one non-link run and one link run (ptr=99).
+        let node_id: crate::drawables::NodeId = 1;
+        let content_id = make_identifier();
+        let link_id = make_identifier();
+        let annot_id = make_identifier();
+
+        let mut run_entries: BTreeMap<
+            crate::drawables::NodeId,
+            Vec<crate::draw_primitives::ParagraphRunItem>,
+        > = BTreeMap::new();
+        run_entries.insert(
+            node_id,
+            vec![
+                crate::draw_primitives::ParagraphRunItem::Content(content_id),
+                crate::draw_primitives::ParagraphRunItem::LinkContent {
+                    span_ptr: 99,
+                    identifier: link_id,
+                },
+            ],
+        );
+
+        let mut link_annot_ids: std::collections::BTreeMap<usize, Identifier> =
+            std::collections::BTreeMap::new();
+        link_annot_ids.insert(99, annot_id);
+
+        let drawables = drawables_with_para(node_id);
+        let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
+        let heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
+        let children_map: BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>> =
+            BTreeMap::new();
+
+        let group = build_tag_group(
+            node_id,
+            &drawables,
+            &identifiers,
+            &heading_titles,
+            &children_map,
+            &run_entries,
+            &link_annot_ids,
+        );
+
+        // The group should have two children: one Leaf (Content) and one Group (Link).
+        assert_eq!(group.children.len(), 2, "expected Leaf + Group(Link)");
+        // Second child should be a Group (the Link TagGroup).
+        assert!(
+            matches!(group.children[1], Node::Group(_)),
+            "second child should be a Link Group"
+        );
+    }
+
+    #[test]
+    fn build_tag_group_link_content_no_annot_id_still_builds_group() {
+        // Same as above but no annotation identifier in link_annot_ids.
+        let node_id: crate::drawables::NodeId = 2;
+        let link_id = make_identifier();
+
+        let mut run_entries: BTreeMap<
+            crate::drawables::NodeId,
+            Vec<crate::draw_primitives::ParagraphRunItem>,
+        > = BTreeMap::new();
+        run_entries.insert(
+            node_id,
+            vec![crate::draw_primitives::ParagraphRunItem::LinkContent {
+                span_ptr: 77,
+                identifier: link_id,
+            }],
+        );
+
+        let link_annot_ids: std::collections::BTreeMap<usize, Identifier> =
+            std::collections::BTreeMap::new(); // empty — no OBJR
+
+        let drawables = drawables_with_para(node_id);
+        let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
+        let heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
+        let children_map: BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>> =
+            BTreeMap::new();
+
+        let group = build_tag_group(
+            node_id,
+            &drawables,
+            &identifiers,
+            &heading_titles,
+            &children_map,
+            &run_entries,
+            &link_annot_ids,
+        );
+
+        assert_eq!(
+            group.children.len(),
+            1,
+            "link without OBJR should still produce one Link Group"
+        );
+        assert!(
+            matches!(group.children[0], Node::Group(_)),
+            "child should be a Link Group"
+        );
     }
 }

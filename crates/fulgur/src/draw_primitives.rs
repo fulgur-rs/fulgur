@@ -504,6 +504,24 @@ impl TagCollector {
         self.entries
     }
 
+    /// Consume `self` and return `(entries, run_entries)` as separate owned
+    /// values. Used by `build_struct_tree` to avoid a partial-move error when
+    /// both fields are needed independently.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<(
+            crate::drawables::NodeId,
+            crate::tagging::PdfTag,
+            krilla::tagging::Identifier,
+            Option<String>,
+        )>,
+        BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
+    ) {
+        (self.entries, self.run_entries)
+    }
+
     /// Record a per-run item under `node_id` (paragraph NodeId).
     pub fn record_run(&mut self, node_id: crate::drawables::NodeId, item: ParagraphRunItem) {
         self.run_entries.entry(node_id).or_default().push(item);
