@@ -656,7 +656,7 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
         }
         let node = doc.get_node(node_id)?;
         if let Some(el) = node.element_data() {
-            if el.name.local.as_ref() == "title" {
+            if el.name.local.as_ref() == "title" && el.name.ns == blitz_dom::ns!(html) {
                 return Some(node_id);
             }
         }
@@ -4165,6 +4165,16 @@ mod extract_html_title_tests {
     fn extract_html_title_returns_none_for_empty_title() {
         let doc = parse(
             r#"<html><head><title>   </title></head><body></body></html>"#,
+            600.0,
+            &[],
+        );
+        assert_eq!(super::extract_html_title(&doc), None);
+    }
+
+    #[test]
+    fn extract_html_title_ignores_svg_title() {
+        let doc = parse(
+            r#"<html><head></head><body><svg><title>SVG Title</title></svg></body></html>"#,
             600.0,
             &[],
         );
