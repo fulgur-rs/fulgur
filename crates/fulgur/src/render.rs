@@ -1671,7 +1671,15 @@ fn draw_under_clip(
         if let Some(p) = para_for_block {
             let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
             let tag_info = if use_run_tagging {
-                canvas.link_run_node_id = Some(node_id);
+                let run_tag_node_id = if drawables.list_items.contains_key(&node_id) {
+                    *drawables
+                        .li_lbody_ids
+                        .get(&node_id)
+                        .expect("list-item paragraph must have an LBody id")
+                } else {
+                    node_id
+                };
+                canvas.link_run_node_id = Some(run_tag_node_id);
                 None
             } else {
                 try_start_tagged(canvas, node_id, drawables)
@@ -2951,7 +2959,11 @@ fn draw_list_item_with_block(
             // inline-root li の段落コンテンツを LBody 配下に記録する
             let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
             let tag_info = if use_run_tagging {
-                canvas.link_run_node_id = Some(node_id);
+                let lbody_id = *drawables
+                    .li_lbody_ids
+                    .get(&node_id)
+                    .expect("list-item paragraph must have an LBody id");
+                canvas.link_run_node_id = Some(lbody_id);
                 None
             } else {
                 try_start_tagged(canvas, node_id, drawables)
