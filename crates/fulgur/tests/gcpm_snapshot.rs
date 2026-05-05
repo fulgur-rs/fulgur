@@ -8,8 +8,8 @@
 //! platforms and the golden files remain deterministic across Linux / macOS /
 //! Windows CI runners.
 
-use fulgur::asset::AssetBundle;
 use fulgur::Engine;
+use fulgur::asset::AssetBundle;
 use krilla::SerializeSettings;
 use std::path::PathBuf;
 
