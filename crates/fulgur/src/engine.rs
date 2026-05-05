@@ -179,12 +179,23 @@ impl Engine {
             crate::gcpm::running::RunningElementStore::new()
         };
 
+        // BookmarkPass downstream consumes per-node snapshots from
+        // StringSetPass and CounterPass when (and only when) bookmarks
+        // will actually be emitted. Compute the gate once here so each
+        // pass can opt out of the per-element clone otherwise.
+        let record_bookmark_snapshots =
+            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+
         // Extract string-set values via DomPass.
         // Also harvest per-node `name -> latest value` snapshots that the
         // later BookmarkPass uses to resolve `string(name)` inside
         // `bookmark-label` (fulgur-70c).
         let (string_set_store, string_snapshots) = if !gcpm.string_set_mappings.is_empty() {
-            let pass = crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
+            let mut pass =
+                crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
+            if record_bookmark_snapshots {
+                pass = pass.with_snapshot_recording();
+            }
             crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
             let snapshots = pass.take_node_snapshots();
             (pass.into_store(), snapshots)
@@ -200,10 +211,13 @@ impl Engine {
         // (`counter(name)` inside `bookmark-label`, fulgur-70c).
         let (counter_ops_by_node_vec, counter_css, counter_snapshots) =
             if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
-                let pass = crate::blitz_adapter::CounterPass::new(
+                let mut pass = crate::blitz_adapter::CounterPass::new(
                     gcpm.counter_mappings.clone(),
                     gcpm.content_counter_mappings.clone(),
                 );
+                if record_bookmark_snapshots {
+                    pass = pass.with_snapshot_recording();
+                }
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
                 let snapshots = pass.take_node_snapshots();
                 let (ops, css) = pass.into_parts();

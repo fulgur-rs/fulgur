@@ -1517,9 +1517,13 @@ pub struct StringSetPass {
     running: RefCell<BTreeMap<String, String>>,
     /// Per-node snapshot of `running` taken at every visited element
     /// after that element's own string-set assignment (if any) has been
-    /// applied. Empty if `apply` did not visit any nodes (e.g. when
-    /// `mappings` is empty).
+    /// applied. Only populated when `record_node_snapshots` is enabled.
+    /// Empty otherwise, including when `apply` did not visit any nodes
+    /// (e.g. `mappings` is empty).
     node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, String>>>,
+    /// Gate for `node_snapshots`. Mirrors `CounterPass`. Off by default
+    /// so renders that do not emit bookmarks skip the per-element clone.
+    record_node_snapshots: bool,
 }
 
 impl StringSetPass {
@@ -1529,7 +1533,17 @@ impl StringSetPass {
             store: RefCell::new(StringSetStore::new()),
             running: RefCell::new(BTreeMap::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
+            record_node_snapshots: false,
         }
+    }
+
+    /// Enable per-node string-set snapshot recording. Required when a
+    /// downstream `BookmarkPass` resolves `string(name)` inside
+    /// `bookmark-label` (fulgur-70c). Off by default to avoid the
+    /// per-element clone overhead on renders that don't emit bookmarks.
+    pub fn with_snapshot_recording(mut self) -> Self {
+        self.record_node_snapshots = true;
+        self
     }
 
     pub fn into_store(self) -> StringSetStore {
@@ -1537,9 +1551,9 @@ impl StringSetPass {
     }
 
     /// Take ownership of the per-node string-set snapshot map. Mirrors
-    /// `CounterPass::take_node_snapshots`. Empty if `apply` did not visit
-    /// any nodes (or if this method has already been called once — call
-    /// before `into_store`).
+    /// `CounterPass::take_node_snapshots`. Empty if snapshot recording
+    /// was not enabled, if `apply` did not visit any nodes, or if this
+    /// method has already been called once — call before `into_store`.
     pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, String>> {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
@@ -1583,10 +1597,14 @@ impl StringSetPass {
             // Snapshot the running map AFTER this element's own
             // assignment is folded in — bookmark-label on the same
             // element should observe its own string-set value.
-            // Mirrors `CounterPass`'s per-node snapshot timing.
-            self.node_snapshots
-                .borrow_mut()
-                .insert(node_id, self.running.borrow().clone());
+            // Mirrors `CounterPass`'s per-node snapshot timing. Gated
+            // on `record_node_snapshots` so non-bookmark renders skip
+            // the clone (fulgur-70c).
+            if self.record_node_snapshots {
+                self.node_snapshots
+                    .borrow_mut()
+                    .insert(node_id, self.running.borrow().clone());
+            }
         }
 
         // string-set targets stay in document flow — always recurse into children.
@@ -1615,8 +1633,15 @@ pub struct CounterPass {
     /// Counter-state snapshot taken at each visited element after the
     /// element's own `counter-reset` / `counter-increment` / `counter-set`
     /// operations have been applied (Phase 2). Consumed by `BookmarkPass`
-    /// to resolve `counter()` inside `bookmark-label`.
+    /// to resolve `counter()` inside `bookmark-label`. Only populated when
+    /// `record_node_snapshots` is enabled (the default is off, since most
+    /// renders do not use `bookmark-label`).
     node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, i32>>>,
+    /// Gate for `node_snapshots`: the per-element snapshot clones the
+    /// counter map and is only useful when a downstream `BookmarkPass`
+    /// will consume it. Engine flips this on via
+    /// [`with_snapshot_recording`] when bookmarks are emitted.
+    record_node_snapshots: bool,
 }
 
 impl CounterPass {
@@ -1632,7 +1657,18 @@ impl CounterPass {
             counter_id: RefCell::new(0),
             ops_by_node: RefCell::new(Vec::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
+            record_node_snapshots: false,
         }
+    }
+
+    /// Enable per-node counter snapshot recording. Required when a
+    /// downstream `BookmarkPass` needs to resolve `counter()` inside
+    /// `bookmark-label` (fulgur-70c). Off by default to avoid the
+    /// O(|elements| × |counters|) clone cost on renders that do not
+    /// consume bookmarks.
+    pub fn with_snapshot_recording(mut self) -> Self {
+        self.record_node_snapshots = true;
+        self
     }
 
     pub fn generated_css(&self) -> String {
@@ -1644,8 +1680,10 @@ impl CounterPass {
     /// point right after the element's own `counter-reset` /
     /// `counter-increment` / `counter-set` operations have been applied —
     /// the same timing CSS GCPM specifies for `counter()` inside
-    /// `bookmark-label`. Empty if `apply` was never called or if there
-    /// were no counter / content mappings (the early return path).
+    /// `bookmark-label`. Empty if `apply` was never called, if there were
+    /// no counter / content mappings (the early-return path), or if
+    /// snapshot recording was not enabled via [`with_snapshot_recording`].
+    /// Subsequent calls return an empty map (the snapshot is moved out).
     pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, i32>> {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
@@ -1736,13 +1774,17 @@ impl CounterPass {
 
         // Snapshot the counter state at this element's "after own ops, before
         // children" position. This is the value bookmark-label sees (matches
-        // `::before` content resolution timing). We snapshot unconditionally —
-        // even when the element has no own counter ops — so that
+        // `::before` content resolution timing). We snapshot unconditionally
+        // for visited elements — even ones with no own counter ops — so that
         // `BookmarkPass` can still resolve inherited counter values for any
-        // element that authors target with `bookmark-label`.
-        self.node_snapshots
-            .borrow_mut()
-            .insert(node_id, self.state.borrow().snapshot());
+        // element that authors target with `bookmark-label`. Gated on
+        // `record_node_snapshots` so renders that don't emit bookmarks pay
+        // nothing for this clone (fulgur-70c).
+        if self.record_node_snapshots {
+            self.node_snapshots
+                .borrow_mut()
+                .insert(node_id, self.state.borrow().snapshot());
+        }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
         // CSS spec: ::before is a first child, ::after is a last child, so
@@ -3114,7 +3156,7 @@ mod tests {
             }],
         }];
         let mut doc = parse(html, 400.0, &[]);
-        let pass = CounterPass::new(mappings, Vec::new());
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
         let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
         let snapshots = pass.take_node_snapshots();
@@ -3141,6 +3183,29 @@ mod tests {
     }
 
     #[test]
+    fn counter_pass_skips_snapshot_when_recording_disabled() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        let html = r#"<html><body><h1>A</h1></body></html>"#;
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            ops: vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        // Default (no `with_snapshot_recording`) skips per-element clones.
+        assert!(
+            pass.take_node_snapshots().is_empty(),
+            "snapshot map must be empty when recording is disabled"
+        );
+    }
+
+    #[test]
     fn string_set_pass_records_per_node_snapshot() {
         use crate::gcpm::StringSetValue;
 
@@ -3156,7 +3221,7 @@ mod tests {
             values: vec![StringSetValue::ContentText],
         }];
         let mut doc = parse(html, 400.0, &[]);
-        let pass = StringSetPass::new(mappings);
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
         let ctx = PassContext { font_data: &[] };
         pass.apply(&mut doc, &ctx);
         let snapshots = pass.take_node_snapshots();
@@ -3883,6 +3948,29 @@ mod transform_tests {
 mod marker_rewrite_tests {
     use super::*;
 
+    /// Locate the first element with the given local tag name in
+    /// document order. Mirrors `tests::find_element_by_local_name` —
+    /// duplicated here because each `#[cfg(test)] mod` is a separate
+    /// scope and the helper isn't worth promoting to the crate API.
+    fn find_first_element(doc: &HtmlDocument, name: &str) -> Option<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if let Some(ed) = node.element_data() {
+                if ed.name.local.as_ref() == name {
+                    return Some(id);
+                }
+            }
+            for &c in &node.children {
+                if let Some(v) = walk(doc, c, name) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        use std::ops::Deref;
+        walk(doc.deref(), doc.root_element().id, name)
+    }
+
     #[test]
     fn test_rewrite_marker_content_url_simple() {
         let css = r#"li::marker { content: url("star.png"); }"#;
@@ -4159,25 +4247,7 @@ li::marker { content: url("star.png"); }
             ]),
         }];
         let mut doc = parse(html, 400.0, &[]);
-        let mut h1_id: Option<usize> = None;
-        fn find(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
-            if out.is_some() {
-                return;
-            }
-            if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "h1" {
-                        *out = Some(id);
-                        return;
-                    }
-                }
-                for &c in &node.children {
-                    find(doc, c, out);
-                }
-            }
-        }
-        find(&doc, doc.root_element().id, &mut h1_id);
-        let h1 = h1_id.expect("h1 in fixture");
+        let h1 = find_first_element(&doc, "h1").expect("h1 in fixture");
 
         let mut counter_snap = BTreeMap::new();
         let mut h1_state = BTreeMap::new();
@@ -4207,25 +4277,7 @@ li::marker { content: url("star.png"); }
             }]),
         }];
         let mut doc = parse(html, 400.0, &[]);
-        let mut h1_id: Option<usize> = None;
-        fn find(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
-            if out.is_some() {
-                return;
-            }
-            if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "h1" {
-                        *out = Some(id);
-                        return;
-                    }
-                }
-                for &c in &node.children {
-                    find(doc, c, out);
-                }
-            }
-        }
-        find(&doc, doc.root_element().id, &mut h1_id);
-        let h1 = h1_id.expect("h1 in fixture");
+        let h1 = find_first_element(&doc, "h1").expect("h1 in fixture");
 
         let mut string_snap = BTreeMap::new();
         let mut h1_state = BTreeMap::new();

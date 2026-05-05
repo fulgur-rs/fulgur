@@ -3198,6 +3198,9 @@ fn outline_titles(pdf_bytes: &[u8]) -> Vec<String> {
         // PDF text strings: UTF-16BE with BOM, or fall back to UTF-8 lossy.
         // (krilla always emits BOM-prefixed UTF-16BE for outline titles, so
         // the else branch is defensive — never hit in practice.)
+        // Mirrors `crates/fulgur/src/inspect.rs::decode_pdf_string`; kept
+        // local because that helper is crate-private and not visible from
+        // an integration test crate.
         if s.starts_with(&[0xFE, 0xFF]) {
             let chars: Vec<u16> = s[2..]
                 .chunks_exact(2)
