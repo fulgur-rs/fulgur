@@ -170,3 +170,24 @@ fn level_only_falls_back_to_element_text() {
         "label-less rule should fall back to element's text content"
     );
 }
+
+/// Inline `<style>` blocks are supported since fulgur-mq5 — verify that
+/// `bookmark-level` delivered via `<style>` produces an outline entry.
+#[test]
+fn bookmarks_via_inline_style_block() {
+    let html = r#"<!doctype html><html><head>
+        <style>
+            aside { bookmark-level: 1; bookmark-label: "Sidebar"; }
+        </style>
+    </head><body>
+        <aside>My sidebar</aside>
+        <p>Some body text.</p>
+    </body></html>"#;
+
+    let engine = Engine::builder().bookmarks(true).build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(
+        pdf_contains_outline_entry(&pdf, "Sidebar"),
+        "expected 'Sidebar' bookmark entry — bookmark-label via inline <style> not working"
+    );
+}
