@@ -207,7 +207,7 @@ fulgur render --pdf-ua --language en -o report.pdf report.html
 
 - Alt text is propagated from `<img alt>` attributes only. CSS background images are not tagged.
 - PDF/UA-1 requires a document language. Always pass `--language` (CLI) or `.lang()` (Rust API) when using `--pdf-ua`.
-- Python and Ruby bindings do not yet expose `tagged` / `pdf_ua`. See [fulgur-rskh] and [fulgur-k96v] for the follow-up work.
+- Python and Ruby bindings do not yet expose `tagged` / `pdf_ua`. Follow-up work is tracked separately.
 
 ## Architecture
 
