@@ -15,6 +15,7 @@ pub struct Engine {
     template: Option<(String, String)>,
     data: Option<serde_json::Value>,
     serialize_settings: SerializeSettings,
+    system_fonts: bool,
 }
 
 impl Engine {
@@ -26,6 +27,7 @@ impl Engine {
             template: None,
             data: None,
             serialize_settings: SerializeSettings::default(),
+            system_fonts: true,
         }
     }
 
@@ -84,6 +86,7 @@ impl Engine {
             crate::convert::pt_to_px(self.config.content_width()),
             crate::convert::pt_to_px(self.config.page_height()) as u32,
             fonts,
+            self.system_fonts,
             self.base_path.as_deref(),
         );
         gcpm.extend_from(link_gcpm);
@@ -408,6 +411,7 @@ impl Engine {
             &gcpm,
             &running_store,
             fonts,
+            self.system_fonts,
             &string_set_for_render,
             &counter_ops_for_render,
             self.serialize_settings.clone(),
@@ -460,6 +464,7 @@ impl Engine {
             crate::convert::pt_to_px(self.config.content_width()),
             crate::convert::pt_to_px(self.config.page_height()) as u32,
             fonts,
+            self.system_fonts,
             self.base_path.as_deref(),
         );
 
@@ -528,6 +533,7 @@ impl Engine {
             crate::convert::pt_to_px(self.config.content_width()),
             crate::convert::pt_to_px(self.config.page_height()) as u32,
             fonts,
+            self.system_fonts,
             self.base_path.as_deref(),
         );
 
@@ -621,6 +627,7 @@ pub struct EngineBuilder {
     template: Option<(String, String)>,
     data: Option<serde_json::Value>,
     serialize_settings: SerializeSettings,
+    system_fonts: bool,
 }
 
 impl EngineBuilder {
@@ -704,6 +711,11 @@ impl EngineBuilder {
         self
     }
 
+    pub fn system_fonts(mut self, enabled: bool) -> Self {
+        self.system_fonts = enabled;
+        self
+    }
+
     pub fn base_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.base_path = Some(path.into());
         self
@@ -732,6 +744,7 @@ impl EngineBuilder {
             template: self.template,
             data: self.data,
             serialize_settings: self.serialize_settings,
+            system_fonts: self.system_fonts,
         }
     }
 }
