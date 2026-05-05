@@ -3420,6 +3420,37 @@ mod tests {
         );
     }
 
+    /// fulgur-i5a: `overflow: hidden` is a pure visual effect that must
+    /// not affect pagination. A 50px-tall parent containing a 1200px-tall
+    /// child stays single-page even though the child would otherwise
+    /// extend past the 800px page strip. The clip is applied at draw
+    /// time (`render.rs` push/pop_clip_path), and pagination follows the
+    /// parent's layout box, not the child's overflowing intrinsic height.
+    #[test]
+    fn overflow_hidden_does_not_split_oversize_child() {
+        let html = r#"
+            <html><body>
+              <div style="height: 50px; overflow: hidden">
+                <div style="height: 1200px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+
+        // body + outer (50px clip) + inner (1200px overflowing child)
+        // = 3 entries; every entry has a single fragment on page 0.
+        assert_eq!(table.len(), 3, "expected body + outer + inner = 3 entries");
+        for (id, geom) in &table {
+            assert_eq!(
+                geom.fragments.len(),
+                1,
+                "node {id} should not split under overflow:hidden parent"
+            );
+            assert_eq!(geom.fragments[0].page_index, 0);
+        }
+    }
+
     /// Phase 4 prerequisite repro: confirm `string-set` carry semantic
     /// across page break.
     #[test]

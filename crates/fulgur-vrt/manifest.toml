@@ -76,6 +76,18 @@ path = "layout/overflow-hidden-rounded.html"
 margin_pt = 0.0
 
 [[fixture]]
+path = "layout/overflow-axis-x.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/overflow-axis-y.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/overflow-nested.html"
+margin_pt = 0.0
+
+[[fixture]]
 path = "layout/inline-block-basic.html"
 margin_pt = 0.0
 
