@@ -1181,6 +1181,14 @@ fn paint_multicol_paragraph_slices(
     // so `is_split() == fragments.len() > 1` for any valid input here.
     // Using the predicate documents the intent.
     let needs_partition = container_geom.is_split();
+    let use_run_tagging = canvas.tag_collector.is_some()
+        && drawables
+            .paragraphs
+            .get(&source_node_id)
+            .is_some_and(para_has_link_runs);
+    if use_run_tagging {
+        canvas.link_run_node_id = Some(source_node_id);
+    }
     draw_with_opacity(canvas, opacity, |canvas| {
         for slice in &slices_entry.slices {
             let slice_top = slice.origin_pt.1 - consumed;
@@ -1207,6 +1215,9 @@ fn paint_multicol_paragraph_slices(
             crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
         }
     });
+    if use_run_tagging {
+        canvas.link_run_node_id = None;
+    }
 }
 
 /// Push the transform onto the surface + link collector, dispatch the
@@ -1658,7 +1669,13 @@ fn draw_under_clip(
         let inner_x = x_pt + inner_inset.0;
         let inner_y = y_pt + inner_inset.1;
         if let Some(p) = para_for_block {
-            let tag_info = try_start_tagged(canvas, node_id, drawables);
+            let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+            let tag_info = if use_run_tagging {
+                canvas.link_run_node_id = Some(node_id);
+                None
+            } else {
+                try_start_tagged(canvas, node_id, drawables)
+            };
             draw_paragraph_inner_paint(
                 canvas,
                 p,
@@ -1673,6 +1690,9 @@ fn draw_under_clip(
                 margin_top_pt,
             );
             finish_tagged(canvas, tag_info);
+            if use_run_tagging {
+                canvas.link_run_node_id = None;
+            }
         }
         if let Some(i) = img_for_block {
             draw_image_inner_paint(canvas, i, inner_x, inner_y);
@@ -2010,6 +2030,13 @@ fn draw_under_opacity(
             let inner_x = x_pt + inner_inset.0;
             let inner_y = y_pt + inner_inset.1;
             if let Some(p) = para_for_block {
+                let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+                let tag_info = if use_run_tagging {
+                    canvas.link_run_node_id = Some(node_id);
+                    None
+                } else {
+                    try_start_tagged(canvas, node_id, drawables)
+                };
                 draw_paragraph_inner_paint(
                     canvas,
                     p,
@@ -2023,6 +2050,10 @@ fn draw_under_opacity(
                     margin_left_pt,
                     margin_top_pt,
                 );
+                finish_tagged(canvas, tag_info);
+                if use_run_tagging {
+                    canvas.link_run_node_id = None;
+                }
             }
             if let Some(i) = img_for_block {
                 draw_image_inner_paint(canvas, i, inner_x, inner_y);
@@ -2918,7 +2949,13 @@ fn draw_list_item_with_block(
         }
         if let Some(p) = paragraph {
             // inline-root li の段落コンテンツを LBody 配下に記録する
-            let tag_info = try_start_tagged(canvas, node_id, drawables);
+            let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+            let tag_info = if use_run_tagging {
+                canvas.link_run_node_id = Some(node_id);
+                None
+            } else {
+                try_start_tagged(canvas, node_id, drawables)
+            };
             draw_paragraph_inner_paint(
                 canvas,
                 p,
@@ -2933,6 +2970,9 @@ fn draw_list_item_with_block(
                 margin_top_pt,
             );
             finish_tagged(canvas, tag_info);
+            if use_run_tagging {
+                canvas.link_run_node_id = None;
+            }
         }
     });
 }
