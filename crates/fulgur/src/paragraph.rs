@@ -566,6 +566,16 @@ pub fn draw_shaped_lines(
     // to derive it from `line.baseline` (which is an absolute baseline offset
     // and does not carry per-line ascent).
     let mut line_top: f32 = 0.0;
+    // Per-run tagging mode is active when canvas.link_run_node_id is set and tagging is enabled.
+    // In this mode each glyph-run or image cluster gets its own start_tagged/end_tagged region.
+    let run_tag_node_id: Option<usize> = if canvas.tag_collector.is_some() {
+        canvas.link_run_node_id
+    } else {
+        None
+    };
+    // None = no region open; Some(None) = non-link region open; Some(Some(ptr)) = link region open.
+    let mut cur_region_ptr: Option<Option<usize>> = None;
+    let mut cur_region_id: Option<krilla::tagging::Identifier> = None;
     for line in lines {
         let line_top_abs = y + line_top;
         let baseline_y = y + line.baseline;
@@ -573,6 +583,39 @@ pub fn draw_shaped_lines(
         for item in &line.items {
             match item {
                 LineItem::Text(run) => {
+                    if let Some(nid) = run_tag_node_id {
+                        let new_ptr = run
+                            .link
+                            .as_ref()
+                            .map(|l| std::sync::Arc::as_ptr(l) as usize);
+                        if cur_region_ptr.as_ref().map(|p| *p) != Some(new_ptr) {
+                            // Close previous region
+                            if cur_region_ptr.is_some() {
+                                canvas.surface.end_tagged();
+                                let ptr_opt = cur_region_ptr.take().unwrap();
+                                let id = cur_region_id.take().unwrap();
+                                let item = match ptr_opt {
+                                    Some(ptr) => {
+                                        crate::draw_primitives::ParagraphRunItem::LinkContent {
+                                            span_ptr: ptr,
+                                            identifier: id,
+                                        }
+                                    }
+                                    None => crate::draw_primitives::ParagraphRunItem::Content(id),
+                                };
+                                if let Some(tc) = canvas.tag_collector.as_mut() {
+                                    tc.record_run(nid, item);
+                                }
+                            }
+                            // Open new region
+                            use krilla::tagging::{ContentTag, SpanTag};
+                            let id = canvas
+                                .surface
+                                .start_tagged(ContentTag::Span(SpanTag::empty()));
+                            cur_region_ptr = Some(new_ptr);
+                            cur_region_id = Some(id);
+                        }
+                    }
                     // Create Krilla font from cached data
                     let data: krilla::Data = Arc::clone(&run.font_data).into();
                     let Some(font) = krilla::text::Font::new(data, run.font_index) else {
@@ -643,6 +686,39 @@ pub fn draw_shaped_lines(
                     }
                 }
                 LineItem::Image(img) => {
+                    if let Some(nid) = run_tag_node_id {
+                        let new_ptr = img
+                            .link
+                            .as_ref()
+                            .map(|l| std::sync::Arc::as_ptr(l) as usize);
+                        if cur_region_ptr.as_ref().map(|p| *p) != Some(new_ptr) {
+                            // Close previous region
+                            if cur_region_ptr.is_some() {
+                                canvas.surface.end_tagged();
+                                let ptr_opt = cur_region_ptr.take().unwrap();
+                                let id = cur_region_id.take().unwrap();
+                                let item = match ptr_opt {
+                                    Some(ptr) => {
+                                        crate::draw_primitives::ParagraphRunItem::LinkContent {
+                                            span_ptr: ptr,
+                                            identifier: id,
+                                        }
+                                    }
+                                    None => crate::draw_primitives::ParagraphRunItem::Content(id),
+                                };
+                                if let Some(tc) = canvas.tag_collector.as_mut() {
+                                    tc.record_run(nid, item);
+                                }
+                            }
+                            // Open new region
+                            use krilla::tagging::{ContentTag, SpanTag};
+                            let id = canvas
+                                .surface
+                                .start_tagged(ContentTag::Span(SpanTag::empty()));
+                            cur_region_ptr = Some(new_ptr);
+                            cur_region_id = Some(id);
+                        }
+                    }
                     if !img.visible {
                         continue;
                     }
@@ -771,6 +847,24 @@ pub fn draw_shaped_lines(
         draw_line_decorations(canvas, &line.items, x, baseline_y);
 
         line_top += line.height;
+    }
+    // Close any open per-run tagged region.
+    if let Some(nid) = run_tag_node_id {
+        if cur_region_ptr.is_some() {
+            canvas.surface.end_tagged();
+            let ptr_opt = cur_region_ptr.take().unwrap();
+            let id = cur_region_id.take().unwrap();
+            let item = match ptr_opt {
+                Some(ptr) => crate::draw_primitives::ParagraphRunItem::LinkContent {
+                    span_ptr: ptr,
+                    identifier: id,
+                },
+                None => crate::draw_primitives::ParagraphRunItem::Content(id),
+            };
+            if let Some(tc) = canvas.tag_collector.as_mut() {
+                tc.record_run(nid, item);
+            }
+        }
     }
 }
 
