@@ -185,7 +185,7 @@ fn draw_blur_box_shadow(
         .surface
         .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
 
-    let stops = blur_stops(shadow.color, 8, bg_color);
+    let stops = blur_stops(shadow.color, 16, bg_color);
 
     {
         let shadow_a = shadow.color[3] as f32 / 255.0;
