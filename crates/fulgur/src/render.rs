@@ -237,7 +237,7 @@ pub fn render_v2(
             );
         }
         let per_page = link_collector.take_page(page_idx);
-        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry);
+        crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry, false);
     }
 
     if let Some(tc) = tag_collector {

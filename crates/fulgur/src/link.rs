@@ -16,6 +16,7 @@ use krilla::annotation::{Annotation, LinkAnnotation, Target};
 use krilla::destination::{Destination, XyzDestination};
 use krilla::geom::{Point, Quadrilateral};
 use krilla::page::Page;
+use krilla::tagging::Identifier;
 
 use crate::draw_primitives::{DestinationRegistry, LinkOccurrence};
 use crate::paragraph::LinkTarget;
@@ -25,11 +26,20 @@ use crate::paragraph::LinkTarget;
 /// `occurrences` must already be filtered to the page represented by `page`.
 /// Internal anchors that cannot be resolved in `registry` are logged via
 /// `eprintln!` and skipped; rendering continues.
+///
+/// When `tagging` is `true`, `add_tagged_annotation` is used instead of
+/// `add_annotation`, and the returned `Vec` maps each `span_ptr` to the
+/// resulting annotation [`Identifier`] (for struct-tree wiring in Task 7).
+/// When `tagging` is `false`, annotations are added untagged and an empty
+/// `Vec` is returned.
 pub(crate) fn emit_link_annotations(
     page: &mut Page,
     occurrences: &[LinkOccurrence],
     registry: &DestinationRegistry,
-) {
+    tagging: bool,
+) -> Vec<(usize, Identifier)> {
+    let mut annot_ids = Vec::new();
+
     for occ in occurrences {
         let target = match &occ.target {
             LinkTarget::External(uri) => {
@@ -56,8 +66,15 @@ pub(crate) fn emit_link_annotations(
 
         let link_ann = LinkAnnotation::new_with_quad_points(quads, target);
         let annotation = Annotation::new_link(link_ann, occ.alt_text.clone());
-        page.add_annotation(annotation);
+        if tagging {
+            let annot_id = page.add_tagged_annotation(annotation);
+            annot_ids.push((occ.span_ptr, annot_id));
+        } else {
+            page.add_annotation(annotation);
+        }
     }
+
+    annot_ids
 }
 
 #[cfg(test)]
@@ -141,7 +158,7 @@ mod tests {
         {
             let mut page = doc.start_page_with(page_settings());
             let registry = DestinationRegistry::new();
-            emit_link_annotations(&mut page, &[], &registry);
+            emit_link_annotations(&mut page, &[], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 0);
     }
@@ -158,7 +175,7 @@ mod tests {
                 "https://example.com",
                 vec![make_quad(10.0, 20.0, 80.0, 14.0)],
             );
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 1);
     }
@@ -176,7 +193,7 @@ mod tests {
                 quads: vec![make_quad(0.0, 0.0, 100.0, 12.0)],
                 span_ptr: 0,
             };
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 1);
     }
@@ -195,7 +212,7 @@ mod tests {
                     make_quad(0.0, 14.0, 150.0, 14.0),
                 ],
             );
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 1);
     }
@@ -212,7 +229,7 @@ mod tests {
             registry.set_current_page(0);
             registry.record("section1", 0.0, 120.0);
             let occ = int_occ("section1", vec![make_quad(10.0, 40.0, 80.0, 12.0)]);
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 1);
     }
@@ -225,7 +242,7 @@ mod tests {
             let registry = DestinationRegistry::new(); // "missing" is not registered
             let occ = int_occ("missing", vec![make_quad(0.0, 0.0, 50.0, 12.0)]);
             // eprintln! log is emitted; the occurrence must be skipped entirely.
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 0);
     }
@@ -239,7 +256,7 @@ mod tests {
             let mut page = doc.start_page_with(page_settings());
             let registry = DestinationRegistry::new();
             let occ = ext_occ("https://no-quads.example", vec![]);
-            emit_link_annotations(&mut page, &[occ], &registry);
+            emit_link_annotations(&mut page, &[occ], &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 0);
     }
@@ -257,9 +274,24 @@ mod tests {
                     vec![make_quad(0.0, 0.0, 80.0, 12.0)],
                 ),
             ];
-            emit_link_annotations(&mut page, &occs, &registry);
+            emit_link_annotations(&mut page, &occs, &registry, false);
         }
         // First occurrence has empty quads (skipped); second is valid → 1 annotation.
+        assert_eq!(page0_annotation_count(doc), 1);
+    }
+
+    // ── tagging mode ──────────────────────────────────────────────────────
+
+    #[test]
+    fn non_tagged_emit_returns_empty_vec() {
+        let mut doc = krilla::Document::new();
+        {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let occ = ext_occ("https://x.example", vec![make_quad(0.0, 0.0, 50.0, 12.0)]);
+            let ids = emit_link_annotations(&mut page, &[occ], &registry, false);
+            assert!(ids.is_empty());
+        }
         assert_eq!(page0_annotation_count(doc), 1);
     }
 
@@ -279,7 +311,7 @@ mod tests {
                 int_occ("gone", vec![make_quad(0.0, 40.0, 60.0, 12.0)]),   // skipped (unresolved)
                 ext_occ("https://empty.example", vec![]),                  // skipped (empty quads)
             ];
-            emit_link_annotations(&mut page, &occs, &registry);
+            emit_link_annotations(&mut page, &occs, &registry, false);
         }
         assert_eq!(page0_annotation_count(doc), 2);
     }
