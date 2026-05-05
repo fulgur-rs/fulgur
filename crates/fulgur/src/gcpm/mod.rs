@@ -216,6 +216,26 @@ pub struct ContentCounterMapping {
     pub content: Vec<ContentItem>,
 }
 
+/// Leader type for `content: leader()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaderStyle {
+    Dotted,
+    Solid,
+    Space,
+    Custom(String),
+}
+
+impl LeaderStyle {
+    pub fn leader_char(&self) -> &str {
+        match self {
+            Self::Dotted => ".",
+            Self::Solid => "_",
+            Self::Space => "\u{00A0}",
+            Self::Custom(s) => s,
+        }
+    }
+}
+
 /// A single content item inside a margin box rule's `content` property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentItem {
@@ -255,6 +275,8 @@ pub enum ContentItem {
     /// Used inside `bookmark-label` and (indirectly, via `string-set`)
     /// named strings; mirrors `StringSetValue::Attr`.
     Attr(String),
+    /// A CSS leader, e.g. `leader(dotted)`.
+    Leader { style: LeaderStyle },
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
