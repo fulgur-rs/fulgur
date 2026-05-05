@@ -146,12 +146,14 @@ pub fn parse_and_layout(
     viewport_width: f32,
     viewport_height: f32,
     font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
 ) -> HtmlDocument {
     let mut doc = parse_inner(
         html,
         viewport_width,
         viewport_height as u32,
         font_data,
+        system_fonts,
         None,
         None,
     );
@@ -177,7 +179,7 @@ pub trait DomPass {
 /// [`parse_html_with_local_resources`] instead, which wires fulgur's
 /// own [`crate::net::FulgurNetProvider`] into Blitz.
 pub fn parse(html: &str, viewport_width: f32, font_data: &[Arc<Vec<u8>>]) -> HtmlDocument {
-    parse_inner(html, viewport_width, 10000, font_data, None, None)
+    parse_inner(html, viewport_width, 10000, font_data, true, None, None)
 }
 
 /// Parse HTML and load any `<link rel="stylesheet">` / `@import` files
@@ -214,6 +216,7 @@ pub fn parse_html_with_local_resources(
     viewport_width: f32,
     viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
     base_path: Option<&Path>,
 ) -> (HtmlDocument, crate::gcpm::GcpmContext) {
     use std::collections::HashSet;
@@ -244,6 +247,7 @@ pub fn parse_html_with_local_resources(
         viewport_width,
         viewport_height_px,
         font_data,
+        system_fonts,
         Some(provider),
         base_url,
     );
@@ -295,6 +299,7 @@ fn parse_inner(
     viewport_width: f32,
     viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
     net_provider: Option<Arc<dyn NetProvider<Resource>>>,
     base_url: Option<String>,
 ) -> HtmlDocument {
@@ -305,10 +310,19 @@ fn parse_inner(
         ColorScheme::Light,
     );
 
-    let font_ctx = if font_data.is_empty() {
+    let font_ctx = if font_data.is_empty() && system_fonts {
+        // No bundled fonts and system fonts allowed: let Blitz use its own
+        // default FontContext (system fonts enabled).
         None
     } else {
-        let mut ctx = FontContext::new();
+        let collection = parley::fontique::Collection::new(parley::fontique::CollectionOptions {
+            system_fonts,
+            ..Default::default()
+        });
+        let mut ctx = FontContext {
+            collection,
+            source_cache: parley::fontique::SourceCache::new(Default::default()),
+        };
         for data in font_data {
             let blob: parley::fontique::Blob<u8> = (**data).clone().into();
             ctx.collection.register_fonts(blob, None);
@@ -2647,7 +2661,7 @@ mod tests {
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
         let (_doc, gcpm) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], Some(dir.path()));
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
 
         let cleaned = &gcpm.cleaned_css;
         let child_pos = cleaned
@@ -2683,7 +2697,7 @@ mod tests {
     #[test]
     fn test_parse_and_layout_unchanged() {
         let html = "<html><body><p>Test</p></body></html>";
-        let doc = parse_and_layout(html, 400.0, 600.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 600.0, &[], true);
         let root = doc.root_element();
         assert!(!root.children.is_empty());
     }
@@ -3110,7 +3124,7 @@ mod tests {
         }
         html.push_str("</body></html>");
 
-        let (doc, _gcpm) = parse_html_with_local_resources(&html, 400.0, 10000, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(&html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let root = doc.root_element();
         let _ = element_text(doc.deref(), root.id);
@@ -3148,7 +3162,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_between_block_children() {
         let html = "<html><body><a id='x'><div>foo</div><div>bar</div></a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -3158,7 +3172,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_for_br() {
         let html = "<html><body><a id='x'>foo<br>bar</a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -3170,7 +3184,7 @@ mod tests {
         // If the text already ends in whitespace, a block boundary should
         // not add another space.
         let html = "<html><body><a id='x'>foo <div>bar</div></a></body></html>";
-        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _gcpm) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -3186,7 +3200,7 @@ mod tests {
         let html = r#"<!doctype html><html><head>
             <style>@page { size: A4 landscape; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -3198,7 +3212,7 @@ mod tests {
     #[test]
     fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
         let html = r#"<!doctype html><html><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert!(gcpm.page_settings.is_empty());
     }
@@ -3213,7 +3227,7 @@ mod tests {
             <style>@page { size: A4 landscape; }</style>
             <style>@page { margin: 2cm; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], None);
+        let (doc, _) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -3225,7 +3239,7 @@ mod tests {
     #[test]
     fn multicol_props_absent_on_plain_block() {
         let html = r#"<html><body><div id="p">plain</div></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         assert!(extract_multicol_props(doc.get_node(id).unwrap()).is_none());
     }
@@ -3235,7 +3249,7 @@ mod tests {
         let html = r#"<html><body>
             <div id="m" style="column-count: 3; column-gap: 12px;">a</div>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, Some(3));
@@ -3248,7 +3262,7 @@ mod tests {
         let html = r#"<html><body>
             <div id="m" style="column-width: 180px;">a</div>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, None);
@@ -3270,7 +3284,7 @@ mod tests {
         // baselines in paragraph.rs, producing a 4/3-off visual shift. Guards
         // against regression of the PR #101 unit-consolidation.
         let html = r#"<html><body><img style="vertical-align: 8px;" src=""></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let id = find_element_by_local_name(&doc, "img").expect("img");
         let va = extract_vertical_align(doc.get_node(id).unwrap());
         match va {
@@ -3287,7 +3301,7 @@ mod tests {
         // `vertical-align: 50%` still returns a unitless ratio — the px→pt
         // fix on the Length branch must not touch Percent semantics.
         let html = r#"<html><body><img style="vertical-align: 50%;" src=""></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let id = find_element_by_local_name(&doc, "img").expect("img");
         let va = extract_vertical_align(doc.get_node(id).unwrap());
         match va {
@@ -3304,7 +3318,7 @@ mod tests {
             <h1 style="column-span: all;">Big</h1>
             <p>plain</p>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let h1 = find_element_by_local_name(&doc, "h1").expect("h1");
         let p = find_element_by_local_name(&doc, "p").expect("p");
         assert!(has_column_span_all(doc.get_node(h1).unwrap()));
@@ -3499,7 +3513,7 @@ mod transform_tests {
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.
     fn compute_for_div(html: &str, box_w: f32, box_h: f32) -> Option<(Affine2D, Point2)> {
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[]);
+        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
         let div_id = find_element_by_tag(&doc, "div")?;
         let node = doc.get_node(div_id)?;
         let styles = node.primary_styles()?;

@@ -31,6 +31,7 @@ pub fn render_v2(
     gcpm: &GcpmContext,
     running_store: &RunningElementStore,
     font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
     serialize_settings: SerializeSettings,
@@ -123,6 +124,7 @@ pub fn render_v2(
         gcpm,
         running_store,
         font_data,
+        system_fonts,
         geometry,
         string_set_by_node,
         counter_ops_by_node,
@@ -3196,6 +3198,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub gcpm: &'a GcpmContext,
     pub running_store: &'a RunningElementStore,
     pub font_data: &'a [Arc<Vec<u8>>],
+    pub system_fonts: bool,
     pub margin_css: String,
     pub string_set_states: Vec<BTreeMap<String, crate::pagination_layout::StringSetPageState>>,
     pub running_states: Vec<BTreeMap<String, crate::pagination_layout::PageRunningState>>,
@@ -3213,6 +3216,7 @@ impl<'a> MarginBoxRenderer<'a> {
         gcpm: &'a GcpmContext,
         running_store: &'a RunningElementStore,
         font_data: &'a [Arc<Vec<u8>>],
+        system_fonts: bool,
         pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
         counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
@@ -3248,6 +3252,7 @@ impl<'a> MarginBoxRenderer<'a> {
             gcpm,
             running_store,
             font_data,
+            system_fonts,
             margin_css: strip_display_none(&gcpm.cleaned_css),
             string_set_states,
             running_states,
@@ -3370,6 +3375,7 @@ impl<'a> MarginBoxRenderer<'a> {
                     crate::convert::pt_to_px(content_width),
                     crate::convert::pt_to_px(page_size.height),
                     self.font_data,
+                    self.system_fonts,
                 );
                 get_body_child_dimension(&measure_doc, true)
             });
@@ -3404,6 +3410,7 @@ impl<'a> MarginBoxRenderer<'a> {
                     crate::convert::pt_to_px(fixed_width),
                     crate::convert::pt_to_px(page_size.height),
                     self.font_data,
+                    self.system_fonts,
                 );
                 get_body_child_dimension(&measure_doc, false)
             });
@@ -3470,6 +3477,7 @@ impl<'a> MarginBoxRenderer<'a> {
                     crate::convert::pt_to_px(rect.width),
                     crate::convert::pt_to_px(rect.height),
                     self.font_data,
+                    self.system_fonts,
                 );
                 let empty_column_styles = crate::column_css::ColumnStyleTable::new();
                 let geometry = crate::pagination_layout::run_pass_with_break_styles(
