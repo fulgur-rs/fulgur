@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>VRT fixture: layout/overflow-axis-y</title>
+<style>
+  html,body{margin:0;padding:0}
+  .row{display:flex;gap:20px;padding:60px}
+  /* Y-axis clip only; X-axis "visible" — per CSS Overflow §3 the
+     visible value may be promoted to auto when the other axis is
+     non-visible. Locks current fulgur behavior either way. */
+  .container{width:120px;height:120px;border:2px solid #333;background:#eef;overflow-y:hidden;overflow-x:visible}
+  .big{width:240px;height:240px;background:#38f}
+</style>
+</head><body><div class="row">
+<div class="container"><div class="big"></div></div>
+</div></body></html>

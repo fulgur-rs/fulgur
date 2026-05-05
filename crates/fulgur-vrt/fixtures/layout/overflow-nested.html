@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>VRT fixture: layout/overflow-nested</title>
+<style>
+  html,body{margin:0;padding:0}
+  .wrap{padding:40px}
+  .outer{width:160px;height:120px;border:2px solid #333;background:#eef;overflow:hidden}
+  .mid{width:200px;height:100px;background:#cfe;border:2px solid #693;overflow:hidden;margin:10px 0 0 10px}
+  .inner{width:300px;height:200px;background:#e33}
+</style>
+</head><body>
+<div class="wrap">
+  <div class="outer">
+    <div class="mid">
+      <div class="inner"></div>
+    </div>
+  </div>
+</div>
+</body></html>

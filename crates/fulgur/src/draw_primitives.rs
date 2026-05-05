@@ -653,6 +653,22 @@ pub enum BorderStyleValue {
 ///
 /// PDF は静的メディアなので、CSS の `hidden`/`clip`/`scroll`/`auto` はすべて
 /// 「padding-box でクリップ」という同一の動作に統合する。
+///
+/// # セマンティクス
+///
+/// - **純視覚効果**: `Clip` はレイアウト・ページネーションに影響しない。
+///   要素のレイアウトサイズは Taffy が決定し、overflow は描画時の
+///   `push_clip_path`/`pop_clip_path` で paint をクリップするだけ。
+///   結果として `<div style="overflow:hidden;height:50pt">` 内の
+///   1200pt の子は単一ページに留まり、はみ出す部分は描画時にクリップされる
+///   (ページ分割は誘発されない)。
+/// - **軸独立**: `overflow-x` / `overflow-y` は別々に保持する。CSS
+///   Overflow Module Level 3 §3 により、片方が `visible` で他方が非
+///   `visible` の場合 `visible` 軸は `auto` に昇格する — この昇格は
+///   Stylo の computed value 段階で行われるため、fulgur 側は受け取った
+///   値をそのまま map すればよい。
+/// - **形状**: クリップ形状は padding-box (border-radius があれば角丸)。
+///   `clip-path` 形状は未対応。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Overflow {
     /// `visible` — クリップしない (デフォルト)
