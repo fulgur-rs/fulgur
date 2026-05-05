@@ -487,7 +487,10 @@ mod tests {
         bundle.add_image("images/logo.png", vec![4, 5, 6]);
         bundle.set_base_url("file:///base/");
         // "images/logo.png" registered → lookup "base/images/logo.png" should work
-        assert!(bundle.get_image("base/images/logo.png").is_some(), "get_image must find images/logo.png via base_url prefix stripping");
+        assert!(
+            bundle.get_image("base/images/logo.png").is_some(),
+            "get_image must find images/logo.png via base_url prefix stripping"
+        );
     }
 
     #[test]
