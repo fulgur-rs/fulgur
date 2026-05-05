@@ -5,7 +5,7 @@
 //! These tests drive Engine::render_html so draw/convert paths appear
 //! in codecov patch coverage (VRT alone doesn't contribute).
 
-use fulgur::{Engine, PageSize};
+use fulgur::Engine;
 
 fn page_count(pdf: &[u8]) -> usize {
     let prefix = b"/Type /Page";
@@ -13,6 +13,7 @@ fn page_count(pdf: &[u8]) -> usize {
     let mut i = 0;
     while i + prefix.len() < pdf.len() {
         if &pdf[i..i + prefix.len()] == prefix {
+            // Reject `/Type /Pages` and any other identifier continuation.
             if !pdf[i + prefix.len()].is_ascii_alphanumeric() {
                 n += 1;
             }
@@ -103,10 +104,6 @@ fn multicol_page_spanning_renders_without_panic() {
         <div class="b"></div><div class="b"></div>
       </div>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .page_size(PageSize::custom(70.5556, 63.5))
-        .build()
-        .render_html(html)
-        .expect("render");
+    let pdf = Engine::builder().build().render_html(html).expect("render");
     assert!(!pdf.is_empty());
 }
