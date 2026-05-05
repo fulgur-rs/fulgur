@@ -191,7 +191,7 @@ impl Engine {
         } else {
             (
                 crate::gcpm::string_set::StringSetStore::new(),
-                std::collections::BTreeMap::new(),
+                BTreeMap::new(),
             )
         };
 
@@ -209,7 +209,7 @@ impl Engine {
                 let (ops, css) = pass.into_parts();
                 (ops, css, snapshots)
             } else {
-                (Vec::new(), String::new(), std::collections::BTreeMap::new())
+                (Vec::new(), String::new(), BTreeMap::new())
             };
 
         // Inject counter-resolved CSS for ::before/::after. Must happen
