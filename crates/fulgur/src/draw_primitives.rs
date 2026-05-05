@@ -314,6 +314,8 @@ pub struct LinkOccurrence {
     pub target: crate::paragraph::LinkTarget,
     pub alt_text: Option<String>,
     pub quads: Vec<Quad>,
+    /// `Arc::as_ptr(link_span) as usize` — correlates with `TagCollector` run entries.
+    pub span_ptr: usize,
 }
 
 /// Per-page collector of link activation rects, grouped by `<a>` identity.
@@ -414,6 +416,7 @@ impl LinkCollector {
             target: link.target.clone(),
             alt_text: link.alt_text.clone(),
             quads: vec![quad],
+            span_ptr: std::sync::Arc::as_ptr(link) as usize,
         });
     }
 
@@ -512,10 +515,7 @@ impl TagCollector {
     }
 
     /// Remove and return run entries for `node_id`.
-    pub fn take_run_entries(
-        &mut self,
-        node_id: crate::drawables::NodeId,
-    ) -> Vec<ParagraphRunItem> {
+    pub fn take_run_entries(&mut self, node_id: crate::drawables::NodeId) -> Vec<ParagraphRunItem> {
         self.run_entries.remove(&node_id).unwrap_or_default()
     }
 }
@@ -2248,8 +2248,7 @@ mod run_tag_tests {
 
     fn make_identifier() -> Identifier {
         let mut doc = krilla::Document::new();
-        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0)
-            .expect("valid page size");
+        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0).expect("valid page size");
         let mut page = doc.start_page_with(settings);
         let mut surface = page.surface();
         let id = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
@@ -2278,9 +2277,13 @@ mod run_tag_tests {
         );
         let runs = tc.take_run_entries(7);
         assert_eq!(runs.len(), 1);
-        assert!(
-            matches!(runs[0], ParagraphRunItem::LinkContent { span_ptr: 0xdeadbeef, .. })
-        );
+        assert!(matches!(
+            runs[0],
+            ParagraphRunItem::LinkContent {
+                span_ptr: 0xdeadbeef,
+                ..
+            }
+        ));
     }
 
     #[test]

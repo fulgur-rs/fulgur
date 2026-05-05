@@ -86,6 +86,7 @@ mod tests {
             target: LinkTarget::External(Arc::new(url.to_string())),
             alt_text: None,
             quads,
+            span_ptr: 0,
         }
     }
 
@@ -95,6 +96,7 @@ mod tests {
             target: LinkTarget::Internal(Arc::new(id.to_string())),
             alt_text: None,
             quads,
+            span_ptr: 0,
         }
     }
 
@@ -172,6 +174,7 @@ mod tests {
                 target: LinkTarget::External(Arc::new("https://alt.example".to_string())),
                 alt_text: Some("Visit example".to_string()),
                 quads: vec![make_quad(0.0, 0.0, 100.0, 12.0)],
+                span_ptr: 0,
             };
             emit_link_annotations(&mut page, &[occ], &registry);
         }
