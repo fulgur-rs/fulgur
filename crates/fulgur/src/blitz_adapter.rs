@@ -1869,13 +1869,42 @@ pub struct BookmarkInfo {
 pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
+    /// Per-node counter-state snapshots produced by `CounterPass`.
+    /// Empty map ⇒ `counter()` resolves to 0 (CSS spec: undefined
+    /// counter is 0).
+    counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+    /// Per-node named-string snapshots produced by `StringSetPass`.
+    /// Empty map ⇒ `string()` resolves to "" (no string ever set).
+    string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
 }
 
 impl BookmarkPass {
+    /// Construct a pass without snapshot connections. `counter()` and
+    /// `string()` inside `bookmark-label` will fall back to their
+    /// CSS-spec defaults (0 and "" respectively). Convenient for tests
+    /// and for the ergonomic case where no GCPM counter / string
+    /// machinery is in play.
     pub fn new(mappings: Vec<BookmarkMapping>) -> Self {
+        Self::new_with_snapshots(mappings, BTreeMap::new(), BTreeMap::new())
+    }
+
+    /// Construct a pass that resolves `counter(name)` and `string(name)`
+    /// inside `bookmark-label` against snapshots harvested from
+    /// `CounterPass` / `StringSetPass` (see their `take_node_snapshots`
+    /// methods). The snapshots are keyed by Blitz DOM node id and
+    /// represent the running state at that element's DOM position
+    /// (after own `counter-*` / `string-set` rules, before children) —
+    /// matching CSS GCPM resolution timing for `bookmark-label`.
+    pub fn new_with_snapshots(
+        mappings: Vec<BookmarkMapping>,
+        counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+        string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
+    ) -> Self {
         Self {
             mappings,
             results: RefCell::new(Vec::new()),
+            counter_snapshots,
+            string_snapshots,
         }
     }
 
@@ -1958,7 +1987,14 @@ impl BookmarkPass {
         // Label fallback: if no `bookmark-label` was declared, use the
         // element's text content (equivalent to `content()`).
         let resolved_label = match label {
-            Some(items) => resolve_label(&items, doc, node_id, elem),
+            Some(items) => resolve_label(
+                &items,
+                doc,
+                node_id,
+                elem,
+                self.counter_snapshots.get(&node_id),
+                self.string_snapshots.get(&node_id),
+            ),
             None => extract_text_content(doc, node_id),
         };
 
@@ -1985,21 +2021,35 @@ impl BookmarkPass {
 ///
 /// Supported items:
 /// - [`ContentItem::String`] — literal text.
-/// - [`ContentItem::ContentText`] — the element's normalized text content
-///   (same extraction as `string-set: … content(text)`).
-/// - [`ContentItem::Attr`] — the named HTML attribute, or empty if absent.
+/// - [`ContentItem::ContentText`] — the element's normalized text
+///   content (same extraction as `string-set: … content(text)`).
+/// - [`ContentItem::Attr`] — the named HTML attribute, or empty if
+///   absent.
+/// - [`ContentItem::Counter`] — resolved against `counter_snapshot`,
+///   the per-node counter map produced by `CounterPass`. Missing
+///   snapshot or missing counter ⇒ 0 (CSS spec: undefined counter is 0).
+/// - [`ContentItem::StringRef`] — resolved against `string_snapshot`,
+///   the per-node named-string map produced by `StringSetPass`. Since
+///   bookmark-label resolves at a single DOM position rather than over a
+///   page, all `StringPolicy` variants reduce to "the latest value seen
+///   at this point in document order" — equivalent to a direct lookup.
+///   Missing snapshot or missing name ⇒ "".
 ///
-/// Skipped (no-op) items (tracked in beads `fulgur-yfx`):
+/// Skipped (no-op) items, tracked in beads `fulgur-yfx`:
 /// - [`ContentItem::ContentBefore`] / [`ContentItem::ContentAfter`] —
 ///   pseudo-element text extraction is not yet wired in.
-/// - [`ContentItem::Counter`] — counter state isn't available in this pass.
-/// - [`ContentItem::StringRef`] / [`ContentItem::Element`] — margin-box
-///   constructs that don't resolve in a bookmark-label context.
+/// - [`ContentItem::Element`] — running-element references are
+///   margin-box constructs that don't resolve in a bookmark-label
+///   context.
+/// - [`ContentItem::Leader`] — produces a fill character at render
+///   time, not a plain label string; emit nothing here.
 fn resolve_label(
     items: &[ContentItem],
     doc: &HtmlDocument,
     node_id: usize,
     elem: &blitz_dom::node::ElementData,
+    counter_snapshot: Option<&BTreeMap<String, i32>>,
+    string_snapshot: Option<&BTreeMap<String, String>>,
 ) -> String {
     let mut out = String::new();
     for item in items {
@@ -2012,17 +2062,21 @@ fn resolve_label(
                 if let Some(v) = get_attr(elem, name) {
                     out.push_str(v);
                 }
-                // Missing attribute contributes the empty string per CSS
-                // `attr()` — no action needed.
             }
-            // TODO(fulgur-yfx): pseudo-element text, counter(), string(),
-            // and element() are not yet resolvable in bookmark labels.
-            // `leader()` produces a fill character at render time, not a
-            // plain label string; emit nothing here.
+            ContentItem::Counter { name, style } => {
+                let value = counter_snapshot
+                    .and_then(|s| s.get(name))
+                    .copied()
+                    .unwrap_or(0);
+                out.push_str(&format_counter(value, *style));
+            }
+            ContentItem::StringRef { name, .. } => {
+                if let Some(v) = string_snapshot.and_then(|s| s.get(name)) {
+                    out.push_str(v);
+                }
+            }
             ContentItem::ContentBefore
             | ContentItem::ContentAfter
-            | ContentItem::Counter { .. }
-            | ContentItem::StringRef { .. }
             | ContentItem::Element { .. }
             | ContentItem::Leader { .. } => {}
         }
@@ -4061,7 +4115,7 @@ li::marker { content: url("star.png"); }
     }
 
     #[test]
-    fn bookmark_pass_skips_counter_gracefully() {
+    fn bookmark_pass_unset_counter_resolves_to_zero() {
         use crate::gcpm::CounterStyle;
 
         let html = r#"<html><body><h1>Title</h1></body></html>"#;
@@ -4081,8 +4135,109 @@ li::marker { content: url("star.png"); }
             }],
         );
         assert_eq!(results.len(), 1);
-        // counter() is a no-op in bookmark-label for now; only literal + text survive.
-        assert_eq!(results[0].1.label, ": Title");
+        // CSS spec: undefined counter resolves to 0.
+        // BookmarkPass::new (no snapshots) ⇒ counter() falls back to 0.
+        assert_eq!(results[0].1.label, "0: Title");
+    }
+
+    #[test]
+    fn bookmark_pass_resolves_counter_with_snapshot() {
+        use crate::gcpm::CounterStyle;
+        use std::collections::BTreeMap;
+
+        let html = r#"<html><body><h1>Title</h1></body></html>"#;
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![
+                ContentItem::Counter {
+                    name: "chapter".into(),
+                    style: CounterStyle::Decimal,
+                },
+                ContentItem::String(". ".into()),
+                ContentItem::ContentText,
+            ]),
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let mut h1_id: Option<usize> = None;
+        fn find(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
+            if out.is_some() {
+                return;
+            }
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        *out = Some(id);
+                        return;
+                    }
+                }
+                for &c in &node.children {
+                    find(doc, c, out);
+                }
+            }
+        }
+        find(&doc, doc.root_element().id, &mut h1_id);
+        let h1 = h1_id.expect("h1 in fixture");
+
+        let mut counter_snap = BTreeMap::new();
+        let mut h1_state = BTreeMap::new();
+        h1_state.insert("chapter".to_string(), 1);
+        counter_snap.insert(h1, h1_state);
+
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snap, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "1. Title");
+    }
+
+    #[test]
+    fn bookmark_pass_resolves_string_ref_with_snapshot() {
+        use crate::gcpm::StringPolicy;
+        use std::collections::BTreeMap;
+
+        let html = r#"<html><body><h1>Body Heading</h1></body></html>"#;
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::StringRef {
+                name: "section".into(),
+                policy: StringPolicy::First,
+            }]),
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let mut h1_id: Option<usize> = None;
+        fn find(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
+            if out.is_some() {
+                return;
+            }
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        *out = Some(id);
+                        return;
+                    }
+                }
+                for &c in &node.children {
+                    find(doc, c, out);
+                }
+            }
+        }
+        find(&doc, doc.root_element().id, &mut h1_id);
+        let h1 = h1_id.expect("h1 in fixture");
+
+        let mut string_snap = BTreeMap::new();
+        let mut h1_state = BTreeMap::new();
+        h1_state.insert("section".to_string(), "Intro".to_string());
+        string_snap.insert(h1, h1_state);
+
+        let pass = BookmarkPass::new_with_snapshots(mappings, BTreeMap::new(), string_snap);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "Intro");
     }
 
     #[test]
