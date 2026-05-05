@@ -43,3 +43,14 @@ p {
   column-count: 3;
   column-gap: 12pt;
 }
+
+.mc-rule {
+  column-rule: 1pt solid #888;
+}
+
+.span-all {
+  column-span: all;
+  font-size: 12pt;
+  margin: 8pt 0;
+  border-bottom: 1pt solid #555;
+}
