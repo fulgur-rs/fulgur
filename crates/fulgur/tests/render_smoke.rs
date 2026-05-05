@@ -3121,8 +3121,10 @@ fn content_url_resolves_image_when_base_path_set() {
     // url("dot.png") to an absolute file:// path, but get_image only
     // accepted relative names, so the image was silently dropped.
     let dir = tempfile::tempdir().unwrap();
-    let _img_path = dir.path().join("dot.png");
-    // Minimal 1x1 red PNG
+    // Minimal 1x1 red PNG. Supplied to the engine via AssetBundle, so we
+    // intentionally do NOT write it to disk — the bundle short-circuits
+    // the base_path lookup that Stylo would otherwise attempt, which is
+    // exactly the regression path this test exercises.
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
@@ -3130,7 +3132,6 @@ fn content_url_resolves_image_when_base_path_set() {
         0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
         0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
-    std::fs::write(&_img_path, PNG_1X1).unwrap();
 
     // Write an external CSS file that uses content: url() for a pseudo
     let css_path = dir.path().join("style.css");

@@ -99,16 +99,15 @@ impl AssetBundle {
         };
     }
 
-    /// Normalize an image key by stripping a leading `./` prefix.
-    fn normalize_key(key: &mut String) {
-        if key.starts_with("./") {
-            key.drain(..2);
-        }
+    /// Strip a leading `./` from an image key. Single source of truth for
+    /// the rule used by `add_image`, `add_image_file`, and `get_image`.
+    fn normalize_key(key: &str) -> &str {
+        key.strip_prefix("./").unwrap_or(key)
     }
 
     pub fn add_image(&mut self, name: impl Into<String>, data: Vec<u8>) {
-        let mut key = name.into();
-        Self::normalize_key(&mut key);
+        let key = name.into();
+        let key = Self::normalize_key(&key).to_string();
         self.images.insert(key, Arc::new(data));
     }
 
@@ -118,24 +117,24 @@ impl AssetBundle {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let data = std::fs::read(path)?;
-        let mut key = name.into();
-        Self::normalize_key(&mut key);
+        let key = name.into();
+        let key = Self::normalize_key(&key).to_string();
         self.images.insert(key, Arc::new(data));
         Ok(())
     }
 
     pub fn get_image(&self, name: &str) -> Option<&Arc<Vec<u8>>> {
-        let key = name.strip_prefix("./").unwrap_or(name);
+        let key = Self::normalize_key(name);
         if let result @ Some(_) = self.images.get(key) {
             return result;
         }
-        // When Stylo resolves url("icon.png") against a real base URL, the
-        // computed value is an absolute path after extract_asset_name strips
-        // "file:///". Strip the base prefix to get the relative name.
+        // When the URL resolver hands `get_image` an absolute file path
+        // (Stylo resolves `content: url("icon.png")` against the engine's
+        // base URL), strip the recorded base prefix to recover the relative
+        // asset name.
         if let Some(base) = &self.base_path_str {
             if let Some(rel) = key.strip_prefix(base.as_str()) {
-                let rel = rel.strip_prefix("./").unwrap_or(rel);
-                return self.images.get(rel);
+                return self.images.get(Self::normalize_key(rel));
             }
         }
         None
