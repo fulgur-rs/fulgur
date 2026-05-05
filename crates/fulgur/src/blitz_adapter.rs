@@ -1419,6 +1419,7 @@ use crate::gcpm::{
     RunningMapping, StringSetMapping, StringSetValue,
 };
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 /// Returns true for elements that should never be walked for GCPM detection
 /// (head, script, style, etc.) — they contain no user-visible content.
@@ -1581,6 +1582,11 @@ pub struct CounterPass {
     counter_id: RefCell<usize>,
     /// Counter ops keyed by node_id, for later use in Pageable markers.
     ops_by_node: RefCell<Vec<(usize, Vec<CounterOp>)>>,
+    /// Counter-state snapshot taken at each visited element after the
+    /// element's own `counter-reset` / `counter-increment` / `counter-set`
+    /// operations have been applied (Phase 2). Consumed by `BookmarkPass`
+    /// to resolve `counter()` inside `bookmark-label`.
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, i32>>>,
 }
 
 impl CounterPass {
@@ -1595,11 +1601,23 @@ impl CounterPass {
             generated_css: RefCell::new(String::new()),
             counter_id: RefCell::new(0),
             ops_by_node: RefCell::new(Vec::new()),
+            node_snapshots: RefCell::new(BTreeMap::new()),
         }
     }
 
     pub fn generated_css(&self) -> String {
         self.generated_css.borrow().clone()
+    }
+
+    /// Take ownership of the per-node counter snapshots collected during
+    /// `apply`. Each entry maps a DOM node id to its counter state at the
+    /// point right after the element's own `counter-reset` /
+    /// `counter-increment` / `counter-set` operations have been applied —
+    /// the same timing CSS GCPM specifies for `counter()` inside
+    /// `bookmark-label`. Empty if `apply` was never called or if there
+    /// were no counter / content mappings (the early return path).
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, i32>> {
+        std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 
     /// Consume self and return (ops_by_node for Pageable markers, generated CSS for body).
@@ -1685,6 +1703,16 @@ impl CounterPass {
             drop(state);
             self.ops_by_node.borrow_mut().push((node_id, matched_ops));
         }
+
+        // Snapshot the counter state at this element's "after own ops, before
+        // children" position. This is the value bookmark-label sees (matches
+        // `::before` content resolution timing). We snapshot unconditionally —
+        // even when the element has no own counter ops — so that
+        // `BookmarkPass` can still resolve inherited counter values for any
+        // element that authors target with `bookmark-label`.
+        self.node_snapshots
+            .borrow_mut()
+            .insert(node_id, self.state.borrow().snapshot());
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
         // CSS spec: ::before is a first child, ::after is a last child, so
@@ -2985,6 +3013,47 @@ mod tests {
             3,
             "Should have exactly 3 ops: body reset + 2 h2 increments"
         );
+    }
+
+    #[test]
+    fn counter_pass_records_per_node_snapshot() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        let html = r#"<html><body>
+            <h1 id="a">A</h1><h1 id="b">B</h1>
+        </body></html>"#;
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            ops: vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let mut h1_ids: Vec<usize> = Vec::new();
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        out.push(id);
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut h1_ids);
+        assert_eq!(h1_ids.len(), 2);
+        let a = snapshots.get(&h1_ids[0]).expect("snapshot at first h1");
+        let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
+        assert_eq!(a.get("chapter").copied(), Some(1));
+        assert_eq!(b.get("chapter").copied(), Some(2));
     }
 
     /// Walk the DOM tree to find the first element with the given local name.
