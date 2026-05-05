@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head><style>
+  body { margin: 0; padding: 20px; font-family: sans-serif; background: white; }
+  .box {
+    width: 120px; height: 40px; background: #fff;
+    border: 1px solid #ddd; margin: 0 0 30px 0; padding: 8px;
+    font-size: 10px; color: #333;
+  }
+  /* blur only */
+  .blur-only  { box-shadow: 0 0 8px rgba(0,0,0,0.6); }
+  /* blur + offset */
+  .blur-off   { box-shadow: 4px 6px 8px rgba(0,0,0,0.5); }
+  /* blur + spread */
+  .blur-spr   { box-shadow: 0 0 8px 4px rgba(0,0,0,0.4); }
+  /* blur + border-radius */
+  .blur-rad   { border-radius: 16px; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+  /* blur + semi-transparent color */
+  .blur-alpha { box-shadow: 0 4px 10px rgba(0,0,200,0.5); }
+  /* multiple blur shadows */
+  .blur-multi {
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25),
+                0 8px 20px rgba(0,0,0,0.15);
+  }
+</style></head>
+<body>
+  <div class="box blur-only">blur only</div>
+  <div class="box blur-off">blur+offset</div>
+  <div class="box blur-spr">blur+spread</div>
+  <div class="box blur-rad">blur+radius</div>
+  <div class="box blur-alpha">blur+alpha</div>
+  <div class="box blur-multi">blur+multi</div>
+</body>
+</html>

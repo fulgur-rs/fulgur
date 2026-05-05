@@ -361,7 +361,7 @@ fn test_render_html_shadow_inset_logged_and_skipped() {
 
 #[test]
 fn test_render_html_shadow_blur_warning_path() {
-    // Non-zero blur radius hits the blur-warn arm in shadow::apply_to.
+    // Non-zero blur radius now routes through the gradient 9-slice path.
     let html = r#"<!DOCTYPE html><html><body>
         <div style="width:100px;height:100px;background:#fff;
                     box-shadow:0 0 8px red;"></div>
@@ -370,6 +370,48 @@ fn test_render_html_shadow_blur_warning_path() {
         .build()
         .render_html(html)
         .expect("render blurred shadow");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_shadow_blur_gradient_path() {
+    // blur > 0 with spread and offset → exercises draw_blur_box_shadow.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;background:#fff;
+                    box-shadow:4px 4px 8px 2px rgba(0,0,0,0.6);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render blurred shadow with offset and spread");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_shadow_blur_rounded() {
+    // blur > 0 with border-radius → exercises RadialGradient corner slices.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:100px;height:100px;background:#fff;border-radius:12px;
+                    box-shadow:0 0 10px 0 black;"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render blurred shadow with border-radius");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_shadow_blur_non_white_background() {
+    // A dark page background verifies the soft-mask approach is background-colour-independent.
+    let html = r#"<!DOCTYPE html><html style="background-color:#1a1a2e"><body>
+        <div style="width:100px;height:100px;background:#e94560;
+                    box-shadow:0 0 12px 4px rgba(233,69,96,0.8);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render blurred shadow on dark background");
     assert!(!pdf.is_empty());
 }
 

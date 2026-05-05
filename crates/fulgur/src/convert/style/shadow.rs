@@ -1,8 +1,9 @@
 //! box-shadow extraction.
 //!
-//! Iterates the computed `box-shadow` list and pushes opaque, non-inset
-//! shadows onto `BlockStyle::box_shadows`. Inset shadows and non-zero blur
-//! are not yet supported and emit `log::warn!` (blur falls back to 0).
+//! Iterates the computed `box-shadow` list and pushes non-inset shadows
+//! onto `BlockStyle::box_shadows`. Non-zero blur is rendered via the
+//! gradient 9-slice path in `render.rs`. Inset shadows are skipped with
+//! a `log::warn!`.
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::convert::px_to_pt;
@@ -16,13 +17,6 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
             continue;
         }
         let blur_px = shadow.base.blur.px();
-        if blur_px > 0.0 {
-            log::warn!(
-                "box-shadow: blur-radius > 0 is not yet supported; \
-                 drawing as blur=0 (blur={}px)",
-                blur_px
-            );
-        }
         let rgba = absolute_to_rgba(shadow.base.color.resolve_to_absolute(ctx.current_color));
         if rgba[3] == 0 {
             continue; // fully transparent — skip
