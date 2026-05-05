@@ -762,6 +762,19 @@ pub(crate) fn dispatch_inline_box_content(
     }
 }
 
+/// Returns `true` if any line item in `entry` is a text run or inline image
+/// with a non-`None` link. Used to decide whether to activate per-run tagging
+/// mode in `dispatch_fragment` rather than the normal paragraph-level tagging.
+fn para_has_link_runs(entry: &crate::drawables::ParagraphEntry) -> bool {
+    entry.lines.iter().any(|line| {
+        line.items.iter().any(|item| match item {
+            crate::paragraph::LineItem::Text(run) => run.link.is_some(),
+            crate::paragraph::LineItem::Image(img) => img.link.is_some(),
+            crate::paragraph::LineItem::InlineBox(_) => false,
+        })
+    })
+}
+
 /// Start a Krilla tagged content sequence for a paragraph-bearing node when
 /// tagging is enabled and the node has a P / H / Span semantic entry.
 ///
@@ -928,7 +941,13 @@ pub(crate) fn dispatch_fragment(
         let img_for_block = drawables.images.get(&node_id);
         let svg_for_block = drawables.svgs.get(&node_id);
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
-            let tag_info = if para_for_block.is_some() {
+            let use_run_tagging = para_for_block
+                .map(|p| canvas.tag_collector.is_some() && para_has_link_runs(p))
+                .unwrap_or(false);
+            let tag_info = if use_run_tagging {
+                canvas.link_run_node_id = Some(node_id);
+                None
+            } else if para_for_block.is_some() {
                 try_start_tagged(canvas, node_id, drawables)
             } else {
                 None
@@ -962,6 +981,9 @@ pub(crate) fn dispatch_fragment(
                 );
             }
             finish_tagged(canvas, tag_info);
+            if use_run_tagging {
+                canvas.link_run_node_id = None;
+            }
             return;
         }
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
@@ -987,21 +1009,39 @@ pub(crate) fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
-        let tag_info = try_start_tagged(canvas, node_id, drawables);
-        draw_paragraph_v2(
-            canvas,
-            para,
-            x_pt,
-            y_pt,
-            &geom.fragments,
-            page_index,
-            is_split,
-            drawables,
-            geometry,
-            margin_left_pt,
-            margin_top_pt,
-        );
-        finish_tagged(canvas, tag_info);
+        if canvas.tag_collector.is_some() && para_has_link_runs(para) {
+            canvas.link_run_node_id = Some(node_id);
+            draw_paragraph_v2(
+                canvas,
+                para,
+                x_pt,
+                y_pt,
+                &geom.fragments,
+                page_index,
+                is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
+            );
+            canvas.link_run_node_id = None;
+        } else {
+            let tag_info = try_start_tagged(canvas, node_id, drawables);
+            draw_paragraph_v2(
+                canvas,
+                para,
+                x_pt,
+                y_pt,
+                &geom.fragments,
+                page_index,
+                is_split,
+                drawables,
+                geometry,
+                margin_left_pt,
+                margin_top_pt,
+            );
+            finish_tagged(canvas, tag_info);
+        }
     }
 }
 
