@@ -101,6 +101,7 @@ mod tests {
                     link_collector: None,
                     tag_collector: None,
                     link_run_node_id: None,
+                    page_background: [255, 255, 255, 255],
                 };
                 svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
             }

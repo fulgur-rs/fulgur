@@ -77,8 +77,8 @@ fn draw_single_box_shadow(
     h: f32,
 ) {
     if shadow.blur > 0.0 {
-        // gradient 9-slice approach: pre-composite with white page background.
-        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h, [255, 255, 255, 255]);
+        let bg = canvas.page_background;
+        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h, bg);
         return;
     }
 

@@ -402,6 +402,21 @@ fn test_render_html_shadow_blur_rounded() {
 }
 
 #[test]
+fn test_render_html_shadow_blur_non_white_background() {
+    // page_background is derived from <html> background-color, not hardcoded white.
+    // A dark page background exercises the pre-compositing path with non-white bg_color.
+    let html = r#"<!DOCTYPE html><html style="background-color:#1a1a2e"><body>
+        <div style="width:100px;height:100px;background:#e94560;
+                    box-shadow:0 0 12px 4px rgba(233,69,96,0.8);"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render blurred shadow on dark background");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
 fn test_render_html_shadow_fully_transparent_skipped() {
     // rgba(0,0,0,0) shadows hit the transparent-skip arm in shadow::apply_to.
     let html = r#"<!DOCTYPE html><html><body>

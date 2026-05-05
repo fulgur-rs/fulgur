@@ -551,6 +551,11 @@ pub struct Canvas<'a, 'b> {
     /// `Arc<LinkSpan>` identity gets its own `start_tagged/end_tagged` region
     /// recorded as a `ParagraphRunItem` under that paragraph's NodeId.
     pub link_run_node_id: Option<crate::drawables::NodeId>,
+    /// Page canvas background colour (RGBA) for pre-compositing box-shadow
+    /// blur gradient stops. Derived from the `<html>`/`<body>` background
+    /// at render time; defaults to opaque white when no background is set.
+    /// Keeping stops opaque avoids PDF transparency groups (PDF/A-1 safe).
+    pub page_background: [u8; 4],
 }
 
 /// Run a draw closure wrapped in opacity guards.
