@@ -111,6 +111,222 @@ fn draw_single_box_shadow(
     canvas.surface.pop();
 }
 
+/// Draw a blurred box-shadow using a gradient 9-slice approach.
+///
+/// All gradient stops are pre-composited with `bg_color` so no PDF transparency
+/// is required (PDF/A-1 compatible when bg_color matches the actual page background).
+///
+/// # Geometry
+///
+/// ```text
+/// outer rect = inner rect expanded by blur on all sides
+/// inner rect = (x + offset_x - spread, y + offset_y - spread, w + 2*spread, h + 2*spread)
+/// ```
+///
+/// The 9 slices (TL corner, top edge, TR corner, left edge, center, right edge,
+/// BL corner, bottom edge, BR corner) are drawn within an EvenOdd clip that
+/// excludes the element's border-box interior.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn draw_blur_box_shadow(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    shadow: &crate::draw_primitives::BoxShadow,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    bg_color: [u8; 4],
+) {
+    let blur = shadow.blur;
+    if blur <= 0.0 {
+        return;
+    }
+
+    // inner rect: shadow shape after spread
+    let ix = x + shadow.offset_x - shadow.spread;
+    let iy = y + shadow.offset_y - shadow.spread;
+    let iw = w + 2.0 * shadow.spread;
+    let ih = h + 2.0 * shadow.spread;
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+
+    // outer rect: inner rect expanded by blur
+    let ox = ix - blur;
+    let oy = iy - blur;
+    let ow = iw + 2.0 * blur;
+    let oh = ih + 2.0 * blur;
+
+    // Corner radii for the inner rect (after spread)
+    let r_inner = expand_radii(&style.border_radii, shadow.spread);
+
+    // EvenOdd clip: outer bbox minus border-box interior
+    let clip_path = {
+        let mut pb = krilla::geom::PathBuilder::new();
+        let Some(bbox) = krilla::geom::Rect::from_xywh(ox, oy, ow, oh) else {
+            return;
+        };
+        pb.push_rect(bbox);
+        if style.has_radius() {
+            crate::draw_primitives::append_rounded_rect_subpath(
+                &mut pb,
+                x,
+                y,
+                w,
+                h,
+                &style.border_radii,
+            );
+        } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
+            pb.push_rect(box_rect);
+        } else {
+            return;
+        }
+        pb.finish()
+    };
+    let Some(clip_path) = clip_path else { return };
+
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+
+    let stops = blur_stops(shadow.color, 8, bg_color);
+
+    // ── Center: solid fill of inner rect (EvenOdd clip already excludes border-box)
+    {
+        let center_color = stops[0].color.clone();
+        let path = if style.has_radius() {
+            crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
+        } else {
+            build_rect_path(ix, iy, iw, ih)
+        };
+        if let Some(path) = path {
+            canvas.surface.set_fill(Some(krilla::paint::Fill {
+                paint: center_color.into(),
+                opacity: krilla::num::NormalizedF32::ONE,
+                rule: Default::default(),
+            }));
+            canvas.surface.set_stroke(None);
+            canvas.surface.draw_path(&path);
+            canvas.surface.set_fill(None);
+        }
+    }
+
+    // ── Edge strips (LinearGradient, 4 sides)
+    // Corner radii to inset edge strip start/end points
+    let r_tl_x = r_inner[0][0];
+    let r_tl_y = r_inner[0][1];
+    let r_tr_x = r_inner[1][0];
+    let r_tr_y = r_inner[1][1];
+    let r_br_x = r_inner[2][0];
+    let r_br_y = r_inner[2][1];
+    let r_bl_x = r_inner[3][0];
+    let r_bl_y = r_inner[3][1];
+
+    // Top edge: x from (ix + r_tl_x) to (ix + iw - r_tr_x), y from oy to iy
+    draw_edge_strip(
+        &mut canvas.surface,
+        ix + r_tl_x,
+        oy,
+        iw - r_tl_x - r_tr_x,
+        blur,
+        ix + r_tl_x,
+        iy,
+        ix + r_tl_x,
+        oy,
+        &stops,
+    );
+    // Bottom edge
+    draw_edge_strip(
+        &mut canvas.surface,
+        ix + r_bl_x,
+        iy + ih,
+        iw - r_bl_x - r_br_x,
+        blur,
+        ix + r_bl_x,
+        iy + ih,
+        ix + r_bl_x,
+        iy + ih + blur,
+        &stops,
+    );
+    // Left edge: y from (iy + r_tl_y) to (iy + ih - r_bl_y)
+    draw_edge_strip(
+        &mut canvas.surface,
+        ox,
+        iy + r_tl_y,
+        blur,
+        ih - r_tl_y - r_bl_y,
+        ix,
+        iy + r_tl_y,
+        ox,
+        iy + r_tl_y,
+        &stops,
+    );
+    // Right edge
+    draw_edge_strip(
+        &mut canvas.surface,
+        ix + iw,
+        iy + r_tr_y,
+        blur,
+        ih - r_tr_y - r_br_y,
+        ix + iw,
+        iy + r_tr_y,
+        ix + iw + blur,
+        iy + r_tr_y,
+        &stops,
+    );
+
+    canvas.surface.pop();
+}
+
+/// Draw a rectangular strip filled with a LinearGradient.
+///
+/// `(rx, ry, rw, rh)` is the strip rectangle.
+/// `(gx1, gy1)` is the opaque end of the gradient (stop offset=0).
+/// `(gx2, gy2)` is the transparent (bg) end (stop offset=1).
+#[allow(dead_code)]
+fn draw_edge_strip(
+    surface: &mut krilla::surface::Surface<'_>,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    gx1: f32,
+    gy1: f32,
+    gx2: f32,
+    gy2: f32,
+    stops: &[krilla::paint::Stop],
+) {
+    if rw <= 0.0 || rh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+    let Some(rect) = krilla::geom::Rect::from_xywh(rx, ry, rw, rh) else {
+        return;
+    };
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else { return };
+
+    let lg = krilla::paint::LinearGradient {
+        x1: gx1,
+        y1: gy1,
+        x2: gx2,
+        y2: gy2,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: stops.to_vec(),
+        anti_alias: false,
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: lg.into(),
+        opacity: krilla::num::NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.set_stroke(None);
+    surface.draw_path(&path);
+    surface.set_fill(None);
+}
+
 /// Expand border radii by `spread`. Negative `spread` clamps to zero per CSS spec
 /// (shadow corners become sharp when spread < -radius). Corners with zero radius
 /// stay sharp regardless of spread, per CSS Backgrounds and Borders Level 3.
