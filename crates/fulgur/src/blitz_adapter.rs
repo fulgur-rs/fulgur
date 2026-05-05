@@ -1953,11 +1953,14 @@ fn resolve_label(
             }
             // TODO(fulgur-yfx): pseudo-element text, counter(), string(),
             // and element() are not yet resolvable in bookmark labels.
+            // `leader()` produces a fill character at render time, not a
+            // plain label string; emit nothing here.
             ContentItem::ContentBefore
             | ContentItem::ContentAfter
             | ContentItem::Counter { .. }
             | ContentItem::StringRef { .. }
-            | ContentItem::Element { .. } => {}
+            | ContentItem::Element { .. }
+            | ContentItem::Leader { .. } => {}
         }
     }
     out

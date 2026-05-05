@@ -36,10 +36,13 @@ pub fn resolve_content_to_string(
             // meaningful inside `bookmark-label`, where a DOM-element
             // context provides the value. In margin-box content they
             // have no referent, so they emit nothing.
+            // `leader()` produces a fill character at render time, not a
+            // plain string; emit nothing in string-resolution context.
             ContentItem::ContentText
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
-            | ContentItem::Attr(_) => {}
+            | ContentItem::Attr(_)
+            | ContentItem::Leader { .. } => {}
         }
     }
     out
@@ -90,10 +93,13 @@ pub fn resolve_content_to_html(
             }
             // DOM-element-scoped items (see `resolve_content`): no
             // referent in margin-box HTML, so emit nothing.
+            // `leader()` produces a fill character at render time, not HTML;
+            // emit nothing in HTML-resolution context.
             ContentItem::ContentText
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
-            | ContentItem::Attr(_) => {}
+            | ContentItem::Attr(_)
+            | ContentItem::Leader { .. } => {}
         }
     }
     out
