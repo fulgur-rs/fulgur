@@ -667,8 +667,10 @@ pub enum BorderStyleValue {
 ///   `visible` の場合 `visible` 軸は `auto` に昇格する — この昇格は
 ///   Stylo の computed value 段階で行われるため、fulgur 側は受け取った
 ///   値をそのまま map すればよい。
-/// - **形状**: クリップ形状は padding-box (border-radius があれば角丸)。
-///   `clip-path` 形状は未対応。
+/// - **形状**: クリップ形状は padding-box。両軸クリップ時のみ
+///   `border-radius` を反映した角丸パスを使い、単軸クリップ時は
+///   矩形パス (簡略化、`compute_overflow_clip_path` の `both_axes &&
+///   has_radius` 分岐参照)。`clip-path` 形状は未対応。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Overflow {
     /// `visible` — クリップしない (デフォルト)
