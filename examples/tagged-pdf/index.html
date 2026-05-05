@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Accessibility Report</title>
+  <style>
+    body { font-family: sans-serif; margin: 40px; }
+    h1 { font-size: 2em; margin-bottom: 0.25em; }
+    h2 { font-size: 1.4em; margin-top: 1.5em; }
+    p { line-height: 1.6; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1em; }
+    th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+    th { background: #f0f0f0; }
+    ul, ol { line-height: 1.8; }
+    a { color: #0066cc; }
+    figure { margin: 1.5em 0; }
+    figcaption { font-size: 0.9em; color: #555; margin-top: 0.25em; }
+  </style>
+</head>
+<body>
+
+<h1>Quarterly Accessibility Report</h1>
+
+<p>This document demonstrates fulgur's Tagged PDF output. When rendered with
+<code>--tagged</code> or <code>--pdf-ua</code>, the PDF contains a structure
+tree that screen readers and accessibility tools can traverse.</p>
+
+<h2>Summary</h2>
+
+<p>Tagged PDF embeds semantic structure — headings, paragraphs, lists, tables,
+figures, and links — directly in the PDF file. This structure is required for
+<a href="https://www.pdfa.org/pdf-ua/">PDF/UA-1</a> conformance and enables
+assistive technologies to present documents in a meaningful order.</p>
+
+<h2>Supported Elements</h2>
+
+<p>The following HTML elements map to PDF structure tags:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th scope="col">HTML element</th>
+      <th scope="col">PDF structure tag</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>h1</code>–<code>h6</code></td><td>H1–H6</td></tr>
+    <tr><td><code>p</code>, <code>div</code></td><td>P, Div</td></tr>
+    <tr><td><code>span</code></td><td>Span</td></tr>
+    <tr><td><code>ul</code></td><td>L (unordered)</td></tr>
+    <tr><td><code>ol</code></td><td>L (ordered)</td></tr>
+    <tr><td><code>li</code></td><td>LI → Lbl + LBody</td></tr>
+    <tr><td><code>table</code></td><td>Table</td></tr>
+    <tr><td><code>thead</code> / <code>tbody</code> / <code>tfoot</code></td><td>THead / TBody / TFoot</td></tr>
+    <tr><td><code>tr</code></td><td>TR</td></tr>
+    <tr><td><code>th</code></td><td>TH (scope: Row/Column/Both)</td></tr>
+    <tr><td><code>td</code></td><td>TD</td></tr>
+    <tr><td><code>img</code></td><td>Figure (alt text propagated)</td></tr>
+    <tr><td><code>a</code></td><td>Link</td></tr>
+  </tbody>
+</table>
+
+<h2>Step-by-Step Workflow</h2>
+
+<ol>
+  <li>Author semantic HTML using the elements listed above.</li>
+  <li>Run fulgur with <code>--tagged</code> (structure tree) or <code>--pdf-ua</code> (full PDF/UA-1).</li>
+  <li>Verify the output with a PDF accessibility checker such as PAC 2024 or Adobe Acrobat's accessibility tool.</li>
+</ol>
+
+<h2>Known Limitations</h2>
+
+<ul>
+  <li>Alt text is propagated from <code>img alt</code> attributes only; CSS background images are not tagged.</li>
+  <li>PDF/UA-1 requires a document language. Always pass <code>--lang</code> (CLI) or <code>.lang()</code> (API) when using <code>--pdf-ua</code>.</li>
+  <li>Python and Ruby bindings do not yet expose <code>tagged</code> / <code>pdf_ua</code> options.</li>
+</ul>
+
+<h2>CLI Usage</h2>
+
+<p>Generate a Tagged PDF:</p>
+
+<p><code>fulgur render --tagged --language en -o report.pdf report.html</code></p>
+
+<p>Generate a PDF/UA-1 conformant PDF (implies --tagged and --bookmarks):</p>
+
+<p><code>fulgur render --pdf-ua --language en -o report.pdf report.html</code></p>
+
+</body>
+</html>

@@ -29,6 +29,7 @@ Built in Rust for server-side workloads where memory footprint and startup time 
 - Page sizes (A4 / Letter / A3) with landscape support
 - PDF metadata (title, author, keywords, language)
 - PDF bookmarks from heading structure
+- Tagged PDF / PDF/UA-1 for accessibility (structure tree, alt text, heading levels)
 - [CSS property support reference](docs/css-support.md)
 
 ## Installation
@@ -78,6 +79,10 @@ fulgur render -o output.pdf -i logo.png=assets/logo.png input.html
 
 # Template + JSON data
 fulgur render -o invoice.pdf -d data.json template.html
+
+# Tagged PDF (accessibility / PDF/UA-1)
+fulgur render --tagged --language en -o report.pdf report.html
+fulgur render --pdf-ua --language en -o report.pdf report.html
 ```
 
 ### Template Example
@@ -116,11 +121,14 @@ fulgur render -o invoice.pdf -d data.json template.html
 | `-l, --landscape` | Landscape orientation | false |
 | `--margin` | Page margins in mm (CSS shorthand: `"20"`, `"20 30"`, `"10 20 30"`, `"10 20 30 40"`) | — |
 | `--title` | PDF title metadata | — |
+| `--language` | Document language tag (BCP 47, e.g. `en`, `ja`). Required for PDF/UA-1. | — |
 | `-f, --font` | Font files to bundle (repeatable) | — |
 | `--css` | CSS files to include (repeatable) | — |
 | `-i, --image` | Image files to bundle as name=path (repeatable) | — |
 | `-d, --data` | JSON data file for template mode (use `-` for stdin) | — |
 | `--bookmarks` | Generate PDF bookmarks (outline) from `h1`-`h6` headings | false |
+| `--tagged` | Enable Tagged PDF output (structure tree for accessibility) | false |
+| `--pdf-ua` | Enable PDF/UA-1 conformance (implies `--tagged` and `--bookmarks`) | false |
 | `--stdin` | Read HTML from stdin | false |
 
 ## Library Usage
@@ -153,7 +161,53 @@ let engine = Engine::builder()
     .build();
 
 let pdf = engine.render()?;
+
+// Tagged PDF (accessibility / PDF/UA-1)
+let engine = Engine::builder()
+    .tagged(true)  // structure tree only
+    .build();
+// or: .pdf_ua(true) for full PDF/UA-1 conformance (implies tagged + bookmarks)
+
+let pdf = engine.render_html(html)?;
 ```
+
+## Tagged PDF
+
+Fulgur can embed a semantic structure tree in the PDF output, required for accessibility tools and PDF/UA-1 conformance.
+
+### CLI
+
+```bash
+# Structure tree only (--tagged)
+fulgur render --tagged --language en -o report.pdf report.html
+
+# Full PDF/UA-1 conformance (implies --tagged and --bookmarks)
+fulgur render --pdf-ua --language en -o report.pdf report.html
+```
+
+### Supported HTML elements
+
+| HTML element | PDF structure tag |
+|---|---|
+| `h1`–`h6` | H1–H6 |
+| `p`, `div` | P, Div |
+| `span` | Span |
+| `ul` | L (unordered) |
+| `ol` | L (ordered) |
+| `li` | LI → Lbl + LBody |
+| `table` | Table |
+| `thead` / `tbody` / `tfoot` | THead / TBody / TFoot |
+| `tr` | TR |
+| `th` | TH (scope: Row/Column/Both) |
+| `td` | TD |
+| `img` | Figure (alt text propagated) |
+| `a` | Link |
+
+### Limitations
+
+- Alt text is propagated from `<img alt>` attributes only. CSS background images are not tagged.
+- PDF/UA-1 requires a document language. Always pass `--language` (CLI) or `.lang()` (Rust API) when using `--pdf-ua`.
+- Python and Ruby bindings do not yet expose `tagged` / `pdf_ua`. See [fulgur-rskh] and [fulgur-k96v] for the follow-up work.
 
 ## Architecture
 
