@@ -3212,6 +3212,7 @@ impl<'a> MarginBoxRenderer<'a> {
     /// Build a renderer from raw inputs. `string_set_by_node` /
     /// `counter_ops_by_node` are the per-node maps drained out of
     /// `ConvertContext` before `dom_to_drawables` consumed them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gcpm: &'a GcpmContext,
         running_store: &'a RunningElementStore,
