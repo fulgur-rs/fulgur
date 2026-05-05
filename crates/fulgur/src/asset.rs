@@ -433,4 +433,44 @@ mod tests {
         // Arc の共有を確認（同じヒープ上の Vec を指している）
         assert!(Arc::ptr_eq(&bundle.fonts[0], &cloned.fonts[0]));
     }
+
+    #[test]
+    fn get_image_resolves_absolute_file_url_when_base_url_set() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        bundle.set_base_url("file:///home/user/project/examples/demo/");
+        // Stylo resolves url("icon.png") to an absolute file:// path when a real base URL is configured.
+        // get_image must find the image by stripping the base prefix.
+        let resolved = "home/user/project/examples/demo/icon.png";
+        assert!(
+            bundle.get_image(resolved).is_some(),
+            "get_image must resolve the absolute path to icon.png when base_url is set"
+        );
+    }
+
+    #[test]
+    fn get_image_resolves_subdir_image_with_base_url() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("images/logo.png", vec![4, 5, 6]);
+        bundle.set_base_url("file:///base/");
+        // "images/logo.png" registered → lookup "base/images/logo.png" should work
+        assert!(bundle.get_image("base/images/logo.png").is_some(), "get_image must find images/logo.png via base_url prefix stripping");
+    }
+
+    #[test]
+    fn get_image_direct_lookup_still_works_without_base_url() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        // Regression guard: short-name lookup must not break when set_base_url is not called.
+        assert!(bundle.get_image("icon.png").is_some());
+    }
+
+    #[test]
+    fn get_image_returns_none_when_base_url_mismatch() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        bundle.set_base_url("file:///other/path/");
+        // Long path does NOT match the base → None
+        assert!(bundle.get_image("home/user/project/icon.png").is_none());
+    }
 }
