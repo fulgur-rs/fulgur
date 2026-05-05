@@ -69,10 +69,8 @@ fn end_to_end_h1_gets_bookmark_via_ua_css() {
 
 /// Helper: build an Engine with author CSS delivered via AssetBundle.
 ///
-/// Inline `<style>` blocks are also supported since `fulgur-mq5` wired
-/// [`extract_gcpm_from_inline_styles`] into `engine.rs`. These tests use
-/// `AssetBundle::add_css` as the canonical caller channel; see
-/// `bookmarks_via_inline_style_block` for the inline-`<style>` variant.
+/// Uses `AssetBundle::add_css` — the canonical channel for library callers.
+/// See `bookmarks_via_inline_style_block` for the inline-`<style>` variant.
 fn engine_with_css(css: &str) -> Engine {
     let mut assets = AssetBundle::new();
     assets.add_css(css);

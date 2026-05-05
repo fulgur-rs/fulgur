@@ -759,7 +759,7 @@ fn test_counter_page_still_works() {
     );
 }
 
-// ── fulgur-gxv: inline <style> variants ─────────────────────────────────────
+// ── inline <style> variants ──────────────────────────────────────────────────
 
 /// Counter in margin-box delivered via inline `<style>` must generate PDF.
 #[test]
