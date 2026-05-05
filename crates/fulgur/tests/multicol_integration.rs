@@ -11,10 +11,14 @@ fn page_count(pdf: &[u8]) -> usize {
     let prefix = b"/Type /Page";
     let mut n = 0usize;
     let mut i = 0;
-    while i + prefix.len() < pdf.len() {
+    while i + prefix.len() <= pdf.len() {
         if &pdf[i..i + prefix.len()] == prefix {
             // Reject `/Type /Pages` and any other identifier continuation.
-            if !pdf[i + prefix.len()].is_ascii_alphanumeric() {
+            // `is_none_or` handles end-of-buffer (no following byte) as a valid match.
+            if pdf
+                .get(i + prefix.len())
+                .is_none_or(|b| !b.is_ascii_alphanumeric())
+            {
                 n += 1;
             }
             i += prefix.len();
