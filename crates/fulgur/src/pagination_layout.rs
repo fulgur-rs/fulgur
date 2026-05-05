@@ -3440,23 +3440,14 @@ mod tests {
 
         // body + outer (50px clip) + inner (1200px overflowing child)
         // = 3 entries; every entry has a single fragment on page 0.
-        assert_eq!(
-            table.len(),
-            3,
-            "expected body + outer + inner = 3 entries, got {table:?}"
-        );
+        assert_eq!(table.len(), 3, "expected body + outer + inner = 3 entries");
         for (id, geom) in &table {
             assert_eq!(
                 geom.fragments.len(),
                 1,
-                "node {id} should not split under overflow:hidden parent; got {} fragments",
-                geom.fragments.len()
+                "node {id} should not split under overflow:hidden parent"
             );
-            assert_eq!(
-                geom.fragments[0].page_index, 0,
-                "node {id} should land on page 0 only; got page {}",
-                geom.fragments[0].page_index
-            );
+            assert_eq!(geom.fragments[0].page_index, 0);
         }
     }
 
