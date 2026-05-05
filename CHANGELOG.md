@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-05-05
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(tagging): add semantic layer for Tagged PDF (fulgur-izp.3) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/349
+* feat(multicol): split single inline-root paragraph across columns by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/351
+* feat(gcpm): support longhand margin in @page rules by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/352
+* feat: add --tagged and --pdf-ua flags for Tagged PDF / PDF/UA output by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/362
+* feat(tagging): build hierarchical StructTree from semantics.parent (fulgur-izp.5) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/366
+* feat(tagging): propagate img alt text to Figure /Alt entry in Tagged PDF (fulgur-izp.6) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/368
+* feat(tagged): implement L/LI/Lbl/LBody structure tags for list elements (fulgur-izp.7) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/369
+* feat(tagging): implement table structure tags (Table/THead/TBody/TFoot/TR/TH/TD) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/372
+* feat(tagged): wire link annotations into PDF structure tree (fulgur-izp.9) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/377
+* feat(tagged): wire link_run_node_id in clip/opacity/list/multicol dispatch paths by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/378
+* feat(engine): extract HTML <title> for PDF metadata in all render modes (fulgur-sa54) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/381
+* feat(tagged): auto-extract HTML <title> for PDF/UA-1 document title (fulgur-izp.10) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/380
+* feat(background): box-shadow blur via gradient 9-slice (PDF/A-1 compatible) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/379
+### Bug Fixes
+* fix(pagination): walk layout_children + emit parent fragments on recursion-cross-page by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/354
+* fix(pagination): paginate absolute body overflow across multiple pages by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/363
+* fix(pagination): align grid/flex parallel sibling recursion entry to row y by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/365
+* fix(pagination): grid/flex row cross-page co-split via RowState (fulgur-ysms) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/370
+### Documentation
+* docs(pyfulgur): mirror docstrings into __init__.pyi for mkdocstrings by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/348
+* docs: add Tagged PDF / PDF/UA-1 documentation and example by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/382
+### Other Changes
+* fix pagination for absolute body overflow by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/361
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.12.0...v0.13.0
+
 ## [0.12.0] - 2026-05-03
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
