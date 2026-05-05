@@ -2566,20 +2566,98 @@ fn untagged_pdf_has_no_struct_tree_root() {
 }
 
 #[test]
-fn pdf_ua_fails_ua1_validation_until_full_compliance_lands() {
-    // pdf_ua=true enables UA1 validation which requires structural
-    // attributes (document title, heading /Title entries) beyond
-    // what this issue wires. Full PDF/UA-1 compliance is out of scope
-    // for fulgur-izp.4; this test documents the known failure mode so
-    // regressions (e.g. a panic instead of a clean Err) are visible.
+fn pdf_ua_without_title_returns_error() {
+    // pdf_ua=true requires a document title (PDF/UA-1 §7.1).
+    // Neither config.title nor HTML <title> is provided → krilla
+    // emits ValidationError::NoDocumentTitle → Err.
     let result = Engine::builder()
         .pdf_ua(true)
+        .lang("en")
         .build()
         .render_html("<html><body><h1>Hello</h1><p>World</p></body></html>");
     assert!(
         result.is_err(),
-        "expected UA1 validation error until full compliance lands"
+        "pdf_ua without title must return Err (NoDocumentTitle)"
     );
+}
+
+#[test]
+fn pdf_ua_with_html_title_succeeds() {
+    // PDF/UA-1 smoke: <title> in HTML head provides the document title,
+    // satisfying krilla's UA1 requirement without explicit config.title.
+    // lang + outline (h1 → bookmark) complete the required metadata.
+    //
+    // Manual full validation: veraPDF (https://verapdf.org):
+    //   java -jar verapdf.jar --flavour ua1 output.pdf
+    // CI relies on krilla's own UA1 validator (build-time check).
+    let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head><title>Test Document</title></head>
+<body><h1>Hello</h1><p>World</p></body>
+</html>"#;
+
+    let pdf = Engine::builder()
+        .pdf_ua(true)
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("pdf_ua with <title> must succeed");
+
+    assert!(!pdf.is_empty(), "pdf must be non-empty");
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(
+        text.contains("pdfuaid"),
+        "pdf must contain pdfuaid XMP namespace"
+    );
+    assert!(
+        text.contains("/StructTreeRoot"),
+        "pdf must contain /StructTreeRoot"
+    );
+    assert!(
+        text.contains("/Lang"),
+        "pdf must contain /Lang when lang is set"
+    );
+}
+
+#[test]
+fn pdf_ua_with_explicit_title_succeeds() {
+    // config.title takes priority over HTML <title>.
+    let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head><title>HTML Title</title></head>
+<body><h1>Hello</h1><p>World</p></body>
+</html>"#;
+
+    let pdf = Engine::builder()
+        .pdf_ua(true)
+        .title("Explicit Title")
+        .lang("en")
+        .build()
+        .render_html(html)
+        .expect("pdf_ua with explicit title must succeed");
+
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn pdf_ua_without_lang_succeeds() {
+    // PDF/UA-1 strongly recommends lang but does NOT hard-fail
+    // when absent (krilla UA1 prohibits(NoDocumentLanguage) = false).
+    // Without lang, /Lang is absent from the catalog — semantically
+    // incomplete but valid per krilla's enforcement.
+    let html = r#"<!DOCTYPE html>
+<html>
+<head><title>No Lang</title></head>
+<body><h1>Hello</h1><p>World</p></body>
+</html>"#;
+
+    let pdf = Engine::builder()
+        .pdf_ua(true)
+        .build()
+        .render_html(html)
+        .expect("pdf_ua without lang must succeed");
+
+    assert!(!pdf.is_empty());
 }
 
 #[test]
