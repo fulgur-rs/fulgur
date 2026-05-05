@@ -404,6 +404,11 @@ impl Engine {
         };
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
+        let html_title = if self.config.effective_tagging() {
+            crate::blitz_adapter::extract_html_title(&doc)
+        } else {
+            None
+        };
         crate::render::render_v2(
             &self.config,
             &convert_ctx.pagination_geometry,
@@ -414,6 +419,7 @@ impl Engine {
             self.system_fonts,
             &string_set_for_render,
             &counter_ops_for_render,
+            html_title,
             self.serialize_settings.clone(),
         )
     }

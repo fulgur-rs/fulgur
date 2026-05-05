@@ -34,6 +34,7 @@ pub fn render_v2(
     system_fonts: bool,
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    html_title: Option<String>,
     serialize_settings: SerializeSettings,
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
@@ -271,7 +272,7 @@ pub fn render_v2(
         }
     }
 
-    document.set_metadata(build_metadata(config));
+    document.set_metadata(build_metadata(config, html_title.as_deref()));
     document
         .finish()
         .map_err(|e| Error::PdfGeneration(format!("{e:?}")))
@@ -3160,10 +3161,11 @@ fn paragraph_lines_for_page(
 }
 
 /// Build krilla Metadata from Config.
-fn build_metadata(config: &Config) -> krilla::metadata::Metadata {
+fn build_metadata(config: &Config, html_title: Option<&str>) -> krilla::metadata::Metadata {
     let mut metadata = krilla::metadata::Metadata::new();
-    if let Some(ref title) = config.title {
-        metadata = metadata.title(title.clone());
+    let effective_title = config.title.as_deref().or(html_title);
+    if let Some(title) = effective_title {
+        metadata = metadata.title(title.to_string());
     }
     if !config.authors.is_empty() {
         metadata = metadata.authors(config.authors.clone());
