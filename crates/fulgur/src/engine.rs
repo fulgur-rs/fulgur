@@ -179,42 +179,62 @@ impl Engine {
             crate::gcpm::running::RunningElementStore::new()
         };
 
-        // Extract string-set values via DomPass
-        let string_set_store = if !gcpm.string_set_mappings.is_empty() {
+        // Extract string-set values via DomPass.
+        // Also harvest per-node `name -> latest value` snapshots that the
+        // later BookmarkPass uses to resolve `string(name)` inside
+        // `bookmark-label` (fulgur-70c).
+        let (string_set_store, string_snapshots) = if !gcpm.string_set_mappings.is_empty() {
             let pass = crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
             crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
-            pass.into_store()
+            let snapshots = pass.take_node_snapshots();
+            (pass.into_store(), snapshots)
         } else {
-            crate::gcpm::string_set::StringSetStore::new()
+            (
+                crate::gcpm::string_set::StringSetStore::new(),
+                std::collections::BTreeMap::new(),
+            )
         };
 
-        let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
-            if self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty() {
-                let pass = crate::blitz_adapter::BookmarkPass::new(gcpm.bookmark_mappings.clone());
-                crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
-                pass.into_results().into_iter().collect()
-            } else {
-                HashMap::new()
-            };
-
-        // Extract counter operations and resolve body content
-        let (counter_ops_by_node_vec, counter_css) =
+        // Extract counter operations and resolve body content.
+        // Also harvest per-node counter snapshots for BookmarkPass
+        // (`counter(name)` inside `bookmark-label`, fulgur-70c).
+        let (counter_ops_by_node_vec, counter_css, counter_snapshots) =
             if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
                 let pass = crate::blitz_adapter::CounterPass::new(
                     gcpm.counter_mappings.clone(),
                     gcpm.content_counter_mappings.clone(),
                 );
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
-                pass.into_parts()
+                let snapshots = pass.take_node_snapshots();
+                let (ops, css) = pass.into_parts();
+                (ops, css, snapshots)
             } else {
-                (Vec::new(), String::new())
+                (Vec::new(), String::new(), std::collections::BTreeMap::new())
             };
 
-        // Inject counter-resolved CSS for ::before/::after
+        // Inject counter-resolved CSS for ::before/::after. Must happen
+        // before BookmarkPass's selector matching so any `data-fulgur-cid`
+        // attributes added by CounterPass are visible.
         if !counter_css.is_empty() {
             let inject_pass = crate::blitz_adapter::InjectCssPass { css: counter_css };
             crate::blitz_adapter::apply_single_pass(&inject_pass, &mut doc, &ctx);
         }
+
+        // BookmarkPass runs AFTER CounterPass and StringSetPass so it can
+        // resolve `counter()` / `string()` inside `bookmark-label` against
+        // the per-node snapshots harvested above (fulgur-70c).
+        let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
+            if self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty() {
+                let pass = crate::blitz_adapter::BookmarkPass::new_with_snapshots(
+                    gcpm.bookmark_mappings.clone(),
+                    counter_snapshots,
+                    string_snapshots,
+                );
+                crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
+                pass.into_results().into_iter().collect()
+            } else {
+                HashMap::new()
+            };
 
         crate::blitz_adapter::resolve(&mut doc);
 
