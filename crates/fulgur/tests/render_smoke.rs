@@ -3030,3 +3030,45 @@ fn tagged_pdf_link_in_opacity_block_with_inline_box_child() {
     );
     assert!(s.contains("/Annots"), "must have link annotation on page");
 }
+
+#[test]
+fn render_v2_smoke_gcpm_leader_dotted_in_margin_box() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+@page {
+  size: A5;
+  margin: 40pt;
+  @top-right {
+    content: "Introduction" leader(dotted) counter(page);
+    font-size: 9pt;
+    font-family: sans-serif;
+  }
+}
+body { margin: 0; padding: 0; font-size: 11pt; font-family: sans-serif; }
+p { margin: 8pt 0; }
+</style></head>
+<body>
+<p>Leader smoke test. This page should have a dot leader in the top-right margin box.</p>
+</body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+fn render_v2_smoke_gcpm_leader_custom_string() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+@page {
+  size: A5; margin: 40pt;
+  @bottom-center {
+    content: "Left" leader(" - ") "Right";
+    font-size: 9pt;
+    font-family: sans-serif;
+  }
+}
+body { font-family: sans-serif; }
+</style></head><body><p>Custom leader test.</p></body></html>"#;
+    let pdf = Engine::builder().build().render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+}
