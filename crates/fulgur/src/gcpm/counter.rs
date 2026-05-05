@@ -56,6 +56,11 @@ pub fn resolve_content_to_string(
 /// `StringRef` values come from the DOM (via `string-set: content(text) |
 /// attr(...)`) and are HTML-escaped before concatenation so characters like
 /// `<` and `&` do not corrupt the margin box.
+///
+/// When the content list contains a `Leader` item, the output switches to a
+/// flex-container mode: every item is wrapped in a `<span>`, and the leader
+/// becomes a `flex:1; overflow:hidden` span filled with repeated characters
+/// so that it expands to fill the available line width.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_content_to_html(
     items: &[ContentItem],
@@ -67,42 +72,106 @@ pub fn resolve_content_to_html(
     page_idx: usize,
     custom_counters: &BTreeMap<String, i32>,
 ) -> String {
-    let mut out = String::new();
+    let has_leader = items
+        .iter()
+        .any(|i| matches!(i, ContentItem::Leader { .. }));
+
+    if !has_leader {
+        // Flat mode: backward-compatible plain concatenation.
+        let mut out = String::new();
+        for item in items {
+            match item {
+                ContentItem::String(s) => push_escaped_html_text(&mut out, s),
+                ContentItem::Counter { name, style } => match name.as_str() {
+                    "page" => out.push_str(&format_counter(page_num as i32, *style)),
+                    "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
+                    _ => {
+                        let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
+                        out.push_str(&format_counter(value, *style));
+                    }
+                },
+                ContentItem::Element { name, policy } => {
+                    if let Some(html) =
+                        resolve_element_policy(name, *policy, page_idx, running_states, store)
+                    {
+                        out.push_str(html);
+                    }
+                }
+                ContentItem::StringRef { name, policy } => {
+                    if let Some(state) = string_set_states.get(name) {
+                        push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
+                    }
+                }
+                ContentItem::ContentText
+                | ContentItem::ContentBefore
+                | ContentItem::ContentAfter
+                | ContentItem::Attr(_)
+                | ContentItem::Leader { .. } => {}
+            }
+        }
+        return out;
+    }
+
+    // Flex mode: wrap everything in a flex container so that leader items
+    // expand to fill the remaining line width.
+    let mut parts: Vec<String> = Vec::new();
     for item in items {
         match item {
-            ContentItem::String(s) => push_escaped_html_text(&mut out, s),
-            ContentItem::Counter { name, style } => match name.as_str() {
-                "page" => out.push_str(&format_counter(page_num as i32, *style)),
-                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
-                _ => {
-                    let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
-                    out.push_str(&format_counter(value, *style));
+            ContentItem::Leader { style } => {
+                let ch = style.leader_char();
+                let fill_len = 400 / ch.len().max(1);
+                let fill = ch.repeat(fill_len);
+                let mut escaped_fill = String::new();
+                push_escaped_html_text(&mut escaped_fill, &fill);
+                parts.push(format!(
+                    "<span style=\"flex:1;overflow:hidden;white-space:nowrap;\
+                     min-width:0;padding:0 0.15em\">{escaped_fill}</span>"
+                ));
+            }
+            other => {
+                let mut inner = String::new();
+                match other {
+                    ContentItem::String(s) => push_escaped_html_text(&mut inner, s),
+                    ContentItem::Counter { name, style } => match name.as_str() {
+                        "page" => inner.push_str(&format_counter(page_num as i32, *style)),
+                        "pages" => inner.push_str(&format_counter(total_pages as i32, *style)),
+                        _ => {
+                            let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
+                            inner.push_str(&format_counter(value, *style));
+                        }
+                    },
+                    ContentItem::Element { name, policy } => {
+                        if let Some(html) =
+                            resolve_element_policy(name, *policy, page_idx, running_states, store)
+                        {
+                            inner.push_str(html);
+                        }
+                    }
+                    ContentItem::StringRef { name, policy } => {
+                        if let Some(state) = string_set_states.get(name) {
+                            push_escaped_html_text(
+                                &mut inner,
+                                resolve_string_policy(state, *policy),
+                            );
+                        }
+                    }
+                    ContentItem::ContentText
+                    | ContentItem::ContentBefore
+                    | ContentItem::ContentAfter
+                    | ContentItem::Attr(_)
+                    | ContentItem::Leader { .. } => {}
                 }
-            },
-            ContentItem::Element { name, policy } => {
-                if let Some(html) =
-                    resolve_element_policy(name, *policy, page_idx, running_states, store)
-                {
-                    out.push_str(html);
+                if !inner.is_empty() {
+                    parts.push(format!("<span>{inner}</span>"));
                 }
             }
-            ContentItem::StringRef { name, policy } => {
-                if let Some(state) = string_set_states.get(name) {
-                    push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
-                }
-            }
-            // DOM-element-scoped items (see `resolve_content`): no
-            // referent in margin-box HTML, so emit nothing.
-            // `leader()` produces a fill character at render time, not HTML;
-            // emit nothing in HTML-resolution context.
-            ContentItem::ContentText
-            | ContentItem::ContentBefore
-            | ContentItem::ContentAfter
-            | ContentItem::Attr(_)
-            | ContentItem::Leader { .. } => {}
         }
     }
-    out
+
+    format!(
+        "<span style=\"display:flex;width:100%;align-items:baseline\">{}</span>",
+        parts.join("")
+    )
 }
 
 /// Append `text` to `out` with HTML special characters escaped.
@@ -898,5 +967,79 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.get("chapter"), Some(&1));
         assert_eq!(snap.get("section"), Some(&0));
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_with_leader_wraps_in_flex() {
+        use crate::gcpm::running::RunningElementStore;
+        use crate::gcpm::{ContentItem, CounterStyle, LeaderStyle};
+        use std::collections::BTreeMap;
+
+        let items = vec![
+            ContentItem::String("Title".into()),
+            ContentItem::Leader {
+                style: LeaderStyle::Dotted,
+            },
+            ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            5,
+            0,
+            &BTreeMap::new(),
+        );
+
+        assert!(
+            html.contains("display:flex"),
+            "expected flex container, got: {html}"
+        );
+        assert!(
+            html.contains("flex:1"),
+            "expected flex:1 leader, got: {html}"
+        );
+        assert!(html.contains("Title"), "expected Title, got: {html}");
+        assert!(html.contains('1'), "expected page number, got: {html}");
+        assert!(html.contains('.'), "expected dots, got: {html}");
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_without_leader_is_flat() {
+        use crate::gcpm::running::RunningElementStore;
+        use crate::gcpm::{ContentItem, CounterStyle};
+        use std::collections::BTreeMap;
+
+        let items = vec![
+            ContentItem::String("Page ".into()),
+            ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            3,
+            10,
+            2,
+            &BTreeMap::new(),
+        );
+
+        assert!(
+            !html.contains("display:flex"),
+            "unexpected flex wrapper: {html}"
+        );
+        assert!(html.contains("Page "), "expected 'Page ', got: {html}");
+        assert!(html.contains('3'), "expected page number 3, got: {html}");
     }
 }
