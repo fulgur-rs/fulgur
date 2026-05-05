@@ -2710,3 +2710,79 @@ fn tagged_th_scope_attribute_preserved() {
     );
     assert!(s.contains("/Row"), "must have Row scope for row-scoped TH");
 }
+
+#[test]
+fn tagged_pdf_external_link_produces_link_struct_element() {
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <p>Visit <a href="https://example.com">Example Site</a> for more info.</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("tagged render with link");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"), "must have struct tree root");
+    assert!(s.contains("/Link"), "must have /Link structure element");
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_pdf_internal_anchor_link_produces_link_struct_element() {
+    let html = r##"<!DOCTYPE html><html lang="en"><body>
+        <h2 id="section1">Section 1</h2>
+        <p>Go to <a href="#section1">Section 1</a> above.</p>
+    </body></html>"##;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("tagged render with internal link");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/Link"), "must have /Link structure element");
+}
+
+#[test]
+fn tagged_pdf_image_link_does_not_panic() {
+    // 1x1 transparent GIF
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <p><a href="https://example.com"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" alt="logo" width="10" height="10"></a></p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("image link tagged render must not panic");
+
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn untagged_pdf_with_link_preserves_annotation_no_struct_tree() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>Visit <a href="https://example.com">Example</a>.</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("untagged render with link");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        !s.contains("/StructTreeRoot"),
+        "untagged PDF must not have struct tree"
+    );
+    assert!(
+        s.contains("/Annots"),
+        "link annotation must be present in untagged PDF"
+    );
+}

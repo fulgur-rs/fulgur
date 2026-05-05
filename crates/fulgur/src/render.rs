@@ -241,9 +241,30 @@ pub fn render_v2(
             );
         }
         let per_page = link_collector.take_page(page_idx);
-        for (ptr, id) in
-            crate::link::emit_link_annotations(&mut page, &per_page, &dest_registry, tagging)
-        {
+        // Build the set of span_ptrs that are wired into the struct tree via
+        // ParagraphRunItem::LinkContent entries.  Only these ptrs should use
+        // add_tagged_annotation; others fall back to add_annotation so that
+        // Krilla's invariant (every tagged annotation appears in the tag tree)
+        // is not violated for link types not yet wired (e.g. InlineBox links).
+        let wired_ptrs: Option<std::collections::BTreeSet<usize>> =
+            tag_collector.as_ref().map(|tc| {
+                use crate::draw_primitives::ParagraphRunItem;
+                tc.run_entries
+                    .values()
+                    .flatten()
+                    .filter_map(|item| match item {
+                        ParagraphRunItem::LinkContent { span_ptr, .. } => Some(*span_ptr),
+                        ParagraphRunItem::Content(_) => None,
+                    })
+                    .collect()
+            });
+        for (ptr, id) in crate::link::emit_link_annotations(
+            &mut page,
+            &per_page,
+            &dest_registry,
+            tagging,
+            wired_ptrs.as_ref(),
+        ) {
             link_annot_ids.insert(ptr, id);
         }
     }
