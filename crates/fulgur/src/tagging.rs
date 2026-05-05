@@ -44,6 +44,7 @@ pub enum PdfTag {
         scope: krilla::tagging::TableHeaderScope,
     },
     Td,
+    Link,
 }
 
 /// Per-NodeId semantic record stored in `Drawables.semantics`.
@@ -141,6 +142,7 @@ pub fn pdf_tag_to_krilla_tag(
         PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
         PdfTag::Th { scope } => krilla::tagging::Tag::TH(*scope).into(),
         PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
+        PdfTag::Link => krilla::tagging::Tag::<krilla::tagging::kind::Link>::Link.into(),
     }
 }
 
@@ -300,5 +302,15 @@ mod tests {
             pdf_tag_to_krilla_tag(&PdfTag::Td, None, None),
             TagKind::TD(_)
         ));
+        assert!(matches!(
+            pdf_tag_to_krilla_tag(&PdfTag::Link, None, None),
+            TagKind::Link(_)
+        ));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_link() {
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Link, None, None);
+        assert!(matches!(k, krilla::tagging::TagKind::Link(_)));
     }
 }
