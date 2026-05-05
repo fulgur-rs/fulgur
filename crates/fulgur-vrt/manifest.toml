@@ -40,6 +40,30 @@ path = "layout/multicol-inline-root-split-case-b.html"
 margin_pt = 0.0
 
 [[fixture]]
+path = "layout/multicol-rule-solid.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-span-all.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-page-spanning.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-break-inside-avoid.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-column-width-resolution.html"
+margin_pt = 0.0
+
+[[fixture]]
+path = "layout/multicol-balance.html"
+margin_pt = 0.0
+
+[[fixture]]
 path = "layout/overflow-hidden.html"
 margin_pt = 0.0
 
