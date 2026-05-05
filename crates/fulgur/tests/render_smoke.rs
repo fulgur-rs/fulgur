@@ -403,8 +403,7 @@ fn test_render_html_shadow_blur_rounded() {
 
 #[test]
 fn test_render_html_shadow_blur_non_white_background() {
-    // page_background is derived from <html> background-color, not hardcoded white.
-    // A dark page background exercises the pre-compositing path with non-white bg_color.
+    // A dark page background verifies the soft-mask approach is background-colour-independent.
     let html = r#"<!DOCTYPE html><html style="background-color:#1a1a2e"><body>
         <div style="width:100px;height:100px;background:#e94560;
                     box-shadow:0 0 12px 4px rgba(233,69,96,0.8);"></div>

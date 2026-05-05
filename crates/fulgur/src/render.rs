@@ -134,23 +134,6 @@ pub fn render_v2(
         page_count,
     );
 
-    // Page canvas background: html/body background propagates to the page
-    // canvas per CSS §14.2. Used to pre-composite box-shadow blur stops so
-    // gradient stops remain opaque (PDF/A-1 safe, no transparency group).
-    let page_background: [u8; 4] = drawables
-        .root_id
-        .and_then(|id| drawables.block_styles.get(&id))
-        .and_then(|b| b.style.background_color)
-        .filter(|&[_, _, _, a]| a > 0)
-        .or_else(|| {
-            drawables
-                .body_id
-                .and_then(|id| drawables.block_styles.get(&id))
-                .and_then(|b| b.style.background_color)
-                .filter(|&[_, _, _, a]| a > 0)
-        })
-        .unwrap_or([255, 255, 255, 255]);
-
     for page_idx in 0..page_count {
         let page_num = page_idx + 1;
         // Pass the full `gcpm.page_settings` (including selector
@@ -184,7 +167,6 @@ pub fn render_v2(
                     link_collector: Some(&mut link_collector),
                     tag_collector: tag_collector.as_mut(),
                     link_run_node_id: None,
-                    page_background,
                 };
                 // Root `<html>` + `<body>` background pre-pass. v1's
                 // `BlockPageable::draw` for these elements paints
@@ -248,7 +230,6 @@ pub fn render_v2(
                 link_collector: Some(&mut link_collector),
                 tag_collector: None,
                 link_run_node_id: None,
-                page_background,
             };
             let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
             margin_box_renderer.render_page(

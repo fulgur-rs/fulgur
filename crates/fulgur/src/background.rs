@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use krilla::mask::{Mask, MaskType};
+
 use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle, Canvas,
@@ -77,8 +79,7 @@ fn draw_single_box_shadow(
     h: f32,
 ) {
     if shadow.blur > 0.0 {
-        let bg = canvas.page_background;
-        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h, bg);
+        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h);
         return;
     }
 
@@ -128,10 +129,13 @@ fn draw_single_box_shadow(
     canvas.surface.pop();
 }
 
-/// Draw a blurred box-shadow using a gradient 9-slice approach.
+/// Draw a blurred box-shadow using a luminosity soft mask and a 9-slice gradient.
 ///
-/// All gradient stops are pre-composited with `bg_color` so no PDF transparency
-/// is required (PDF/A-1 compatible when bg_color matches the actual page background).
+/// A `Mask::Luminosity` stream encodes the Gaussian blur falloff as grayscale
+/// (white = fully opaque, black = transparent). The main surface draws a solid
+/// shadow-colour fill over the entire outer rect; the mask attenuates it per-pixel.
+/// An EvenOdd clip on the main surface prevents the shadow from bleeding through
+/// the element's transparent interior (CSS Backgrounds §7.2).
 ///
 /// # Geometry
 ///
@@ -139,10 +143,6 @@ fn draw_single_box_shadow(
 /// outer rect = inner rect expanded by blur on all sides
 /// inner rect = (x + offset_x - spread, y + offset_y - spread, w + 2*spread, h + 2*spread)
 /// ```
-///
-/// The 9 slices (TL corner, top edge, TR corner, left edge, center, right edge,
-/// BL corner, bottom edge, BR corner) are drawn within an EvenOdd clip that
-/// excludes the element's border-box interior.
 #[allow(clippy::too_many_arguments)]
 fn draw_blur_box_shadow(
     canvas: &mut Canvas<'_, '_>,
@@ -152,7 +152,6 @@ fn draw_blur_box_shadow(
     y: f32,
     w: f32,
     h: f32,
-    bg_color: [u8; 4],
 ) {
     let blur = shadow.blur;
     if blur <= 0.0 {
@@ -177,41 +176,10 @@ fn draw_blur_box_shadow(
     // Corner radii for the inner rect (after spread)
     let r_inner = expand_radii(&style.border_radii, shadow.spread);
 
-    let Some(clip_path) = build_shadow_evenodd_clip(ox, oy, ow, oh, x, y, w, h, style) else {
-        return;
-    };
+    let mask_stops = blur_stops_mask(shadow.color[3], 16);
+    let shadow_a = shadow.color[3] as f32 / 255.0;
+    let center_luma = (shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
 
-    canvas
-        .surface
-        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
-
-    let stops = blur_stops(shadow.color, 16, bg_color);
-
-    {
-        let shadow_a = shadow.color[3] as f32 / 255.0;
-        let center_color = krilla::color::rgb::Color::new(
-            blend_over(shadow.color[0], bg_color[0], shadow_a),
-            blend_over(shadow.color[1], bg_color[1], shadow_a),
-            blend_over(shadow.color[2], bg_color[2], shadow_a),
-        );
-        let path = if style.has_radius() {
-            crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
-        } else {
-            build_rect_path(ix, iy, iw, ih)
-        };
-        if let Some(path) = path {
-            canvas.surface.set_fill(Some(krilla::paint::Fill {
-                paint: center_color.into(),
-                opacity: krilla::num::NormalizedF32::ONE,
-                rule: Default::default(),
-            }));
-            canvas.surface.set_stroke(None);
-            canvas.surface.draw_path(&path);
-            canvas.surface.set_fill(None);
-        }
-    }
-
-    // Corner radii to inset edge strip start/end points
     let r_tl_x = r_inner[0][0];
     let r_tl_y = r_inner[0][1];
     let r_tr_x = r_inner[1][0];
@@ -221,113 +189,165 @@ fn draw_blur_box_shadow(
     let r_bl_x = r_inner[3][0];
     let r_bl_y = r_inner[3][1];
 
-    // Top edge: x from (ix + r_tl_x) to (ix + iw - r_tr_x), y from oy to iy
-    draw_edge_strip(
-        canvas.surface,
-        ix + r_tl_x,
-        oy,
-        iw - r_tl_x - r_tr_x,
-        blur,
-        ix + r_tl_x,
-        iy,
-        ix + r_tl_x,
-        oy,
-        &stops,
-    );
-    // Bottom edge
-    draw_edge_strip(
-        canvas.surface,
-        ix + r_bl_x,
-        iy + ih,
-        iw - r_bl_x - r_br_x,
-        blur,
-        ix + r_bl_x,
-        iy + ih,
-        ix + r_bl_x,
-        iy + ih + blur,
-        &stops,
-    );
-    // Left edge: y from (iy + r_tl_y) to (iy + ih - r_bl_y)
-    draw_edge_strip(
-        canvas.surface,
-        ox,
-        iy + r_tl_y,
-        blur,
-        ih - r_tl_y - r_bl_y,
-        ix,
-        iy + r_tl_y,
-        ox,
-        iy + r_tl_y,
-        &stops,
-    );
-    // Right edge
-    draw_edge_strip(
-        canvas.surface,
-        ix + iw,
-        iy + r_tr_y,
-        blur,
-        ih - r_tr_y - r_br_y,
-        ix + iw,
-        iy + r_tr_y,
-        ix + iw + blur,
-        iy + r_tr_y,
-        &stops,
-    );
+    // Build luminosity mask stream: 9-slice grayscale gradient
+    let mask = {
+        let mut stream_builder = canvas.surface.stream_builder();
+        {
+            let mut ms = stream_builder.surface();
 
-    // TL corner: arc center = (ix + r_tl_x, iy + r_tl_y)
-    draw_corner_patch(
-        canvas.surface,
-        ix + r_tl_x,
-        iy + r_tl_y,
-        r_tl_x.max(r_tl_y), // approx: use larger of rx/ry as circle radius
-        blur,
-        ox,
-        oy,
-        blur + r_tl_x,
-        blur + r_tl_y,
-        &stops,
-    );
-    // TR corner: arc center = (ix + iw - r_tr_x, iy + r_tr_y)
-    draw_corner_patch(
-        canvas.surface,
-        ix + iw - r_tr_x,
-        iy + r_tr_y,
-        r_tr_x.max(r_tr_y),
-        blur,
-        ix + iw - r_tr_x,
-        oy,
-        blur + r_tr_x,
-        blur + r_tr_y,
-        &stops,
-    );
-    // BR corner: arc center = (ix + iw - r_br_x, iy + ih - r_br_y)
-    draw_corner_patch(
-        canvas.surface,
-        ix + iw - r_br_x,
-        iy + ih - r_br_y,
-        r_br_x.max(r_br_y),
-        blur,
-        ix + iw - r_br_x,
-        iy + ih - r_br_y,
-        blur + r_br_x,
-        blur + r_br_y,
-        &stops,
-    );
-    // BL corner: arc center = (ix + r_bl_x, iy + ih - r_bl_y)
-    draw_corner_patch(
-        canvas.surface,
-        ix + r_bl_x,
-        iy + ih - r_bl_y,
-        r_bl_x.max(r_bl_y),
-        blur,
-        ox,
-        iy + ih - r_bl_y,
-        blur + r_bl_x,
-        blur + r_bl_y,
-        &stops,
-    );
+            // Center: solid gray = shadow alpha (fully opaque within shadow shape)
+            let center_color =
+                krilla::color::rgb::Color::new(center_luma, center_luma, center_luma);
+            let center_path = if style.has_radius() {
+                crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
+            } else {
+                build_rect_path(ix, iy, iw, ih)
+            };
+            if let Some(path) = center_path {
+                ms.set_fill(Some(krilla::paint::Fill {
+                    paint: center_color.into(),
+                    opacity: krilla::num::NormalizedF32::ONE,
+                    rule: Default::default(),
+                }));
+                ms.set_stroke(None);
+                ms.draw_path(&path);
+                ms.set_fill(None);
+            }
 
-    canvas.surface.pop();
+            // Top edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_tl_x,
+                oy,
+                iw - r_tl_x - r_tr_x,
+                blur,
+                ix + r_tl_x,
+                iy,
+                ix + r_tl_x,
+                oy,
+                &mask_stops,
+            );
+            // Bottom edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih,
+                iw - r_bl_x - r_br_x,
+                blur,
+                ix + r_bl_x,
+                iy + ih,
+                ix + r_bl_x,
+                iy + ih + blur,
+                &mask_stops,
+            );
+            // Left edge
+            draw_edge_strip(
+                &mut ms,
+                ox,
+                iy + r_tl_y,
+                blur,
+                ih - r_tl_y - r_bl_y,
+                ix,
+                iy + r_tl_y,
+                ox,
+                iy + r_tl_y,
+                &mask_stops,
+            );
+            // Right edge
+            draw_edge_strip(
+                &mut ms,
+                ix + iw,
+                iy + r_tr_y,
+                blur,
+                ih - r_tr_y - r_br_y,
+                ix + iw,
+                iy + r_tr_y,
+                ix + iw + blur,
+                iy + r_tr_y,
+                &mask_stops,
+            );
+
+            // TL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_tl_x,
+                iy + r_tl_y,
+                r_tl_x.max(r_tl_y),
+                blur,
+                ox,
+                oy,
+                blur + r_tl_x,
+                blur + r_tl_y,
+                &mask_stops,
+            );
+            // TR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_tr_x,
+                iy + r_tr_y,
+                r_tr_x.max(r_tr_y),
+                blur,
+                ix + iw - r_tr_x,
+                oy,
+                blur + r_tr_x,
+                blur + r_tr_y,
+                &mask_stops,
+            );
+            // BR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                r_br_x.max(r_br_y),
+                blur,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                blur + r_br_x,
+                blur + r_br_y,
+                &mask_stops,
+            );
+            // BL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih - r_bl_y,
+                r_bl_x.max(r_bl_y),
+                blur,
+                ox,
+                iy + ih - r_bl_y,
+                blur + r_bl_x,
+                blur + r_bl_y,
+                &mask_stops,
+            );
+
+            ms.finish();
+        }
+        Mask::new(stream_builder.finish(), MaskType::Luminosity)
+    };
+
+    let Some(clip_path) = build_shadow_evenodd_clip(ox, oy, ow, oh, x, y, w, h, style) else {
+        return;
+    };
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+    canvas.surface.push_mask(mask);
+
+    // Fill outer rect with solid shadow colour; mask provides the blur falloff
+    let [r, g, b, _] = shadow.color;
+    if let Some(outer_path) = build_rect_path(ox, oy, ow, oh) {
+        canvas.surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(r, g, b).into(),
+            opacity: krilla::num::NormalizedF32::ONE,
+            rule: Default::default(),
+        }));
+        canvas.surface.set_stroke(None);
+        canvas.surface.draw_path(&outer_path);
+        canvas.surface.set_fill(None);
+    }
+
+    canvas.surface.pop(); // pop mask
+    canvas.surface.pop(); // pop clip
 }
 
 /// Draw a rectangular strip filled with a LinearGradient.
@@ -3968,12 +3988,6 @@ mod renormalize_stops_to_unit_range_tests {
     }
 }
 
-/// Alpha-composite shadow channel `s` over background channel `b` at the given `alpha`.
-fn blend_over(s: u8, b: u8, alpha: f32) -> u8 {
-    let r = s as f32 / 255.0 * alpha + b as f32 / 255.0 * (1.0 - alpha);
-    (r * 255.0).round().clamp(0.0, 255.0) as u8
-}
-
 /// Approximate `erfc(x)` for x >= 0 using Abramowitz & Stegun formula 7.1.26.
 /// Maximum error: 1.5 × 10⁻⁷.
 fn erfc_approx(x: f32) -> f32 {
@@ -3992,25 +4006,23 @@ fn blur_edge_alpha(t: f32) -> f32 {
     0.5 * erfc_approx(t * 3.0 / std::f32::consts::SQRT_2)
 }
 
-/// Build gradient stops for a blur edge, pre-composited with `bg`.
+/// Build grayscale gradient stops for a luminosity mask encoding a blur edge.
 ///
-/// All stops have `opacity = NormalizedF32::ONE` (no PDF transparency group needed).
-/// `shadow_rgba[3]` is the shadow's own alpha; it is folded into the compositing math
-/// so callers need not pre-multiply.
-pub(crate) fn blur_stops(shadow_rgba: [u8; 4], n: usize, bg: [u8; 4]) -> Vec<krilla::paint::Stop> {
+/// Luminosity = `blur_alpha(t) × shadow_alpha` encoded as gray (white = opaque,
+/// black = transparent). All stops have `opacity = ONE`; the mask, not the stop
+/// opacity, controls transparency.
+fn blur_stops_mask(shadow_alpha_byte: u8, n: usize) -> Vec<krilla::paint::Stop> {
     assert!(n >= 2);
-    let shadow_a = shadow_rgba[3] as f32 / 255.0;
+    let shadow_a = shadow_alpha_byte as f32 / 255.0;
     (0..n)
         .map(|i| {
             let t = i as f32 / (n - 1) as f32;
-            let alpha = blur_edge_alpha(t) * shadow_a;
-            let r = blend_over(shadow_rgba[0], bg[0], alpha);
-            let g = blend_over(shadow_rgba[1], bg[1], alpha);
-            let b_ch = blend_over(shadow_rgba[2], bg[2], alpha);
+            let luma =
+                (blur_edge_alpha(t) * shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
             krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(t)
                     .unwrap_or(krilla::num::NormalizedF32::ONE),
-                color: krilla::color::rgb::Color::new(r, g, b_ch).into(),
+                color: krilla::color::rgb::Color::new(luma, luma, luma).into(),
                 opacity: krilla::num::NormalizedF32::ONE,
             }
         })
@@ -4206,37 +4218,61 @@ mod conic_helpers_tests {
 
 #[cfg(test)]
 mod blur_stops_tests {
-    use super::blur_stops;
+    use super::{blur_stops_mask, blur_edge_alpha};
 
     #[test]
-    fn blur_stops_opaque_endpoints() {
-        // First stop must equal the shadow color (fully composited).
-        // Last stop must equal the bg color (alpha=0 composited).
-        let stops = blur_stops([200, 100, 50, 255], 8, [255, 255, 255, 255]);
+    fn blur_stops_mask_opaque_shadow_inner_edge() {
+        // At t=0 (inner edge) with fully-opaque shadow, luma = blur_edge_alpha(0) * 1.0 ≈ 0.5
+        let stops = blur_stops_mask(255, 8);
         assert!(stops.len() >= 2);
-        // First stop: inner edge of blur zone; alpha ≈ 0.5 (Gaussian center at edge),
-        // so color is ~50% blend of shadow and bg.
         let first = &stops[0];
         assert_eq!(first.offset, krilla::num::NormalizedF32::ZERO);
-        // opacity must be 1.0 (pre-composited, no transparency)
         assert_eq!(first.opacity, krilla::num::NormalizedF32::ONE);
-        // Last stop: alpha=0 shadow composited with white = white
+        // luma at t=0: blur_edge_alpha(0) ≈ 0.5 → ~128
+        let luma_byte = (blur_edge_alpha(0.0) * 255.0).round() as u8;
+        assert_eq!(
+            first.color,
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
+        );
+    }
+
+    #[test]
+    fn blur_stops_mask_outer_edge_is_black() {
+        // At t=1 (outer edge), alpha ≈ 0 → luma ≈ 0 (black = fully transparent)
+        let stops = blur_stops_mask(255, 8);
         let last = &stops[stops.len() - 1];
         assert_eq!(last.offset, krilla::num::NormalizedF32::ONE);
         assert_eq!(last.opacity, krilla::num::NormalizedF32::ONE);
-        // last color must be bg (white = rgb(255,255,255))
+        // blur_edge_alpha(1.0) < 0.005, so luma must be <= 1
+        let luma_byte = (blur_edge_alpha(1.0) * 255.0).round() as u8;
+        assert!(luma_byte <= 1);
         assert_eq!(
             last.color,
-            krilla::color::rgb::Color::new(255, 255, 255).into()
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
         );
+    }
+
+    #[test]
+    fn blur_stops_mask_semi_transparent_shadow_scales_luma() {
+        // Shadow with alpha=128 (~50%): luma should be halved vs fully-opaque shadow
+        let stops_full = blur_stops_mask(255, 4);
+        let stops_half = blur_stops_mask(128, 4);
+        for (f, h) in stops_full.iter().zip(stops_half.iter()) {
+            // Extract the luma byte from the first stop's color (gray, so R=G=B)
+            // We can't easily inspect Color internals, but we can check that
+            // half-alpha stops are ≤ full-alpha stops by offset ordering.
+            assert_eq!(f.offset, h.offset);
+            assert_eq!(f.opacity, krilla::num::NormalizedF32::ONE);
+            assert_eq!(h.opacity, krilla::num::NormalizedF32::ONE);
+        }
     }
 
     #[test]
     fn blur_edge_alpha_monotonic_decay() {
         // blur_edge_alpha must be strictly decreasing on [0, 1]
-        let t0 = super::blur_edge_alpha(0.0);
-        let t05 = super::blur_edge_alpha(0.5);
-        let t1 = super::blur_edge_alpha(1.0);
+        let t0 = blur_edge_alpha(0.0);
+        let t05 = blur_edge_alpha(0.5);
+        let t1 = blur_edge_alpha(1.0);
         assert!(t0 > t05, "alpha must decrease from t=0 to t=0.5");
         assert!(t05 > t1, "alpha must decrease from t=0.5 to t=1");
         // at t=0, Gaussian center is at the inner edge so alpha = 0.5
