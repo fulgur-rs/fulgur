@@ -3976,10 +3976,10 @@ mod renormalize_stops_to_unit_range_tests {
 /// Approximate `erfc(x)` for x >= 0 using Abramowitz & Stegun formula 7.1.26.
 /// Maximum error: 1.5 × 10⁻⁷.
 fn erfc_approx(x: f32) -> f32 {
-    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
     let poly = t
-        * (0.254829592
-            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_8 + t * (-1.453_152_1 + t * 1.061_405_4))));
     poly * (-x * x).exp()
 }
 
