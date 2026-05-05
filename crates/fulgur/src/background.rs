@@ -42,9 +42,12 @@ fn draw_single_box_shadow(
     w: f32,
     h: f32,
 ) {
-    // NOTE: when blur rendering is implemented (fulgur-4ie follow-up), this rect
-    // must also be expanded by the blur radius, and the blur extent drawn via
-    // rasterization + gaussian blur + image embed.
+    if shadow.blur > 0.0 {
+        // gradient 9-slice approach: pre-composite with white page background.
+        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h, [255, 255, 255, 255]);
+        return;
+    }
+
     let sx = x + shadow.offset_x - shadow.spread;
     let sy = y + shadow.offset_y - shadow.spread;
     let sw = w + 2.0 * shadow.spread;
@@ -127,7 +130,6 @@ fn draw_single_box_shadow(
 /// BL corner, bottom edge, BR corner) are drawn within an EvenOdd clip that
 /// excludes the element's border-box interior.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn draw_blur_box_shadow(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -338,7 +340,6 @@ fn draw_blur_box_shadow(
 /// `(rx, ry, rw, rh)` is the strip rectangle.
 /// `(gx1, gy1)` is the opaque end of the gradient (stop offset=0).
 /// `(gx2, gy2)` is the transparent (bg) end (stop offset=1).
-#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn draw_edge_strip(
     surface: &mut krilla::surface::Surface<'_>,
