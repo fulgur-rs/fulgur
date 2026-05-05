@@ -832,14 +832,14 @@ git commit -m "feat(engine): wire bookmark-label counter()/string() snapshots th
 
 **Files:**
 
-- Create: `crates/fulgur-vrt/tests/fixtures/bookmark-label-counter.html` (パスは既存 fixture と同じ流儀で確認)
-- Create: `crates/fulgur-vrt/goldens/fulgur/bookmark-label-counter.pdf`
+- Create: `crates/fulgur-vrt/fixtures/gcpm/bookmark-label-counter.html` (既存 GCPM fixture 配置に合わせる)
+- Create: `crates/fulgur-vrt/goldens/fulgur/gcpm/bookmark-label-counter.pdf`
 
 ### Step 1: 既存 fixture / golden の流儀を確認
 
 ```bash
-ls crates/fulgur-vrt/tests/fixtures/ 2>/dev/null | head -20
-ls crates/fulgur-vrt/goldens/fulgur/ 2>/dev/null | head -20
+ls crates/fulgur-vrt/fixtures/gcpm/ 2>/dev/null | head -20
+ls crates/fulgur-vrt/goldens/fulgur/gcpm/ 2>/dev/null | head -20
 grep -rn "bookmark" crates/fulgur-vrt/ 2>/dev/null | head
 ```
 
@@ -898,8 +898,8 @@ Expected: PASS (golden と一致)。
 ### Step 5: commit
 
 ```bash
-git add crates/fulgur-vrt/tests/fixtures/bookmark-label-counter.html \
-        crates/fulgur-vrt/goldens/fulgur/bookmark-label-counter.pdf
+git add crates/fulgur-vrt/fixtures/gcpm/bookmark-label-counter.html \
+        crates/fulgur-vrt/goldens/fulgur/gcpm/bookmark-label-counter.pdf
 git commit -m "test(vrt): add bookmark-label counter() golden (fulgur-70c)"
 ```
 

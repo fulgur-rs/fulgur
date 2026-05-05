@@ -1583,7 +1583,17 @@ impl StringSetPass {
             if is_non_visual_tag(elem.name.local.as_ref()) {
                 return;
             }
-            if let Some(mapping) = self.find_string_set(elem) {
+            // Fold every matching mapping in cascade order. A single
+            // element may match multiple `string-set` rules from different
+            // selectors (and they may set distinct named strings); the
+            // previous "first-match wins" lookup silently dropped the
+            // remainder, which is observable from `bookmark-label:
+            // string(...)` once snapshots are wired in.
+            for mapping in self
+                .mappings
+                .iter()
+                .filter(|m| selector_matches(&m.parsed, elem))
+            {
                 let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
                 self.running
                     .borrow_mut()
@@ -1611,12 +1621,6 @@ impl StringSetPass {
         for &child_id in &node.children {
             self.walk_tree(doc, child_id, depth + 1);
         }
-    }
-
-    fn find_string_set(&self, elem: &blitz_dom::node::ElementData) -> Option<&StringSetMapping> {
-        self.mappings
-            .iter()
-            .find(|m| selector_matches(&m.parsed, elem))
     }
 }
 
@@ -3261,6 +3265,76 @@ mod tests {
             Some("Second".to_string()),
             "second <p> should see title=Second (set by preceding h1)"
         );
+    }
+
+    #[test]
+    fn string_set_pass_folds_multiple_matching_mappings() {
+        use crate::gcpm::StringSetValue;
+
+        // Two distinct selectors target the same element with different
+        // named strings. The pass must apply BOTH (cascade order), not
+        // short-circuit on the first match — otherwise `bookmark-label:
+        // string(other-name)` reads stale / empty values.
+        let html = r#"<html><body>
+            <h1 class="ch">Heading</h1>
+            <p>Body</p>
+        </body></html>"#;
+        let mappings = vec![
+            StringSetMapping {
+                parsed: ParsedSelector::Tag("h1".into()),
+                name: "title".into(),
+                values: vec![StringSetValue::ContentText],
+            },
+            StringSetMapping {
+                parsed: ParsedSelector::Class("ch".into()),
+                name: "section".into(),
+                values: vec![StringSetValue::Literal("ch-1".into())],
+            },
+        ];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+        let store = pass.into_store();
+
+        // Both store entries from the h1 should be present.
+        let names: Vec<&str> = store.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"title"),
+            "store should contain the `title` entry; got {names:?}"
+        );
+        assert!(
+            names.contains(&"section"),
+            "store should contain the `section` entry; got {names:?}"
+        );
+
+        // The <p>'s snapshot should observe BOTH named strings set by
+        // the preceding h1 — proves the running map folded both
+        // mappings, not just the first one.
+        let mut p_id: Option<usize> = None;
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
+            if out.is_some() {
+                return;
+            }
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "p" {
+                        *out = Some(id);
+                        return;
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut p_id);
+        let p = p_id.expect("<p> in fixture");
+
+        let snap = snapshots.get(&p).expect("snapshot at <p>");
+        assert_eq!(snap.get("title").cloned(), Some("Heading".to_string()));
+        assert_eq!(snap.get("section").cloned(), Some("ch-1".to_string()));
     }
 
     /// Walk the DOM tree to find the first element with the given local name.
