@@ -992,8 +992,10 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 input.try_parse(|i| i.expect_ident().map(|s| s.to_string()))
                             {
                                 match ident.to_ascii_lowercase().as_str() {
+                                    "dotted" => LeaderStyle::Dotted,
                                     "solid" => LeaderStyle::Solid,
                                     "space" => LeaderStyle::Space,
+                                    // Unknown idents (e.g. typos) fall back to dotted.
                                     _ => LeaderStyle::Dotted,
                                 }
                             } else {
@@ -2047,6 +2049,30 @@ mod tests {
         assert_eq!(rule.margin.right, Some(7.5));
         assert_eq!(rule.margin.bottom, Some(7.5));
         assert_eq!(rule.margin.left, Some(7.5));
+    }
+
+    #[test]
+    fn test_parse_leader_no_args() {
+        let css = "@page { @top-right { content: leader(); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_leader_unknown_ident_falls_back_to_dotted() {
+        let css = "@page { @top-right { content: leader(banana); } }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
+        );
     }
 
     #[test]

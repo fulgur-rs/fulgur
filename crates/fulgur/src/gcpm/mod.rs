@@ -229,7 +229,11 @@ impl LeaderStyle {
     pub fn leader_char(&self) -> &str {
         match self {
             Self::Dotted => ".",
+            // U+005F LOW LINE — CSS GCPM does not prescribe a specific glyph for solid;
+            // ASCII underscore is a common baseline choice.
             Self::Solid => "_",
+            // U+00A0 NO-BREAK SPACE — regular U+0020 spaces collapse in HTML and would
+            // produce a single gap; NBSP is preserved as-is, avoiding that folding.
             Self::Space => "\u{00A0}",
             Self::Custom(s) => s,
         }

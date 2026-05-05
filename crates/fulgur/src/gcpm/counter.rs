@@ -119,7 +119,10 @@ pub fn resolve_content_to_html(
         match item {
             ContentItem::Leader { style } => {
                 let ch = style.leader_char();
-                let fill_len = 400 / ch.len().max(1);
+                // Repeat enough chars to fill any reasonable column width;
+                // overflow:hidden clips any excess in the browser/Blitz layout.
+                const LEADER_FILL_REPEAT: usize = 400;
+                let fill_len = LEADER_FILL_REPEAT / ch.chars().count().max(1);
                 let fill = ch.repeat(fill_len);
                 let mut escaped_fill = String::new();
                 push_escaped_html_text(&mut escaped_fill, &fill);
@@ -158,8 +161,9 @@ pub fn resolve_content_to_html(
                     ContentItem::ContentText
                     | ContentItem::ContentBefore
                     | ContentItem::ContentAfter
-                    | ContentItem::Attr(_)
-                    | ContentItem::Leader { .. } => {}
+                    | ContentItem::Attr(_) => {}
+                    // unreachable: outer arm already matched Leader
+                    ContentItem::Leader { .. } => {}
                 }
                 if !inner.is_empty() {
                     parts.push(format!("<span>{inner}</span>"));
