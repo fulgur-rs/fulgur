@@ -100,6 +100,7 @@ mod tests {
                     bookmark_collector: None,
                     link_collector: None,
                     tag_collector: None,
+                    link_run_node_id: None,
                 };
                 svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
             }

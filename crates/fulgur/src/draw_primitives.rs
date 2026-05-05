@@ -440,6 +440,22 @@ impl LinkCollector {
     }
 }
 
+/// Per-run tagged item for paragraphs drawn in per-run tagging mode.
+///
+/// Collected by `draw_shaped_lines` when `Canvas::link_run_node_id` is set.
+/// `build_struct_tree` assembles these into `P` children, grouping consecutive
+/// `LinkContent` items with the same `span_ptr` into `Link` TagGroups.
+#[derive(Debug)]
+pub enum ParagraphRunItem {
+    /// Non-link content identifier (child of P/H/LBody directly).
+    Content(krilla::tagging::Identifier),
+    /// Link content identifier grouped by the `Arc<LinkSpan>` pointer.
+    LinkContent {
+        span_ptr: usize,
+        identifier: krilla::tagging::Identifier,
+    },
+}
+
 /// Per-render accumulator for tagged-content identifiers.
 ///
 /// Each `record` call stores one (NodeId, PdfTag, Identifier) triple
@@ -453,12 +469,14 @@ pub struct TagCollector {
         krilla::tagging::Identifier,
         Option<String>,
     )>,
+    pub run_entries: BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
 }
 
 impl TagCollector {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            run_entries: BTreeMap::new(),
         }
     }
 
@@ -482,6 +500,24 @@ impl TagCollector {
     )> {
         self.entries
     }
+
+    /// Record a per-run item under `node_id` (paragraph NodeId).
+    pub fn record_run(&mut self, node_id: crate::drawables::NodeId, item: ParagraphRunItem) {
+        self.run_entries.entry(node_id).or_default().push(item);
+    }
+
+    /// Return a reference to run entries for `node_id` (empty slice if none).
+    pub fn run_entries_for(&self, node_id: crate::drawables::NodeId) -> &[ParagraphRunItem] {
+        self.run_entries.get(&node_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Remove and return run entries for `node_id`.
+    pub fn take_run_entries(
+        &mut self,
+        node_id: crate::drawables::NodeId,
+    ) -> Vec<ParagraphRunItem> {
+        self.run_entries.remove(&node_id).unwrap_or_default()
+    }
 }
 
 impl Default for TagCollector {
@@ -497,6 +533,10 @@ pub struct Canvas<'a, 'b> {
     pub bookmark_collector: Option<&'a mut BookmarkCollector>,
     pub link_collector: Option<&'a mut LinkCollector>,
     pub tag_collector: Option<&'a mut TagCollector>,
+    /// When `Some(node_id)`, `draw_shaped_lines` operates in per-run tagging mode:
+    /// each glyph-run cluster bounded by `Arc<LinkSpan>` identity gets its own
+    /// `start_tagged/end_tagged` region recorded as a `ParagraphRunItem`.
+    pub link_run_node_id: Option<usize>,
 }
 
 /// Run a draw closure wrapped in opacity guards.
@@ -2198,6 +2238,55 @@ mod dp_unit_tests {
             ..Default::default()
         };
         assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
+    }
+}
+
+#[cfg(test)]
+mod run_tag_tests {
+    use super::*;
+    use krilla::tagging::{ContentTag, Identifier, SpanTag};
+
+    fn make_identifier() -> Identifier {
+        let mut doc = krilla::Document::new();
+        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0)
+            .expect("valid page size");
+        let mut page = doc.start_page_with(settings);
+        let mut surface = page.surface();
+        let id = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+        surface.end_tagged();
+        id
+    }
+
+    #[test]
+    fn record_run_content_round_trips() {
+        let mut tc = TagCollector::new();
+        tc.record_run(42, ParagraphRunItem::Content(make_identifier()));
+        let runs = tc.take_run_entries(42);
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0], ParagraphRunItem::Content(_)));
+    }
+
+    #[test]
+    fn record_run_link_content_round_trips() {
+        let mut tc = TagCollector::new();
+        tc.record_run(
+            7,
+            ParagraphRunItem::LinkContent {
+                span_ptr: 0xdeadbeef,
+                identifier: make_identifier(),
+            },
+        );
+        let runs = tc.take_run_entries(7);
+        assert_eq!(runs.len(), 1);
+        assert!(
+            matches!(runs[0], ParagraphRunItem::LinkContent { span_ptr: 0xdeadbeef, .. })
+        );
+    }
+
+    #[test]
+    fn run_entries_for_returns_empty_when_absent() {
+        let tc = TagCollector::new();
+        assert!(tc.run_entries_for(99).is_empty());
     }
 }
 
