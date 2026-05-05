@@ -101,7 +101,7 @@ pub struct Config {
     pub bookmarks: bool,
     /// Enable Tagged PDF output (PDF structure tree).
     pub enable_tagging: bool,
-    /// Enable PDF/UA-1 conformance (implies enable_tagging). WIP: content tagging not yet implemented.
+    /// Enable PDF/UA-1 conformance (implies enable_tagging).
     pub pdf_ua: bool,
 }
 

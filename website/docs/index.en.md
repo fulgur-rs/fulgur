@@ -138,6 +138,10 @@ Seal the output your AI agent generates into authoritative, permanent documents.
 
     Running headers/footers, page counters, named pages, and margin boxes — the CSS spec that matters for real documents.
 
+- :wheelchair: **Tagged PDF / PDF/UA-1**
+
+    Emit a semantic structure tree from headings, lists, tables, and figures. Pass `--tagged` for accessibility or `--pdf-ua` for full PDF/UA-1 conformance.
+
 </div>
 
 ---
