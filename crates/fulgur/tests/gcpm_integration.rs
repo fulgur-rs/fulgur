@@ -758,3 +758,61 @@ fn test_counter_page_still_works() {
         result.err()
     );
 }
+
+// ── fulgur-gxv: inline <style> variants ─────────────────────────────────────
+
+/// Counter in margin-box delivered via inline `<style>` must generate PDF.
+#[test]
+fn gcpm_counter_via_inline_style_block() {
+    let html = r#"<!doctype html><html><head>
+        <style>
+            body { counter-reset: pg; }
+            @page { @bottom-center { content: "Page " counter(pg); } }
+        </style>
+    </head><body>
+        <p>Hello inline counter.</p>
+    </body></html>"#;
+
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+/// Running element header delivered via inline `<style>` must generate PDF.
+#[test]
+fn gcpm_running_element_via_inline_style_block() {
+    let html = r#"<!doctype html><html><head>
+        <style>
+            .hdr { position: running(pageHeader); }
+            @page { @top-center { content: element(pageHeader); } }
+        </style>
+    </head><body>
+        <div class="hdr">Running Header</div>
+        <p>Body text.</p>
+    </body></html>"#;
+
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+/// string-set delivered via inline `<style>` must generate PDF.
+#[test]
+fn gcpm_string_set_via_inline_style_block() {
+    let html = r#"<!doctype html><html><head>
+        <style>
+            h1 { string-set: chap content(text); }
+            @page { @top-center { content: string(chap); } }
+        </style>
+    </head><body>
+        <h1>Chapter One</h1>
+        <p>Some content here.</p>
+    </body></html>"#;
+
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF-"));
+}
