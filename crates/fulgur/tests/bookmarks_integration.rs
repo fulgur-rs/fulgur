@@ -69,11 +69,8 @@ fn end_to_end_h1_gets_bookmark_via_ua_css() {
 
 /// Helper: build an Engine with author CSS delivered via AssetBundle.
 ///
-/// GCPM extraction (including `bookmark-level` / `bookmark-label`) only
-/// runs on CSS that arrives through AssetBundle or `<link>` stylesheets,
-/// not inline `<style>` blocks. These E2E tests therefore route their
-/// author CSS through `AssetBundle::add_css` — the same channel real
-/// library callers use.
+/// Uses `AssetBundle::add_css` — the canonical channel for library callers.
+/// See `bookmarks_via_inline_style_block` for the inline-`<style>` variant.
 fn engine_with_css(css: &str) -> Engine {
     let mut assets = AssetBundle::new();
     assets.add_css(css);
@@ -169,5 +166,26 @@ fn level_only_falls_back_to_element_text() {
     assert!(
         pdf_contains_outline_entry(&pdf, "Text Content"),
         "label-less rule should fall back to element's text content"
+    );
+}
+
+/// Inline `<style>` blocks are supported since fulgur-mq5 — verify that
+/// `bookmark-level` delivered via `<style>` produces an outline entry.
+#[test]
+fn bookmarks_via_inline_style_block() {
+    let html = r#"<!doctype html><html><head>
+        <style>
+            aside { bookmark-level: 1; bookmark-label: "Sidebar"; }
+        </style>
+    </head><body>
+        <aside>My sidebar</aside>
+        <p>Some body text.</p>
+    </body></html>"#;
+
+    let engine = Engine::builder().bookmarks(true).build();
+    let pdf = engine.render_html(html).expect("render");
+    assert!(
+        pdf_contains_outline_entry(&pdf, "Sidebar"),
+        "expected 'Sidebar' bookmark entry — bookmark-label via inline <style> not working"
     );
 }

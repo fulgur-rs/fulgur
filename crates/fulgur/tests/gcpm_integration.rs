@@ -758,3 +758,5 @@ fn test_counter_page_still_works() {
         result.err()
     );
 }
+
+// inline <style> variants: see crates/fulgur/tests/gcpm_snapshot.rs

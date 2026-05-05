@@ -33,6 +33,7 @@ pub fn render_v2(
     font_data: &[Arc<Vec<u8>>],
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    serialize_settings: SerializeSettings,
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
@@ -43,10 +44,10 @@ pub fn render_v2(
         krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
             configuration,
-            ..Default::default()
+            ..serialize_settings
         })
     } else {
-        krilla::Document::new()
+        krilla::Document::new_with(serialize_settings)
     };
 
     let mut bookmark_collector = if config.effective_bookmarks() {
