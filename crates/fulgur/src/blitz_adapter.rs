@@ -1510,6 +1510,16 @@ impl RunningElementPass {
 pub struct StringSetPass {
     mappings: Vec<StringSetMapping>,
     store: RefCell<StringSetStore>,
+    /// Running map `name -> latest value` updated as the DOM walk
+    /// encounters string-set assignments. Snapshotted into
+    /// `node_snapshots` at every visited element so `BookmarkPass` can
+    /// resolve `string(name)` at the element's DOM position.
+    running: RefCell<BTreeMap<String, String>>,
+    /// Per-node snapshot of `running` taken at every visited element
+    /// after that element's own string-set assignment (if any) has been
+    /// applied. Empty if `apply` did not visit any nodes (e.g. when
+    /// `mappings` is empty).
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, String>>>,
 }
 
 impl StringSetPass {
@@ -1517,11 +1527,21 @@ impl StringSetPass {
         Self {
             mappings,
             store: RefCell::new(StringSetStore::new()),
+            running: RefCell::new(BTreeMap::new()),
+            node_snapshots: RefCell::new(BTreeMap::new()),
         }
     }
 
     pub fn into_store(self) -> StringSetStore {
         self.store.into_inner()
+    }
+
+    /// Take ownership of the per-node string-set snapshot map. Mirrors
+    /// `CounterPass::take_node_snapshots`. Empty if `apply` did not visit
+    /// any nodes (or if this method has already been called once — call
+    /// before `into_store`).
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, String>> {
+        std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 }
 
@@ -1551,12 +1571,22 @@ impl StringSetPass {
             }
             if let Some(mapping) = self.find_string_set(elem) {
                 let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
+                self.running
+                    .borrow_mut()
+                    .insert(mapping.name.clone(), value.clone());
                 self.store.borrow_mut().push(StringSetEntry {
                     name: mapping.name.clone(),
                     value,
                     node_id,
                 });
             }
+            // Snapshot the running map AFTER this element's own
+            // assignment is folded in — bookmark-label on the same
+            // element should observe its own string-set value.
+            // Mirrors `CounterPass`'s per-node snapshot timing.
+            self.node_snapshots
+                .borrow_mut()
+                .insert(node_id, self.running.borrow().clone());
         }
 
         // string-set targets stay in document flow — always recurse into children.
@@ -3054,6 +3084,64 @@ mod tests {
         let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
         assert_eq!(a.get("chapter").copied(), Some(1));
         assert_eq!(b.get("chapter").copied(), Some(2));
+    }
+
+    #[test]
+    fn string_set_pass_records_per_node_snapshot() {
+        use crate::gcpm::StringSetValue;
+
+        let html = r#"<html><body>
+            <h1 id="a">First</h1>
+            <p id="p1">Body</p>
+            <h1 id="b">Second</h1>
+            <p id="p2">Body2</p>
+        </body></html>"#;
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            name: "title".into(),
+            values: vec![StringSetValue::ContentText],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let mut tag_ids: Vec<(String, usize)> = Vec::new();
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<(String, usize)>) {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    let tag = el.name.local.as_ref().to_string();
+                    if matches!(tag.as_str(), "h1" | "p") {
+                        out.push((tag, id));
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut tag_ids);
+
+        let p_ids: Vec<usize> = tag_ids
+            .iter()
+            .filter(|(t, _)| t == "p")
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(p_ids.len(), 2);
+        let p1 = p_ids[0];
+        let p2 = p_ids[1];
+
+        assert_eq!(
+            snapshots.get(&p1).and_then(|m| m.get("title").cloned()),
+            Some("First".to_string()),
+            "first <p> should see title=First (set by preceding h1)"
+        );
+        assert_eq!(
+            snapshots.get(&p2).and_then(|m| m.get("title").cloned()),
+            Some("Second".to_string()),
+            "second <p> should see title=Second (set by preceding h1)"
+        );
     }
 
     /// Walk the DOM tree to find the first element with the given local name.
