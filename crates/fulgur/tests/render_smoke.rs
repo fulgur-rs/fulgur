@@ -2812,3 +2812,124 @@ fn untagged_pdf_with_link_preserves_annotation_no_struct_tree() {
         "link annotation must be present in untagged PDF"
     );
 }
+
+#[test]
+fn tagged_pdf_link_in_overflow_hidden_does_not_panic() {
+    // Regression: draw_under_clip used try_start_tagged for para with link runs,
+    // causing a non-nestable start_tagged panic. Should use use_run_tagging instead.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <div style="overflow:hidden;width:200px;height:50px">
+            Visit <a href="https://example.com">clipped link</a> here.
+        </div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("overflow:hidden link in tagged PDF must not panic");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_pdf_link_in_list_item_produces_link_struct_element() {
+    // Regression: draw_list_item_with_block used try_start_tagged for para with
+    // link runs, causing a non-nestable start_tagged panic.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <ul>
+            <li>Visit <a href="https://example.com">list item link</a>.</li>
+        </ul>
+    </body></html>"#;
+
+    let pdf = tagged_render_with_noto(html);
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_pdf_link_in_multicol_produces_link_struct_element() {
+    // Regression: paint_multicol_paragraph_slices never set link_run_node_id,
+    // so links in multicol blocks had no /Link StructTree entries.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <div style="columns:2;column-gap:20px;width:400px">
+            <p>Visit <a href="https://example.com">multicol link</a> here.</p>
+        </div>
+    </body></html>"#;
+
+    let pdf = tagged_render_with_noto(html);
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_pdf_link_in_opacity_block_does_not_panic() {
+    // Regression: draw_under_opacity had no tagging at all — para with link runs
+    // would invoke draw_shaped_lines while link_run_node_id was not set, meaning
+    // no /Link entry in StructTree. The fix adds the full use_run_tagging chain.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <div style="opacity:0.8">
+            Visit <a href="https://example.com">opacity link</a> here.
+        </div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("opacity block with link in tagged PDF must not panic");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_pdf_link_in_opacity_block_with_inline_box_child() {
+    // Exercises the `use_run_tagging` branch inside `draw_under_opacity`
+    // (render.rs L2035/2036/2055) which is reached only when the opacity-
+    // scoped node is ALSO an inline root (has a ParagraphDraw at the same
+    // node_id) AND has `opacity_descendants` non-empty (i.e. it contains
+    // inline-box children that register their own drawable entries during
+    // `extract_paragraph`). The combination: visual-style + opacity +
+    // inline-box child + link run.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <div style="opacity:0.8;background:#fff;padding:4px">
+            Visit <a href="https://example.com">opacity link</a>
+            <span style="display:inline-block;width:10px;height:10px;background:#aaa;"></span>
+            here.
+        </div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render_html(html)
+        .expect("opacity inline-root with inline-box child and link in tagged PDF must not panic");
+
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
