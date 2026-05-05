@@ -1046,4 +1046,67 @@ mod tests {
         assert!(html.contains("Page "), "expected 'Page ', got: {html}");
         assert!(html.contains('3'), "expected page number 3, got: {html}");
     }
+
+    #[test]
+    fn test_resolve_content_to_string_with_string_ref() {
+        let items = vec![
+            ContentItem::String("Ch: ".into()),
+            ContentItem::StringRef {
+                name: "chapter".to_string(),
+                policy: StringPolicy::First,
+            },
+        ];
+        let mut states = BTreeMap::new();
+        states.insert(
+            "chapter".to_string(),
+            StringSetPageState {
+                start: None,
+                first: Some("Introduction".to_string()),
+                last: Some("Introduction".to_string()),
+            },
+        );
+        assert_eq!(
+            resolve_content_to_string(&items, &states, 1, 5, &BTreeMap::new()),
+            "Ch: Introduction"
+        );
+    }
+
+    #[test]
+    fn test_resolve_content_to_string_leader_is_empty() {
+        use crate::gcpm::LeaderStyle;
+
+        let items = vec![
+            ContentItem::String("A".into()),
+            ContentItem::Leader {
+                style: LeaderStyle::Dotted,
+            },
+            ContentItem::String("B".into()),
+        ];
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &BTreeMap::new()),
+            "AB"
+        );
+    }
+
+    #[test]
+    fn test_resolve_content_to_html_flat_custom_counter() {
+        use crate::gcpm::running::RunningElementStore;
+        use crate::gcpm::{ContentItem, CounterStyle};
+        use std::collections::BTreeMap;
+
+        let items = vec![
+            ContentItem::String("§".into()),
+            ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::Decimal,
+            },
+        ];
+        let mut custom = BTreeMap::new();
+        custom.insert("section".to_string(), 7_i32);
+        let store = RunningElementStore::new();
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+
+        assert!(!html.contains("display:flex"), "unexpected flex: {html}");
+        assert!(html.contains('7'), "expected section 7, got: {html}");
+    }
 }
