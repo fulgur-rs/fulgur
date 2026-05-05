@@ -3654,8 +3654,9 @@ mod renormalize_stops_to_unit_range_tests {
 /// Maximum error: 1.5 × 10⁻⁷.
 fn erfc_approx(x: f32) -> f32 {
     let t = 1.0 / (1.0 + 0.3275911 * x);
-    let poly = t * (0.254829592
-        + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     poly * (-x * x).exp()
 }
 
@@ -3672,11 +3673,7 @@ fn blur_edge_alpha(t: f32) -> f32 {
 /// All stops have `opacity = NormalizedF32::ONE` (no PDF transparency group needed).
 /// `shadow_rgba[3]` is the shadow's own alpha; it is folded into the compositing math
 /// so callers need not pre-multiply.
-pub(crate) fn blur_stops(
-    shadow_rgba: [u8; 4],
-    n: usize,
-    bg: [u8; 4],
-) -> Vec<krilla::paint::Stop> {
+pub(crate) fn blur_stops(shadow_rgba: [u8; 4], n: usize, bg: [u8; 4]) -> Vec<krilla::paint::Stop> {
     assert!(n >= 2);
     let shadow_a = shadow_rgba[3] as f32 / 255.0;
     (0..n)
@@ -3692,7 +3689,7 @@ pub(crate) fn blur_stops(
             let b_ch = blend(shadow_rgba[2], bg[2]);
             krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(t)
-                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                    .unwrap_or(krilla::num::NormalizedF32::ZERO),
                 color: krilla::color::rgb::Color::new(r, g, b_ch).into(),
                 opacity: krilla::num::NormalizedF32::ONE,
             }
@@ -3897,7 +3894,8 @@ mod blur_stops_tests {
         // Last stop must equal the bg color (alpha=0 composited).
         let stops = blur_stops([200, 100, 50, 255], 8, [255, 255, 255, 255]);
         assert!(stops.len() >= 2);
-        // First stop: opaque shadow color composited with white = shadow color
+        // First stop: inner edge of blur zone; alpha ≈ 0.5 (Gaussian center at edge),
+        // so color is ~50% blend of shadow and bg.
         let first = &stops[0];
         assert_eq!(first.offset, krilla::num::NormalizedF32::ZERO);
         // opacity must be 1.0 (pre-composited, no transparency)
@@ -3907,18 +3905,23 @@ mod blur_stops_tests {
         assert_eq!(last.offset, krilla::num::NormalizedF32::ONE);
         assert_eq!(last.opacity, krilla::num::NormalizedF32::ONE);
         // last color must be bg (white = rgb(255,255,255))
-        assert_eq!(last.color, krilla::color::rgb::Color::new(255, 255, 255).into());
+        assert_eq!(
+            last.color,
+            krilla::color::rgb::Color::new(255, 255, 255).into()
+        );
     }
 
     #[test]
-    fn blur_stops_monotonic_alpha_decay() {
-        // Shadow alpha at each stop must decrease (or stay equal) from first to last.
-        // We test this by checking that the red channel of the pre-composited color
-        // moves monotonically toward the bg red (255) when shadow red < 255.
-        let stops = blur_stops([0, 0, 0, 255], 8, [255, 255, 255, 255]);
-        // For black shadow on white bg: pre-composited color's red channel
-        // should increase from 0 toward 255 as offset increases.
-        // We can't access Color components directly, so just verify stop count >= 7.
-        assert!(stops.len() >= 7);
+    fn blur_edge_alpha_monotonic_decay() {
+        // blur_edge_alpha must be strictly decreasing on [0, 1]
+        let t0 = super::blur_edge_alpha(0.0);
+        let t05 = super::blur_edge_alpha(0.5);
+        let t1 = super::blur_edge_alpha(1.0);
+        assert!(t0 > t05, "alpha must decrease from t=0 to t=0.5");
+        assert!(t05 > t1, "alpha must decrease from t=0.5 to t=1");
+        // at t=0, Gaussian center is at the inner edge so alpha = 0.5
+        assert!((t0 - 0.5).abs() < 1e-5);
+        // at t=1, alpha must be near 0
+        assert!(t1 < 0.005);
     }
 }
