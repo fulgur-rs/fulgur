@@ -2056,7 +2056,9 @@ mod tests {
         assert_eq!(ctx.margin_boxes.len(), 1);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::Leader { style: LeaderStyle::Dotted }]
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Dotted
+            }]
         );
     }
 
@@ -2066,7 +2068,9 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::Leader { style: LeaderStyle::Solid }]
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Solid
+            }]
         );
     }
 
@@ -2076,7 +2080,9 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::Leader { style: LeaderStyle::Space }]
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Space
+            }]
         );
     }
 
@@ -2086,7 +2092,9 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::Leader { style: LeaderStyle::Custom(".".into()) }]
+            vec![ContentItem::Leader {
+                style: LeaderStyle::Custom(".".into())
+            }]
         );
     }
 
@@ -2098,8 +2106,13 @@ mod tests {
             ctx.margin_boxes[0].content,
             vec![
                 ContentItem::String("Title".into()),
-                ContentItem::Leader { style: LeaderStyle::Dotted },
-                ContentItem::Counter { name: "page".into(), style: CounterStyle::Decimal },
+                ContentItem::Leader {
+                    style: LeaderStyle::Dotted
+                },
+                ContentItem::Counter {
+                    name: "page".into(),
+                    style: CounterStyle::Decimal
+                },
             ]
         );
     }
