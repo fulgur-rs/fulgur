@@ -33,6 +33,40 @@ pub fn draw_box_shadows(
     }
 }
 
+/// Build an EvenOdd clip path: `outer` rect minus the element's border-box interior.
+///
+/// Used by box-shadow drawing to prevent shadow from bleeding through transparent elements
+/// (CSS Backgrounds §7.2).
+fn build_shadow_evenodd_clip(
+    outer_x: f32,
+    outer_y: f32,
+    outer_w: f32,
+    outer_h: f32,
+    elem_x: f32,
+    elem_y: f32,
+    elem_w: f32,
+    elem_h: f32,
+    style: &BlockStyle,
+) -> Option<krilla::geom::Path> {
+    let mut pb = krilla::geom::PathBuilder::new();
+    let bbox = krilla::geom::Rect::from_xywh(outer_x, outer_y, outer_w, outer_h)?;
+    pb.push_rect(bbox);
+    if style.has_radius() {
+        crate::draw_primitives::append_rounded_rect_subpath(
+            &mut pb,
+            elem_x,
+            elem_y,
+            elem_w,
+            elem_h,
+            &style.border_radii,
+        );
+    } else {
+        let box_rect = krilla::geom::Rect::from_xywh(elem_x, elem_y, elem_w, elem_h)?;
+        pb.push_rect(box_rect);
+    }
+    pb.finish()
+}
+
 fn draw_single_box_shadow(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -73,29 +107,9 @@ fn draw_single_box_shadow(
     // bleeding through the interior. To prevent this we clip the shadow by
     // excluding the border-box using an EvenOdd clip path: the clip region
     // covers the shadow's bounding box minus the border-box.
-    let clip_path = {
-        let mut pb = krilla::geom::PathBuilder::new();
-        let Some(bbox) = krilla::geom::Rect::from_xywh(sx, sy, sw, sh) else {
-            return;
-        };
-        pb.push_rect(bbox);
-        if style.has_radius() {
-            crate::draw_primitives::append_rounded_rect_subpath(
-                &mut pb,
-                x,
-                y,
-                w,
-                h,
-                &style.border_radii,
-            );
-        } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
-            pb.push_rect(box_rect);
-        } else {
-            return;
-        }
-        pb.finish()
+    let Some(clip_path) = build_shadow_evenodd_clip(sx, sy, sw, sh, x, y, w, h, style) else {
+        return;
     };
-    let Some(clip_path) = clip_path else { return };
 
     canvas
         .surface
@@ -163,30 +177,9 @@ fn draw_blur_box_shadow(
     // Corner radii for the inner rect (after spread)
     let r_inner = expand_radii(&style.border_radii, shadow.spread);
 
-    // EvenOdd clip: outer bbox minus border-box interior
-    let clip_path = {
-        let mut pb = krilla::geom::PathBuilder::new();
-        let Some(bbox) = krilla::geom::Rect::from_xywh(ox, oy, ow, oh) else {
-            return;
-        };
-        pb.push_rect(bbox);
-        if style.has_radius() {
-            crate::draw_primitives::append_rounded_rect_subpath(
-                &mut pb,
-                x,
-                y,
-                w,
-                h,
-                &style.border_radii,
-            );
-        } else if let Some(box_rect) = krilla::geom::Rect::from_xywh(x, y, w, h) {
-            pb.push_rect(box_rect);
-        } else {
-            return;
-        }
-        pb.finish()
+    let Some(clip_path) = build_shadow_evenodd_clip(ox, oy, ow, oh, x, y, w, h, style) else {
+        return;
     };
-    let Some(clip_path) = clip_path else { return };
 
     canvas
         .surface
@@ -194,17 +187,12 @@ fn draw_blur_box_shadow(
 
     let stops = blur_stops(shadow.color, 8, bg_color);
 
-    // ── Center: solid fill of inner rect (EvenOdd clip already excludes border-box)
     {
         let shadow_a = shadow.color[3] as f32 / 255.0;
-        let blend_full = |s: u8, b: u8| -> u8 {
-            let r = s as f32 / 255.0 * shadow_a + b as f32 / 255.0 * (1.0 - shadow_a);
-            (r * 255.0).round().clamp(0.0, 255.0) as u8
-        };
         let center_color = krilla::color::rgb::Color::new(
-            blend_full(shadow.color[0], bg_color[0]),
-            blend_full(shadow.color[1], bg_color[1]),
-            blend_full(shadow.color[2], bg_color[2]),
+            blend_over(shadow.color[0], bg_color[0], shadow_a),
+            blend_over(shadow.color[1], bg_color[1], shadow_a),
+            blend_over(shadow.color[2], bg_color[2], shadow_a),
         );
         let path = if style.has_radius() {
             crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
@@ -223,7 +211,6 @@ fn draw_blur_box_shadow(
         }
     }
 
-    // ── Edge strips (LinearGradient, 4 sides)
     // Corner radii to inset edge strip start/end points
     let r_tl_x = r_inner[0][0];
     let r_tl_y = r_inner[0][1];
@@ -287,14 +274,13 @@ fn draw_blur_box_shadow(
         &stops,
     );
 
-    // ── Corners (RadialGradient)
     // TL corner: arc center = (ix + r_tl_x, iy + r_tl_y)
     draw_corner_patch(
         canvas.surface,
         ix + r_tl_x,
         iy + r_tl_y,
         r_tl_x.max(r_tl_y), // approx: use larger of rx/ry as circle radius
-        r_tl_x.max(r_tl_y) + blur,
+        blur,
         ox,
         oy,
         blur + r_tl_x,
@@ -307,7 +293,7 @@ fn draw_blur_box_shadow(
         ix + iw - r_tr_x,
         iy + r_tr_y,
         r_tr_x.max(r_tr_y),
-        r_tr_x.max(r_tr_y) + blur,
+        blur,
         ix + iw - r_tr_x,
         oy,
         blur + r_tr_x,
@@ -320,7 +306,7 @@ fn draw_blur_box_shadow(
         ix + iw - r_br_x,
         iy + ih - r_br_y,
         r_br_x.max(r_br_y),
-        r_br_x.max(r_br_y) + blur,
+        blur,
         ix + iw - r_br_x,
         iy + ih - r_br_y,
         blur + r_br_x,
@@ -333,7 +319,7 @@ fn draw_blur_box_shadow(
         ix + r_bl_x,
         iy + ih - r_bl_y,
         r_bl_x.max(r_bl_y),
-        r_bl_x.max(r_bl_y) + blur,
+        blur,
         ox,
         iy + ih - r_bl_y,
         blur + r_bl_x,
@@ -395,22 +381,22 @@ fn draw_edge_strip(
 /// Draw one corner patch of a blurred shadow using a RadialGradient.
 ///
 /// `(cx, cy)` is the arc center of the inner rounded corner (shadow shape).
-/// `r_inner` is the inner radius (start of blur, opaque stop).
-/// `r_outer = r_inner + blur` is the outer radius (end of blur, bg stop).
+/// `r_corner` is the inner radius (start of blur, opaque stop); `r_corner + blur` is the outer.
 /// `(patch_x, patch_y, patch_w, patch_h)` is the rectangular bounding patch.
 #[allow(clippy::too_many_arguments)]
 fn draw_corner_patch(
     surface: &mut krilla::surface::Surface<'_>,
     cx: f32,
     cy: f32,
-    r_inner: f32,
-    r_outer: f32,
+    r_corner: f32,
+    blur: f32,
     patch_x: f32,
     patch_y: f32,
     patch_w: f32,
     patch_h: f32,
     stops: &[krilla::paint::Stop],
 ) {
+    let r_outer = r_corner + blur;
     if patch_w <= 0.0 || patch_h <= 0.0 || r_outer <= 0.0 || stops.len() < 2 {
         return;
     }
@@ -424,7 +410,7 @@ fn draw_corner_patch(
     let rg = krilla::paint::RadialGradient {
         fx: cx,
         fy: cy,
-        fr: r_inner,
+        fr: r_corner,
         cx,
         cy,
         cr: r_outer,
@@ -3982,6 +3968,12 @@ mod renormalize_stops_to_unit_range_tests {
     }
 }
 
+/// Alpha-composite shadow channel `s` over background channel `b` at the given `alpha`.
+fn blend_over(s: u8, b: u8, alpha: f32) -> u8 {
+    let r = s as f32 / 255.0 * alpha + b as f32 / 255.0 * (1.0 - alpha);
+    (r * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 /// Approximate `erfc(x)` for x >= 0 using Abramowitz & Stegun formula 7.1.26.
 /// Maximum error: 1.5 × 10⁻⁷.
 fn erfc_approx(x: f32) -> f32 {
@@ -4012,13 +4004,9 @@ pub(crate) fn blur_stops(shadow_rgba: [u8; 4], n: usize, bg: [u8; 4]) -> Vec<kri
         .map(|i| {
             let t = i as f32 / (n - 1) as f32;
             let alpha = blur_edge_alpha(t) * shadow_a;
-            let blend = |s: u8, b: u8| -> u8 {
-                let r = s as f32 / 255.0 * alpha + b as f32 / 255.0 * (1.0 - alpha);
-                (r * 255.0).round().clamp(0.0, 255.0) as u8
-            };
-            let r = blend(shadow_rgba[0], bg[0]);
-            let g = blend(shadow_rgba[1], bg[1]);
-            let b_ch = blend(shadow_rgba[2], bg[2]);
+            let r = blend_over(shadow_rgba[0], bg[0], alpha);
+            let g = blend_over(shadow_rgba[1], bg[1], alpha);
+            let b_ch = blend_over(shadow_rgba[2], bg[2], alpha);
             krilla::paint::Stop {
                 offset: krilla::num::NormalizedF32::new(t)
                     .unwrap_or(krilla::num::NormalizedF32::ONE),
