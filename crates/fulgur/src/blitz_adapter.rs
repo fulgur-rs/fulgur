@@ -1646,6 +1646,13 @@ pub struct CounterPass {
     /// will consume it. Engine flips this on via
     /// [`with_snapshot_recording`] when bookmarks are emitted.
     record_node_snapshots: bool,
+    /// Pass-2 cross-reference table built at the end of pass 1. When
+    /// present, `target-counter()` / `target-counters()` / `target-text()`
+    /// inside `::before` / `::after` `content` resolve against this map.
+    /// When absent (pass 1, or single-pass renders without target refs),
+    /// those variants substitute fixed-width placeholders so the layout
+    /// produced by pass 1 stays close to pass 2 — see [`resolve_content`].
+    anchor_map: RefCell<Option<crate::gcpm::target_ref::AnchorMap>>,
 }
 
 impl CounterPass {
@@ -1662,7 +1669,19 @@ impl CounterPass {
             ops_by_node: RefCell::new(Vec::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
+            anchor_map: RefCell::new(None),
         }
+    }
+
+    /// Supply the pass-2 cross-reference table built from pass-1 output.
+    /// When set, `target-counter()` / `target-counters()` / `target-text()`
+    /// inside `::before` / `::after` `content` resolve against this map.
+    /// When unset (pass 1, or single-pass renders without target refs),
+    /// those variants substitute fixed-width placeholders to keep line
+    /// breaking roughly stable across the two passes.
+    pub fn with_anchor_map(self, map: crate::gcpm::target_ref::AnchorMap) -> Self {
+        *self.anchor_map.borrow_mut() = Some(map);
+        self
     }
 
     /// Enable per-node counter snapshot recording. Required when a
@@ -1835,10 +1854,14 @@ impl CounterPass {
         // Resolve ::before now (before child traversal)
         if let Some(ref cid) = attr_value {
             use std::fmt::Write;
+            let element_href = doc
+                .get_node(node_id)
+                .and_then(|n| n.element_data())
+                .and_then(|e| get_attr(e, "href").map(str::to_owned));
             let mut css = self.generated_css.borrow_mut();
             for idx in &before_indices {
                 let mapping = &self.content_mappings[*idx];
-                let resolved = self.resolve_content(&mapping.content);
+                let resolved = self.resolve_content(&mapping.content, element_href.as_deref());
                 let _ = write!(
                     css,
                     "[data-fulgur-cid=\"{}\"]::before{{content:\"{}\"}}",
@@ -1860,10 +1883,14 @@ impl CounterPass {
         // Resolve ::after now (after child traversal, sees descendant counter changes)
         if let Some(ref cid) = attr_value {
             use std::fmt::Write;
+            let element_href = doc
+                .get_node(node_id)
+                .and_then(|n| n.element_data())
+                .and_then(|e| get_attr(e, "href").map(str::to_owned));
             let mut css = self.generated_css.borrow_mut();
             for idx in &after_indices {
                 let mapping = &self.content_mappings[*idx];
-                let resolved = self.resolve_content(&mapping.content);
+                let resolved = self.resolve_content(&mapping.content, element_href.as_deref());
                 let _ = write!(
                     css,
                     "[data-fulgur-cid=\"{}\"]::after{{content:\"{}\"}}",
@@ -1883,8 +1910,9 @@ impl CounterPass {
         self.state.borrow_mut().leave_element(node_id);
     }
 
-    fn resolve_content(&self, items: &[ContentItem]) -> String {
+    fn resolve_content(&self, items: &[ContentItem], element_href: Option<&str>) -> String {
         let state = self.state.borrow();
+        let anchor = self.anchor_map.borrow();
         let mut out = String::new();
         for item in items {
             match item {
@@ -1900,6 +1928,65 @@ impl CounterPass {
                 } => {
                     let chain = state.chain(name);
                     out.push_str(&format_counter_chain(&chain, separator, *style));
+                }
+                ContentItem::TargetCounter {
+                    url_attr,
+                    counter_name,
+                    style,
+                } => {
+                    if url_attr != "href" {
+                        continue;
+                    }
+                    let href = element_href.unwrap_or("");
+                    match anchor.as_ref() {
+                        Some(map) => {
+                            out.push_str(&crate::gcpm::target_ref::resolve_target_counter(
+                                href,
+                                counter_name,
+                                *style,
+                                map,
+                            ))
+                        }
+                        // Pass-1 placeholder: 2-char fixed-width substitution
+                        // keeps line-breaking roughly stable across passes.
+                        None => out.push_str("00"),
+                    }
+                }
+                ContentItem::TargetCounters {
+                    url_attr,
+                    counter_name,
+                    separator,
+                    style,
+                } => {
+                    if url_attr != "href" {
+                        continue;
+                    }
+                    let href = element_href.unwrap_or("");
+                    match anchor.as_ref() {
+                        Some(map) => {
+                            out.push_str(&crate::gcpm::target_ref::resolve_target_counters(
+                                href,
+                                counter_name,
+                                separator,
+                                *style,
+                                map,
+                            ))
+                        }
+                        None => out.push_str("00"),
+                    }
+                }
+                ContentItem::TargetText { url_attr } => {
+                    if url_attr != "href" {
+                        continue;
+                    }
+                    let href = element_href.unwrap_or("");
+                    match anchor.as_ref() {
+                        Some(map) => {
+                            out.push_str(&crate::gcpm::target_ref::resolve_target_text(href, map))
+                        }
+                        // Pass-1 placeholder for text: a single space.
+                        None => out.push(' '),
+                    }
                 }
                 _ => {}
             }
@@ -3409,6 +3496,48 @@ mod tests {
             "leave_element regression: outer counter at third top-level li \
              should be `3.`, not `3.1.` (got: {css})"
         );
+    }
+
+    /// `target-counter(attr(href), <name>)` inside `::after` content must
+    /// resolve against the supplied `AnchorMap`. Pass-1 (no map) emits the
+    /// "00" placeholder; pass-2 (with map) emits the actual counter value.
+    #[test]
+    fn counter_pass_resolves_target_counter_with_anchor_map() {
+        use crate::gcpm::target_ref::{AnchorEntry, AnchorMap};
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterStyle, ParsedSelector, PseudoElement,
+        };
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let mut anchor = AnchorMap::new();
+        let mut counters = BTreeMap::new();
+        counters.insert("page".into(), vec![3]);
+        anchor.insert(
+            "sec1",
+            AnchorEntry {
+                page_num: 3,
+                counters,
+                text: String::new(),
+            },
+        );
+
+        let pass = CounterPass::new(Vec::new(), mappings).with_anchor_map(anchor);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("\"3\""), "CSS = {css}");
     }
 
     /// Covers `BookmarkPass::resolve_label`'s `Counters` arm. A single
