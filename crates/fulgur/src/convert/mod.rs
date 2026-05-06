@@ -338,11 +338,37 @@ pub(super) fn convert_node(
     if depth >= MAX_DOM_DEPTH {
         return;
     }
-    let before = collect_drawables_node_ids(out);
+    // Only `record_transform` consumes `before`, and `record_transform`
+    // is a no-op for any node without a CSS transform. Snapshotting
+    // every drawables map for every walked node was the dominant
+    // O(N²) cost in document-grade documents (each `convert_node` call
+    // copying every NodeId already inserted, summing to ~N²/2 inserts
+    // for N nodes). Gate the snapshot on the transform check so the
+    // common case stays O(N). (fulgur-v1cm)
+    let before = node_has_transform(doc, node_id).then(|| collect_drawables_node_ids(out));
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
     convert_multicol_paragraph_slices(doc, node_id, ctx, out);
-    record_transform(doc, node_id, &before, out);
+    if let Some(before) = before {
+        record_transform(doc, node_id, &before, out);
+    }
+}
+
+/// Cheap pre-check that mirrors `record_transform`'s own bail conditions:
+/// returns true only when this node would actually need a snapshot to
+/// compute its transform descendants. Computing the matrix here costs
+/// the same as `record_transform` would (and is bypassed by the early
+/// `return`s in nodes without a `<style transform>`), but it keeps the
+/// branch-free invariant that `record_transform`'s snapshot consumer
+/// only fires for nodes that produce a `TransformEntry`.
+fn node_has_transform(doc: &BaseDocument, node_id: usize) -> bool {
+    doc.get_node(node_id)
+        .and_then(|node| {
+            let styles = node.primary_styles()?;
+            let (w, h) = size_in_pt(node.final_layout.size);
+            crate::blitz_adapter::compute_transform(&styles, w, h)
+        })
+        .is_some()
 }
 
 /// Walk the DOM top-down from `<body>` and populate `out.semantics`
