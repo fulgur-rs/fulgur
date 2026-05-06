@@ -320,6 +320,19 @@ pub enum ContentItem {
     TargetText { url_attr: String },
 }
 
+impl ContentItem {
+    /// Returns true if this item is a `target-counter` / `target-counters`
+    /// / `target-text` reference. Used to gate fulgur's 2-pass render.
+    pub fn is_target_reference(&self) -> bool {
+        matches!(
+            self,
+            ContentItem::TargetCounter { .. }
+                | ContentItem::TargetCounters { .. }
+                | ContentItem::TargetText { .. }
+        )
+    }
+}
+
 /// Counter display styles (CSS `list-style-type` subset for counters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CounterStyle {
@@ -413,6 +426,19 @@ impl GcpmContext {
             }
             self.cleaned_css.push_str(&other.cleaned_css);
         }
+    }
+
+    /// Returns true if any margin-box rule, content-counter mapping,
+    /// or string-set value contains a `target-*` item. Triggers the
+    /// 2-pass pipeline; otherwise the single-pass fast path runs.
+    pub fn has_target_references(&self) -> bool {
+        self.margin_boxes
+            .iter()
+            .any(|r| r.content.iter().any(ContentItem::is_target_reference))
+            || self
+                .content_counter_mappings
+                .iter()
+                .any(|m| m.content.iter().any(ContentItem::is_target_reference))
     }
 }
 
@@ -579,5 +605,36 @@ mod content_item_target_tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn gcpm_context_target_detection() {
+        let mut ctx = GcpmContext::default();
+        assert!(!ctx.has_target_references());
+        ctx.content_counter_mappings.push(ContentCounterMapping {
+            parsed: ParsedSelector::Tag("a".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![ContentItem::TargetCounter {
+                url_attr: "href".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            }],
+        });
+        assert!(ctx.has_target_references());
+    }
+
+    #[test]
+    fn gcpm_context_target_detection_via_margin_box() {
+        let mut ctx = GcpmContext::default();
+        assert!(!ctx.has_target_references());
+        ctx.margin_boxes.push(MarginBoxRule {
+            page_selector: None,
+            position: MarginBoxPosition::TopCenter,
+            content: vec![ContentItem::TargetText {
+                url_attr: "href".into(),
+            }],
+            declarations: String::new(),
+        });
+        assert!(ctx.has_target_references());
     }
 }
