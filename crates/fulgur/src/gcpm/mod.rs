@@ -257,6 +257,18 @@ pub enum ContentItem {
         /// Display style.
         style: CounterStyle,
     },
+    /// A nested counter reference, e.g. `counters(section, ".")` or
+    /// `counters(section, ".", upper-roman)`. Resolves to all active
+    /// counter instances joined by the separator (CSS Lists 3 §4.5).
+    Counters {
+        /// Counter name. Built-ins (`page`, `pages`) fall back to a
+        /// single-value chain at margin-box resolve time.
+        name: String,
+        /// Separator string inserted between consecutive instance values.
+        separator: String,
+        /// Display style applied to every value in the chain.
+        style: CounterStyle,
+    },
     /// A literal string, e.g. `"Page "`.
     String(String),
     /// A named string reference, e.g. `string(chapter-title, first)`.

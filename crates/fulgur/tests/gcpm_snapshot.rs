@@ -513,3 +513,43 @@ fn gcpm_string_set_with_policies_snapshot() {
 
     check_snapshot("gcpm_string_set_with_policies", &pdf);
 }
+
+/// fulgur-vsv: nested `<ol>` with `counters(item, ".")` in `li::before`.
+/// Verifies the spec-compliant CSS Lists 3 §4.5 scope tracking — chains
+/// `1.`, `2.`, `2.1.`, `2.2.`, `3.` should appear in the PDF text
+/// stream. The test guards against `leave_element` regressions: if the
+/// inner ol's instance leaks to the outer scope after returning, the
+/// third top-level `<li>` would render `3.1.` and the snapshot bytes
+/// would diverge.
+#[test]
+fn gcpm_counters_function_nested_ol_snapshot() {
+    let html = r#"<!doctype html>
+<html>
+<head><style>
+ol { counter-reset: item; padding: 0; margin: 0; list-style: none; }
+li { counter-increment: item; }
+li::before { content: counters(item, ".") ". "; }
+</style></head>
+<body>
+<ol>
+  <li>Alpha</li>
+  <li>Beta
+    <ol>
+      <li>Beta-one</li>
+      <li>Beta-two</li>
+    </ol>
+  </li>
+  <li>Gamma</li>
+</ol>
+</body>
+</html>"#;
+
+    let pdf = Engine::builder()
+        .assets(noto_assets())
+        .serialize_settings(snapshot_settings())
+        .build()
+        .render_html(html)
+        .expect("render");
+
+    check_snapshot("gcpm_counters_function_nested_ol", &pdf);
+}

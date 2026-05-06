@@ -38,6 +38,17 @@ pub fn resolve_content_to_string(
             // have no referent, so they emit nothing.
             // `leader()` produces a fill character at render time, not a
             // plain string; emit nothing in string-resolution context.
+            ContentItem::Counters {
+                name,
+                separator: _,
+                style,
+            } => out.push_str(&resolve_counters_margin_box(
+                name,
+                *style,
+                page,
+                total_pages,
+                custom_counters,
+            )),
             ContentItem::ContentText
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
@@ -102,6 +113,17 @@ pub fn resolve_content_to_html(
                         push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
                     }
                 }
+                ContentItem::Counters {
+                    name,
+                    separator: _,
+                    style,
+                } => out.push_str(&resolve_counters_margin_box(
+                    name,
+                    *style,
+                    page_num,
+                    total_pages,
+                    custom_counters,
+                )),
                 ContentItem::ContentText
                 | ContentItem::ContentBefore
                 | ContentItem::ContentAfter
@@ -159,6 +181,17 @@ pub fn resolve_content_to_html(
                             );
                         }
                     }
+                    ContentItem::Counters {
+                        name,
+                        separator: _,
+                        style,
+                    } => inner.push_str(&resolve_counters_margin_box(
+                        name,
+                        *style,
+                        page_num,
+                        total_pages,
+                        custom_counters,
+                    )),
                     _ => {}
                 }
                 if !inner.is_empty() {
@@ -265,6 +298,44 @@ pub fn resolve_element_policy<'a>(
     None
 }
 
+/// Format a list of counter values according to the given
+/// [`CounterStyle`] and join them by `separator`. Returns an empty
+/// string when `values` is empty.
+pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle) -> String {
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push_str(separator);
+        }
+        out.push_str(&format_counter(*v, style));
+    }
+    out
+}
+
+/// Resolve a `counters(name, sep, style)` reference in a margin-box
+/// context where there is no DOM tree and only flat per-page counter
+/// snapshots are available. Built-in `page` / `pages` use the page
+/// scalars; custom names degrade to a single-value chain (equivalent
+/// to `counter()`) because `custom_counters` only holds innermost
+/// values. The separator is unused — single-element chains have
+/// nowhere to insert it.
+fn resolve_counters_margin_box(
+    name: &str,
+    style: CounterStyle,
+    page: usize,
+    total_pages: usize,
+    custom_counters: &BTreeMap<String, i32>,
+) -> String {
+    match name {
+        "page" => format_counter(page as i32, style),
+        "pages" => format_counter(total_pages as i32, style),
+        _ => custom_counters
+            .get(name)
+            .map(|v| format_counter(*v, style))
+            .unwrap_or_default(),
+    }
+}
+
 /// Format a counter value according to the given [`CounterStyle`].
 pub fn format_counter(value: i32, style: CounterStyle) -> String {
     match style {
@@ -325,13 +396,33 @@ fn to_alpha(value: i32, base: u8) -> Option<String> {
     Some(chars.into_iter().collect())
 }
 
+/// Sentinel `parent_id` for instances created via the legacy flat API
+/// (`reset` / `increment` / `set`) and for implicit-root instances
+/// created when `*_in_scope` is called without a prior reset.
+/// `usize::MAX` is unreachable as a real DOM node id because Blitz's
+/// node ids are dense low integers, so `leave_element(usize::MAX)`
+/// will never accidentally match.
+pub const COUNTER_ROOT_PARENT: usize = usize::MAX;
+
+/// A single counter instance: a value scoped to the originating
+/// element's parent's subtree (CSS Lists 3 §4.5).
+#[derive(Debug, Clone)]
+struct CounterInstance {
+    /// Parent node id of the element that pushed this instance.
+    /// `leave_element(X)` pops while top.parent_id == X.
+    parent_id: usize,
+    value: i32,
+}
+
 /// Tracks CSS counter values during DOM traversal.
 ///
-/// Simplified model (no `counters()` nesting): a flat map where
-/// `counter-reset` overwrites any existing value.
+/// Internally stores a stack of instances per name (CSS Lists 3 scope:
+/// element + descendants + following siblings + their descendants).
+/// `counter()` returns the innermost (top of stack) value;
+/// `counters()` joins all values from outermost to innermost.
 #[derive(Debug, Clone, Default)]
 pub struct CounterState {
-    values: BTreeMap<String, i32>,
+    stacks: BTreeMap<String, Vec<CounterInstance>>,
 }
 
 impl CounterState {
@@ -339,26 +430,121 @@ impl CounterState {
         Self::default()
     }
 
+    // ----- Legacy flat API (no scope tracking) -----
+
+    /// Reset (or create) a counter at the implicit-root scope.
+    /// Used by `pagination_layout::collect_counter_states` which
+    /// reuses one `CounterState` across all pages and never calls
+    /// `leave_element`. Therefore this overwrites the existing root
+    /// instance rather than pushing — preserving the old flat-map
+    /// `BTreeMap::insert` semantics and preventing unbounded stack
+    /// growth across pages.
     pub fn reset(&mut self, name: &str, value: i32) {
-        self.values.insert(name.to_string(), value);
+        let stack = self.stacks.entry(name.to_string()).or_default();
+        if let Some(top) = stack.last_mut() {
+            if top.parent_id == COUNTER_ROOT_PARENT {
+                top.value = value;
+                return;
+            }
+        }
+        stack.push(CounterInstance {
+            parent_id: COUNTER_ROOT_PARENT,
+            value,
+        });
     }
 
     pub fn increment(&mut self, name: &str, value: i32) {
-        let entry = self.values.entry(name.to_string()).or_insert(0);
-        *entry += value;
+        self.increment_in_scope(name, value, COUNTER_ROOT_PARENT);
     }
 
     pub fn set(&mut self, name: &str, value: i32) {
-        self.values.insert(name.to_string(), value);
+        self.set_in_scope(name, value, COUNTER_ROOT_PARENT);
     }
 
+    /// Innermost active value for `name`, or 0 if none.
     pub fn get(&self, name: &str) -> i32 {
-        self.values.get(name).copied().unwrap_or(0)
+        self.stacks
+            .get(name)
+            .and_then(|s| s.last())
+            .map(|i| i.value)
+            .unwrap_or(0)
     }
 
-    /// Return a snapshot of all counter values.
+    /// Flat snapshot mapping each name to its innermost value.
+    /// Used by margin-box rendering via `collect_counter_states`.
     pub fn snapshot(&self) -> BTreeMap<String, i32> {
-        self.values.clone()
+        self.stacks
+            .iter()
+            .filter_map(|(k, v)| v.last().map(|i| (k.clone(), i.value)))
+            .collect()
+    }
+
+    // ----- Scope-aware API (used by CounterPass) -----
+
+    /// Push a new counter instance scoped to `parent_id`'s subtree.
+    pub fn reset_in_scope(&mut self, name: &str, value: i32, parent_id: usize) {
+        self.stacks
+            .entry(name.to_string())
+            .or_default()
+            .push(CounterInstance { parent_id, value });
+    }
+
+    /// Increment the innermost active instance of `name`. If no
+    /// instance exists, create an implicit-root instance and apply
+    /// the increment (CSS Lists 3: implicit root reset).
+    pub fn increment_in_scope(&mut self, name: &str, value: i32, _parent_id: usize) {
+        let stack = self.stacks.entry(name.to_string()).or_default();
+        if let Some(top) = stack.last_mut() {
+            top.value += value;
+        } else {
+            stack.push(CounterInstance {
+                parent_id: COUNTER_ROOT_PARENT,
+                value,
+            });
+        }
+    }
+
+    /// Set the innermost active instance of `name` to `value`. If no
+    /// instance exists, create an implicit-root one at `value`.
+    pub fn set_in_scope(&mut self, name: &str, value: i32, _parent_id: usize) {
+        let stack = self.stacks.entry(name.to_string()).or_default();
+        if let Some(top) = stack.last_mut() {
+            top.value = value;
+        } else {
+            stack.push(CounterInstance {
+                parent_id: COUNTER_ROOT_PARENT,
+                value,
+            });
+        }
+    }
+
+    /// Pop instances created by direct children of `node_id`. Call in
+    /// post-order (after recursing into a node's children, when the
+    /// node itself is about to return to its parent).
+    pub fn leave_element(&mut self, node_id: usize) {
+        for stack in self.stacks.values_mut() {
+            while stack.last().is_some_and(|i| i.parent_id == node_id) {
+                stack.pop();
+            }
+        }
+    }
+
+    /// Chain of values for `name`, from outermost to innermost.
+    /// Empty if no instance exists.
+    pub fn chain(&self, name: &str) -> Vec<i32> {
+        self.stacks
+            .get(name)
+            .map(|s| s.iter().map(|i| i.value).collect())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot of every counter's full chain (outer→inner). Used by
+    /// `CounterPass::take_node_snapshots` for `BookmarkPass`.
+    pub fn chain_snapshot(&self) -> BTreeMap<String, Vec<i32>> {
+        self.stacks
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().map(|i| i.value).collect()))
+            .collect()
     }
 }
 
@@ -1240,5 +1426,203 @@ mod tests {
 
         assert!(!html.contains("display:flex"), "unexpected flex: {html}");
         assert_eq!(html, "", "expected empty output, got: {html}");
+    }
+
+    #[test]
+    fn test_counter_state_in_scope_basic() {
+        let mut s = CounterState::new();
+        s.reset_in_scope("section", 0, 1); // E (parent=1) creates instance
+        s.increment_in_scope("section", 1, 1);
+        assert_eq!(s.get("section"), 1);
+        assert_eq!(s.chain("section"), vec![1]);
+    }
+
+    #[test]
+    fn test_counter_state_nested_chain() {
+        // Stack model: parent_id is the parent of the resetting element.
+        let mut s = CounterState::new();
+        s.reset_in_scope("item", 0, 1); // ol#2's reset: parent=1
+        s.increment_in_scope("item", 1, 2); // li#3's increment, target=top
+        s.reset_in_scope("item", 0, 3); // ol#4's reset: parent=3
+        s.increment_in_scope("item", 1, 4); // li#5's increment, target=top
+        assert_eq!(s.get("item"), 1);
+        assert_eq!(s.chain("item"), vec![1, 1]);
+    }
+
+    #[test]
+    fn test_counter_state_leave_element_pops_children() {
+        let mut s = CounterState::new();
+        s.reset_in_scope("item", 0, 1); // pushed by element whose parent is 1
+        s.reset_in_scope("item", 0, 2); // pushed by element whose parent is 2
+        assert_eq!(s.chain("item"), vec![0, 0]);
+        s.leave_element(2); // children of 2 popped
+        assert_eq!(s.chain("item"), vec![0]);
+        s.leave_element(1); // children of 1 popped
+        assert_eq!(s.chain("item"), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_counter_state_increment_without_reset_implicit_root() {
+        // CSS spec: counter-increment on a counter not in scope creates an
+        // implicit root counter at value 0 then applies the increment.
+        let mut s = CounterState::new();
+        s.increment_in_scope("foo", 5, 42);
+        assert_eq!(s.get("foo"), 5);
+        assert_eq!(s.chain("foo"), vec![5]);
+        // The implicit root instance lives forever — leave_element on the
+        // recorded parent never pops it (sentinel value differs).
+        s.leave_element(42);
+        assert_eq!(s.chain("foo"), vec![5]);
+    }
+
+    #[test]
+    fn test_counter_state_existing_api_backwards_compatible() {
+        // Public flat API (used by collect_counter_states) must keep working.
+        let mut s = CounterState::new();
+        s.reset("page", 0);
+        s.increment("page", 1);
+        assert_eq!(s.get("page"), 1);
+        let snap = s.snapshot();
+        assert_eq!(snap.get("page"), Some(&1));
+    }
+
+    #[test]
+    fn test_counter_state_legacy_reset_does_not_grow_stack() {
+        // Regression: collect_counter_states reuses one CounterState across
+        // all pages and applies counter-reset on every page. Legacy `reset`
+        // must overwrite the root instance, not push — otherwise chain_snapshot
+        // grows O(pages).
+        let mut s = CounterState::new();
+        s.reset("page", 0);
+        s.reset("page", 0);
+        s.reset("page", 0);
+        assert_eq!(s.chain("page"), vec![0]);
+    }
+
+    #[test]
+    fn test_counter_state_chain_snapshot() {
+        let mut s = CounterState::new();
+        s.reset_in_scope("item", 0, 1);
+        s.increment_in_scope("item", 1, 1);
+        s.reset_in_scope("item", 0, 2);
+        s.increment_in_scope("item", 2, 2);
+        let chain_snap = s.chain_snapshot();
+        assert_eq!(chain_snap.get("item"), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn test_format_counter_chain_basic() {
+        assert_eq!(
+            format_counter_chain(&[1, 2, 3], ".", CounterStyle::Decimal),
+            "1.2.3"
+        );
+        assert_eq!(format_counter_chain(&[], ".", CounterStyle::Decimal), "");
+        assert_eq!(format_counter_chain(&[5], ".", CounterStyle::Decimal), "5");
+    }
+
+    #[test]
+    fn test_format_counter_chain_with_style() {
+        assert_eq!(
+            format_counter_chain(&[1, 4, 9], "-", CounterStyle::UpperRoman),
+            "I-IV-IX"
+        );
+    }
+
+    #[test]
+    fn test_resolve_counters_in_margin_box_falls_back_to_single() {
+        // Margin-box `counters()` only sees flat custom_counters; the
+        // resolver degrades to single-value chain (equivalent to counter()).
+        let items = vec![ContentItem::Counters {
+            name: "chapter".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 7);
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &custom),
+            "7"
+        );
+    }
+
+    #[test]
+    fn test_resolve_counters_margin_box_page_and_pages() {
+        // Built-in `page` / `pages` route through the page-scalar branch,
+        // bypassing custom_counters entirely.
+        let page_item = vec![ContentItem::Counters {
+            name: "page".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let pages_item = vec![ContentItem::Counters {
+            name: "pages".into(),
+            separator: ".".into(),
+            style: CounterStyle::UpperRoman,
+        }];
+        assert_eq!(
+            resolve_content_to_string(&page_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            "5"
+        );
+        assert_eq!(
+            resolve_content_to_string(&pages_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            "XII"
+        );
+    }
+
+    #[test]
+    fn test_set_in_scope_without_reset_creates_implicit_root() {
+        // Like increment_in_scope, set_in_scope on an empty stack creates
+        // an implicit-root instance at the given value.
+        let mut s = CounterState::new();
+        s.set_in_scope("foo", 9, 42);
+        assert_eq!(s.get("foo"), 9);
+        assert_eq!(s.chain("foo"), vec![9]);
+        // Implicit-root instance survives leave_element on the recorded
+        // parent — the sentinel parent_id (COUNTER_ROOT_PARENT) never
+        // matches a real node id.
+        s.leave_element(42);
+        assert_eq!(s.chain("foo"), vec![9]);
+    }
+
+    #[test]
+    fn test_resolve_counters_in_html_flat_mode() {
+        // Covers the resolve_content_to_html flat-mode Counters arm
+        // (no leader present → flat mode is selected).
+        let items = vec![ContentItem::Counters {
+            name: "chapter".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 3);
+        let store = RunningElementStore::new();
+        let result =
+            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        assert_eq!(result, "3");
+    }
+
+    #[test]
+    fn test_resolve_counters_in_html_flex_mode_with_leader() {
+        // A Leader item triggers flex mode in resolve_content_to_html.
+        // The Counters value is wrapped in <span> like Counter is.
+        let items = vec![
+            ContentItem::Counters {
+                name: "chapter".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 7);
+        let store = RunningElementStore::new();
+        let result =
+            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        assert!(
+            result.contains("<span>7</span>"),
+            "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
+        );
     }
 }

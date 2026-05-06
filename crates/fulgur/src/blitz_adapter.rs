@@ -1411,7 +1411,7 @@ impl DomPass for InjectCssPass {
 }
 
 use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
-use crate::gcpm::counter::{CounterState, format_counter};
+use crate::gcpm::counter::{CounterState, format_counter, format_counter_chain};
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
 use crate::gcpm::{
@@ -1640,7 +1640,7 @@ pub struct CounterPass {
     /// to resolve `counter()` inside `bookmark-label`. Only populated when
     /// `record_node_snapshots` is enabled (the default is off, since most
     /// renders do not use `bookmark-label`).
-    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, i32>>>,
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, Vec<i32>>>>,
     /// Gate for `node_snapshots`: the per-element snapshot clones the
     /// counter map and is only useful when a downstream `BookmarkPass`
     /// will consume it. Engine flips this on via
@@ -1688,7 +1688,7 @@ impl CounterPass {
     /// no counter / content mappings (the early-return path), or if
     /// snapshot recording was not enabled via [`with_snapshot_recording`].
     /// Subsequent calls return an empty map (the snapshot is moved out).
-    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, i32>> {
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, Vec<i32>>> {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 
@@ -1762,14 +1762,30 @@ impl CounterPass {
             return;
         };
 
-        // Phase 2: Apply counter state changes (no doc borrow needed)
+        // Phase 2: Apply counter state changes (no doc borrow needed).
+        // CSS Lists 3 §4.5: a counter instance created by `counter-reset`
+        // is scoped to the originating element + its descendants +
+        // following siblings. We model that by tagging the instance with
+        // the originating element's *DOM parent*, then popping all
+        // instances tagged with `node_id` in a post-order `leave_element`
+        // call (see end of this function). Increment/set never push a
+        // new instance, so their parent_id is unused — we still pass it
+        // for API symmetry.
         if !matched_ops.is_empty() {
+            let parent_id = doc
+                .get_node(node_id)
+                .and_then(|n| n.parent)
+                .unwrap_or(crate::gcpm::counter::COUNTER_ROOT_PARENT);
             let mut state = self.state.borrow_mut();
             for op in &matched_ops {
                 match op {
-                    CounterOp::Reset { name, value } => state.reset(name, *value),
-                    CounterOp::Increment { name, value } => state.increment(name, *value),
-                    CounterOp::Set { name, value } => state.set(name, *value),
+                    CounterOp::Reset { name, value } => {
+                        state.reset_in_scope(name, *value, parent_id)
+                    }
+                    CounterOp::Increment { name, value } => {
+                        state.increment_in_scope(name, *value, parent_id)
+                    }
+                    CounterOp::Set { name, value } => state.set_in_scope(name, *value, parent_id),
                 }
             }
             drop(state);
@@ -1787,7 +1803,7 @@ impl CounterPass {
         if self.record_node_snapshots {
             self.node_snapshots
                 .borrow_mut()
-                .insert(node_id, self.state.borrow().snapshot());
+                .insert(node_id, self.state.borrow().chain_snapshot());
         }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
@@ -1856,6 +1872,15 @@ impl CounterPass {
                 );
             }
         }
+
+        // Post-order: pop instances created by this node's children. Per
+        // CSS Lists 3 §4.5, an instance's scope is the originating
+        // element + descendants + following siblings. Instances pushed
+        // by children of `node_id` are scoped to `node_id`'s subtree, so
+        // they must die now (we are returning from `node_id`). Placed
+        // after the ::after resolution so descendant counter state is
+        // still visible to `::after`'s `counter()` lookup.
+        self.state.borrow_mut().leave_element(node_id);
     }
 
     fn resolve_content(&self, items: &[ContentItem]) -> String {
@@ -1867,6 +1892,14 @@ impl CounterPass {
                 ContentItem::Counter { name, style } => {
                     let value = state.get(name);
                     out.push_str(&format_counter(value, *style));
+                }
+                ContentItem::Counters {
+                    name,
+                    separator,
+                    style,
+                } => {
+                    let chain = state.chain(name);
+                    out.push_str(&format_counter_chain(&chain, separator, *style));
                 }
                 _ => {}
             }
@@ -1916,9 +1949,11 @@ pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
     /// Per-node counter-state snapshots produced by `CounterPass`.
+    /// Each value is the full nesting chain (outer-to-inner) per CSS
+    /// Lists 3 §4.5; `counter()` takes the innermost (`last()`) value.
     /// Empty map ⇒ `counter()` resolves to 0 (CSS spec: undefined
     /// counter is 0).
-    counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+    counter_snapshots: BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
     /// Per-node named-string snapshots produced by `StringSetPass`.
     /// Empty map ⇒ `string()` resolves to "" (no string ever set).
     string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
@@ -1943,7 +1978,7 @@ impl BookmarkPass {
     /// matching CSS GCPM resolution timing for `bookmark-label`.
     pub fn new_with_snapshots(
         mappings: Vec<BookmarkMapping>,
-        counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+        counter_snapshots: BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
         string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
     ) -> Self {
         Self {
@@ -2094,7 +2129,7 @@ fn resolve_label(
     doc: &HtmlDocument,
     node_id: usize,
     elem: &blitz_dom::node::ElementData,
-    counter_snapshot: Option<&BTreeMap<String, i32>>,
+    counter_snapshot: Option<&BTreeMap<String, Vec<i32>>>,
     string_snapshot: Option<&BTreeMap<String, String>>,
 ) -> String {
     let mut out = String::new();
@@ -2112,9 +2147,18 @@ fn resolve_label(
             ContentItem::Counter { name, style } => {
                 let value = counter_snapshot
                     .and_then(|s| s.get(name))
-                    .copied()
+                    .and_then(|chain| chain.last().copied())
                     .unwrap_or(0);
                 out.push_str(&format_counter(value, *style));
+            }
+            ContentItem::Counters {
+                name,
+                separator,
+                style,
+            } => {
+                if let Some(chain) = counter_snapshot.and_then(|s| s.get(name)) {
+                    out.push_str(&format_counter_chain(chain, separator, *style));
+                }
             }
             ContentItem::StringRef { name, .. } => {
                 if let Some(v) = string_snapshot.and_then(|s| s.get(name)) {
@@ -3182,8 +3226,8 @@ mod tests {
         assert_eq!(h1_ids.len(), 2);
         let a = snapshots.get(&h1_ids[0]).expect("snapshot at first h1");
         let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
-        assert_eq!(a.get("chapter").copied(), Some(1));
-        assert_eq!(b.get("chapter").copied(), Some(2));
+        assert_eq!(a.get("chapter"), Some(&vec![1]));
+        assert_eq!(b.get("chapter"), Some(&vec![2]));
     }
 
     #[test]
@@ -3207,6 +3251,211 @@ mod tests {
             pass.take_node_snapshots().is_empty(),
             "snapshot map must be empty when recording is disabled"
         );
+    }
+
+    #[test]
+    fn counter_pass_nested_reset_records_chain_snapshot() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // Outer ol resets `item`. Inner ol nested under outer's first li
+        // resets `item` again — at that scope chain is length 2.
+        let html = r#"<html><body>
+            <ol><li><ol><li id="inner">Inner</li></ol></li></ol>
+        </body></html>"#;
+        let mappings = vec![
+            CounterMapping {
+                parsed: ParsedSelector::Tag("ol".into()),
+                ops: vec![CounterOp::Reset {
+                    name: "item".into(),
+                    value: 0,
+                }],
+            },
+            CounterMapping {
+                parsed: ParsedSelector::Tag("li".into()),
+                ops: vec![CounterOp::Increment {
+                    name: "item".into(),
+                    value: 1,
+                }],
+            },
+        ];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        fn find_inner_li(doc: &HtmlDocument, id: usize, ol_depth: usize) -> Option<usize> {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "li" && ol_depth >= 2 {
+                        return Some(id);
+                    }
+                }
+                let next_depth = node
+                    .element_data()
+                    .map(|el| {
+                        if el.name.local.as_ref() == "ol" {
+                            ol_depth + 1
+                        } else {
+                            ol_depth
+                        }
+                    })
+                    .unwrap_or(ol_depth);
+                for &c in &node.children {
+                    if let Some(found) = find_inner_li(doc, c, next_depth) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        let inner_id = find_inner_li(&doc, doc.root_element().id, 0).expect("inner li");
+        let snap = snapshots.get(&inner_id).expect("snapshot at inner li");
+        let chain = snap.get("item").expect("item chain at inner li");
+        assert_eq!(
+            chain.len(),
+            2,
+            "nested counter-reset must yield chain of length 2, got {chain:?}"
+        );
+        // Both outer-li and inner-li have been incremented once; snapshot
+        // is taken at inner-li after its own ops, so chain == [1, 1].
+        assert_eq!(chain, &vec![1, 1]);
+    }
+
+    /// Snapshot test for the spec-compliant `counters()` resolution: a
+    /// nested `<ol>` with `counters(item, ".") ". "` in `li::before`
+    /// must produce one CSS rule per matched `<li>` whose resolved
+    /// `content:"…"` contains exactly the expected chain markers.
+    /// Asserts on `CounterPass::generated_css` — fully deterministic
+    /// (no PDF rendering, no font/CMap dependency), unlike PDF text
+    /// extraction which cannot decode krilla's ToUnicode CMap.
+    #[test]
+    fn counter_pass_resolves_counters_function() {
+        use crate::gcpm::{
+            ContentCounterMapping, CounterMapping, CounterOp, CounterStyle, ParsedSelector,
+            PseudoElement,
+        };
+
+        let html = r#"<html><body>
+            <ol>
+              <li>Alpha</li>
+              <li>Beta
+                <ol>
+                  <li>Beta-one</li>
+                  <li>Beta-two</li>
+                </ol>
+              </li>
+              <li>Gamma</li>
+            </ol>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let counter_mappings = vec![
+            CounterMapping {
+                parsed: ParsedSelector::Tag("ol".into()),
+                ops: vec![CounterOp::Reset {
+                    name: "item".into(),
+                    value: 0,
+                }],
+            },
+            CounterMapping {
+                parsed: ParsedSelector::Tag("li".into()),
+                ops: vec![CounterOp::Increment {
+                    name: "item".into(),
+                    value: 1,
+                }],
+            },
+        ];
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Tag("li".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![
+                crate::gcpm::ContentItem::Counters {
+                    name: "item".into(),
+                    separator: ".".into(),
+                    style: CounterStyle::Decimal,
+                },
+                crate::gcpm::ContentItem::String(". ".into()),
+            ],
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // Five li::before rules. Order in `generated_css` mirrors DOM
+        // traversal: outer 1 → outer 2 (Beta) → inner 2.1 → inner 2.2 →
+        // outer 3. After leaving the inner ol, `leave_element(inner-ol)`
+        // pops the inner-ol instance, so the third top-level li reads
+        // chain `[3]` — emitted as `3.`, NOT `3.1.` (regression marker).
+        for needle in [
+            "content:\"1. \"",
+            "content:\"2. \"",
+            "content:\"2.1. \"",
+            "content:\"2.2. \"",
+            "content:\"3. \"",
+        ] {
+            assert!(
+                css.contains(needle),
+                "expected {needle:?} in generated CSS, got: {css}"
+            );
+        }
+        assert!(
+            !css.contains("content:\"3.1. \""),
+            "leave_element regression: outer counter at third top-level li \
+             should be `3.`, not `3.1.` (got: {css})"
+        );
+    }
+
+    /// Covers `BookmarkPass::resolve_label`'s `Counters` arm. A single
+    /// `bookmark-label: counters(section, ".")` rule against a chain
+    /// snapshot of `[1, 2]` must resolve to `"1.2"`. Empty / missing
+    /// chains resolve to `""` (CSS Lists 3 §3.3).
+    #[test]
+    fn bookmark_pass_resolves_counters_with_chain_snapshot() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        let html = r#"<html><body><h1 id="t">Title</h1></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        return Some(id);
+                    }
+                }
+                for &c in &node.children {
+                    if let Some(found) = find_h1(doc, c) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let h1_id = find_h1(&doc, doc.root_element().id).expect("h1 node");
+
+        let mut counter_snapshots = BTreeMap::new();
+        let mut chain_for_h1 = BTreeMap::new();
+        chain_for_h1.insert("section".to_string(), vec![1, 2]);
+        counter_snapshots.insert(h1_id, chain_for_h1);
+
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::Counters {
+                name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            }]),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "1.2");
     }
 
     #[test]
@@ -4325,7 +4574,7 @@ li::marker { content: url("star.png"); }
 
         let mut counter_snap = BTreeMap::new();
         let mut h1_state = BTreeMap::new();
-        h1_state.insert("chapter".to_string(), 1);
+        h1_state.insert("chapter".to_string(), vec![1]);
         counter_snap.insert(h1, h1_state);
 
         let pass = BookmarkPass::new_with_snapshots(mappings, counter_snap, BTreeMap::new());

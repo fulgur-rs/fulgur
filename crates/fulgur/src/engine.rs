@@ -208,7 +208,11 @@ impl Engine {
 
         // Extract counter operations and resolve body content.
         // Also harvest per-node counter snapshots for BookmarkPass
-        // (`counter(name)` inside `bookmark-label`, fulgur-70c).
+        // (`counter(name)` / `counters(name, sep)` inside
+        // `bookmark-label`, fulgur-70c / fulgur-vsv). Each snapshot
+        // value is the full nesting chain (`Vec<i32>`, outer-to-inner)
+        // per CSS Lists 3 §4.5, so both `counter()` (innermost) and
+        // `counters()` (joined) can resolve directly.
         let (counter_ops_by_node_vec, counter_css, counter_snapshots) =
             if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
                 let mut pass = crate::blitz_adapter::CounterPass::new(
