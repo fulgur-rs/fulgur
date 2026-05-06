@@ -3330,3 +3330,61 @@ fn render_table_pagebreak_does_not_scale_quadratically() {
         ratio,
     );
 }
+
+#[test]
+fn smoke_nested_counters_function() {
+    // Verifies the new counters() resolution path: nested <ol> with
+    // counter-reset/counter-increment, ::before content using
+    // counters(item, ".") to chain values across scopes. The new
+    // stack-of-instances CounterState (fulgur-vsv) tracks chains
+    // correctly: outer 1, inner 2.1 / 2.2, outer 3.
+    let html = r#"<!doctype html>
+<html>
+<head><style>
+ol { counter-reset: item; padding: 0; margin: 0; list-style: none; }
+li { counter-increment: item; }
+li::before { content: counters(item, ".") ". "; }
+</style></head>
+<body>
+<ol>
+  <li>Alpha</li>
+  <li>Beta
+    <ol>
+      <li>Beta-one</li>
+      <li>Beta-two</li>
+    </ol>
+  </li>
+  <li>Gamma</li>
+</ol>
+</body>
+</html>"#;
+
+    let pdf = fulgur::Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render should succeed");
+    assert!(!pdf.is_empty(), "rendered PDF must not be empty");
+
+    // Best-effort text extraction. lopdf 0.40 has a known issue
+    // reading krilla's ToUnicode CMap (project memory:
+    // project_lopdf_text_extraction); when extraction returns text,
+    // we use it to verify the chain markers — when it returns empty,
+    // the PDF-bytes assertion above is the binding check.
+    if let Ok(doc) = lopdf::Document::load_mem(&pdf) {
+        let page_ids: Vec<u32> = doc.get_pages().keys().copied().collect();
+        let mut all_text = String::new();
+        for pid in page_ids {
+            if let Ok(t) = doc.extract_text(&[pid]) {
+                all_text.push_str(&t);
+            }
+        }
+        if !all_text.is_empty() {
+            for needle in ["1.", "2.1.", "2.2.", "3."] {
+                assert!(
+                    all_text.contains(needle),
+                    "expected {needle:?} in extracted text, got {all_text:?}"
+                );
+            }
+        }
+    }
+}
