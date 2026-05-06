@@ -227,6 +227,55 @@ mod tests {
     }
 
     #[test]
+    fn page_for_node_returns_first_page_for_split_node() {
+        use crate::pagination_layout::{Fragment, PaginationGeometry};
+        let mut table = PaginationGeometryTable::new();
+        table.insert(
+            42,
+            PaginationGeometry {
+                fragments: vec![
+                    Fragment {
+                        page_index: 2,
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                    Fragment {
+                        page_index: 3,
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                ],
+                is_repeat: false,
+            },
+        );
+        assert_eq!(page_for_node(&table, 42), Some(3)); // page_index 2 -> 1-based page 3
+    }
+
+    #[test]
+    fn page_for_node_returns_none_for_absent_node() {
+        let table = PaginationGeometryTable::new();
+        assert_eq!(page_for_node(&table, 999), None);
+    }
+
+    #[test]
+    fn page_for_node_returns_none_for_node_with_no_fragments() {
+        use crate::pagination_layout::PaginationGeometry;
+        let mut table = PaginationGeometryTable::new();
+        table.insert(
+            7,
+            PaginationGeometry {
+                fragments: vec![],
+                is_repeat: false,
+            },
+        );
+        assert_eq!(page_for_node(&table, 7), None);
+    }
+
+    #[test]
     fn collect_anchor_map_from_synthetic_inputs() {
         use crate::gcpm::target_ref::{FragmentRecord, collect_anchor_map_from_records};
         let records = vec![FragmentRecord {

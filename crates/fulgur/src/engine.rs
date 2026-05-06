@@ -675,6 +675,7 @@ fn build_anchor_map(
     walk_anchors(
         doc,
         doc.root_element().id,
+        0,
         pagination_geometry,
         counter_snapshots,
         &mut map,
@@ -686,10 +687,14 @@ fn build_anchor_map(
 fn walk_anchors(
     doc: &BaseDocument,
     node_id: usize,
+    depth: usize,
     geometry: &PaginationGeometryTable,
     snapshots: &BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
     out: &mut AnchorMap,
 ) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
@@ -710,25 +715,14 @@ fn walk_anchors(
     }
     let children: Vec<usize> = node.children.clone();
     for c in children {
-        walk_anchors(doc, c, geometry, snapshots, out);
+        walk_anchors(doc, c, depth + 1, geometry, snapshots, out);
     }
 }
 
 #[allow(dead_code)]
 fn collect_text_content(doc: &BaseDocument, node_id: usize) -> String {
-    fn walk(doc: &BaseDocument, id: usize, out: &mut String) {
-        if let Some(node) = doc.get_node(id) {
-            if let Some(text) = node.text_data() {
-                out.push_str(&text.content);
-            }
-            for c in &node.children {
-                walk(doc, *c, out);
-            }
-        }
-    }
-    let mut s = String::new();
-    walk(doc, node_id, &mut s);
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let raw = crate::blitz_adapter::element_text(doc, node_id);
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub struct EngineBuilder {
