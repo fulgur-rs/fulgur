@@ -61,10 +61,18 @@ pub(super) fn register_pseudo_content(
         out.images.insert(pseudo_id, entry);
         produced = true;
     }
-    let before_keys = collect_drawables_node_ids(out);
+    // Probe with O(1) `drawables_total_len` instead of constructing a
+    // 6-map `BTreeSet<usize>` snapshot before and after — the snapshot
+    // was the dominant residual O(N²) factor inside the per-cell
+    // convert walk (`register_pseudo_content` fires once per block-level
+    // node, and the snapshot is O(K) where K = total drawables already
+    // recorded). Convert never removes entries from these maps, so the
+    // length sum is monotonic and a strict inequality is exactly
+    // equivalent to "the BTreeSet diff would be non-empty".
+    // (fulgur-vrkv)
+    let before_total = super::drawables_total_len(out);
     walk_absolute_children(doc, node, ctx, depth, out);
-    let after_keys = collect_drawables_node_ids(out);
-    if after_keys.len() > before_keys.len() {
+    if super::drawables_total_len(out) > before_total {
         produced = true;
     }
     produced

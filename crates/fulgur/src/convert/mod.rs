@@ -262,6 +262,23 @@ pub(super) fn collect_drawables_node_ids(
     ids
 }
 
+/// O(1) probe answering "did *any* per-NodeId map grow?" — sums `.len()`
+/// across the same six maps `collect_drawables_node_ids` unions. Callers
+/// that only need the boolean "produced anything?" answer (not the
+/// descendant set) should compare this value before/after a recursion
+/// instead of constructing two `BTreeSet<usize>`s. Convert never removes
+/// entries from these maps, so the sum is monotonic and a strict
+/// inequality is exactly equivalent to set-difference being non-empty.
+/// (fulgur-vrkv)
+pub(super) fn drawables_total_len(out: &crate::drawables::Drawables) -> usize {
+    out.block_styles.len()
+        + out.paragraphs.len()
+        + out.images.len()
+        + out.svgs.len()
+        + out.tables.len()
+        + out.list_items.len()
+}
+
 /// Build the bookmark anchor map. The `bookmark_by_node` map on
 /// `ConvertContext` is populated upstream (`engine.rs` runs
 /// `BookmarkPass` before `dom_to_drawables`); we only project it into
