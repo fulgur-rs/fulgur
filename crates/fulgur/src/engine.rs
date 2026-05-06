@@ -57,38 +57,19 @@ impl Engine {
     /// `CounterPass::with_anchor_map` substitute real values instead of
     /// fixed-width placeholders.
     pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
-        let needs_two_pass = self.contains_target_references(html);
-        if !needs_two_pass {
-            let (pdf, _) = self.render_pass(html, None)?;
+        // Pass 1: render once. `render_pass` parses the full GCPM context
+        // (AssetBundle, <link>-loaded stylesheets, inline <style> blocks)
+        // and reports `needs_pass_two` based on that parsed view, so
+        // `target-counter()` / `target-counters()` / `target-text()`
+        // declared in any of those locations is detected reliably.
+        let (pdf, anchor_map, needs_pass_two) = self.render_pass(html, None)?;
+        if !needs_pass_two {
             return Ok(pdf);
         }
-        // Pass 1: discard PDF bytes; keep only the AnchorMap built from
-        // the paginated DOM. Pass 2 re-renders with that map so
-        // `target-*` resolvers substitute resolved values.
-        let (_, anchor_map) = self.render_pass(html, None)?;
-        let (pdf, _) = self.render_pass(html, Some(&anchor_map))?;
-        Ok(pdf)
-    }
-
-    /// Cheap textual + CSS probe to decide whether the input requires the
-    /// 2-pass `target-*` orchestration. The parsed-CSS check catches
-    /// AssetBundle / `<link>`-injected stylesheets; the substring scan
-    /// catches inline `<style>` blocks the GCPM parser has not yet seen.
-    /// Lower-casing keeps case variants like `Target-Counter(` matching.
-    fn contains_target_references(&self, html: &str) -> bool {
-        let combined = self
-            .assets
-            .as_ref()
-            .map(|a| a.combined_css())
-            .unwrap_or_default();
-        let asset_gcpm = crate::gcpm::parser::parse_gcpm(&combined);
-        if asset_gcpm.has_target_references() {
-            return true;
-        }
-        let lower = html.to_ascii_lowercase();
-        lower.contains("target-counter(")
-            || lower.contains("target-counters(")
-            || lower.contains("target-text(")
+        // Pass 2: re-render with the AnchorMap so `target-*` resolvers
+        // substitute resolved values instead of fixed-width placeholders.
+        let (pdf2, _, _) = self.render_pass(html, Some(&anchor_map))?;
+        Ok(pdf2)
     }
 
     /// Single render pass. When `anchor_map` is `Some`, the supplied map
@@ -99,14 +80,22 @@ impl Engine {
     /// same. When `None`, those resolvers fall back to placeholders /
     /// empty strings.
     ///
-    /// The returned `AnchorMap` is the table built from this pass's
-    /// pagination geometry + counter snapshots — pass 1 keeps it, pass 2
-    /// discards it.
+    /// The returned tuple is `(pdf_bytes, collected_anchor_map,
+    /// needs_pass_two)`:
+    /// - `collected_anchor_map` is the table built from this pass's
+    ///   pagination geometry + counter snapshots when the parsed GCPM
+    ///   context contains `target-*` references AND `anchor_map` is
+    ///   `None` (i.e. this is pass 1 of a 2-pass render). Otherwise it
+    ///   is empty — we skip the DOM walk to avoid `element_text` cost
+    ///   on every id'd subtree on the fast path.
+    /// - `needs_pass_two` mirrors that gate: `true` only for pass 1 of
+    ///   a 2-pass render so `render_html` can decide whether to call
+    ///   `render_pass` again with the populated map.
     fn render_pass(
         &self,
         html: &str,
         anchor_map: Option<&AnchorMap>,
-    ) -> Result<(Vec<u8>, AnchorMap)> {
+    ) -> Result<(Vec<u8>, AnchorMap, bool)> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -477,22 +466,24 @@ impl Engine {
             );
         }
 
-        // Build the AnchorMap for `target-*` cross-references now that
-        // `pagination_geometry` is fully assembled (after `position:
-        // fixed` / body-direct absolute fragments have been appended).
-        // The map is always built — empty when no document `id` anchors
-        // exist or no target refs are active — so the public API
-        // contract holds for both 1-pass and 2-pass paths. The cost of
-        // walking the DOM once is negligible compared to convert /
-        // render, and `walk_anchors` short-circuits on `MAX_DOM_DEPTH`.
+        // Build the AnchorMap for `target-*` cross-references only when
+        // pass 2 will actually consume it (parsed GCPM context contains
+        // `target-*` AND this is pass 1, i.e. `anchor_map.is_none()`).
+        // On the fast path (no `target-*` anywhere) we skip the DOM walk
+        // entirely to avoid the `element_text` cost on every id'd
+        // subtree. On pass 2 we hand `render_v2` the caller-supplied
+        // `anchor_map` directly — the local one would be redundant.
         //
-        // The snapshot map is only populated when `target-*` references
-        // are present (`record_node_snapshots` includes that case);
-        // otherwise we hand `walk_anchors` an empty map so the per-id
-        // entries record `page_num` only — page-counter still works,
-        // named counter chains resolve to empty.
-        let collected_anchor_map =
-            build_anchor_map(&doc, &pagination_geometry, &counter_snapshots_for_anchor);
+        // The walk runs against `pagination_geometry` after `position:
+        // fixed` / body-direct absolute fragments have been appended,
+        // so anchor pages reflect the final paginated layout.
+        // `walk_anchors` short-circuits on `MAX_DOM_DEPTH`.
+        let needs_anchor_map_for_pass_two = anchor_map.is_none() && gcpm.has_target_references();
+        let collected_anchor_map = if needs_anchor_map_for_pass_two {
+            build_anchor_map(&doc, &pagination_geometry, &counter_snapshots_for_anchor)
+        } else {
+            AnchorMap::default()
+        };
 
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
@@ -560,7 +551,7 @@ impl Engine {
             self.serialize_settings.clone(),
             anchor_map,
         )?;
-        Ok((pdf, collected_anchor_map))
+        Ok((pdf, collected_anchor_map, needs_anchor_map_for_pass_two))
     }
 
     /// Render HTML string to a PDF file.
