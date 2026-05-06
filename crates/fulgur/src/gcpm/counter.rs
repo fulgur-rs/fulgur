@@ -1544,4 +1544,85 @@ mod tests {
             "7"
         );
     }
+
+    #[test]
+    fn test_resolve_counters_margin_box_page_and_pages() {
+        // Built-in `page` / `pages` route through the page-scalar branch,
+        // bypassing custom_counters entirely.
+        let page_item = vec![ContentItem::Counters {
+            name: "page".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let pages_item = vec![ContentItem::Counters {
+            name: "pages".into(),
+            separator: ".".into(),
+            style: CounterStyle::UpperRoman,
+        }];
+        assert_eq!(
+            resolve_content_to_string(&page_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            "5"
+        );
+        assert_eq!(
+            resolve_content_to_string(&pages_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            "XII"
+        );
+    }
+
+    #[test]
+    fn test_set_in_scope_without_reset_creates_implicit_root() {
+        // Like increment_in_scope, set_in_scope on an empty stack creates
+        // an implicit-root instance at the given value.
+        let mut s = CounterState::new();
+        s.set_in_scope("foo", 9, 42);
+        assert_eq!(s.get("foo"), 9);
+        assert_eq!(s.chain("foo"), vec![9]);
+        // Implicit-root instance survives leave_element on the recorded
+        // parent — the sentinel parent_id (COUNTER_ROOT_PARENT) never
+        // matches a real node id.
+        s.leave_element(42);
+        assert_eq!(s.chain("foo"), vec![9]);
+    }
+
+    #[test]
+    fn test_resolve_counters_in_html_flat_mode() {
+        // Covers the resolve_content_to_html flat-mode Counters arm
+        // (no leader present → flat mode is selected).
+        let items = vec![ContentItem::Counters {
+            name: "chapter".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 3);
+        let store = RunningElementStore::new();
+        let result =
+            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        assert_eq!(result, "3");
+    }
+
+    #[test]
+    fn test_resolve_counters_in_html_flex_mode_with_leader() {
+        // A Leader item triggers flex mode in resolve_content_to_html.
+        // The Counters value is wrapped in <span> like Counter is.
+        let items = vec![
+            ContentItem::Counters {
+                name: "chapter".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 7);
+        let store = RunningElementStore::new();
+        let result =
+            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        assert!(
+            result.contains("<span>7</span>"),
+            "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
+        );
+    }
 }

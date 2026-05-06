@@ -3323,6 +3323,141 @@ mod tests {
         assert_eq!(chain, &vec![1, 1]);
     }
 
+    /// Snapshot test for the spec-compliant `counters()` resolution: a
+    /// nested `<ol>` with `counters(item, ".") ". "` in `li::before`
+    /// must produce one CSS rule per matched `<li>` whose resolved
+    /// `content:"…"` contains exactly the expected chain markers.
+    /// Asserts on `CounterPass::generated_css` — fully deterministic
+    /// (no PDF rendering, no font/CMap dependency), unlike PDF text
+    /// extraction which cannot decode krilla's ToUnicode CMap.
+    #[test]
+    fn counter_pass_resolves_counters_function() {
+        use crate::gcpm::{
+            ContentCounterMapping, CounterMapping, CounterOp, CounterStyle, ParsedSelector,
+            PseudoElement,
+        };
+
+        let html = r#"<html><body>
+            <ol>
+              <li>Alpha</li>
+              <li>Beta
+                <ol>
+                  <li>Beta-one</li>
+                  <li>Beta-two</li>
+                </ol>
+              </li>
+              <li>Gamma</li>
+            </ol>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        let counter_mappings = vec![
+            CounterMapping {
+                parsed: ParsedSelector::Tag("ol".into()),
+                ops: vec![CounterOp::Reset {
+                    name: "item".into(),
+                    value: 0,
+                }],
+            },
+            CounterMapping {
+                parsed: ParsedSelector::Tag("li".into()),
+                ops: vec![CounterOp::Increment {
+                    name: "item".into(),
+                    value: 1,
+                }],
+            },
+        ];
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Tag("li".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![
+                crate::gcpm::ContentItem::Counters {
+                    name: "item".into(),
+                    separator: ".".into(),
+                    style: CounterStyle::Decimal,
+                },
+                crate::gcpm::ContentItem::String(". ".into()),
+            ],
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // Five li::before rules. Order in `generated_css` mirrors DOM
+        // traversal: outer 1 → outer 2 (Beta) → inner 2.1 → inner 2.2 →
+        // outer 3. After leaving the inner ol, `leave_element(inner-ol)`
+        // pops the inner-ol instance, so the third top-level li reads
+        // chain `[3]` — emitted as `3.`, NOT `3.1.` (regression marker).
+        for needle in [
+            "content:\"1. \"",
+            "content:\"2. \"",
+            "content:\"2.1. \"",
+            "content:\"2.2. \"",
+            "content:\"3. \"",
+        ] {
+            assert!(
+                css.contains(needle),
+                "expected {needle:?} in generated CSS, got: {css}"
+            );
+        }
+        assert!(
+            !css.contains("content:\"3.1. \""),
+            "leave_element regression: outer counter at third top-level li \
+             should be `3.`, not `3.1.` (got: {css})"
+        );
+    }
+
+    /// Covers `BookmarkPass::resolve_label`'s `Counters` arm. A single
+    /// `bookmark-label: counters(section, ".")` rule against a chain
+    /// snapshot of `[1, 2]` must resolve to `"1.2"`. Empty / missing
+    /// chains resolve to `""` (CSS Lists 3 §3.3).
+    #[test]
+    fn bookmark_pass_resolves_counters_with_chain_snapshot() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        let html = r#"<html><body><h1 id="t">Title</h1></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        return Some(id);
+                    }
+                }
+                for &c in &node.children {
+                    if let Some(found) = find_h1(doc, c) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let h1_id = find_h1(&doc, doc.root_element().id).expect("h1 node");
+
+        let mut counter_snapshots = BTreeMap::new();
+        let mut chain_for_h1 = BTreeMap::new();
+        chain_for_h1.insert("section".to_string(), vec![1, 2]);
+        counter_snapshots.insert(h1_id, chain_for_h1);
+
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::Counters {
+                name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            }]),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "1.2");
+    }
+
     #[test]
     fn string_set_pass_records_per_node_snapshot() {
         use crate::gcpm::StringSetValue;

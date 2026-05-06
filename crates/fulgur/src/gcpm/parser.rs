@@ -2224,4 +2224,21 @@ mod tests {
             .any(|i| matches!(i, ContentItem::Counters { .. }));
         assert!(!any_counters, "invalid counters() should produce no item");
     }
+
+    #[test]
+    fn test_parse_counters_non_string_separator_drops_item() {
+        // The separator must be a <string> per CSS Lists 3 §3.3.
+        // A bare number or identifier is invalid — drop silently.
+        let css = r#"li::before { content: counters(item, 42); }"#;
+        let ctx = parse_gcpm(css);
+        let any_counters = ctx
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::Counters { .. }));
+        assert!(
+            !any_counters,
+            "non-string separator should drop counters() item"
+        );
+    }
 }

@@ -3331,13 +3331,24 @@ fn render_table_pagebreak_does_not_scale_quadratically() {
     );
 }
 
+/// E2E smoke test for the `counters(name, sep)` resolution path:
+/// nested `<ol>` with counter-reset / counter-increment, `::before`
+/// content using `counters(item, ".")` to chain values across CSS
+/// Lists 3 scopes (fulgur-vsv).
+///
+/// Asserts only that `Engine::render_html` succeeds and emits PDF
+/// bytes — the actual chain content (`1.`, `2.`, `2.1.`, `2.2.`, `3.`)
+/// is verified deterministically at the `CounterPass` layer in
+/// `blitz_adapter::tests::counter_pass_resolves_counters_function`,
+/// which inspects `generated_css` directly. PDF text-stream
+/// inspection is not viable here because krilla's ToUnicode CMap is
+/// not decoded by either `lopdf::Document::extract_text` or
+/// `fulgur::inspect::inspect` (see project memory
+/// `project_lopdf_text_extraction`). The byte-non-empty check is
+/// intentionally narrow — its job is to catch regressions in the
+/// render pipeline that bypass the unit-level resolver tests.
 #[test]
 fn smoke_nested_counters_function() {
-    // Verifies the new counters() resolution path: nested <ol> with
-    // counter-reset/counter-increment, ::before content using
-    // counters(item, ".") to chain values across scopes. The new
-    // stack-of-instances CounterState (fulgur-vsv) tracks chains
-    // correctly: outer 1, inner 2.1 / 2.2, outer 3.
     let html = r#"<!doctype html>
 <html>
 <head><style>
@@ -3364,27 +3375,4 @@ li::before { content: counters(item, ".") ". "; }
         .render_html(html)
         .expect("render should succeed");
     assert!(!pdf.is_empty(), "rendered PDF must not be empty");
-
-    // Best-effort text extraction. lopdf 0.40 has a known issue
-    // reading krilla's ToUnicode CMap (project memory:
-    // project_lopdf_text_extraction); when extraction returns text,
-    // we use it to verify the chain markers — when it returns empty,
-    // the PDF-bytes assertion above is the binding check.
-    if let Ok(doc) = lopdf::Document::load_mem(&pdf) {
-        let page_ids: Vec<u32> = doc.get_pages().keys().copied().collect();
-        let mut all_text = String::new();
-        for pid in page_ids {
-            if let Ok(t) = doc.extract_text(&[pid]) {
-                all_text.push_str(&t);
-            }
-        }
-        if !all_text.is_empty() {
-            for needle in ["1.", "2.1.", "2.2.", "3."] {
-                assert!(
-                    all_text.contains(needle),
-                    "expected {needle:?} in extracted text, got {all_text:?}"
-                );
-            }
-        }
-    }
 }
