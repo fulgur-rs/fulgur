@@ -7,6 +7,7 @@
 
 use crate::gcpm::CounterStyle;
 use crate::gcpm::counter::{format_counter, format_counter_chain};
+use crate::pagination_layout::PaginationGeometryTable;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default)]
@@ -103,6 +104,39 @@ pub fn resolve_target_text(href: &str, map: &AnchorMap) -> String {
     map.get(frag).map(|e| e.text.clone()).unwrap_or_default()
 }
 
+/// Return the **1-based** page number for a DOM node, derived from
+/// the first fragment in the node's pagination geometry. Returns
+/// `None` if the node has no fragments (out-of-flow nodes the
+/// fragmenter skipped, or non-laid-out subtrees).
+pub fn page_for_node(geometry: &PaginationGeometryTable, node_id: usize) -> Option<u32> {
+    geometry
+        .get(&node_id)
+        .and_then(|g| g.fragments.first())
+        .map(|f| f.page_index + 1)
+}
+
+pub struct FragmentRecord {
+    pub fragment_id: String,
+    pub page_num: u32,
+    pub counters: BTreeMap<String, Vec<i32>>,
+    pub text: String,
+}
+
+pub fn collect_anchor_map_from_records(records: Vec<FragmentRecord>) -> AnchorMap {
+    let mut map = AnchorMap::new();
+    for r in records {
+        map.insert(
+            r.fragment_id,
+            AnchorEntry {
+                page_num: r.page_num,
+                counters: r.counters,
+                text: r.text,
+            },
+        );
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +224,25 @@ mod tests {
     fn target_text_missing_returns_empty() {
         let m = make_map();
         assert_eq!(resolve_target_text("#nope", &m), "");
+    }
+
+    #[test]
+    fn collect_anchor_map_from_synthetic_inputs() {
+        use crate::gcpm::target_ref::{FragmentRecord, collect_anchor_map_from_records};
+        let records = vec![FragmentRecord {
+            fragment_id: "sec1".into(),
+            page_num: 2,
+            counters: {
+                let mut m = BTreeMap::new();
+                m.insert("section".into(), vec![1]);
+                m
+            },
+            text: "Section One".into(),
+        }];
+        let map = collect_anchor_map_from_records(records);
+        let entry = map.get("sec1").expect("should have entry");
+        assert_eq!(entry.page_num, 2);
+        assert_eq!(entry.counters.get("section"), Some(&vec![1]));
+        assert_eq!(entry.text, "Section One");
     }
 }

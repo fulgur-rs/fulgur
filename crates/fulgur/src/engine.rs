@@ -660,6 +660,77 @@ impl Engine {
     }
 }
 
+use crate::blitz_adapter::get_attr;
+use crate::gcpm::target_ref::{AnchorEntry, AnchorMap, page_for_node};
+use crate::pagination_layout::PaginationGeometryTable;
+use blitz_dom::BaseDocument;
+
+#[allow(dead_code)] // Task 8 wires the call site; suppress until then.
+fn build_anchor_map(
+    doc: &BaseDocument,
+    pagination_geometry: &PaginationGeometryTable,
+    counter_snapshots: &BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
+) -> AnchorMap {
+    let mut map = AnchorMap::new();
+    walk_anchors(
+        doc,
+        doc.root_element().id,
+        pagination_geometry,
+        counter_snapshots,
+        &mut map,
+    );
+    map
+}
+
+#[allow(dead_code)]
+fn walk_anchors(
+    doc: &BaseDocument,
+    node_id: usize,
+    geometry: &PaginationGeometryTable,
+    snapshots: &BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
+    out: &mut AnchorMap,
+) {
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(elem) = node.element_data() {
+        if let Some(frag) = get_attr(elem, "id") {
+            let page_num = page_for_node(geometry, node_id).unwrap_or(0);
+            let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
+            let text = collect_text_content(doc, node_id);
+            out.insert(
+                frag.to_string(),
+                AnchorEntry {
+                    page_num,
+                    counters,
+                    text,
+                },
+            );
+        }
+    }
+    let children: Vec<usize> = node.children.clone();
+    for c in children {
+        walk_anchors(doc, c, geometry, snapshots, out);
+    }
+}
+
+#[allow(dead_code)]
+fn collect_text_content(doc: &BaseDocument, node_id: usize) -> String {
+    fn walk(doc: &BaseDocument, id: usize, out: &mut String) {
+        if let Some(node) = doc.get_node(id) {
+            if let Some(text) = node.text_data() {
+                out.push_str(&text.content);
+            }
+            for c in &node.children {
+                walk(doc, *c, out);
+            }
+        }
+    }
+    let mut s = String::new();
+    walk(doc, node_id, &mut s);
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub struct EngineBuilder {
     config_builder: ConfigBuilder,
     assets: Option<AssetBundle>,
