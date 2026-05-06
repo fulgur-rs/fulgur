@@ -1652,7 +1652,9 @@ pub struct CounterPass {
     /// When absent (pass 1, or single-pass renders without target refs),
     /// those variants substitute fixed-width placeholders so the layout
     /// produced by pass 1 stays close to pass 2 — see [`resolve_content`].
-    anchor_map: RefCell<Option<crate::gcpm::target_ref::AnchorMap>>,
+    /// Set exactly once via [`with_anchor_map`] at construction; never
+    /// mutated during `apply`, so no interior mutability is needed.
+    anchor_map: Option<crate::gcpm::target_ref::AnchorMap>,
 }
 
 impl CounterPass {
@@ -1669,7 +1671,7 @@ impl CounterPass {
             ops_by_node: RefCell::new(Vec::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
-            anchor_map: RefCell::new(None),
+            anchor_map: None,
         }
     }
 
@@ -1679,8 +1681,8 @@ impl CounterPass {
     /// When unset (pass 1, or single-pass renders without target refs),
     /// those variants substitute fixed-width placeholders to keep line
     /// breaking roughly stable across the two passes.
-    pub fn with_anchor_map(self, map: crate::gcpm::target_ref::AnchorMap) -> Self {
-        *self.anchor_map.borrow_mut() = Some(map);
+    pub fn with_anchor_map(mut self, map: crate::gcpm::target_ref::AnchorMap) -> Self {
+        self.anchor_map = Some(map);
         self
     }
 
@@ -1912,7 +1914,6 @@ impl CounterPass {
 
     fn resolve_content(&self, items: &[ContentItem], element_href: Option<&str>) -> String {
         let state = self.state.borrow();
-        let anchor = self.anchor_map.borrow();
         let mut out = String::new();
         for item in items {
             match item {
@@ -1938,7 +1939,7 @@ impl CounterPass {
                         continue;
                     }
                     let href = element_href.unwrap_or("");
-                    match anchor.as_ref() {
+                    match self.anchor_map.as_ref() {
                         Some(map) => {
                             out.push_str(&crate::gcpm::target_ref::resolve_target_counter(
                                 href,
@@ -1962,7 +1963,7 @@ impl CounterPass {
                         continue;
                     }
                     let href = element_href.unwrap_or("");
-                    match anchor.as_ref() {
+                    match self.anchor_map.as_ref() {
                         Some(map) => {
                             out.push_str(&crate::gcpm::target_ref::resolve_target_counters(
                                 href,
@@ -1980,7 +1981,7 @@ impl CounterPass {
                         continue;
                     }
                     let href = element_href.unwrap_or("");
-                    match anchor.as_ref() {
+                    match self.anchor_map.as_ref() {
                         Some(map) => {
                             out.push_str(&crate::gcpm::target_ref::resolve_target_text(href, map))
                         }
@@ -3538,6 +3539,74 @@ mod tests {
         pass.apply(&mut doc, &ctx);
         let (_, css) = pass.into_parts();
         assert!(css.contains("\"3\""), "CSS = {css}");
+    }
+
+    /// Pass-1 placeholder path: when no `AnchorMap` is supplied (the
+    /// pre-pagination pass), `target-counter()` inside `::after` content
+    /// must substitute the fixed-width `"00"` placeholder so line breaking
+    /// in pass 1 stays close to pass 2.
+    #[test]
+    fn counter_pass_target_counter_emits_placeholder_in_pass_one() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterStyle, ParsedSelector, PseudoElement,
+        };
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        // No `with_anchor_map` — exercise the pass-1 placeholder branch.
+        let pass = CounterPass::new(Vec::new(), mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("\"00\""), "CSS = {css}");
+    }
+
+    /// `target-text(attr(href))` inside `::after` content must resolve
+    /// against the supplied `AnchorMap`'s `text` field (the anchor's
+    /// resolved text, e.g. an `<h2>` heading's body) when the map is
+    /// present in pass 2.
+    #[test]
+    fn counter_pass_resolves_target_text_with_anchor_map() {
+        use crate::gcpm::target_ref::{AnchorEntry, AnchorMap};
+        use crate::gcpm::{ContentCounterMapping, ContentItem, ParsedSelector, PseudoElement};
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetText {
+            url_attr: "href".into(),
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let mut anchor = AnchorMap::new();
+        anchor.insert(
+            "sec1",
+            AnchorEntry {
+                page_num: 0,
+                counters: BTreeMap::new(),
+                text: "Hello".into(),
+            },
+        );
+
+        let pass = CounterPass::new(Vec::new(), mappings).with_anchor_map(anchor);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("Hello"), "CSS = {css}");
     }
 
     /// Covers `BookmarkPass::resolve_label`'s `Counters` arm. A single
