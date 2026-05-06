@@ -134,7 +134,43 @@ pub fn render_v2(
         page_count,
     );
 
-    for page_idx in 0..page_count {
+    // Page-independent skip sets. These reference only `drawables.*`
+    // (transforms / block_styles / tables) and never change across
+    // pages, so building them inside `draw_v2_page` once per page made
+    // the per-page work O(N_blocks + N_tables + N_transforms). See
+    // fulgur-v1cm.
+    let (transformed_descendants, clipped_descendants, opacity_wrapped_descendants) =
+        build_page_skip_sets(drawables);
+
+    // Per-page dispatch buckets: which `node_id`s have at least one
+    // fragment on this page index. The previous shape — walking the
+    // entire `geometry` BTreeMap once per page — was the dominant
+    // O(P²) cost in document-grade documents (N tables × P
+    // page-sections), since `geometry` grows with N which itself
+    // scales with P. Bucketing collapses that to O(N) build + O(F)
+    // dispatch where F is the total fragment count. (fulgur-v1cm)
+    //
+    // Iteration order inside each bucket follows `BTreeMap<NodeId, _>`
+    // which is approximately document order, preserving v1 stacking
+    // (parents before children, backgrounds before foregrounds). This
+    // is the same invariant the original loop relied on. Each node is
+    // inserted at most once per page even when it has multiple
+    // fragments on that page — `dispatch_fragment` and the per-fragment
+    // arms below already iterate `geom.fragments` themselves and skip
+    // mismatched `frag.page_index`, so a single dispatch entry per
+    // (node, page) is sufficient.
+    let mut per_page_node_ids: Vec<Vec<usize>> = vec![Vec::new(); page_count];
+    for (&node_id, geom) in geometry {
+        let mut seen_pages: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for frag in &geom.fragments {
+            let p = frag.page_index;
+            if (p as usize) < page_count && seen_pages.insert(p) {
+                per_page_node_ids[p as usize].push(node_id);
+            }
+        }
+    }
+
+    for (page_idx, page_node_ids) in per_page_node_ids.iter().enumerate() {
         let page_num = page_idx + 1;
         // Pass the full `gcpm.page_settings` (including selector
         // rules: `:first`, `:left`, `:right`) so per-page overrides
@@ -218,6 +254,10 @@ pub fn render_v2(
                     resolved_margin.top + drawables.body_offset_pt.1,
                     geometry,
                     drawables,
+                    &transformed_descendants,
+                    &clipped_descendants,
+                    &opacity_wrapped_descendants,
+                    page_node_ids,
                 );
             }
             // Paint margin boxes after body content so page headers /
@@ -290,56 +330,43 @@ pub fn render_v2(
 /// PR 2 covers `Drawables.images`, `.svgs`, and `.bookmark_anchors`
 /// (first-fragment-only). Subsequent PRs add match arms for the
 /// other maps.
-fn draw_v2_page(
-    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
-    page_index: u32,
-    margin_left_pt: f32,
-    margin_top_pt: f32,
-    geometry: &crate::pagination_layout::PaginationGeometryTable,
+/// Build the three page-independent skip sets used by `draw_v2_page`.
+///
+/// - `transformed_descendants`: every node listed in some
+///   `TransformEntry::descendants` — drawn inside that transform's
+///   `push_transform / pop` group, so the main per-fragment loop must
+///   skip them to avoid double-painting outside the transform.
+/// - `clipped_descendants`: every node listed in the
+///   `clip_descendants` of an `overflow:hidden|clip` block or table
+///   (excluding body and root, see `render_v2` rationale).
+/// - `opacity_wrapped_descendants`: every node listed in
+///   `opacity_descendants` of a fractional-opacity block (excluding
+///   body and root).
+///
+/// All three depend only on `drawables.*` and are page-independent.
+/// `render_v2` builds them once and passes references into every
+/// `draw_v2_page` call. (fulgur-v1cm)
+fn build_page_skip_sets(
     drawables: &Drawables,
+) -> (
+    std::collections::BTreeSet<usize>,
+    std::collections::BTreeSet<usize>,
+    std::collections::BTreeSet<usize>,
 ) {
-    use crate::convert::px_to_pt;
+    let transformed_descendants: std::collections::BTreeSet<usize> = drawables
+        .transforms
+        .values()
+        .flat_map(|tx| tx.descendants.iter().copied())
+        .collect();
 
-    // Pre-compute the set of node_ids that fall under any transform's
-    // `descendants` list. They are skipped in the main iteration and
-    // drawn instead inside the transform's `push_transform / pop` group
-    // below — mirroring v1's `TransformWrapperPageable::draw` which
-    // calls `inner.draw(...)` while the surface transform is active.
-    let mut transformed_descendants: std::collections::BTreeSet<usize> =
-        std::collections::BTreeSet::new();
-    for tx in drawables.transforms.values() {
-        transformed_descendants.extend(tx.descendants.iter().copied());
-    }
-    // Same shape as `transformed_descendants` but keyed by an ancestor
-    // block whose `style.has_overflow_clip()` is true. Strict
-    // descendants paint inside the clip's `push_clip_path / pop` group;
-    // skipping them here prevents the main loop from also dispatching
-    // them outside the clip.
-    //
-    // Body is excluded from this collection: the fragmenter records
-    // body with exactly one fragment at `page_index = 0`
-    // (`pagination_layout.rs:380-384`), so `draw_under_clip(body)`
-    // only fires on page 0. If we kept body in `clipped_descendants`,
-    // every descendant would still be skipped via the
-    // `clipped_descendants.contains(&node_id)` guard on page 1+ but
-    // nobody would dispatch them — silently blanking all content
-    // after page 1 on `<body style="overflow:hidden|auto|scroll">`
-    // (PR #310 follow-up Devin). Skipping body here means body-level
-    // overflow clip is not applied in v2, matching the pre-PR
-    // behavior; body clipping in a paged context is unusual and the
-    // pre-pass at `paint_root_block_v2` already handles body's own
-    // bg / border on continuation pages.
     let mut clipped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     for (&node_id, block) in &drawables.block_styles {
-        // Exclude body AND root: both are skipped by the main
-        // dispatch loop (body's only fragment lives on page 0, root
-        // is never recorded in `geometry` and is painted via
-        // `paint_root_block_v2`). Including either would silently
-        // blank descendants on pages 1+ because `draw_under_clip`
-        // never fires for them but the skip set still hides their
-        // descendants from the regular per-fragment dispatch.
-        // (PR #312 follow-up Devin: root exclusion symmetry.)
+        // Exclude body and root: body's only fragment lives on
+        // page 0 (so `draw_under_clip(body)` only fires there) and
+        // root is never recorded in `geometry`. Including either
+        // would silently blank descendants on pages 1+ via the
+        // `clipped_descendants.contains(&node_id)` guard.
         if block.style.has_overflow_clip()
             && Some(node_id) != drawables.body_id
             && Some(node_id) != drawables.root_id
@@ -347,36 +374,12 @@ fn draw_v2_page(
             clipped_descendants.extend(block.clip_descendants.iter().copied());
         }
     }
-    // Tables with `overflow: hidden | clip` clip their cells to the
-    // padding box. Mirror the block-clip skip set so the main loop
-    // doesn't dispatch cell descendants outside the table's clip
-    // scope — `draw_under_clip_table` paints them inside the clip.
-    // Unlike body/root, tables are always proper geometry-recorded
-    // nodes so no special exclusion is needed.
     for table in drawables.tables.values() {
         if table.style.has_overflow_clip() && !table.clip_descendants.is_empty() {
             clipped_descendants.extend(table.clip_descendants.iter().copied());
         }
     }
-    // Mirrors `clipped_descendants` for blocks that wrap their
-    // descendants in a `draw_with_opacity` group (fractional opacity,
-    // no clip — see `BlockEntry.opacity_descendants` and
-    // `draw_under_opacity`). Without skipping these in the main loop
-    // they'd be dispatched twice: once at full opacity here, once
-    // again under the parent's opacity wrap.
-    //
-    // Body and root are excluded for the same reason
-    // `clipped_descendants` excludes them: the fragmenter records
-    // body with exactly one fragment at `page_index = 0` (so
-    // `draw_under_opacity(body)` only fires on page 0), and root
-    // is never recorded in `geometry` at all (it's painted via
-    // the `paint_root_block_v2` pre-pass). Keeping either's
-    // descendants in this set would silently blank all content on
-    // pages 1+ because descendants get skipped by the guard but
-    // no-one dispatches them — `html { opacity: 0.5 }` would
-    // silently blank the whole document, and `body { opacity:
-    // 0.5 }` would silently blank pages 1+. (PR #314 + PR #312
-    // follow-up Devin Reviews.)
+
     let mut opacity_wrapped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     for (&node_id, block) in &drawables.block_styles {
@@ -388,7 +391,37 @@ fn draw_v2_page(
         }
     }
 
-    for (&node_id, geom) in geometry {
+    (
+        transformed_descendants,
+        clipped_descendants,
+        opacity_wrapped_descendants,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_v2_page(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    page_index: u32,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    drawables: &Drawables,
+    transformed_descendants: &std::collections::BTreeSet<usize>,
+    clipped_descendants: &std::collections::BTreeSet<usize>,
+    opacity_wrapped_descendants: &std::collections::BTreeSet<usize>,
+    page_node_ids: &[usize],
+) {
+    use crate::convert::px_to_pt;
+
+    // Skip sets and per-page dispatch list are built once in
+    // `render_v2`. Walking only `page_node_ids` (instead of the full
+    // `geometry` map per page) is what fixes the O(P²) regression
+    // documented in fulgur-v1cm.
+
+    for &node_id in page_node_ids {
+        let Some(geom) = geometry.get(&node_id) else {
+            continue;
+        };
         // Bookmark anchor: emit on the page where the node's *first*
         // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
         // `is_first_page_for` slice semantics. Run BEFORE the
@@ -3618,7 +3651,26 @@ impl<'a> MarginBoxRenderer<'a> {
                 // `body { margin: 0; padding: 0; }` via an inline style, which
                 // takes higher specificity than `self.margin_css`. No adjustment
                 // needed unlike `render_v2`.
-                draw_v2_page(canvas, 0, rect.x, rect.y, geometry, drawables);
+                let (txd, cd, owd) = build_page_skip_sets(drawables);
+                // Margin-box content is always single-page (page 0).
+                let page_nodes: Vec<usize> = geometry
+                    .iter()
+                    .filter_map(|(&id, g)| {
+                        g.fragments.iter().any(|f| f.page_index == 0).then_some(id)
+                    })
+                    .collect();
+                draw_v2_page(
+                    canvas,
+                    0,
+                    rect.x,
+                    rect.y,
+                    geometry,
+                    drawables,
+                    &txd,
+                    &cd,
+                    &owd,
+                    &page_nodes,
+                );
             }
         }
     }

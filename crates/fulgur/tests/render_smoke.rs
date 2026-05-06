@@ -3271,3 +3271,62 @@ fn bookmark_label_string_appears_in_outline() {
     let titles = outline_titles(&pdf);
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
 }
+
+/// Regression test for fulgur-v1cm: render time must not blow up
+/// quadratically with section/table count.
+///
+/// Pre-fix a 100-section × 100-table doc rendered ~410ms while a
+/// 10-section × 10-table doc was ~10ms — a 41x ratio, well past the
+/// 10x linear baseline (textbook O(N²) signature). The fix moved the
+/// page-independent skip sets and per-page geometry buckets out of the
+/// per-page loop and gated `convert_node`'s document-wide drawables
+/// snapshot on `node_has_transform`.
+///
+/// We assert ratio (not absolute time) to stay robust against CI
+/// variance. 30x is loose enough to tolerate sub-linear startup
+/// amortisation at small N and the residual sub-quadratic factor
+/// in the cell walk (tracked in a follow-up), but still fails loudly
+/// if a future change reintroduces a per-page document-wide walk.
+#[test]
+fn render_table_pagebreak_does_not_scale_quadratically() {
+    fn build(n: usize) -> String {
+        let mut html = String::from("<!DOCTYPE html><html><body>");
+        for i in 0..n {
+            html.push_str(&format!(
+                "<div style=\"page-break-after:always\"><h2>S{i}</h2><p>Lorem ipsum.</p>\
+<table><thead><tr><th>A</th><th>B</th></tr></thead>\
+<tbody><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></tbody></table></div>",
+            ));
+        }
+        html.push_str("</body></html>");
+        html
+    }
+
+    fn time_render(n: usize) -> std::time::Duration {
+        let html = build(n);
+        // Warm up so the first call doesn't pay font / GCPM init costs.
+        let _ = fulgur::Engine::builder()
+            .build()
+            .render_html(&html)
+            .unwrap();
+        let start = std::time::Instant::now();
+        let _ = fulgur::Engine::builder()
+            .build()
+            .render_html(&html)
+            .unwrap();
+        start.elapsed()
+    }
+
+    let t10 = time_render(10);
+    let t100 = time_render(100);
+
+    let ratio = t100.as_secs_f64() / t10.as_secs_f64();
+    assert!(
+        ratio < 30.0,
+        "render time scaling regressed: t10={:?} t100={:?} ratio={:.1}x \
+         (expected < 30x — see fulgur-v1cm)",
+        t10,
+        t100,
+        ratio,
+    );
+}
