@@ -729,4 +729,177 @@ mod tests {
         assert_eq!(out.block_styles[&10].clip_descendants, vec![11usize]);
         assert!(out.block_styles[&10].opacity_descendants.is_empty());
     }
+
+    // ── inject shift loop: Text and Image existing-item arms ──────────
+
+    fn make_text_run(x_offset: f32) -> LineItem {
+        LineItem::Text(ShapedGlyphRun {
+            font_data: Arc::new(vec![]),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: String::new(),
+            x_offset,
+            link: None,
+        })
+    }
+
+    fn make_image_item(width: f32, x_offset: f32) -> LineItem {
+        LineItem::Image(InlineImage {
+            data: Arc::new(vec![]),
+            format: crate::image::ImageFormat::Png,
+            width,
+            height: 10.0,
+            x_offset,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: 0.0,
+            link: None,
+        })
+    }
+
+    #[test]
+    fn inject_shifts_existing_text_run_by_marker_width() {
+        // Existing item in the line is LineItem::Text. The shift loop's Text arm
+        // (`run.x_offset += shift`) must update it when a marker is prepended.
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![make_text_run(5.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+        // marker InlineBox width = 10 → existing text run shifts from 5 to 15.
+        let LineItem::Text(shifted) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected Text at index 1");
+        };
+        assert!(
+            (shifted.x_offset - 15.0).abs() < 0.001,
+            "got {}",
+            shifted.x_offset
+        );
+    }
+
+    #[test]
+    fn inject_shifts_existing_inline_image_by_marker_width() {
+        // Existing item in the line is LineItem::Image. The shift loop's Image arm
+        // (`i.x_offset += shift`) must update it when a marker is prepended.
+        let mut out = Drawables::new();
+        out.paragraphs.insert(
+            5,
+            make_para(vec![make_line(vec![make_image_item(20.0, 3.0)])]),
+        );
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(8.0, 0.0)
+        ));
+        // marker width = 8 → existing image shifts from 3 to 11.
+        let LineItem::Image(shifted) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected Image at index 1");
+        };
+        assert!(
+            (shifted.x_offset - 11.0).abs() < 0.001,
+            "got {}",
+            shifted.x_offset
+        );
+    }
+
+    #[test]
+    fn inject_shifts_all_three_item_types_in_first_line() {
+        // First line has Text + Image + InlineBox. After injection all three must
+        // be shifted by the marker's width; only the first line is affected.
+        let mut out = Drawables::new();
+        let line0 = make_line(vec![
+            make_text_run(1.0),
+            make_image_item(15.0, 2.0),
+            inline_box(5.0, 3.0),
+        ]);
+        let line1 = make_line(vec![inline_box(5.0, 0.0)]); // second line must not shift
+        out.paragraphs.insert(5, make_para(vec![line0, line1]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            inline_box(10.0, 0.0)
+        ));
+        let items = &out.paragraphs[&5].lines[0].items;
+        // Items at indices 1, 2, 3 are the original three (marker inserted at 0).
+        let LineItem::Text(t) = &items[1] else {
+            panic!("expected Text at 1");
+        };
+        assert!(
+            (t.x_offset - 11.0).abs() < 0.001,
+            "text: got {}",
+            t.x_offset
+        );
+        let LineItem::Image(im) = &items[2] else {
+            panic!("expected Image at 2");
+        };
+        assert!(
+            (im.x_offset - 12.0).abs() < 0.001,
+            "image: got {}",
+            im.x_offset
+        );
+        let LineItem::InlineBox(ib) = &items[3] else {
+            panic!("expected InlineBox at 3");
+        };
+        assert!(
+            (ib.x_offset - 13.0).abs() < 0.001,
+            "ib: got {}",
+            ib.x_offset
+        );
+        // Second line must be unchanged.
+        let LineItem::InlineBox(l1_ib) = &out.paragraphs[&5].lines[1].items[0] else {
+            panic!("expected InlineBox in line 1");
+        };
+        assert!(
+            (l1_ib.x_offset - 0.0).abs() < 0.001,
+            "line 1 shifted unexpectedly: {}",
+            l1_ib.x_offset
+        );
+    }
+
+    #[test]
+    fn inject_text_marker_zero_glyphs_inserts_without_shifting() {
+        // A Text marker with no glyphs has advance sum = 0, so existing items
+        // keep their x_offset while the marker is still prepended.
+        let mut out = Drawables::new();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 7.0)])]));
+        let pre: BTreeSet<usize> = BTreeSet::new();
+        let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
+            font_data: Arc::new(vec![]),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: String::new(),
+            x_offset: 0.0,
+            link: None,
+        });
+        assert!(inject_marker_into_first_paragraph(
+            &mut out,
+            &pre,
+            zero_glyph_marker
+        ));
+        // shift = 0 → existing InlineBox stays at x_offset=7.
+        let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected InlineBox at index 1");
+        };
+        assert!(
+            (ib.x_offset - 7.0).abs() < 0.001,
+            "expected no shift, got {}",
+            ib.x_offset
+        );
+        // Marker is still inserted at index 0.
+        assert_eq!(out.paragraphs[&5].lines[0].items.len(), 2);
+    }
 }
