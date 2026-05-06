@@ -362,14 +362,13 @@ pub(super) fn convert_node(
 /// branch-free invariant that `record_transform`'s snapshot consumer
 /// only fires for nodes that produce a `TransformEntry`.
 fn node_has_transform(doc: &BaseDocument, node_id: usize) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
-        return false;
-    };
-    let Some(styles) = node.primary_styles() else {
-        return false;
-    };
-    let (w, h) = size_in_pt(node.final_layout.size);
-    crate::blitz_adapter::compute_transform(&styles, w, h).is_some()
+    doc.get_node(node_id)
+        .and_then(|node| {
+            let styles = node.primary_styles()?;
+            let (w, h) = size_in_pt(node.final_layout.size);
+            crate::blitz_adapter::compute_transform(&styles, w, h)
+        })
+        .is_some()
 }
 
 /// Walk the DOM top-down from `<body>` and populate `out.semantics`

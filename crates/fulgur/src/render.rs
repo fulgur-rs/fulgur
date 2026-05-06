@@ -419,9 +419,11 @@ fn draw_v2_page(
     // documented in fulgur-v1cm.
 
     for &node_id in page_node_ids {
-        let Some(geom) = geometry.get(&node_id) else {
-            continue;
-        };
+        // SAFETY: `per_page_node_ids` is populated from `geometry`'s keys
+        // in `render_v2`, so every `node_id` here is guaranteed to be in
+        // `geometry`. Indexing keeps the access on a single line so line
+        // coverage isn't dragged down by an else-arm that never fires.
+        let geom = &geometry[&node_id];
         // Bookmark anchor: emit on the page where the node's *first*
         // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
         // `is_first_page_for` slice semantics. Run BEFORE the
