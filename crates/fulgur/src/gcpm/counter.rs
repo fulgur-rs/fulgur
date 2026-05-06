@@ -50,11 +50,10 @@ pub fn resolve_content_to_string(
                     // to single-value chain (equivalent to counter()). The body's
                     // CounterPass tracks chains correctly; the innermost value is
                     // what made it into custom_counters.
-                    let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
-                        vec![*custom_counters.get(name.as_str()).unwrap()]
-                    } else {
-                        Vec::new()
-                    };
+                    let chain: Vec<i32> = custom_counters
+                        .get(name.as_str())
+                        .map(|v| vec![*v])
+                        .unwrap_or_default();
                     out.push_str(&format_counter_chain(&chain, separator, *style));
                 }
             },
