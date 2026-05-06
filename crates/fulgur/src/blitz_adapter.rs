@@ -1771,12 +1771,11 @@ impl CounterPass {
         // call (see end of this function). Increment/set never push a
         // new instance, so their parent_id is unused — we still pass it
         // for API symmetry.
-        let parent_id = doc
-            .get_node(node_id)
-            .and_then(|n| n.parent)
-            .unwrap_or(crate::gcpm::counter::COUNTER_ROOT_PARENT);
-
         if !matched_ops.is_empty() {
+            let parent_id = doc
+                .get_node(node_id)
+                .and_then(|n| n.parent)
+                .unwrap_or(crate::gcpm::counter::COUNTER_ROOT_PARENT);
             let mut state = self.state.borrow_mut();
             for op in &matched_ops {
                 match op {
@@ -2157,11 +2156,9 @@ fn resolve_label(
                 separator,
                 style,
             } => {
-                let chain: Vec<i32> = counter_snapshot
-                    .and_then(|s| s.get(name))
-                    .cloned()
-                    .unwrap_or_default();
-                out.push_str(&format_counter_chain(&chain, separator, *style));
+                if let Some(chain) = counter_snapshot.and_then(|s| s.get(name)) {
+                    out.push_str(&format_counter_chain(chain, separator, *style));
+                }
             }
             ContentItem::StringRef { name, .. } => {
                 if let Some(v) = string_snapshot.and_then(|s| s.get(name)) {

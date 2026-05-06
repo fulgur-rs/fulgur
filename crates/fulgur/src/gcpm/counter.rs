@@ -40,23 +40,15 @@ pub fn resolve_content_to_string(
             // plain string; emit nothing in string-resolution context.
             ContentItem::Counters {
                 name,
-                separator,
+                separator: _,
                 style,
-            } => match name.as_str() {
-                "page" => out.push_str(&format_counter(page as i32, *style)),
-                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
-                _ => {
-                    // Margin-box has no DOM tree, only flat custom_counters. Degrade
-                    // to single-value chain (equivalent to counter()). The body's
-                    // CounterPass tracks chains correctly; the innermost value is
-                    // what made it into custom_counters.
-                    let chain: Vec<i32> = custom_counters
-                        .get(name.as_str())
-                        .map(|v| vec![*v])
-                        .unwrap_or_default();
-                    out.push_str(&format_counter_chain(&chain, separator, *style));
-                }
-            },
+            } => out.push_str(&resolve_counters_margin_box(
+                name,
+                *style,
+                page,
+                total_pages,
+                custom_counters,
+            )),
             ContentItem::ContentText
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
@@ -123,19 +115,15 @@ pub fn resolve_content_to_html(
                 }
                 ContentItem::Counters {
                     name,
-                    separator,
+                    separator: _,
                     style,
-                } => match name.as_str() {
-                    "page" => out.push_str(&format_counter(page_num as i32, *style)),
-                    "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
-                    _ => {
-                        let chain: Vec<i32> = custom_counters
-                            .get(name.as_str())
-                            .map(|v| vec![*v])
-                            .unwrap_or_default();
-                        out.push_str(&format_counter_chain(&chain, separator, *style));
-                    }
-                },
+                } => out.push_str(&resolve_counters_margin_box(
+                    name,
+                    *style,
+                    page_num,
+                    total_pages,
+                    custom_counters,
+                )),
                 ContentItem::ContentText
                 | ContentItem::ContentBefore
                 | ContentItem::ContentAfter
@@ -195,19 +183,15 @@ pub fn resolve_content_to_html(
                     }
                     ContentItem::Counters {
                         name,
-                        separator,
+                        separator: _,
                         style,
-                    } => match name.as_str() {
-                        "page" => inner.push_str(&format_counter(page_num as i32, *style)),
-                        "pages" => inner.push_str(&format_counter(total_pages as i32, *style)),
-                        _ => {
-                            let chain: Vec<i32> = custom_counters
-                                .get(name.as_str())
-                                .map(|v| vec![*v])
-                                .unwrap_or_default();
-                            inner.push_str(&format_counter_chain(&chain, separator, *style));
-                        }
-                    },
+                    } => inner.push_str(&resolve_counters_margin_box(
+                        name,
+                        *style,
+                        page_num,
+                        total_pages,
+                        custom_counters,
+                    )),
                     _ => {}
                 }
                 if !inner.is_empty() {
@@ -326,6 +310,30 @@ pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle
         out.push_str(&format_counter(*v, style));
     }
     out
+}
+
+/// Resolve a `counters(name, sep, style)` reference in a margin-box
+/// context where there is no DOM tree and only flat per-page counter
+/// snapshots are available. Built-in `page` / `pages` use the page
+/// scalars; custom names degrade to a single-value chain (equivalent
+/// to `counter()`) because `custom_counters` only holds innermost
+/// values. The separator is unused — single-element chains have
+/// nowhere to insert it.
+fn resolve_counters_margin_box(
+    name: &str,
+    style: CounterStyle,
+    page: usize,
+    total_pages: usize,
+    custom_counters: &BTreeMap<String, i32>,
+) -> String {
+    match name {
+        "page" => format_counter(page as i32, style),
+        "pages" => format_counter(total_pages as i32, style),
+        _ => custom_counters
+            .get(name)
+            .map(|v| format_counter(*v, style))
+            .unwrap_or_default(),
+    }
 }
 
 /// Format a counter value according to the given [`CounterStyle`].
