@@ -38,12 +38,31 @@ pub fn resolve_content_to_string(
             // have no referent, so they emit nothing.
             // `leader()` produces a fill character at render time, not a
             // plain string; emit nothing in string-resolution context.
+            ContentItem::Counters {
+                name,
+                separator,
+                style,
+            } => match name.as_str() {
+                "page" => out.push_str(&format_counter(page as i32, *style)),
+                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
+                _ => {
+                    // Margin-box has no DOM tree, only flat custom_counters. Degrade
+                    // to single-value chain (equivalent to counter()). The body's
+                    // CounterPass tracks chains correctly; the innermost value is
+                    // what made it into custom_counters.
+                    let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
+                        vec![*custom_counters.get(name.as_str()).unwrap()]
+                    } else {
+                        Vec::new()
+                    };
+                    out.push_str(&format_counter_chain(&chain, separator, *style));
+                }
+            },
             ContentItem::ContentText
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
             | ContentItem::Attr(_)
-            | ContentItem::Leader { .. }
-            | ContentItem::Counters { .. } => {}
+            | ContentItem::Leader { .. } => {}
         }
     }
     out
@@ -103,12 +122,27 @@ pub fn resolve_content_to_html(
                         push_escaped_html_text(&mut out, resolve_string_policy(state, *policy));
                     }
                 }
+                ContentItem::Counters {
+                    name,
+                    separator,
+                    style,
+                } => match name.as_str() {
+                    "page" => out.push_str(&format_counter(page_num as i32, *style)),
+                    "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
+                    _ => {
+                        let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
+                            vec![*custom_counters.get(name.as_str()).unwrap()]
+                        } else {
+                            Vec::new()
+                        };
+                        out.push_str(&format_counter_chain(&chain, separator, *style));
+                    }
+                },
                 ContentItem::ContentText
                 | ContentItem::ContentBefore
                 | ContentItem::ContentAfter
                 | ContentItem::Attr(_)
-                | ContentItem::Leader { .. }
-                | ContentItem::Counters { .. } => {}
+                | ContentItem::Leader { .. } => {}
             }
         }
         return out;
@@ -161,6 +195,22 @@ pub fn resolve_content_to_html(
                             );
                         }
                     }
+                    ContentItem::Counters {
+                        name,
+                        separator,
+                        style,
+                    } => match name.as_str() {
+                        "page" => inner.push_str(&format_counter(page_num as i32, *style)),
+                        "pages" => inner.push_str(&format_counter(total_pages as i32, *style)),
+                        _ => {
+                            let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
+                                vec![*custom_counters.get(name.as_str()).unwrap()]
+                            } else {
+                                Vec::new()
+                            };
+                            inner.push_str(&format_counter_chain(&chain, separator, *style));
+                        }
+                    },
                     _ => {}
                 }
                 if !inner.is_empty() {
@@ -265,6 +315,20 @@ pub fn resolve_element_policy<'a>(
     }
 
     None
+}
+
+/// Format a list of counter values according to the given
+/// [`CounterStyle`] and join them by `separator`. Returns an empty
+/// string when `values` is empty.
+pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle) -> String {
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push_str(separator);
+        }
+        out.push_str(&format_counter(*v, style));
+    }
+    out
 }
 
 /// Format a counter value according to the given [`CounterStyle`].
@@ -1439,5 +1503,40 @@ mod tests {
         s.increment_in_scope("item", 2, 2);
         let chain_snap = s.chain_snapshot();
         assert_eq!(chain_snap.get("item"), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn test_format_counter_chain_basic() {
+        assert_eq!(
+            format_counter_chain(&[1, 2, 3], ".", CounterStyle::Decimal),
+            "1.2.3"
+        );
+        assert_eq!(format_counter_chain(&[], ".", CounterStyle::Decimal), "");
+        assert_eq!(format_counter_chain(&[5], ".", CounterStyle::Decimal), "5");
+    }
+
+    #[test]
+    fn test_format_counter_chain_with_style() {
+        assert_eq!(
+            format_counter_chain(&[1, 4, 9], "-", CounterStyle::UpperRoman),
+            "I-IV-IX"
+        );
+    }
+
+    #[test]
+    fn test_resolve_counters_in_margin_box_falls_back_to_single() {
+        // Margin-box `counters()` only sees flat custom_counters; the
+        // resolver degrades to single-value chain (equivalent to counter()).
+        let items = vec![ContentItem::Counters {
+            name: "chapter".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mut custom = BTreeMap::new();
+        custom.insert("chapter".to_string(), 7);
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &custom),
+            "7"
+        );
     }
 }

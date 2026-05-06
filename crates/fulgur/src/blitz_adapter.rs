@@ -1411,7 +1411,7 @@ impl DomPass for InjectCssPass {
 }
 
 use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
-use crate::gcpm::counter::{CounterState, format_counter};
+use crate::gcpm::counter::{CounterState, format_counter, format_counter_chain};
 use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
 use crate::gcpm::{
@@ -1894,6 +1894,14 @@ impl CounterPass {
                     let value = state.get(name);
                     out.push_str(&format_counter(value, *style));
                 }
+                ContentItem::Counters {
+                    name,
+                    separator,
+                    style,
+                } => {
+                    let chain = state.chain(name);
+                    out.push_str(&format_counter_chain(&chain, separator, *style));
+                }
                 _ => {}
             }
         }
@@ -2144,6 +2152,17 @@ fn resolve_label(
                     .unwrap_or(0);
                 out.push_str(&format_counter(value, *style));
             }
+            ContentItem::Counters {
+                name,
+                separator,
+                style,
+            } => {
+                let chain: Vec<i32> = counter_snapshot
+                    .and_then(|s| s.get(name))
+                    .cloned()
+                    .unwrap_or_default();
+                out.push_str(&format_counter_chain(&chain, separator, *style));
+            }
             ContentItem::StringRef { name, .. } => {
                 if let Some(v) = string_snapshot.and_then(|s| s.get(name)) {
                     out.push_str(v);
@@ -2152,8 +2171,7 @@ fn resolve_label(
             ContentItem::ContentBefore
             | ContentItem::ContentAfter
             | ContentItem::Element { .. }
-            | ContentItem::Leader { .. }
-            | ContentItem::Counters { .. } => {}
+            | ContentItem::Leader { .. } => {}
         }
     }
     out
