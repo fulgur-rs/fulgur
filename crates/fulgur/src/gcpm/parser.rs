@@ -1063,9 +1063,9 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                             if input.try_parse(|input| input.expect_comma()).is_err() {
                                 return Ok(());
                             }
-                            let separator = match input.try_parse(|input| {
-                                input.expect_string().map(|s| s.to_string())
-                            }) {
+                            let separator = match input
+                                .try_parse(|input| input.expect_string().map(|s| s.to_string()))
+                            {
                                 Ok(s) => s,
                                 Err(_) => return Ok(()),
                             };
@@ -1075,7 +1075,11 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                     parse_counter_style(input)
                                 })
                                 .unwrap_or(CounterStyle::Decimal);
-                            items.push(ContentItem::Counters { name, separator, style });
+                            items.push(ContentItem::Counters {
+                                name,
+                                separator,
+                                style,
+                            });
                         } else if fn_name.eq_ignore_ascii_case("string") {
                             let name = arg.to_string();
                             let policy = input
