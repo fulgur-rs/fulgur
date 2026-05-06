@@ -115,28 +115,6 @@ pub fn page_for_node(geometry: &PaginationGeometryTable, node_id: usize) -> Opti
         .map(|f| f.page_index + 1)
 }
 
-pub struct FragmentRecord {
-    pub fragment_id: String,
-    pub page_num: u32,
-    pub counters: BTreeMap<String, Vec<i32>>,
-    pub text: String,
-}
-
-pub fn collect_anchor_map_from_records(records: Vec<FragmentRecord>) -> AnchorMap {
-    let mut map = AnchorMap::new();
-    for r in records {
-        map.insert(
-            r.fragment_id,
-            AnchorEntry {
-                page_num: r.page_num,
-                counters: r.counters,
-                text: r.text,
-            },
-        );
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,25 +251,5 @@ mod tests {
             },
         );
         assert_eq!(page_for_node(&table, 7), None);
-    }
-
-    #[test]
-    fn collect_anchor_map_from_synthetic_inputs() {
-        use crate::gcpm::target_ref::{FragmentRecord, collect_anchor_map_from_records};
-        let records = vec![FragmentRecord {
-            fragment_id: "sec1".into(),
-            page_num: 2,
-            counters: {
-                let mut m = BTreeMap::new();
-                m.insert("section".into(), vec![1]);
-                m
-            },
-            text: "Section One".into(),
-        }];
-        let map = collect_anchor_map_from_records(records);
-        let entry = map.get("sec1").expect("should have entry");
-        assert_eq!(entry.page_num, 2);
-        assert_eq!(entry.counters.get("section"), Some(&vec![1]));
-        assert_eq!(entry.text, "Section One");
     }
 }

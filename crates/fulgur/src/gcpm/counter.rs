@@ -38,9 +38,11 @@ pub fn resolve_content_to_string(
 /// currently supports).
 ///
 /// When `anchor_map` is `None`, the three target-* variants emit empty
-/// strings — this is the pass-1 placeholder mode (margin boxes simply
-/// produce nothing during pass 1; the placeholder injection for
-/// `::before` / `::after` is handled at the parser/serializer level).
+/// strings. Margin-box content is empty during pass 1 (output is
+/// discarded), so placeholder width is irrelevant here — the
+/// `::before` / `::after` placeholder injection that *does* affect
+/// pass-1 layout lives at the parser/serializer level (see
+/// `blitz_adapter::CounterPass::resolve_content`).
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_content_to_string_with_anchor(
     items: &[ContentItem],
