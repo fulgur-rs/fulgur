@@ -48,7 +48,65 @@ impl Engine {
     /// When GCPM constructs (margin boxes, running elements) are detected in the CSS,
     /// a 2-pass rendering pipeline is used: pass 1 paginates body content, pass 2
     /// renders each page with resolved margin boxes.
+    ///
+    /// `target-counter()` / `target-counters()` / `target-text()` add a
+    /// second axis of 2-pass rendering: pass 1 paginates the document and
+    /// builds an `AnchorMap` (fragment id → page / counter / text); pass
+    /// 2 re-renders with that map so the resolvers in
+    /// `gcpm::counter::resolve_content_to_*_with_anchor` and
+    /// `CounterPass::with_anchor_map` substitute real values instead of
+    /// fixed-width placeholders.
     pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
+        let needs_two_pass = self.contains_target_references(html);
+        if !needs_two_pass {
+            let (pdf, _) = self.render_pass(html, None)?;
+            return Ok(pdf);
+        }
+        // Pass 1: discard PDF bytes; keep only the AnchorMap built from
+        // the paginated DOM. Pass 2 re-renders with that map so
+        // `target-*` resolvers substitute resolved values.
+        let (_, anchor_map) = self.render_pass(html, None)?;
+        let (pdf, _) = self.render_pass(html, Some(&anchor_map))?;
+        Ok(pdf)
+    }
+
+    /// Cheap textual + CSS probe to decide whether the input requires the
+    /// 2-pass `target-*` orchestration. The parsed-CSS check catches
+    /// AssetBundle / `<link>`-injected stylesheets; the substring scan
+    /// catches inline `<style>` blocks the GCPM parser has not yet seen.
+    /// Lower-casing keeps case variants like `Target-Counter(` matching.
+    fn contains_target_references(&self, html: &str) -> bool {
+        let combined = self
+            .assets
+            .as_ref()
+            .map(|a| a.combined_css())
+            .unwrap_or_default();
+        let asset_gcpm = crate::gcpm::parser::parse_gcpm(&combined);
+        if asset_gcpm.has_target_references() {
+            return true;
+        }
+        let lower = html.to_ascii_lowercase();
+        lower.contains("target-counter(")
+            || lower.contains("target-counters(")
+            || lower.contains("target-text(")
+    }
+
+    /// Single render pass. When `anchor_map` is `Some`, the supplied map
+    /// is wired into [`CounterPass`] so `target-counter()` /
+    /// `target-counters()` / `target-text()` inside `::before` / `::after`
+    /// resolve against pass-1 anchor data, and is passed through to
+    /// `render::render_v2` so margin-box `target-*` resolvers can do the
+    /// same. When `None`, those resolvers fall back to placeholders /
+    /// empty strings.
+    ///
+    /// The returned `AnchorMap` is the table built from this pass's
+    /// pagination geometry + counter snapshots — pass 1 keeps it, pass 2
+    /// discards it.
+    fn render_pass(
+        &self,
+        html: &str,
+        anchor_map: Option<&AnchorMap>,
+    ) -> Result<(Vec<u8>, AnchorMap)> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -181,10 +239,17 @@ impl Engine {
 
         // BookmarkPass downstream consumes per-node snapshots from
         // StringSetPass and CounterPass when (and only when) bookmarks
-        // will actually be emitted. Compute the gate once here so each
-        // pass can opt out of the per-element clone otherwise.
-        let record_bookmark_snapshots =
-            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+        // will actually be emitted. The 2-pass `target-*` path
+        // (`gcpm.has_target_references()`) also needs the per-node
+        // counter snapshots so `build_anchor_map` can populate
+        // `AnchorEntry.counters` for pass 2 — without this the
+        // `target-counter(attr(href), section)` family resolves to
+        // empty strings even though `attr(href), page` still works
+        // via `AnchorEntry.page_num`. Compute the gate once here so
+        // each pass can opt out of the per-element clone otherwise.
+        let record_node_snapshots = (self.config.effective_bookmarks()
+            && !gcpm.bookmark_mappings.is_empty())
+            || gcpm.has_target_references();
 
         // Extract string-set values via DomPass.
         // Also harvest per-node `name -> latest value` snapshots that the
@@ -193,7 +258,7 @@ impl Engine {
         let (string_set_store, string_snapshots) = if !gcpm.string_set_mappings.is_empty() {
             let mut pass =
                 crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
-            if record_bookmark_snapshots {
+            if record_node_snapshots {
                 pass = pass.with_snapshot_recording();
             }
             crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
@@ -219,8 +284,11 @@ impl Engine {
                     gcpm.counter_mappings.clone(),
                     gcpm.content_counter_mappings.clone(),
                 );
-                if record_bookmark_snapshots {
+                if record_node_snapshots {
                     pass = pass.with_snapshot_recording();
+                }
+                if let Some(map) = anchor_map {
+                    pass = pass.with_anchor_map(map.clone());
                 }
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
                 let snapshots = pass.take_node_snapshots();
@@ -241,11 +309,29 @@ impl Engine {
         // BookmarkPass runs AFTER CounterPass and StringSetPass so it can
         // resolve `counter()` / `string()` inside `bookmark-label` against
         // the per-node snapshots harvested above (fulgur-70c).
+        //
+        // The 2-pass `target-*` path also needs `counter_snapshots` —
+        // `build_anchor_map` reads them later to populate
+        // `AnchorEntry.counters` so `target-counter(href, section)` etc.
+        // resolve to the chain at the destination. `BookmarkPass`
+        // consumes the map by value, so when both gates fire we have to
+        // clone first; the clone cost is paid only when bookmarks +
+        // `target-*` are active simultaneously.
+        let bookmark_active =
+            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+        let target_refs_active = gcpm.has_target_references();
+        let (counter_snapshots_for_bookmark, counter_snapshots_for_anchor) =
+            match (bookmark_active, target_refs_active) {
+                (true, true) => (counter_snapshots.clone(), counter_snapshots),
+                (true, false) => (counter_snapshots, BTreeMap::new()),
+                (false, true) => (BTreeMap::new(), counter_snapshots),
+                (false, false) => (BTreeMap::new(), BTreeMap::new()),
+            };
         let bookmark_by_node: HashMap<usize, crate::blitz_adapter::BookmarkInfo> =
-            if self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty() {
+            if bookmark_active {
                 let pass = crate::blitz_adapter::BookmarkPass::new_with_snapshots(
                     gcpm.bookmark_mappings.clone(),
-                    counter_snapshots,
+                    counter_snapshots_for_bookmark,
                     string_snapshots,
                 );
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
@@ -391,6 +477,23 @@ impl Engine {
             );
         }
 
+        // Build the AnchorMap for `target-*` cross-references now that
+        // `pagination_geometry` is fully assembled (after `position:
+        // fixed` / body-direct absolute fragments have been appended).
+        // The map is always built — empty when no document `id` anchors
+        // exist or no target refs are active — so the public API
+        // contract holds for both 1-pass and 2-pass paths. The cost of
+        // walking the DOM once is negligible compared to convert /
+        // render, and `walk_anchors` short-circuits on `MAX_DOM_DEPTH`.
+        //
+        // The snapshot map is only populated when `target-*` references
+        // are present (`record_node_snapshots` includes that case);
+        // otherwise we hand `walk_anchors` an empty map so the per-id
+        // entries record `page_num` only — page-counter still works,
+        // named counter chains resolve to empty.
+        let collected_anchor_map =
+            build_anchor_map(&doc, &pagination_geometry, &counter_snapshots_for_anchor);
+
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {
@@ -443,7 +546,7 @@ impl Engine {
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
-        crate::render::render_v2(
+        let pdf = crate::render::render_v2(
             &self.config,
             &convert_ctx.pagination_geometry,
             &drawables,
@@ -455,7 +558,9 @@ impl Engine {
             &counter_ops_for_render,
             html_title,
             self.serialize_settings.clone(),
-        )
+            anchor_map,
+        )?;
+        Ok((pdf, collected_anchor_map))
     }
 
     /// Render HTML string to a PDF file.
@@ -665,7 +770,6 @@ use crate::gcpm::target_ref::{AnchorEntry, AnchorMap, page_for_node};
 use crate::pagination_layout::PaginationGeometryTable;
 use blitz_dom::BaseDocument;
 
-#[allow(dead_code)] // Task 8 wires the call site; suppress until then.
 fn build_anchor_map(
     doc: &BaseDocument,
     pagination_geometry: &PaginationGeometryTable,
@@ -683,7 +787,6 @@ fn build_anchor_map(
     map
 }
 
-#[allow(dead_code)]
 fn walk_anchors(
     doc: &BaseDocument,
     node_id: usize,
@@ -719,7 +822,6 @@ fn walk_anchors(
     }
 }
 
-#[allow(dead_code)]
 fn collect_text_content(doc: &BaseDocument, node_id: usize) -> String {
     let raw = crate::blitz_adapter::element_text(doc, node_id);
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
