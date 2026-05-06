@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@page { size: A5; margin: 24pt; }
+body { font-family: sans-serif; font-size: 12pt; line-height: 1.5; margin: 0; }
+h1 {
+  counter-increment: chapter;
+  counter-reset: section;
+  bookmark-level: 1;
+  bookmark-label: counter(chapter) ". " content(text);
+  margin-top: 18pt;
+}
+h2 {
+  counter-increment: section;
+  bookmark-level: 2;
+  bookmark-label: counter(chapter) "." counter(section) " " content(text);
+  margin-top: 12pt;
+}
+p { margin: 8pt 0; }
+</style>
+</head>
+<body>
+<h1>Introduction</h1>
+<p>The introduction outlines the structure of the document, including how chapters and sections are numbered automatically via CSS counters.</p>
+<h2>Background</h2>
+<p>Background material on the problem domain.</p>
+<h2>Goals</h2>
+<p>Goals and non-goals of the work.</p>
+<h1 style="page-break-before: always">Method</h1>
+<p>Approach taken to solve the problem.</p>
+<h2>Setup</h2>
+<p>Environment configuration and tooling.</p>
+</body>
+</html>

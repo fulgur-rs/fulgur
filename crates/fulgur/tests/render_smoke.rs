@@ -3170,3 +3170,104 @@ fn content_url_resolves_image_when_base_path_set() {
         "PDF must contain at least one image XObject (content: url() not resolved)"
     );
 }
+
+fn outline_titles(pdf_bytes: &[u8]) -> Vec<String> {
+    let doc = lopdf::Document::load_mem(pdf_bytes).expect("load_mem");
+    let catalog_id = doc
+        .trailer
+        .get(b"Root")
+        .expect("Root")
+        .as_reference()
+        .expect("Root ref");
+    let catalog = doc
+        .get_object(catalog_id)
+        .expect("catalog")
+        .as_dict()
+        .expect("catalog dict");
+    let outlines_id = match catalog.get(b"Outlines") {
+        Ok(v) => v.as_reference().expect("Outlines ref"),
+        Err(_) => return Vec::new(),
+    };
+    let outlines = doc
+        .get_object(outlines_id)
+        .expect("outlines")
+        .as_dict()
+        .expect("outlines dict");
+
+    fn decode_title(s: &[u8]) -> String {
+        // PDF text strings: UTF-16BE with BOM, or fall back to UTF-8 lossy.
+        // (krilla always emits BOM-prefixed UTF-16BE for outline titles, so
+        // the else branch is defensive — never hit in practice.)
+        // Mirrors `crates/fulgur/src/inspect.rs::decode_pdf_string`; kept
+        // local because that helper is crate-private and not visible from
+        // an integration test crate.
+        if s.starts_with(&[0xFE, 0xFF]) {
+            let chars: Vec<u16> = s[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&chars)
+        } else {
+            String::from_utf8_lossy(s).into_owned()
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut cur = outlines
+        .get(b"First")
+        .ok()
+        .and_then(|v| v.as_reference().ok());
+    while let Some(id) = cur {
+        let dict = doc
+            .get_object(id)
+            .expect("outline node")
+            .as_dict()
+            .expect("outline dict");
+        if let Ok(title) = dict.get(b"Title") {
+            if let Ok(s) = title.as_str() {
+                out.push(decode_title(s));
+            }
+        }
+        cur = dict.get(b"Next").ok().and_then(|v| v.as_reference().ok());
+    }
+    out
+}
+
+#[test]
+fn bookmark_label_counter_appears_in_outline() {
+    let html = r#"<!doctype html><html><head><style>
+        h1 { counter-increment: chapter; bookmark-level: 1; bookmark-label: counter(chapter) ". " content(text); }
+    </style></head><body>
+        <h1>Intro</h1><h1>Method</h1>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .build()
+        .render_html(html)
+        .expect("render_html");
+    let titles = outline_titles(&pdf);
+    assert!(
+        titles.iter().any(|t| t == "1. Intro"),
+        "outline should contain '1. Intro', got: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t == "2. Method"),
+        "outline should contain '2. Method', got: {titles:?}"
+    );
+}
+
+#[test]
+fn bookmark_label_string_appears_in_outline() {
+    let html = r#"<!doctype html><html><head><style>
+        h1 { string-set: title content(text); bookmark-level: 1; bookmark-label: string(title); }
+    </style></head><body>
+        <h1>Alpha</h1><h1>Beta</h1>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .build()
+        .render_html(html)
+        .expect("render_html");
+    let titles = outline_titles(&pdf);
+    assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
+}

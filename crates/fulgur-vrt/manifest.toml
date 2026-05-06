@@ -200,6 +200,10 @@ path = "gcpm/bookmark-outline.html"
 bookmarks = true
 
 [[fixture]]
+path = "gcpm/bookmark-label-counter.html"
+bookmarks = true
+
+[[fixture]]
 path = "gcpm/link-annotations.html"
 
 [[fixture]]

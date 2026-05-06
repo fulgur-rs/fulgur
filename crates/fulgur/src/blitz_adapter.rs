@@ -1419,6 +1419,7 @@ use crate::gcpm::{
     RunningMapping, StringSetMapping, StringSetValue,
 };
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 /// Returns true for elements that should never be walked for GCPM detection
 /// (head, script, style, etc.) — they contain no user-visible content.
@@ -1509,6 +1510,20 @@ impl RunningElementPass {
 pub struct StringSetPass {
     mappings: Vec<StringSetMapping>,
     store: RefCell<StringSetStore>,
+    /// Running map `name -> latest value` updated as the DOM walk
+    /// encounters string-set assignments. Snapshotted into
+    /// `node_snapshots` at every visited element so `BookmarkPass` can
+    /// resolve `string(name)` at the element's DOM position.
+    running: RefCell<BTreeMap<String, String>>,
+    /// Per-node snapshot of `running` taken at every visited element
+    /// after that element's own string-set assignment (if any) has been
+    /// applied. Only populated when `record_node_snapshots` is enabled.
+    /// Empty otherwise, including when `apply` did not visit any nodes
+    /// (e.g. `mappings` is empty).
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, String>>>,
+    /// Gate for `node_snapshots`. Mirrors `CounterPass`. Off by default
+    /// so renders that do not emit bookmarks skip the per-element clone.
+    record_node_snapshots: bool,
 }
 
 impl StringSetPass {
@@ -1516,11 +1531,31 @@ impl StringSetPass {
         Self {
             mappings,
             store: RefCell::new(StringSetStore::new()),
+            running: RefCell::new(BTreeMap::new()),
+            node_snapshots: RefCell::new(BTreeMap::new()),
+            record_node_snapshots: false,
         }
+    }
+
+    /// Enable per-node string-set snapshot recording. Required when a
+    /// downstream `BookmarkPass` resolves `string(name)` inside
+    /// `bookmark-label` (fulgur-70c). Off by default to avoid the
+    /// per-element clone overhead on renders that don't emit bookmarks.
+    pub fn with_snapshot_recording(mut self) -> Self {
+        self.record_node_snapshots = true;
+        self
     }
 
     pub fn into_store(self) -> StringSetStore {
         self.store.into_inner()
+    }
+
+    /// Take ownership of the per-node string-set snapshot map. Mirrors
+    /// `CounterPass::take_node_snapshots`. Empty if snapshot recording
+    /// was not enabled, if `apply` did not visit any nodes, or if this
+    /// method has already been called once — call before `into_store`.
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, String>> {
+        std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 }
 
@@ -1548,13 +1583,37 @@ impl StringSetPass {
             if is_non_visual_tag(elem.name.local.as_ref()) {
                 return;
             }
-            if let Some(mapping) = self.find_string_set(elem) {
+            // Fold every matching mapping in cascade order. A single
+            // element may match multiple `string-set` rules from different
+            // selectors (and they may set distinct named strings); the
+            // previous "first-match wins" lookup silently dropped the
+            // remainder, which is observable from `bookmark-label:
+            // string(...)` once snapshots are wired in.
+            for mapping in self
+                .mappings
+                .iter()
+                .filter(|m| selector_matches(&m.parsed, elem))
+            {
                 let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
+                self.running
+                    .borrow_mut()
+                    .insert(mapping.name.clone(), value.clone());
                 self.store.borrow_mut().push(StringSetEntry {
                     name: mapping.name.clone(),
                     value,
                     node_id,
                 });
+            }
+            // Snapshot the running map AFTER this element's own
+            // assignment is folded in — bookmark-label on the same
+            // element should observe its own string-set value.
+            // Mirrors `CounterPass`'s per-node snapshot timing. Gated
+            // on `record_node_snapshots` so non-bookmark renders skip
+            // the clone (fulgur-70c).
+            if self.record_node_snapshots {
+                self.node_snapshots
+                    .borrow_mut()
+                    .insert(node_id, self.running.borrow().clone());
             }
         }
 
@@ -1562,12 +1621,6 @@ impl StringSetPass {
         for &child_id in &node.children {
             self.walk_tree(doc, child_id, depth + 1);
         }
-    }
-
-    fn find_string_set(&self, elem: &blitz_dom::node::ElementData) -> Option<&StringSetMapping> {
-        self.mappings
-            .iter()
-            .find(|m| selector_matches(&m.parsed, elem))
     }
 }
 
@@ -1581,6 +1634,18 @@ pub struct CounterPass {
     counter_id: RefCell<usize>,
     /// Counter ops keyed by node_id, for later use in Pageable markers.
     ops_by_node: RefCell<Vec<(usize, Vec<CounterOp>)>>,
+    /// Counter-state snapshot taken at each visited element after the
+    /// element's own `counter-reset` / `counter-increment` / `counter-set`
+    /// operations have been applied (Phase 2). Consumed by `BookmarkPass`
+    /// to resolve `counter()` inside `bookmark-label`. Only populated when
+    /// `record_node_snapshots` is enabled (the default is off, since most
+    /// renders do not use `bookmark-label`).
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, i32>>>,
+    /// Gate for `node_snapshots`: the per-element snapshot clones the
+    /// counter map and is only useful when a downstream `BookmarkPass`
+    /// will consume it. Engine flips this on via
+    /// [`with_snapshot_recording`] when bookmarks are emitted.
+    record_node_snapshots: bool,
 }
 
 impl CounterPass {
@@ -1595,11 +1660,36 @@ impl CounterPass {
             generated_css: RefCell::new(String::new()),
             counter_id: RefCell::new(0),
             ops_by_node: RefCell::new(Vec::new()),
+            node_snapshots: RefCell::new(BTreeMap::new()),
+            record_node_snapshots: false,
         }
+    }
+
+    /// Enable per-node counter snapshot recording. Required when a
+    /// downstream `BookmarkPass` needs to resolve `counter()` inside
+    /// `bookmark-label` (fulgur-70c). Off by default to avoid the
+    /// O(|elements| × |counters|) clone cost on renders that do not
+    /// consume bookmarks.
+    pub fn with_snapshot_recording(mut self) -> Self {
+        self.record_node_snapshots = true;
+        self
     }
 
     pub fn generated_css(&self) -> String {
         self.generated_css.borrow().clone()
+    }
+
+    /// Take ownership of the per-node counter snapshots collected during
+    /// `apply`. Each entry maps a DOM node id to its counter state at the
+    /// point right after the element's own `counter-reset` /
+    /// `counter-increment` / `counter-set` operations have been applied —
+    /// the same timing CSS GCPM specifies for `counter()` inside
+    /// `bookmark-label`. Empty if `apply` was never called, if there were
+    /// no counter / content mappings (the early-return path), or if
+    /// snapshot recording was not enabled via [`with_snapshot_recording`].
+    /// Subsequent calls return an empty map (the snapshot is moved out).
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, i32>> {
+        std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 
     /// Consume self and return (ops_by_node for Pageable markers, generated CSS for body).
@@ -1684,6 +1774,20 @@ impl CounterPass {
             }
             drop(state);
             self.ops_by_node.borrow_mut().push((node_id, matched_ops));
+        }
+
+        // Snapshot the counter state at this element's "after own ops, before
+        // children" position. This is the value bookmark-label sees (matches
+        // `::before` content resolution timing). We snapshot unconditionally
+        // for visited elements — even ones with no own counter ops — so that
+        // `BookmarkPass` can still resolve inherited counter values for any
+        // element that authors target with `bookmark-label`. Gated on
+        // `record_node_snapshots` so renders that don't emit bookmarks pay
+        // nothing for this clone (fulgur-70c).
+        if self.record_node_snapshots {
+            self.node_snapshots
+                .borrow_mut()
+                .insert(node_id, self.state.borrow().snapshot());
         }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
@@ -1811,13 +1915,42 @@ pub struct BookmarkInfo {
 pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
+    /// Per-node counter-state snapshots produced by `CounterPass`.
+    /// Empty map ⇒ `counter()` resolves to 0 (CSS spec: undefined
+    /// counter is 0).
+    counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+    /// Per-node named-string snapshots produced by `StringSetPass`.
+    /// Empty map ⇒ `string()` resolves to "" (no string ever set).
+    string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
 }
 
 impl BookmarkPass {
+    /// Construct a pass without snapshot connections. `counter()` and
+    /// `string()` inside `bookmark-label` will fall back to their
+    /// CSS-spec defaults (0 and "" respectively). Convenient for tests
+    /// and for the ergonomic case where no GCPM counter / string
+    /// machinery is in play.
     pub fn new(mappings: Vec<BookmarkMapping>) -> Self {
+        Self::new_with_snapshots(mappings, BTreeMap::new(), BTreeMap::new())
+    }
+
+    /// Construct a pass that resolves `counter(name)` and `string(name)`
+    /// inside `bookmark-label` against snapshots harvested from
+    /// `CounterPass` / `StringSetPass` (see their `take_node_snapshots`
+    /// methods). The snapshots are keyed by Blitz DOM node id and
+    /// represent the running state at that element's DOM position
+    /// (after own `counter-*` / `string-set` rules, before children) —
+    /// matching CSS GCPM resolution timing for `bookmark-label`.
+    pub fn new_with_snapshots(
+        mappings: Vec<BookmarkMapping>,
+        counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+        string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
+    ) -> Self {
         Self {
             mappings,
             results: RefCell::new(Vec::new()),
+            counter_snapshots,
+            string_snapshots,
         }
     }
 
@@ -1900,7 +2033,14 @@ impl BookmarkPass {
         // Label fallback: if no `bookmark-label` was declared, use the
         // element's text content (equivalent to `content()`).
         let resolved_label = match label {
-            Some(items) => resolve_label(&items, doc, node_id, elem),
+            Some(items) => resolve_label(
+                &items,
+                doc,
+                node_id,
+                elem,
+                self.counter_snapshots.get(&node_id),
+                self.string_snapshots.get(&node_id),
+            ),
             None => extract_text_content(doc, node_id),
         };
 
@@ -1927,21 +2067,35 @@ impl BookmarkPass {
 ///
 /// Supported items:
 /// - [`ContentItem::String`] — literal text.
-/// - [`ContentItem::ContentText`] — the element's normalized text content
-///   (same extraction as `string-set: … content(text)`).
-/// - [`ContentItem::Attr`] — the named HTML attribute, or empty if absent.
+/// - [`ContentItem::ContentText`] — the element's normalized text
+///   content (same extraction as `string-set: … content(text)`).
+/// - [`ContentItem::Attr`] — the named HTML attribute, or empty if
+///   absent.
+/// - [`ContentItem::Counter`] — resolved against `counter_snapshot`,
+///   the per-node counter map produced by `CounterPass`. Missing
+///   snapshot or missing counter ⇒ 0 (CSS spec: undefined counter is 0).
+/// - [`ContentItem::StringRef`] — resolved against `string_snapshot`,
+///   the per-node named-string map produced by `StringSetPass`. Since
+///   bookmark-label resolves at a single DOM position rather than over a
+///   page, all `StringPolicy` variants reduce to "the latest value seen
+///   at this point in document order" — equivalent to a direct lookup.
+///   Missing snapshot or missing name ⇒ "".
 ///
-/// Skipped (no-op) items (tracked in beads `fulgur-yfx`):
+/// Skipped (no-op) items, tracked in beads `fulgur-yfx`:
 /// - [`ContentItem::ContentBefore`] / [`ContentItem::ContentAfter`] —
 ///   pseudo-element text extraction is not yet wired in.
-/// - [`ContentItem::Counter`] — counter state isn't available in this pass.
-/// - [`ContentItem::StringRef`] / [`ContentItem::Element`] — margin-box
-///   constructs that don't resolve in a bookmark-label context.
+/// - [`ContentItem::Element`] — running-element references are
+///   margin-box constructs that don't resolve in a bookmark-label
+///   context.
+/// - [`ContentItem::Leader`] — produces a fill character at render
+///   time, not a plain label string; emit nothing here.
 fn resolve_label(
     items: &[ContentItem],
     doc: &HtmlDocument,
     node_id: usize,
     elem: &blitz_dom::node::ElementData,
+    counter_snapshot: Option<&BTreeMap<String, i32>>,
+    string_snapshot: Option<&BTreeMap<String, String>>,
 ) -> String {
     let mut out = String::new();
     for item in items {
@@ -1954,17 +2108,21 @@ fn resolve_label(
                 if let Some(v) = get_attr(elem, name) {
                     out.push_str(v);
                 }
-                // Missing attribute contributes the empty string per CSS
-                // `attr()` — no action needed.
             }
-            // TODO(fulgur-yfx): pseudo-element text, counter(), string(),
-            // and element() are not yet resolvable in bookmark labels.
-            // `leader()` produces a fill character at render time, not a
-            // plain label string; emit nothing here.
+            ContentItem::Counter { name, style } => {
+                let value = counter_snapshot
+                    .and_then(|s| s.get(name))
+                    .copied()
+                    .unwrap_or(0);
+                out.push_str(&format_counter(value, *style));
+            }
+            ContentItem::StringRef { name, .. } => {
+                if let Some(v) = string_snapshot.and_then(|s| s.get(name)) {
+                    out.push_str(v);
+                }
+            }
             ContentItem::ContentBefore
             | ContentItem::ContentAfter
-            | ContentItem::Counter { .. }
-            | ContentItem::StringRef { .. }
             | ContentItem::Element { .. }
             | ContentItem::Leader { .. } => {}
         }
@@ -2987,6 +3145,198 @@ mod tests {
         );
     }
 
+    #[test]
+    fn counter_pass_records_per_node_snapshot() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        let html = r#"<html><body>
+            <h1 id="a">A</h1><h1 id="b">B</h1>
+        </body></html>"#;
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            ops: vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let mut h1_ids: Vec<usize> = Vec::new();
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "h1" {
+                        out.push(id);
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut h1_ids);
+        assert_eq!(h1_ids.len(), 2);
+        let a = snapshots.get(&h1_ids[0]).expect("snapshot at first h1");
+        let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
+        assert_eq!(a.get("chapter").copied(), Some(1));
+        assert_eq!(b.get("chapter").copied(), Some(2));
+    }
+
+    #[test]
+    fn counter_pass_skips_snapshot_when_recording_disabled() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        let html = r#"<html><body><h1>A</h1></body></html>"#;
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            ops: vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        // Default (no `with_snapshot_recording`) skips per-element clones.
+        assert!(
+            pass.take_node_snapshots().is_empty(),
+            "snapshot map must be empty when recording is disabled"
+        );
+    }
+
+    #[test]
+    fn string_set_pass_records_per_node_snapshot() {
+        use crate::gcpm::StringSetValue;
+
+        let html = r#"<html><body>
+            <h1 id="a">First</h1>
+            <p id="p1">Body</p>
+            <h1 id="b">Second</h1>
+            <p id="p2">Body2</p>
+        </body></html>"#;
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            name: "title".into(),
+            values: vec![StringSetValue::ContentText],
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let mut tag_ids: Vec<(String, usize)> = Vec::new();
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<(String, usize)>) {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    let tag = el.name.local.as_ref().to_string();
+                    if matches!(tag.as_str(), "h1" | "p") {
+                        out.push((tag, id));
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut tag_ids);
+
+        let p_ids: Vec<usize> = tag_ids
+            .iter()
+            .filter(|(t, _)| t == "p")
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(p_ids.len(), 2);
+        let p1 = p_ids[0];
+        let p2 = p_ids[1];
+
+        assert_eq!(
+            snapshots.get(&p1).and_then(|m| m.get("title").cloned()),
+            Some("First".to_string()),
+            "first <p> should see title=First (set by preceding h1)"
+        );
+        assert_eq!(
+            snapshots.get(&p2).and_then(|m| m.get("title").cloned()),
+            Some("Second".to_string()),
+            "second <p> should see title=Second (set by preceding h1)"
+        );
+    }
+
+    #[test]
+    fn string_set_pass_folds_multiple_matching_mappings() {
+        use crate::gcpm::StringSetValue;
+
+        // Two distinct selectors target the same element with different
+        // named strings. The pass must apply BOTH (cascade order), not
+        // short-circuit on the first match — otherwise `bookmark-label:
+        // string(other-name)` reads stale / empty values.
+        let html = r#"<html><body>
+            <h1 class="ch">Heading</h1>
+            <p>Body</p>
+        </body></html>"#;
+        let mappings = vec![
+            StringSetMapping {
+                parsed: ParsedSelector::Tag("h1".into()),
+                name: "title".into(),
+                values: vec![StringSetValue::ContentText],
+            },
+            StringSetMapping {
+                parsed: ParsedSelector::Class("ch".into()),
+                name: "section".into(),
+                values: vec![StringSetValue::Literal("ch-1".into())],
+            },
+        ];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+        let store = pass.into_store();
+
+        // Both store entries from the h1 should be present.
+        let names: Vec<&str> = store.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"title"),
+            "store should contain the `title` entry; got {names:?}"
+        );
+        assert!(
+            names.contains(&"section"),
+            "store should contain the `section` entry; got {names:?}"
+        );
+
+        // The <p>'s snapshot should observe BOTH named strings set by
+        // the preceding h1 — proves the running map folded both
+        // mappings, not just the first one.
+        let mut p_id: Option<usize> = None;
+        fn walk(doc: &HtmlDocument, id: usize, out: &mut Option<usize>) {
+            if out.is_some() {
+                return;
+            }
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "p" {
+                        *out = Some(id);
+                        return;
+                    }
+                }
+                for &c in &node.children {
+                    walk(doc, c, out);
+                }
+            }
+        }
+        walk(&doc, doc.root_element().id, &mut p_id);
+        let p = p_id.expect("<p> in fixture");
+
+        let snap = snapshots.get(&p).expect("snapshot at <p>");
+        assert_eq!(snap.get("title").cloned(), Some("Heading".to_string()));
+        assert_eq!(snap.get("section").cloned(), Some("ch-1".to_string()));
+    }
+
     /// Walk the DOM tree to find the first element with the given local name.
     /// Used by pseudo-content tests below.
     fn find_element_by_local_name(doc: &HtmlDocument, name: &str) -> Option<usize> {
@@ -3672,6 +4022,29 @@ mod transform_tests {
 mod marker_rewrite_tests {
     use super::*;
 
+    /// Locate the first element with the given local tag name in
+    /// document order. Mirrors `tests::find_element_by_local_name` —
+    /// duplicated here because each `#[cfg(test)] mod` is a separate
+    /// scope and the helper isn't worth promoting to the crate API.
+    fn find_first_element(doc: &HtmlDocument, name: &str) -> Option<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if let Some(ed) = node.element_data() {
+                if ed.name.local.as_ref() == name {
+                    return Some(id);
+                }
+            }
+            for &c in &node.children {
+                if let Some(v) = walk(doc, c, name) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        use std::ops::Deref;
+        walk(doc.deref(), doc.root_element().id, name)
+    }
+
     #[test]
     fn test_rewrite_marker_content_url_simple() {
         let css = r#"li::marker { content: url("star.png"); }"#;
@@ -3904,7 +4277,7 @@ li::marker { content: url("star.png"); }
     }
 
     #[test]
-    fn bookmark_pass_skips_counter_gracefully() {
+    fn bookmark_pass_unset_counter_resolves_to_zero() {
         use crate::gcpm::CounterStyle;
 
         let html = r#"<html><body><h1>Title</h1></body></html>"#;
@@ -3924,8 +4297,73 @@ li::marker { content: url("star.png"); }
             }],
         );
         assert_eq!(results.len(), 1);
-        // counter() is a no-op in bookmark-label for now; only literal + text survive.
-        assert_eq!(results[0].1.label, ": Title");
+        // CSS spec: undefined counter resolves to 0.
+        // BookmarkPass::new (no snapshots) ⇒ counter() falls back to 0.
+        assert_eq!(results[0].1.label, "0: Title");
+    }
+
+    #[test]
+    fn bookmark_pass_resolves_counter_with_snapshot() {
+        use crate::gcpm::CounterStyle;
+        use std::collections::BTreeMap;
+
+        let html = r#"<html><body><h1>Title</h1></body></html>"#;
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![
+                ContentItem::Counter {
+                    name: "chapter".into(),
+                    style: CounterStyle::Decimal,
+                },
+                ContentItem::String(". ".into()),
+                ContentItem::ContentText,
+            ]),
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let h1 = find_first_element(&doc, "h1").expect("h1 in fixture");
+
+        let mut counter_snap = BTreeMap::new();
+        let mut h1_state = BTreeMap::new();
+        h1_state.insert("chapter".to_string(), 1);
+        counter_snap.insert(h1, h1_state);
+
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snap, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "1. Title");
+    }
+
+    #[test]
+    fn bookmark_pass_resolves_string_ref_with_snapshot() {
+        use crate::gcpm::StringPolicy;
+        use std::collections::BTreeMap;
+
+        let html = r#"<html><body><h1>Body Heading</h1></body></html>"#;
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::StringRef {
+                name: "section".into(),
+                policy: StringPolicy::First,
+            }]),
+        }];
+        let mut doc = parse(html, 400.0, &[]);
+        let h1 = find_first_element(&doc, "h1").expect("h1 in fixture");
+
+        let mut string_snap = BTreeMap::new();
+        let mut h1_state = BTreeMap::new();
+        h1_state.insert("section".to_string(), "Intro".to_string());
+        string_snap.insert(h1, h1_state);
+
+        let pass = BookmarkPass::new_with_snapshots(mappings, BTreeMap::new(), string_snap);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.label, "Intro");
     }
 
     #[test]
