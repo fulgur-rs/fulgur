@@ -129,11 +129,10 @@ pub fn resolve_content_to_html(
                     "page" => out.push_str(&format_counter(page_num as i32, *style)),
                     "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
                     _ => {
-                        let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
-                            vec![*custom_counters.get(name.as_str()).unwrap()]
-                        } else {
-                            Vec::new()
-                        };
+                        let chain: Vec<i32> = custom_counters
+                            .get(name.as_str())
+                            .map(|v| vec![*v])
+                            .unwrap_or_default();
                         out.push_str(&format_counter_chain(&chain, separator, *style));
                     }
                 },
@@ -202,11 +201,10 @@ pub fn resolve_content_to_html(
                         "page" => inner.push_str(&format_counter(page_num as i32, *style)),
                         "pages" => inner.push_str(&format_counter(total_pages as i32, *style)),
                         _ => {
-                            let chain: Vec<i32> = if custom_counters.contains_key(name.as_str()) {
-                                vec![*custom_counters.get(name.as_str()).unwrap()]
-                            } else {
-                                Vec::new()
-                            };
+                            let chain: Vec<i32> = custom_counters
+                                .get(name.as_str())
+                                .map(|v| vec![*v])
+                                .unwrap_or_default();
                             inner.push_str(&format_counter_chain(&chain, separator, *style));
                         }
                     },
