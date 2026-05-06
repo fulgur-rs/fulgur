@@ -2168,7 +2168,10 @@ fn resolve_label(
             ContentItem::ContentBefore
             | ContentItem::ContentAfter
             | ContentItem::Element { .. }
-            | ContentItem::Leader { .. } => {}
+            | ContentItem::Leader { .. }
+            | ContentItem::TargetCounter { .. }
+            | ContentItem::TargetCounters { .. }
+            | ContentItem::TargetText { .. } => {}
         }
     }
     out

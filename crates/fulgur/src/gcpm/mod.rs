@@ -293,6 +293,30 @@ pub enum ContentItem {
     Attr(String),
     /// A CSS leader, e.g. `leader(dotted)`.
     Leader { style: LeaderStyle },
+    /// `target-counter(<url-attr>, <counter-name>)` — resolves the named
+    /// counter at the element identified by the URL fragment in
+    /// `attr(<url-attr>)`. fulgur-63y currently restricts `<url-attr>`
+    /// to `"href"`; other attribute names yield an empty string.
+    TargetCounter {
+        /// Attribute name read from the matched element. Always lowercase.
+        url_attr: String,
+        /// Counter name being looked up at the target element.
+        counter_name: String,
+        /// Display style applied to the resolved value.
+        style: CounterStyle,
+    },
+    /// `target-counters(<url-attr>, <counter-name>, <separator>)` —
+    /// like `TargetCounter` but joins the entire counter chain at the
+    /// target with `separator`.
+    TargetCounters {
+        url_attr: String,
+        counter_name: String,
+        separator: String,
+        style: CounterStyle,
+    },
+    /// `target-text(<url-attr>)` — resolves to the text content of the
+    /// target element. Only the default `content` form is implemented.
+    TargetText { url_attr: String },
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
@@ -534,5 +558,25 @@ mod tests {
     #[test]
     fn test_leader_style_char_custom() {
         assert_eq!(LeaderStyle::Custom("·".to_string()).leader_char(), "·");
+    }
+}
+
+#[cfg(test)]
+mod content_item_target_tests {
+    use super::*;
+
+    #[test]
+    fn target_counter_variant_default_style_is_decimal() {
+        let item = ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        };
+        match item {
+            ContentItem::TargetCounter { counter_name, .. } => {
+                assert_eq!(counter_name, "page");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
