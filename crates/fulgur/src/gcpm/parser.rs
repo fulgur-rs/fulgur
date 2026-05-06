@@ -2398,4 +2398,47 @@ mod tests {
             .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
         assert!(!any_target, "non-attr URL should drop target-counter item");
     }
+
+    #[test]
+    fn parse_target_counter_with_whitespace_and_case() {
+        // Mixed-case function name + extra whitespace inside the call
+        // should still parse to a TargetCounter item identical to the
+        // canonical lowercase / no-whitespace form.
+        let css = r##"a::after { content: Target-Counter(  attr( href )  ,  page  ); }"##;
+        let g = parse_gcpm(css);
+        assert!(
+            g.content_counter_mappings
+                .iter()
+                .any(|m| m.content.contains(&ContentItem::TargetCounter {
+                    url_attr: "href".into(),
+                    counter_name: "page".into(),
+                    style: CounterStyle::Decimal,
+                })),
+            "expected mixed-case + whitespace to parse — got {:?}",
+            g.content_counter_mappings
+        );
+    }
+
+    #[test]
+    fn parse_target_counter_accepts_style_arg_for_forward_compat() {
+        // The optional 3rd argument selects the counter style, and per
+        // the Task 3 implementation the style is threaded all the way
+        // through to format_counter() — so we expect LowerRoman to be
+        // stored on the ContentItem (not the Decimal default).
+        let css = r##"a::after { content: target-counter(attr(href), section, lower-roman); }"##;
+        let g = parse_gcpm(css);
+        let item = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .find_map(|i| match i {
+                ContentItem::TargetCounter {
+                    counter_name,
+                    style,
+                    ..
+                } => Some((counter_name.clone(), *style)),
+                _ => None,
+            });
+        assert_eq!(item, Some(("section".into(), CounterStyle::LowerRoman)));
+    }
 }
