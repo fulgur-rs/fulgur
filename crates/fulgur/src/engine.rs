@@ -208,17 +208,11 @@ impl Engine {
 
         // Extract counter operations and resolve body content.
         // Also harvest per-node counter snapshots for BookmarkPass
-        // (`counter(name)` inside `bookmark-label`, fulgur-70c).
-        //
-        // CounterPass now records full chain snapshots (`Vec<i32>`,
-        // outer-to-inner, per CSS Lists 3 §4.5) so `counters()`
-        // resolution can join them. BookmarkPass still consumes a flat
-        // `i32` per name (matching the legacy `counter()` behavior:
-        // innermost value wins). Until BookmarkPass is widened to take
-        // chains directly (Task 4 of fulgur-vsv), compress here by
-        // taking the last (innermost) value of each chain — this
-        // preserves today's semantics exactly because the legacy flat
-        // `state.get(name)` returned the innermost reset's value.
+        // (`counter(name)` / `counters(name, sep)` inside
+        // `bookmark-label`, fulgur-70c / fulgur-vsv). Each snapshot
+        // value is the full nesting chain (`Vec<i32>`, outer-to-inner)
+        // per CSS Lists 3 §4.5, so both `counter()` (innermost) and
+        // `counters()` (joined) can resolve directly.
         let (counter_ops_by_node_vec, counter_css, counter_snapshots) =
             if !gcpm.counter_mappings.is_empty() || !gcpm.content_counter_mappings.is_empty() {
                 let mut pass = crate::blitz_adapter::CounterPass::new(
@@ -229,17 +223,7 @@ impl Engine {
                     pass = pass.with_snapshot_recording();
                 }
                 crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
-                let chain_snapshots = pass.take_node_snapshots();
-                let snapshots: BTreeMap<usize, BTreeMap<String, i32>> = chain_snapshots
-                    .into_iter()
-                    .map(|(nid, chains)| {
-                        let flat = chains
-                            .into_iter()
-                            .map(|(name, chain)| (name, chain.last().copied().unwrap_or(0)))
-                            .collect();
-                        (nid, flat)
-                    })
-                    .collect();
+                let snapshots = pass.take_node_snapshots();
                 let (ops, css) = pass.into_parts();
                 (ops, css, snapshots)
             } else {

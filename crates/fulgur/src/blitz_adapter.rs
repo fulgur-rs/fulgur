@@ -1942,9 +1942,11 @@ pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
     /// Per-node counter-state snapshots produced by `CounterPass`.
+    /// Each value is the full nesting chain (outer-to-inner) per CSS
+    /// Lists 3 §4.5; `counter()` takes the innermost (`last()`) value.
     /// Empty map ⇒ `counter()` resolves to 0 (CSS spec: undefined
     /// counter is 0).
-    counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+    counter_snapshots: BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
     /// Per-node named-string snapshots produced by `StringSetPass`.
     /// Empty map ⇒ `string()` resolves to "" (no string ever set).
     string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
@@ -1969,7 +1971,7 @@ impl BookmarkPass {
     /// matching CSS GCPM resolution timing for `bookmark-label`.
     pub fn new_with_snapshots(
         mappings: Vec<BookmarkMapping>,
-        counter_snapshots: BTreeMap<usize, BTreeMap<String, i32>>,
+        counter_snapshots: BTreeMap<usize, BTreeMap<String, Vec<i32>>>,
         string_snapshots: BTreeMap<usize, BTreeMap<String, String>>,
     ) -> Self {
         Self {
@@ -2120,7 +2122,7 @@ fn resolve_label(
     doc: &HtmlDocument,
     node_id: usize,
     elem: &blitz_dom::node::ElementData,
-    counter_snapshot: Option<&BTreeMap<String, i32>>,
+    counter_snapshot: Option<&BTreeMap<String, Vec<i32>>>,
     string_snapshot: Option<&BTreeMap<String, String>>,
 ) -> String {
     let mut out = String::new();
@@ -2138,7 +2140,7 @@ fn resolve_label(
             ContentItem::Counter { name, style } => {
                 let value = counter_snapshot
                     .and_then(|s| s.get(name))
-                    .copied()
+                    .and_then(|chain| chain.last().copied())
                     .unwrap_or(0);
                 out.push_str(&format_counter(value, *style));
             }
@@ -4422,7 +4424,7 @@ li::marker { content: url("star.png"); }
 
         let mut counter_snap = BTreeMap::new();
         let mut h1_state = BTreeMap::new();
-        h1_state.insert("chapter".to_string(), 1);
+        h1_state.insert("chapter".to_string(), vec![1]);
         counter_snap.insert(h1, h1_state);
 
         let pass = BookmarkPass::new_with_snapshots(mappings, counter_snap, BTreeMap::new());
