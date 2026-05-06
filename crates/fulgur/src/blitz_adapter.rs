@@ -1640,7 +1640,7 @@ pub struct CounterPass {
     /// to resolve `counter()` inside `bookmark-label`. Only populated when
     /// `record_node_snapshots` is enabled (the default is off, since most
     /// renders do not use `bookmark-label`).
-    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, i32>>>,
+    node_snapshots: RefCell<BTreeMap<usize, BTreeMap<String, Vec<i32>>>>,
     /// Gate for `node_snapshots`: the per-element snapshot clones the
     /// counter map and is only useful when a downstream `BookmarkPass`
     /// will consume it. Engine flips this on via
@@ -1688,7 +1688,7 @@ impl CounterPass {
     /// no counter / content mappings (the early-return path), or if
     /// snapshot recording was not enabled via [`with_snapshot_recording`].
     /// Subsequent calls return an empty map (the snapshot is moved out).
-    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, i32>> {
+    pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, Vec<i32>>> {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 
@@ -1762,14 +1762,31 @@ impl CounterPass {
             return;
         };
 
-        // Phase 2: Apply counter state changes (no doc borrow needed)
+        // Phase 2: Apply counter state changes (no doc borrow needed).
+        // CSS Lists 3 §4.5: a counter instance created by `counter-reset`
+        // is scoped to the originating element + its descendants +
+        // following siblings. We model that by tagging the instance with
+        // the originating element's *DOM parent*, then popping all
+        // instances tagged with `node_id` in a post-order `leave_element`
+        // call (see end of this function). Increment/set never push a
+        // new instance, so their parent_id is unused — we still pass it
+        // for API symmetry.
+        let parent_id = doc
+            .get_node(node_id)
+            .and_then(|n| n.parent)
+            .unwrap_or(crate::gcpm::counter::COUNTER_ROOT_PARENT);
+
         if !matched_ops.is_empty() {
             let mut state = self.state.borrow_mut();
             for op in &matched_ops {
                 match op {
-                    CounterOp::Reset { name, value } => state.reset(name, *value),
-                    CounterOp::Increment { name, value } => state.increment(name, *value),
-                    CounterOp::Set { name, value } => state.set(name, *value),
+                    CounterOp::Reset { name, value } => {
+                        state.reset_in_scope(name, *value, parent_id)
+                    }
+                    CounterOp::Increment { name, value } => {
+                        state.increment_in_scope(name, *value, parent_id)
+                    }
+                    CounterOp::Set { name, value } => state.set_in_scope(name, *value, parent_id),
                 }
             }
             drop(state);
@@ -1787,7 +1804,7 @@ impl CounterPass {
         if self.record_node_snapshots {
             self.node_snapshots
                 .borrow_mut()
-                .insert(node_id, self.state.borrow().snapshot());
+                .insert(node_id, self.state.borrow().chain_snapshot());
         }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
@@ -1856,6 +1873,15 @@ impl CounterPass {
                 );
             }
         }
+
+        // Post-order: pop instances created by this node's children. Per
+        // CSS Lists 3 §4.5, an instance's scope is the originating
+        // element + descendants + following siblings. Instances pushed
+        // by children of `node_id` are scoped to `node_id`'s subtree, so
+        // they must die now (we are returning from `node_id`). Placed
+        // after the ::after resolution so descendant counter state is
+        // still visible to `::after`'s `counter()` lookup.
+        self.state.borrow_mut().leave_element(node_id);
     }
 
     fn resolve_content(&self, items: &[ContentItem]) -> String {
@@ -3183,8 +3209,8 @@ mod tests {
         assert_eq!(h1_ids.len(), 2);
         let a = snapshots.get(&h1_ids[0]).expect("snapshot at first h1");
         let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
-        assert_eq!(a.get("chapter").copied(), Some(1));
-        assert_eq!(b.get("chapter").copied(), Some(2));
+        assert_eq!(a.get("chapter"), Some(&vec![1]));
+        assert_eq!(b.get("chapter"), Some(&vec![2]));
     }
 
     #[test]
@@ -3208,6 +3234,76 @@ mod tests {
             pass.take_node_snapshots().is_empty(),
             "snapshot map must be empty when recording is disabled"
         );
+    }
+
+    #[test]
+    fn counter_pass_nested_reset_records_chain_snapshot() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // Outer ol resets `item`. Inner ol nested under outer's first li
+        // resets `item` again — at that scope chain is length 2.
+        let html = r#"<html><body>
+            <ol><li><ol><li id="inner">Inner</li></ol></li></ol>
+        </body></html>"#;
+        let mappings = vec![
+            CounterMapping {
+                parsed: ParsedSelector::Tag("ol".into()),
+                ops: vec![CounterOp::Reset {
+                    name: "item".into(),
+                    value: 0,
+                }],
+            },
+            CounterMapping {
+                parsed: ParsedSelector::Tag("li".into()),
+                ops: vec![CounterOp::Increment {
+                    name: "item".into(),
+                    value: 1,
+                }],
+            },
+        ];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        fn find_inner_li(doc: &HtmlDocument, id: usize, ol_depth: usize) -> Option<usize> {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(el) = node.element_data() {
+                    if el.name.local.as_ref() == "li" && ol_depth >= 2 {
+                        return Some(id);
+                    }
+                }
+                let next_depth = node
+                    .element_data()
+                    .map(|el| {
+                        if el.name.local.as_ref() == "ol" {
+                            ol_depth + 1
+                        } else {
+                            ol_depth
+                        }
+                    })
+                    .unwrap_or(ol_depth);
+                for &c in &node.children {
+                    if let Some(found) = find_inner_li(doc, c, next_depth) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        let inner_id = find_inner_li(&doc, doc.root_element().id, 0).expect("inner li");
+        let snap = snapshots.get(&inner_id).expect("snapshot at inner li");
+        let chain = snap.get("item").expect("item chain at inner li");
+        assert_eq!(
+            chain.len(),
+            2,
+            "nested counter-reset must yield chain of length 2, got {chain:?}"
+        );
+        // Both outer-li and inner-li have been incremented once; snapshot
+        // is taken at inner-li after its own ops, so chain == [1, 1].
+        assert_eq!(chain, &vec![1, 1]);
     }
 
     #[test]
