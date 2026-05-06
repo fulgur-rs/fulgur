@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-05-06
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(gcpm): support content: leader() in margin boxes by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/383
+* feat(bookmark-label): resolve counter() and string() (fulgur-70c) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/388
+### Bug Fixes
+* fix(asset): resolve content: url() images when CSS is loaded via NetProvider by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/385
+### Documentation
+* docs(plans): add implementation and design plans by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/387
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.13.0...v0.14.0
+
 ## [0.13.0] - 2026-05-05
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
