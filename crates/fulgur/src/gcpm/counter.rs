@@ -42,7 +42,8 @@ pub fn resolve_content_to_string(
             | ContentItem::ContentBefore
             | ContentItem::ContentAfter
             | ContentItem::Attr(_)
-            | ContentItem::Leader { .. } => {}
+            | ContentItem::Leader { .. }
+            | ContentItem::Counters { .. } => {}
         }
     }
     out
@@ -106,7 +107,8 @@ pub fn resolve_content_to_html(
                 | ContentItem::ContentBefore
                 | ContentItem::ContentAfter
                 | ContentItem::Attr(_)
-                | ContentItem::Leader { .. } => {}
+                | ContentItem::Leader { .. }
+                | ContentItem::Counters { .. } => {}
             }
         }
         return out;

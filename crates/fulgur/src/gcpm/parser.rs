@@ -714,9 +714,12 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
             *self.bookmark_label = Some(items);
         } else if name.eq_ignore_ascii_case("content") && self.has_pseudo {
             let items = parse_content_value(input);
-            let has_counter = items
-                .iter()
-                .any(|item| matches!(item, ContentItem::Counter { .. }));
+            let has_counter = items.iter().any(|item| {
+                matches!(
+                    item,
+                    ContentItem::Counter { .. } | ContentItem::Counters { .. }
+                )
+            });
             // Last-declaration-wins: always update content_items (clear when
             // the new content has no counter()).
             if has_counter {
@@ -1055,6 +1058,24 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 })
                                 .unwrap_or(CounterStyle::Decimal);
                             items.push(ContentItem::Counter { name, style });
+                        } else if fn_name.eq_ignore_ascii_case("counters") {
+                            let name = arg.to_string();
+                            if input.try_parse(|input| input.expect_comma()).is_err() {
+                                return Ok(());
+                            }
+                            let separator = match input.try_parse(|input| {
+                                input.expect_string().map(|s| s.to_string())
+                            }) {
+                                Ok(s) => s,
+                                Err(_) => return Ok(()),
+                            };
+                            let style = input
+                                .try_parse(|input| {
+                                    input.expect_comma()?;
+                                    parse_counter_style(input)
+                                })
+                                .unwrap_or(CounterStyle::Decimal);
+                            items.push(ContentItem::Counters { name, separator, style });
                         } else if fn_name.eq_ignore_ascii_case("string") {
                             let name = arg.to_string();
                             let policy = input
@@ -2155,5 +2176,48 @@ mod tests {
                 style: LeaderStyle::Dotted
             }]
         );
+    }
+
+    #[test]
+    fn test_parse_counters_with_separator_only() {
+        let css = r#"li::before { content: counters(item, "."); }"#;
+        let ctx = parse_gcpm(css);
+        let mapping = &ctx.content_counter_mappings[0];
+        assert_eq!(
+            mapping.content,
+            vec![ContentItem::Counters {
+                name: "item".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_counters_with_style() {
+        let css = r#"li::before { content: counters(item, "-", upper-roman); }"#;
+        let ctx = parse_gcpm(css);
+        let mapping = &ctx.content_counter_mappings[0];
+        assert_eq!(
+            mapping.content,
+            vec![ContentItem::Counters {
+                name: "item".into(),
+                separator: "-".into(),
+                style: CounterStyle::UpperRoman,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_counters_missing_separator_drops_item() {
+        // counters() with only a name is invalid per spec — drop silently.
+        let css = r#"li::before { content: counters(item); }"#;
+        let ctx = parse_gcpm(css);
+        let any_counters = ctx
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::Counters { .. }));
+        assert!(!any_counters, "invalid counters() should produce no item");
     }
 }
