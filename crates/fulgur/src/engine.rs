@@ -797,7 +797,7 @@ impl Engine {
 }
 
 use crate::blitz_adapter::get_attr;
-use crate::gcpm::target_ref::{AnchorEntry, AnchorMap, page_for_node};
+use crate::gcpm::target_ref::{AnchorEntry, AnchorMap, fragment_id_from_href, page_for_node};
 use crate::pagination_layout::PaginationGeometryTable;
 use blitz_dom::BaseDocument;
 
@@ -917,7 +917,7 @@ fn walk_implicit_href(
     if let Some(elem) = node.element_data()
         && elem.name.local.as_ref() == "a"
         && let Some(href) = get_attr(elem, "href")
-        && href.starts_with('#')
+        && fragment_id_from_href(href).is_some()
         && let Some(page_num) = resolved_page
     {
         let page_idx = page_num.saturating_sub(1) as usize;
@@ -1344,18 +1344,23 @@ mod tests {
 
     #[test]
     fn implicit_href_skips_external_and_hashless_hrefs() {
+        // `href="#"` is a no-op anchor: `fragment_id_from_href` strips
+        // the leading `#` and returns `None` for the empty remainder,
+        // so it must not poison the map and clobber the later
+        // `<a href="#real">` via first-on-page-wins.
         let html = r##"<html><body>
             <a href="https://example.com/">external</a>
             <a href="page2.html">relative</a>
             <a>missing-href</a>
+            <a href="#">empty-fragment</a>
             <a href="#real">fragment</a>
         </body></html>"##;
         let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
         let anchors = collect_anchor_node_ids(&doc);
-        assert_eq!(anchors.len(), 4);
-        let geometry = geometry_with_anchor_pages(&anchors, &[0, 0, 0, 0]);
+        assert_eq!(anchors.len(), 5);
+        let geometry = geometry_with_anchor_pages(&anchors, &[0, 0, 0, 0, 0]);
         let map = build_implicit_href_map(&doc, &geometry);
-        // Only the fragment-form `<a>` contributes.
+        // Only the real fragment `<a>` contributes; `#` is dropped.
         assert_eq!(map.get(&0).map(String::as_str), Some("#real"));
     }
 
