@@ -500,6 +500,14 @@ impl Engine {
             AnchorMap::default()
         };
 
+        // Per-page implicit `href` for `target-*(attr(href), ...)` in
+        // `@page` margin boxes (fulgur-qgy7). Built every pass — pass 1
+        // populates it for completeness even though margin-box target-*
+        // resolves to empty without an `anchor_map`; the cost is one DOM
+        // walk and the determinism trade-off matches `pagination_geometry`
+        // already being recomputed per pass.
+        let implicit_href_map = build_implicit_href_map(&doc, &pagination_geometry);
+
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {
@@ -565,6 +573,7 @@ impl Engine {
             html_title,
             self.serialize_settings.clone(),
             anchor_map,
+            &implicit_href_map,
         )?;
         Ok(RenderPassOutput {
             pdf,
@@ -840,6 +849,75 @@ fn walk_anchors(
 fn collect_text_content(doc: &BaseDocument, node_id: usize) -> String {
     let raw = crate::blitz_adapter::element_text(doc, node_id);
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Per-page implicit `href` for `target-*(attr(href), ...)` evaluated
+/// inside `@page` margin boxes. CSS GCPM does not define `attr(href)`
+/// for margin-box content (no link element exists in that context), so
+/// we adopt the de-facto rule used by other paged-media engines: the
+/// implicit reference for page *N* is the **first `<a href="#...">`
+/// element whose enclosing block lands on page N**. Pages with no such
+/// anchor have no entry in the returned map; callers fall back to an
+/// empty string.
+///
+/// Inline anchors carry no geometry of their own — the block-only
+/// fragmenter only records block-level nodes — so we attribute each
+/// `<a>` to the first page of its **nearest paginated ancestor**. An
+/// `<a>` inline in a `<p>` that spans pages 1→2 is therefore attributed
+/// to page 1 only; line-level placement is not available without
+/// re-driving inline layout, and keeping the rule cheap matches the
+/// "spec coverage at low marginal cost" framing of fulgur-qgy7.
+fn build_implicit_href_map(
+    doc: &BaseDocument,
+    pagination_geometry: &PaginationGeometryTable,
+) -> BTreeMap<usize, String> {
+    let mut map = BTreeMap::new();
+    walk_implicit_href(
+        doc,
+        doc.root_element().id,
+        0,
+        None,
+        pagination_geometry,
+        &mut map,
+    );
+    map
+}
+
+fn walk_implicit_href(
+    doc: &BaseDocument,
+    node_id: usize,
+    depth: usize,
+    inherited_page: Option<u32>,
+    geometry: &PaginationGeometryTable,
+    out: &mut BTreeMap<usize, String>,
+) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    // Block-level ancestors get their own fragments; inline descendants
+    // (notably `<a>`) do not. Inherit the deepest seen block page so
+    // inline children resolve against the same page the fragmenter
+    // assigned to their nearest paginated ancestor.
+    let resolved_page = page_for_node(geometry, node_id).or(inherited_page);
+    // `BaseDocument` lowercases HTML tag names during parsing, so a
+    // bare equality check against `"a"` matches both `<a>` and `<A>`
+    // source forms.
+    if let Some(elem) = node.element_data()
+        && elem.name.local.as_ref() == "a"
+        && let Some(href) = get_attr(elem, "href")
+        && href.starts_with('#')
+        && let Some(page_num) = resolved_page
+    {
+        let page_idx = page_num.saturating_sub(1) as usize;
+        out.entry(page_idx).or_insert_with(|| href.to_string());
+    }
+    let children: Vec<usize> = node.children.clone();
+    for c in children {
+        walk_implicit_href(doc, c, depth + 1, resolved_page, geometry, out);
+    }
 }
 
 pub struct EngineBuilder {
@@ -1167,5 +1245,171 @@ mod tests {
     fn builder_pdf_ua_implies_effective_tagging() {
         let engine = Engine::builder().pdf_ua(true).build();
         assert!(engine.config().effective_tagging());
+    }
+
+    // ── fulgur-qgy7: implicit-href map for margin-box target-* ─────────────
+
+    /// Locate every `<a>` element in document order. Used by the
+    /// implicit-href tests to drive synthetic `PaginationGeometryTable`
+    /// fixtures that don't run a real fragmenter.
+    fn collect_anchor_node_ids(doc: &blitz_dom::BaseDocument) -> Vec<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            if let Some(elem) = node.element_data()
+                && elem.name.local.as_ref() == "a"
+            {
+                out.push(node_id);
+            }
+            let children: Vec<usize> = node.children.clone();
+            for c in children {
+                walk(doc, c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(doc, doc.root_element().id, &mut out);
+        out
+    }
+
+    fn frag_on_page(page_index: u32) -> crate::pagination_layout::Fragment {
+        crate::pagination_layout::Fragment {
+            page_index,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    fn geometry_with_anchor_pages(
+        anchor_ids: &[usize],
+        page_indices: &[u32],
+    ) -> PaginationGeometryTable {
+        assert_eq!(anchor_ids.len(), page_indices.len());
+        let mut table = PaginationGeometryTable::new();
+        for (&node_id, &page_index) in anchor_ids.iter().zip(page_indices) {
+            table.insert(
+                node_id,
+                crate::pagination_layout::PaginationGeometry {
+                    fragments: vec![frag_on_page(page_index)],
+                    is_repeat: false,
+                },
+            );
+        }
+        table
+    }
+
+    #[test]
+    fn implicit_href_first_anchor_per_page_wins() {
+        let html = r##"<html><body>
+            <a href="#a">first</a>
+            <a href="#b">second</a>
+        </body></html>"##;
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        let anchors = collect_anchor_node_ids(&doc);
+        assert_eq!(anchors.len(), 2, "expected two <a> elements");
+        // Both anchors land on page 0 — document order means `#a` wins.
+        let geometry = geometry_with_anchor_pages(&anchors, &[0, 0]);
+        let map = build_implicit_href_map(&doc, &geometry);
+        assert_eq!(map.get(&0).map(String::as_str), Some("#a"));
+        assert!(!map.contains_key(&1));
+    }
+
+    #[test]
+    fn implicit_href_records_one_entry_per_page() {
+        let html = r##"<html><body>
+            <a href="#a">page-one</a>
+            <a href="#b">page-two</a>
+            <a href="#c">page-two-second</a>
+        </body></html>"##;
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        let anchors = collect_anchor_node_ids(&doc);
+        assert_eq!(anchors.len(), 3);
+        let geometry = geometry_with_anchor_pages(&anchors, &[0, 1, 1]);
+        let map = build_implicit_href_map(&doc, &geometry);
+        assert_eq!(map.get(&0).map(String::as_str), Some("#a"));
+        // First-on-page wins; `#c` is dropped.
+        assert_eq!(map.get(&1).map(String::as_str), Some("#b"));
+    }
+
+    #[test]
+    fn implicit_href_skips_external_and_hashless_hrefs() {
+        let html = r##"<html><body>
+            <a href="https://example.com/">external</a>
+            <a href="page2.html">relative</a>
+            <a>missing-href</a>
+            <a href="#real">fragment</a>
+        </body></html>"##;
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        let anchors = collect_anchor_node_ids(&doc);
+        assert_eq!(anchors.len(), 4);
+        let geometry = geometry_with_anchor_pages(&anchors, &[0, 0, 0, 0]);
+        let map = build_implicit_href_map(&doc, &geometry);
+        // Only the fragment-form `<a>` contributes.
+        assert_eq!(map.get(&0).map(String::as_str), Some("#real"));
+    }
+
+    #[test]
+    fn implicit_href_skips_anchors_without_geometry() {
+        // An `<a>` whose subtree was never paginated (out-of-flow,
+        // `display: none`, …) has no entry in the geometry table and
+        // must not poison the implicit-href map for any page.
+        let html = r##"<html><body><a href="#orphan">x</a></body></html>"##;
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        let geometry = PaginationGeometryTable::new();
+        let map = build_implicit_href_map(&doc, &geometry);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn implicit_href_empty_when_document_has_no_anchors() {
+        let html = "<html><body><p>no anchors here</p></body></html>";
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        let geometry = PaginationGeometryTable::new();
+        let map = build_implicit_href_map(&doc, &geometry);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn implicit_href_inherits_block_ancestor_page() {
+        // The block-only fragmenter records geometry for block-level
+        // nodes only; inline `<a>` elements inherit their page from
+        // the nearest paginated ancestor. Real renders trigger this
+        // path because `<p><a href="#x">` has geometry on the `<p>`,
+        // not on the `<a>` itself.
+        let html = r##"<html><body><p><a href="#sec">link</a></p></body></html>"##;
+        let doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        // Locate the `<p>` (block-level) by walking; the `<a>` inside
+        // it is inline and intentionally has no geometry entry.
+        fn find_first_tag(doc: &blitz_dom::BaseDocument, tag: &str) -> Option<usize> {
+            fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
+                let n = doc.get_node(node_id)?;
+                if let Some(elem) = n.element_data()
+                    && elem.name.local.as_ref() == tag
+                {
+                    return Some(node_id);
+                }
+                for c in n.children.iter().copied() {
+                    if let Some(found) = walk(doc, c, tag) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            walk(doc, doc.root_element().id, tag)
+        }
+        let p_id = find_first_tag(&doc, "p").expect("find <p>");
+        let mut geometry = PaginationGeometryTable::new();
+        geometry.insert(
+            p_id,
+            crate::pagination_layout::PaginationGeometry {
+                fragments: vec![frag_on_page(2)],
+                is_repeat: false,
+            },
+        );
+        let map = build_implicit_href_map(&doc, &geometry);
+        // `<a>` inherits page 2 (0-based index) from its `<p>` parent.
+        assert_eq!(map.get(&2).map(String::as_str), Some("#sec"));
     }
 }

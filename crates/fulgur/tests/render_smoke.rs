@@ -3530,3 +3530,79 @@ fn target_counter_in_link_loaded_css_triggers_pass_two() {
         lower.len()
     );
 }
+
+/// fulgur-qgy7: `target-text(attr(href))` evaluated inside an `@page`
+/// margin box has no link element to read `href` from. The renderer
+/// supplies an implicit reference — the first `<a href="#...">` whose
+/// first fragment lands on the current page — so a header / footer like
+/// `@top-center { content: target-text(attr(href)); }` resolves to the
+/// section title that page 1's link points at. Without the plumbing the
+/// margin box stays empty (Option 2 in the design notes).
+#[test]
+fn target_text_in_top_center_resolves_via_implicit_href() {
+    // Page 1 hosts the `<a href="#sec1">`; page 2 hosts the target
+    // `<h2 id="sec1">`. `page-break-before: always` forces the section
+    // onto page 2 so the implicit-href map for page 0 picks up `#sec1`
+    // and pass 2's margin-box content stream contains the resolved
+    // title. The margin box's prefix (`§ `) is unique enough that a
+    // direct substring search distinguishes the margin-box copy from
+    // the body's `<h2>` copy.
+    let html = r##"
+<!doctype html>
+<html><head><style>
+  body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+  @page { margin: 1in; @top-center { content: "Header: " target-text(attr(href)); } }
+  h2 { page-break-before: always; }
+</style></head>
+<body>
+  <p><a href="#sec1">Jump to section</a></p>
+  <h2 id="sec1">My Section Title</h2>
+  <p>section body</p>
+</body></html>"##;
+
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
+    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .assets(assets)
+        .build()
+        .render_html(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("margin-box-target-text.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let doc = lopdf::Document::load(&path).expect("load pdf");
+    let mut decompressed = String::new();
+    for (_id, obj) in doc.objects.iter() {
+        if let lopdf::Object::Stream(s) = obj {
+            let mut clone = s.clone();
+            let _ = clone.decompress();
+            decompressed.push_str(&String::from_utf8_lossy(&clone.content));
+        }
+    }
+    let lower = decompressed.to_ascii_lowercase();
+
+    // The full margin-box payload (§ prefix + resolved target-text)
+    // is only ever produced by the implicit-href plumbing. The body's
+    // own `<h2>` carries plain "My Section Title" without the prefix,
+    // so this string appears in the PDF exclusively because pass 2's
+    // margin-box content stream rendered the resolved title.
+    let combined = hex_utf16be("Header: My Section Title");
+    assert!(
+        lower.contains(&combined.to_ascii_lowercase()),
+        "ActualText missing UTF-16BE for the @top-center payload — \
+         margin-box `target-text(attr(href))` did not pick up the implicit \
+         href from `<a href=\"#sec1\">`. Looked for {combined} in {} bytes \
+         of decompressed PDF streams.",
+        lower.len()
+    );
+}
