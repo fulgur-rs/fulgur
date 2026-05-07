@@ -218,6 +218,11 @@ path = "gcpm/leader-toc.html"
 [[fixture]]
 path = "gcpm/toc-target-counter.html"
 
+# fulgur-qgy7: implicit-href plumbing for `target-*(attr(href), ...)`
+# inside `@page` margin boxes.
+[[fixture]]
+path = "gcpm/margin-box-implicit-href.html"
+
 # fulgur-uebl: CSS Page 3 named-page implicit forced breaks.
 # Three siblings with `page: a`, `page: b`, and an unnamed (auto)
 # trailing div should produce three pages — the implicit break is

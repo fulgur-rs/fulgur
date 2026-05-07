@@ -3530,3 +3530,55 @@ fn target_counter_in_link_loaded_css_triggers_pass_two() {
         lower.len()
     );
 }
+
+/// fulgur-qgy7: `target-text(attr(href))` inside an `@page` margin box
+/// has no link element to read `href` from. The renderer supplies an
+/// implicit reference — the first `<a href="#...">` landing on the
+/// current page — so `@top-center { content: ... target-text(...) }`
+/// resolves to the section title that page 1's link points at. The
+/// margin box's `"Header: "` prefix is unique to the margin-box
+/// payload, so a substring search distinguishes it from the body's
+/// `<h2>` copy.
+#[test]
+fn target_text_in_top_center_resolves_via_implicit_href() {
+    let html = r##"
+<!doctype html>
+<html><head><style>
+  body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+  @page { margin: 1in; @top-center { content: "Header: " target-text(attr(href)); } }
+  h2 { page-break-before: always; }
+</style></head>
+<body>
+  <p><a href="#sec1">Jump to section</a></p>
+  <h2 id="sec1">My Section Title</h2>
+  <p>section body</p>
+</body></html>"##;
+
+    let pdf = tagged_render_with_noto(html);
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("margin-box-target-text.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let doc = lopdf::Document::load(&path).expect("load pdf");
+    let mut decompressed = String::new();
+    for (_id, obj) in doc.objects.iter() {
+        if let lopdf::Object::Stream(s) = obj {
+            let mut clone = s.clone();
+            let _ = clone.decompress();
+            decompressed.push_str(&String::from_utf8_lossy(&clone.content));
+        }
+    }
+    let lower = decompressed.to_ascii_lowercase();
+
+    let combined = hex_utf16be("Header: My Section Title");
+    assert!(
+        lower.contains(&combined.to_ascii_lowercase()),
+        "ActualText missing UTF-16BE for the @top-center payload — \
+         margin-box `target-text(attr(href))` did not pick up the implicit \
+         href from `<a href=\"#sec1\">`. Looked for {combined} in {} bytes \
+         of decompressed PDF streams.",
+        lower.len()
+    );
+}

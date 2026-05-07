@@ -38,6 +38,7 @@ pub fn render_v2(
     html_title: Option<String>,
     serialize_settings: SerializeSettings,
     anchor_map: Option<&AnchorMap>,
+    implicit_href_by_page: &BTreeMap<usize, String>,
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
@@ -134,6 +135,7 @@ pub fn render_v2(
         string_set_by_node,
         counter_ops_by_node,
         page_count,
+        implicit_href_by_page,
     );
 
     // Page-independent skip sets. These reference only `drawables.*`
@@ -3346,6 +3348,10 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub measure_cache: MeasureCache,
     pub height_cache: HashMap<(String, u32, u32), f32>,
     pub render_cache: RenderCache,
+    /// fulgur-qgy7: per-page implicit `href` for
+    /// `target-*(attr(href), ...)` evaluated inside `@page` margin
+    /// boxes. Built once per render pass by `engine::render_pass`.
+    pub implicit_href_by_page: &'a BTreeMap<usize, String>,
 }
 
 impl<'a> MarginBoxRenderer<'a> {
@@ -3362,6 +3368,7 @@ impl<'a> MarginBoxRenderer<'a> {
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
         counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
         total_pages: usize,
+        implicit_href_by_page: &'a BTreeMap<usize, String>,
     ) -> Self {
         let string_set_states = if gcpm.string_set_mappings.is_empty() {
             vec![BTreeMap::new(); total_pages]
@@ -3401,6 +3408,7 @@ impl<'a> MarginBoxRenderer<'a> {
             measure_cache: HashMap::new(),
             height_cache: HashMap::new(),
             render_cache: HashMap::new(),
+            implicit_href_by_page,
         }
     }
 
@@ -3428,14 +3436,13 @@ impl<'a> MarginBoxRenderer<'a> {
     /// resolvers return empty strings — see
     /// `gcpm::counter::resolve_content_to_html_with_anchor`.
     ///
-    /// Margin-box `implicit_href` plumbing is not yet implemented:
-    /// `implicit_href` is always `None` here, so margin-box content with
-    /// `target-counter(attr(href), ...)` resolves to an empty string.
-    /// The dominant use case (TOC entries in `::before` / `::after`)
-    /// already resolves via `CounterPass::with_anchor_map`. Wiring a
-    /// per-page implicit href (e.g. by walking `pagination_geometry`
-    /// for the first `<a href="#...">` on each page) is tracked by
-    /// fulgur-qgy7.
+    /// fulgur-qgy7: margin-box `target-*(attr(href), ...)` resolves
+    /// against the per-page implicit `href` stored on
+    /// `implicit_href_by_page`. The map is populated by
+    /// `engine::build_implicit_href_map` from the first
+    /// `<a href="#...">` whose first fragment lands on each page.
+    /// Pages with no such anchor look up `None` and the resolver
+    /// returns an empty string.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_page(
         &mut self,
@@ -3478,10 +3485,12 @@ impl<'a> MarginBoxRenderer<'a> {
         }
 
         // Resolve HTML for each effective box. Margin-box content goes
-        // through `_with_anchor` so `target-*` resolves when `anchor_map`
-        // is present (pass 2). `implicit_href` is `None` for now;
-        // margin-box `target-counter(attr(href), ...)` therefore returns
-        // an empty string. Tracked by fulgur-qgy7.
+        // through `_with_anchor` so `target-*` resolves when
+        // `anchor_map` is present (pass 2).
+        let implicit_href = self
+            .implicit_href_by_page
+            .get(&page_idx)
+            .map(String::as_str);
         let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
         for (&pos, rule) in &effective_boxes {
             let content_html = resolve_content_to_html_with_anchor(
@@ -3494,7 +3503,7 @@ impl<'a> MarginBoxRenderer<'a> {
                 page_idx,
                 &self.counter_states[page_idx],
                 anchor_map,
-                None,
+                implicit_href,
             );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {
