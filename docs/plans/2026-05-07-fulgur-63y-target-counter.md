@@ -146,7 +146,7 @@ git commit -m "feat(gcpm): add ContentItem::TargetCounter / TargetCounters / Tar
 - `<url>` argument: only `attr(href)` form. Anything else (string literal, `url(...)`, `attr(<other-name>)`) → emit nothing (skip the item gracefully).
 - `target-counter` second argument: counter name (ident).
 - `target-counters` arguments: counter name (ident), separator (string literal).
-- `target-text` second argument: not parsed in this issue. If present, swallow tokens but ignore.
+- `target-text` second argument: not implemented in this issue. If present, the entire item is dropped (so `target-text(attr(href), before)` does NOT silently behave like the default form). Tracked under fulgur-x70n.
 - Counter-style 3rd argument: parsed AND honored end-to-end via `format_counter(value, *style)`. All five base `CounterStyle` variants (`Decimal`, `UpperRoman`, `LowerRoman`, `UpperAlpha`, `LowerAlpha`) work in `target-counter` / `target-counters`. The default is `CounterStyle::Decimal` when the argument is absent. Closes `fulgur-5ho3` (any *new* counter styles such as `decimal-leading-zero` or `@counter-style` rules are out of scope and should be tracked under a separately scoped issue).
 
 **Step 1: Write failing parser tests**
