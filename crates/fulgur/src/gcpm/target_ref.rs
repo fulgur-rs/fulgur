@@ -281,4 +281,62 @@ mod tests {
         );
         assert_eq!(page_for_node(&table, 7), None);
     }
+
+    #[test]
+    fn anchor_map_is_empty_after_construction() {
+        let m = AnchorMap::new();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn anchor_map_is_not_empty_after_insert() {
+        let mut m = AnchorMap::new();
+        m.insert("a", AnchorEntry::default());
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn target_counter_undefined_named_counter_returns_empty() {
+        // Entry exists, counter_name is not "page", and counters map
+        // does not contain the requested key. Hits the second
+        // `let-else` empty-return path in resolve_target_counter.
+        let m = make_map();
+        assert_eq!(
+            resolve_target_counter("#sec-1-2", "no-such-counter", CounterStyle::Decimal, &m),
+            ""
+        );
+    }
+
+    #[test]
+    fn target_counters_external_href_returns_empty() {
+        let m = make_map();
+        assert_eq!(
+            resolve_target_counters("foo.html#bar", "section", ".", CounterStyle::Decimal, &m),
+            ""
+        );
+    }
+
+    #[test]
+    fn target_counters_missing_fragment_returns_empty() {
+        let m = make_map();
+        assert_eq!(
+            resolve_target_counters("#nope", "section", ".", CounterStyle::Decimal, &m),
+            ""
+        );
+    }
+
+    #[test]
+    fn target_counters_undefined_counter_returns_empty() {
+        let m = make_map();
+        assert_eq!(
+            resolve_target_counters("#sec-1-2", "undefined", ".", CounterStyle::Decimal, &m),
+            ""
+        );
+    }
+
+    #[test]
+    fn target_text_external_href_returns_empty() {
+        let m = make_map();
+        assert_eq!(resolve_target_text("https://example.com/", &m), "");
+    }
 }

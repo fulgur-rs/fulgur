@@ -1857,6 +1857,354 @@ mod tests {
         assert_eq!(out, "5");
     }
 
+    fn make_anchor_map_for_target_tests() -> crate::gcpm::target_ref::AnchorMap {
+        use crate::gcpm::target_ref::{AnchorEntry, AnchorMap};
+        let mut map = AnchorMap::new();
+        let mut counters = BTreeMap::new();
+        counters.insert("section".into(), vec![1, 2]);
+        map.insert(
+            "sec",
+            AnchorEntry {
+                page_num: 7,
+                counters,
+                text: "Hello & <world>".into(),
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn resolve_target_counters_in_string_mode() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounters {
+            url_attr: "href".into(),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "1.2");
+    }
+
+    #[test]
+    fn resolve_target_text_in_string_mode() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetText {
+            url_attr: "href".into(),
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "Hello & <world>");
+    }
+
+    #[test]
+    fn resolve_target_counter_non_href_url_attr_skips_in_string_mode() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounter {
+            url_attr: "data-ref".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn resolve_target_counter_in_html_flat_mode_escapes_value() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "7");
+    }
+
+    #[test]
+    fn resolve_target_counters_in_html_flat_mode() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounters {
+            url_attr: "href".into(),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "1.2");
+    }
+
+    #[test]
+    fn resolve_target_text_in_html_flat_mode_escapes_html_chars() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetText {
+            url_attr: "href".into(),
+        }];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        // "Hello & <world>" must come out HTML-escaped so the
+        // margin-box DOM doesn't see literal `<`/`>`/`&`.
+        assert_eq!(out, "Hello &amp; &lt;world&gt;");
+    }
+
+    #[test]
+    fn resolve_target_counter_non_href_skips_in_html_flat_mode() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![
+            ContentItem::TargetCounter {
+                url_attr: "data-ref".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetCounters {
+                url_attr: "data-ref".into(),
+                counter_name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetText {
+                url_attr: "data-ref".into(),
+            },
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn resolve_target_counter_in_html_flex_mode_wraps_in_span() {
+        // A Leader item triggers flex mode; verify target-counter goes
+        // into the `<span>...</span>` inner-wrapper path alongside
+        // counter()/counters() — covers gcpm/counter.rs:372-387.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![
+            ContentItem::TargetCounter {
+                url_attr: "href".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert!(
+            out.contains("<span>7</span>"),
+            "expected flex-mode target-counter output to wrap value in <span>, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_counters_in_html_flex_mode_wraps_in_span() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![
+            ContentItem::TargetCounters {
+                url_attr: "href".into(),
+                counter_name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert!(
+            out.contains("<span>1.2</span>"),
+            "expected flex-mode target-counters output to wrap chain in <span>, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_text_in_html_flex_mode_escapes_and_wraps() {
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![
+            ContentItem::TargetText {
+                url_attr: "href".into(),
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert!(
+            out.contains("<span>Hello &amp; &lt;world&gt;</span>"),
+            "expected flex-mode target-text to be escaped and wrapped in <span>, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_counter_in_html_flex_mode_non_href_skips() {
+        // url_attr != "href" branch in flex mode (the `_ => {}` arm
+        // inside the match-guard) — covers the silent-skip leg of
+        // gcpm/counter.rs:367-417.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![
+            ContentItem::TargetCounter {
+                url_attr: "data-ref".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetCounters {
+                url_attr: "data-ref".into(),
+                counter_name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetText {
+                url_attr: "data-ref".into(),
+            },
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        // No <span> for any non-href target-* item; only the leader fill remains.
+        assert!(
+            !out.contains("<span>7</span>") && !out.contains("<span>1.2</span>"),
+            "non-href target-* should be skipped in flex mode, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_counter_with_no_anchor_map_emits_empty_in_string_mode() {
+        // Pass-1 placeholder mode for margin boxes: anchor_map=None
+        // means the resolver writes nothing. Documents that the
+        // pass-1 PDF (which is discarded) is allowed to look empty.
+        let items = vec![ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            None,
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
     #[test]
     fn test_resolve_counters_in_html_flex_mode_with_leader() {
         // A Leader item triggers flex mode in resolve_content_to_html.

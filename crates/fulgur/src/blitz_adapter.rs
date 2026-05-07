@@ -3613,6 +3613,170 @@ mod tests {
         assert!(css.contains("Hello"), "CSS = {css}");
     }
 
+    /// `target-counters(attr(href), <name>, <sep>)` inside `::after`
+    /// content must walk the AnchorEntry's chain and join with the
+    /// separator, mirroring the `Counters` arm.
+    #[test]
+    fn counter_pass_resolves_target_counters_with_anchor_map() {
+        use crate::gcpm::target_ref::{AnchorEntry, AnchorMap};
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterStyle, ParsedSelector, PseudoElement,
+        };
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetCounters {
+            url_attr: "href".into(),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let mut anchor = AnchorMap::new();
+        let mut counters = BTreeMap::new();
+        counters.insert("section".into(), vec![1, 2, 3]);
+        anchor.insert(
+            "sec1",
+            AnchorEntry {
+                page_num: 0,
+                counters,
+                text: String::new(),
+            },
+        );
+
+        let pass = CounterPass::new(Vec::new(), mappings).with_anchor_map(anchor);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("\"1.2.3\""), "CSS = {css}");
+    }
+
+    /// Pass-1 placeholder for `target-counters` is the same `"00"` as
+    /// `target-counter` (chain depth is unknown until pass 2 — width is
+    /// a rough approximation).
+    #[test]
+    fn counter_pass_target_counters_emits_placeholder_in_pass_one() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterStyle, ParsedSelector, PseudoElement,
+        };
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetCounters {
+            url_attr: "href".into(),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let pass = CounterPass::new(Vec::new(), mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("\"00\""), "CSS = {css}");
+    }
+
+    /// Pass-1 placeholder for `target-text` is a single space (width
+    /// reservation only — actual heading text is unknown pre-pagination).
+    #[test]
+    fn counter_pass_target_text_emits_space_placeholder_in_pass_one() {
+        use crate::gcpm::{ContentCounterMapping, ContentItem, ParsedSelector, PseudoElement};
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![ContentItem::TargetText {
+            url_attr: "href".into(),
+        }];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let pass = CounterPass::new(Vec::new(), mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        assert!(css.contains("\" \""), "CSS = {css}");
+    }
+
+    /// `url_attr != "href"` skip path on all three target-* variants:
+    /// the resolver MUST emit nothing (no insert into the generated CSS
+    /// for the matched element), even when an `AnchorMap` is supplied.
+    /// Without this guard, `target-counter(attr(data-ref), page)` would
+    /// silently fall back to reading `href` and produce a wrong value.
+    #[test]
+    fn counter_pass_target_with_non_href_url_attr_emits_empty_content() {
+        use crate::gcpm::target_ref::{AnchorEntry, AnchorMap};
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterStyle, ParsedSelector, PseudoElement,
+        };
+
+        let html = r##"<html><body><a class="ref" href="#sec1">Sec1</a></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        let content = vec![
+            ContentItem::TargetCounter {
+                url_attr: "data-ref".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetCounters {
+                url_attr: "data-ref".into(),
+                counter_name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::TargetText {
+                url_attr: "data-ref".into(),
+            },
+        ];
+        let mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("ref".into()),
+            pseudo: PseudoElement::After,
+            content,
+        }];
+
+        let mut anchor = AnchorMap::new();
+        let mut counters = BTreeMap::new();
+        counters.insert("page".into(), vec![3]);
+        counters.insert("section".into(), vec![1, 2]);
+        anchor.insert(
+            "sec1",
+            AnchorEntry {
+                page_num: 3,
+                counters,
+                text: "should-not-appear".into(),
+            },
+        );
+
+        let pass = CounterPass::new(Vec::new(), mappings).with_anchor_map(anchor);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let (_, css) = pass.into_parts();
+        // None of the would-be resolved values should leak into the CSS.
+        assert!(
+            !css.contains("3") && !css.contains("1.2") && !css.contains("should-not-appear"),
+            "non-href url_attr should not produce any resolved value, got {css}"
+        );
+        // The matched element still gets `::after { content: "" }` because
+        // the rule fired; assert that explicitly so a future refactor that
+        // skips the rule entirely is caught.
+        assert!(
+            css.contains("::after{content:\"\"}"),
+            "matched rule should still emit empty content, got {css}"
+        );
+    }
+
     /// Covers `BookmarkPass::resolve_label`'s `Counters` arm. A single
     /// `bookmark-label: counters(section, ".")` rule against a chain
     /// snapshot of `[1, 2]` must resolve to `"1.2"`. Empty / missing
