@@ -501,12 +501,24 @@ impl Engine {
         };
 
         // Per-page implicit `href` for `target-*(attr(href), ...)` in
-        // `@page` margin boxes (fulgur-qgy7). Built every pass — pass 1
-        // populates it for completeness even though margin-box target-*
-        // resolves to empty without an `anchor_map`; the cost is one DOM
-        // walk and the determinism trade-off matches `pagination_geometry`
-        // already being recomputed per pass.
-        let implicit_href_map = build_implicit_href_map(&doc, &pagination_geometry);
+        // `@page` margin boxes (fulgur-qgy7). Only pass 2 consults the
+        // map — pass 1's resolver returns empty without an `anchor_map`
+        // regardless of `implicit_href` — and the map is irrelevant
+        // unless a margin-box rule actually references
+        // `target-*(attr(href), ...)`. Gating on both keeps the
+        // single-pass / non-margin-box-target fast path free of the DOM
+        // walk.
+        let needs_implicit_href_map = anchor_map.is_some()
+            && gcpm.margin_boxes.iter().any(|r| {
+                r.content
+                    .iter()
+                    .any(crate::gcpm::ContentItem::is_target_reference)
+            });
+        let implicit_href_map = if needs_implicit_href_map {
+            build_implicit_href_map(&doc, &pagination_geometry)
+        } else {
+            BTreeMap::new()
+        };
 
         // --- Convert DOM to Pageable and render ---
         // Build string-set lookup map
@@ -902,9 +914,6 @@ fn walk_implicit_href(
     // inline children resolve against the same page the fragmenter
     // assigned to their nearest paginated ancestor.
     let resolved_page = page_for_node(geometry, node_id).or(inherited_page);
-    // `BaseDocument` lowercases HTML tag names during parsing, so a
-    // bare equality check against `"a"` matches both `<a>` and `<A>`
-    // source forms.
     if let Some(elem) = node.element_data()
         && elem.name.local.as_ref() == "a"
         && let Some(href) = get_attr(elem, "href")

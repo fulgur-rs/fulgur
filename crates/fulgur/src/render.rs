@@ -3350,10 +3350,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub render_cache: RenderCache,
     /// fulgur-qgy7: per-page implicit `href` for
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
-    /// boxes. Borrowed from the `engine::render_pass` map so margin
-    /// boxes resolve the same `<a>` per page that `engine.rs`
-    /// computed alongside the AnchorMap. Pages with no entry fall
-    /// back to an empty string.
+    /// boxes. Built once per render pass by `engine::render_pass`.
     pub implicit_href_by_page: &'a BTreeMap<usize, String>,
 }
 
@@ -3488,11 +3485,8 @@ impl<'a> MarginBoxRenderer<'a> {
         }
 
         // Resolve HTML for each effective box. Margin-box content goes
-        // through `_with_anchor` so `target-*` resolves when `anchor_map`
-        // is present (pass 2). The implicit `href` for
-        // `target-*(attr(href), ...)` is the first `<a href="#...">`
-        // landing on this page (fulgur-qgy7); pages with no such anchor
-        // resolve to an empty string.
+        // through `_with_anchor` so `target-*` resolves when
+        // `anchor_map` is present (pass 2).
         let implicit_href = self
             .implicit_href_by_page
             .get(&page_idx)

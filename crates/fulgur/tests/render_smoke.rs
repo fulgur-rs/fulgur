@@ -3531,22 +3531,16 @@ fn target_counter_in_link_loaded_css_triggers_pass_two() {
     );
 }
 
-/// fulgur-qgy7: `target-text(attr(href))` evaluated inside an `@page`
-/// margin box has no link element to read `href` from. The renderer
-/// supplies an implicit reference — the first `<a href="#...">` whose
-/// first fragment lands on the current page — so a header / footer like
-/// `@top-center { content: target-text(attr(href)); }` resolves to the
-/// section title that page 1's link points at. Without the plumbing the
-/// margin box stays empty (Option 2 in the design notes).
+/// fulgur-qgy7: `target-text(attr(href))` inside an `@page` margin box
+/// has no link element to read `href` from. The renderer supplies an
+/// implicit reference — the first `<a href="#...">` landing on the
+/// current page — so `@top-center { content: ... target-text(...) }`
+/// resolves to the section title that page 1's link points at. The
+/// margin box's `"Header: "` prefix is unique to the margin-box
+/// payload, so a substring search distinguishes it from the body's
+/// `<h2>` copy.
 #[test]
 fn target_text_in_top_center_resolves_via_implicit_href() {
-    // Page 1 hosts the `<a href="#sec1">`; page 2 hosts the target
-    // `<h2 id="sec1">`. `page-break-before: always` forces the section
-    // onto page 2 so the implicit-href map for page 0 picks up `#sec1`
-    // and pass 2's margin-box content stream contains the resolved
-    // title. The margin box's prefix (`§ `) is unique enough that a
-    // direct substring search distinguishes the margin-box copy from
-    // the body's `<h2>` copy.
     let html = r##"
 <!doctype html>
 <html><head><style>
@@ -3560,20 +3554,7 @@ fn target_text_in_top_center_resolves_via_implicit_href() {
   <p>section body</p>
 </body></html>"##;
 
-    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/.fonts/NotoSans-Regular.ttf");
-    let mut assets = AssetBundle::default();
-    assets
-        .add_font_file(&font_path)
-        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
-    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
-
-    let pdf = Engine::builder()
-        .tagged(true)
-        .assets(assets)
-        .build()
-        .render_html(html)
-        .expect("render");
+    let pdf = tagged_render_with_noto(html);
     assert!(!pdf.is_empty());
 
     let dir = tempdir().expect("tempdir");
@@ -3591,11 +3572,6 @@ fn target_text_in_top_center_resolves_via_implicit_href() {
     }
     let lower = decompressed.to_ascii_lowercase();
 
-    // The full margin-box payload (§ prefix + resolved target-text)
-    // is only ever produced by the implicit-href plumbing. The body's
-    // own `<h2>` carries plain "My Section Title" without the prefix,
-    // so this string appears in the PDF exclusively because pass 2's
-    // margin-box content stream rendered the resolved title.
     let combined = hex_utf16be("Header: My Section Title");
     assert!(
         lower.contains(&combined.to_ascii_lowercase()),
