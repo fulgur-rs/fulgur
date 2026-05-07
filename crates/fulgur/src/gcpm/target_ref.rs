@@ -65,10 +65,16 @@ pub fn resolve_target_counter(
     let Some(entry) = map.get(frag) else {
         return String::new();
     };
+    // CSS spec treats `page` as the implicit page counter. Resolve it
+    // straight from `entry.page_num` regardless of whether the snapshot
+    // happens to carry a user-defined `page` counter — `target-counter(..,
+    // page)` is documented to mean "the page number where this anchor
+    // lands", and giving precedence to a custom `counter-reset: page`
+    // produces a result that disagrees with the rendered page sequence.
+    if counter_name == "page" {
+        return format_counter(entry.page_num as i32, style);
+    }
     let Some(chain) = entry.counters.get(counter_name) else {
-        if counter_name == "page" {
-            return format_counter(entry.page_num as i32, style);
-        }
         return String::new();
     };
     chain
@@ -153,6 +159,29 @@ mod tests {
         assert_eq!(
             resolve_target_counter("#sec-1-2", "page", CounterStyle::Decimal, &m),
             "7"
+        );
+    }
+
+    #[test]
+    fn target_counter_page_name_ignores_user_defined_counter() {
+        // `target-counter(href, page)` always resolves to the actual
+        // page number where the anchor lands. A user-defined
+        // `counter-reset: page` on the target element must not shadow
+        // the implicit page counter.
+        let mut m = AnchorMap::new();
+        let mut counters = BTreeMap::new();
+        counters.insert("page".into(), vec![999]);
+        m.insert(
+            "x",
+            AnchorEntry {
+                page_num: 5,
+                counters,
+                text: String::new(),
+            },
+        );
+        assert_eq!(
+            resolve_target_counter("#x", "page", CounterStyle::Decimal, &m),
+            "5"
         );
     }
 

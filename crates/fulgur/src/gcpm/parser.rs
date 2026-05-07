@@ -920,6 +920,11 @@ fn parse_target_url_attr(input: &mut Parser<'_, '_>) -> Option<String> {
                 Token::Function(ref name) if name.eq_ignore_ascii_case("attr") => input
                     .parse_nested_block(|inner| {
                         let id = inner.expect_ident()?.to_string();
+                        // Reject `attr(name, <type>)` and similar — only
+                        // the bare `attr(<ident>)` form is supported.
+                        if !inner.is_exhausted() {
+                            return Err(inner.new_error_for_next_token());
+                        }
                         Ok::<_, ParseError<'_, ()>>(id)
                     }),
                 _ => Err(input.new_error_for_next_token()),
@@ -1102,11 +1107,15 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 Some(name) => name,
                                 None => return Ok(()),
                             };
-                            // Optional 2nd ident is consumed but ignored.
-                            let _ = input.try_parse(|input| {
-                                input.expect_comma()?;
-                                input.expect_ident().map(|i| i.to_string())
-                            });
+                            // Only the default `content` form is
+                            // implemented. Other forms
+                            // (`target-text(url, before|after|first-letter)`)
+                            // are not yet supported; if a 2nd argument is
+                            // present at all, drop the item rather than
+                            // silently treating it as the default form.
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
                             items.push(ContentItem::TargetText { url_attr });
                             return Ok(());
                         }
@@ -2396,6 +2405,45 @@ mod tests {
             .flat_map(|m| m.content.iter())
             .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
         assert!(!any_target, "non-attr URL should drop target-counter item");
+    }
+
+    #[test]
+    fn parse_target_counter_two_arg_attr_drops_item() {
+        // The 2-argument `attr(name, <type>)` form is not part of the
+        // supported `target-*` URL grammar — currently only bare
+        // `attr(<ident>)` is honored. Anything else must drop the item
+        // entirely instead of silently treating the type/fallback
+        // argument as if it were absent.
+        let css = r##"a::after { content: target-counter(attr(href, string), page); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
+        assert!(
+            !any_target,
+            "two-arg attr() should drop the target-counter item"
+        );
+    }
+
+    #[test]
+    fn parse_target_text_with_unsupported_2nd_arg_drops_item() {
+        // `target-text(url, before|after|first-letter)` is not yet
+        // implemented. If a 2nd argument is present at all, drop the
+        // item rather than silently aliasing it to the default
+        // `content` form (which would surface a wrong text fragment in
+        // the rendered PDF).
+        for form in ["before", "after", "first-letter", "content"] {
+            let css = format!(r##"a::after {{ content: target-text(attr(href), {form}); }}"##);
+            let g = parse_gcpm(&css);
+            let any_target = g
+                .content_counter_mappings
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .any(|i| matches!(i, ContentItem::TargetText { .. }));
+            assert!(!any_target, "2nd arg `{form}` should drop the item");
+        }
     }
 
     #[test]

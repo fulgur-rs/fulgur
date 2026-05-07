@@ -811,20 +811,25 @@ fn walk_anchors(
     let Some(node) = doc.get_node(node_id) else {
         return;
     };
-    if let Some(elem) = node.element_data() {
-        if let Some(frag) = get_attr(elem, "id") {
-            let page_num = page_for_node(geometry, node_id).unwrap_or(0);
-            let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
-            let text = collect_text_content(doc, node_id);
-            out.insert(
-                frag.to_string(),
-                AnchorEntry {
-                    page_num,
-                    counters,
-                    text,
-                },
-            );
-        }
+    // Skip nodes that the fragmenter never assigned a page to (out-of-flow
+    // or non-laid-out subtrees). Registering an entry with `page_num = 0`
+    // would surface as a literal "0" through `target-counter(..., page)`,
+    // which is wrong — better to drop the anchor entirely so callers see
+    // an empty resolution and can fall back to plain text.
+    if let Some(elem) = node.element_data()
+        && let Some(frag) = get_attr(elem, "id")
+        && let Some(page_num) = page_for_node(geometry, node_id)
+    {
+        let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
+        let text = collect_text_content(doc, node_id);
+        out.insert(
+            frag.to_string(),
+            AnchorEntry {
+                page_num,
+                counters,
+                text,
+            },
+        );
     }
     let children: Vec<usize> = node.children.clone();
     for c in children {

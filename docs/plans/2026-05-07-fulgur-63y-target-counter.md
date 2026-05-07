@@ -16,7 +16,7 @@
 
 **Beads:** `fulgur-63y` (in_progress) is the parent. Follow-ups: `fulgur-5ho3`, `fulgur-11gd`, `fulgur-s4ec`, `fulgur-x70n`, `fulgur-ejw9`, `fulgur-38y2` — all blocked by `fulgur-63y`.
 
-**Note on `fulgur-5ho3`:** This plan parses the `<counter-style>` 3rd argument and threads it through `format_counter(value, *style)` end-to-end. All five existing `CounterStyle` variants (`Decimal`, `UpperRoman`, `LowerRoman`, `UpperAlpha`, `LowerAlpha`) work in `target-counter`. Therefore `fulgur-5ho3` is effectively shipped by Task 11; either close it together OR rewrite its description to scope it to *new* counter styles (`decimal-leading-zero`, `@counter-style` rules) before closing `fulgur-63y`.
+**Note on `fulgur-5ho3`:** This plan parses the `<counter-style>` 3rd argument AND threads it through `format_counter(value, *style)` end-to-end. All five existing `CounterStyle` variants (`Decimal`, `UpperRoman`, `LowerRoman`, `UpperAlpha`, `LowerAlpha`) work in `target-counter` / `target-counters`. `fulgur-5ho3` therefore closes alongside `fulgur-63y` in this PR. Any *new* counter styles (`decimal-leading-zero`, `@counter-style` rules) are out of scope and should be tracked under a separately scoped follow-up issue.
 
 **Verified API surface (worktree-local recon at plan time):**
 
@@ -147,7 +147,7 @@ git commit -m "feat(gcpm): add ContentItem::TargetCounter / TargetCounters / Tar
 - `target-counter` second argument: counter name (ident).
 - `target-counters` arguments: counter name (ident), separator (string literal).
 - `target-text` second argument: not parsed in this issue. If present, swallow tokens but ignore.
-- Counter-style 3rd argument: parsed and dropped (per Q5 it's a follow-up). Use `CounterStyle::Decimal`. The grammar accepts the comma + style so we don't error out and the call still returns a valid item — the style argument itself is not yet honored.
+- Counter-style 3rd argument: parsed AND honored end-to-end via `format_counter(value, *style)`. All five base `CounterStyle` variants (`Decimal`, `UpperRoman`, `LowerRoman`, `UpperAlpha`, `LowerAlpha`) work in `target-counter` / `target-counters`. The default is `CounterStyle::Decimal` when the argument is absent. Closes `fulgur-5ho3` (any *new* counter styles such as `decimal-leading-zero` or `@counter-style` rules are out of scope and should be tracked under a separately scoped issue).
 
 **Step 1: Write failing parser tests**
 
@@ -1364,20 +1364,13 @@ Expected: clean.
 
 **Step 3: Beads update**
 
-Decide whether `fulgur-5ho3` (counter-style 3rd argument) is also closed by this work — Tasks 2/3 ship the parsing AND the formatter call (`format_counter(value, *style)`), so all five existing `CounterStyle` variants work end-to-end in `target-counter`. Either:
+Close `fulgur-63y` AND `fulgur-5ho3` together — Tasks 2/3 ship the parsing AND the formatter call (`format_counter(value, *style)`), so all five existing `CounterStyle` variants work end-to-end in `target-counter`:
 
-- close it with this PR:
+```bash
+bd close fulgur-63y fulgur-5ho3 --reason="GCPM target-counter / target-counters / target-text shipped via 2-pass render. counter-style 3rd arg (fulgur-5ho3) honored end-to-end through CounterStyle. Followups: fulgur-11gd (URL literals), fulgur-s4ec (non-href attrs), fulgur-x70n (target-text 2nd arg), fulgur-ejw9 (string-set/running), fulgur-38y2 (fixed-point iteration)."
+```
 
-  ```bash
-  bd close fulgur-63y fulgur-5ho3 --reason="GCPM target-counter / target-counters / target-text shipped via 2-pass render. counter-style 3rd arg (fulgur-5ho3) honored end-to-end through CounterStyle. Followups: fulgur-11gd (URL literals), fulgur-s4ec (non-href attrs), fulgur-x70n (target-text 2nd arg), fulgur-ejw9 (string-set/running), fulgur-38y2 (fixed-point iteration)."
-  ```
-
-- or rewrite `fulgur-5ho3` first to scope it to *new* counter styles (e.g. `decimal-leading-zero`, `@counter-style` rules) before closing `fulgur-63y` so it doesn't appear stale:
-
-  ```bash
-  bd update fulgur-5ho3 --title="GCPM: target-counter() に追加の counter-style (decimal-leading-zero / @counter-style 等) を実装" --description="<rewrite focused on styles beyond the 5 base CounterStyle variants>"
-  bd close fulgur-63y --reason="..."
-  ```
+Any *new* counter styles beyond the 5 base `CounterStyle` variants (`decimal-leading-zero`, `@counter-style` rules) are out of scope here — file a fresh issue rather than reopening `fulgur-5ho3`.
 
 **Step 4: PR**
 
@@ -1387,7 +1380,7 @@ Use the project's normal PR creation flow (PR title in English, body in Japanese
 
 ## Out-of-scope explicit list (filed as follow-up beads issues)
 
-- **fulgur-5ho3** — `target-counter(url, name, <counter-style>)` 3rd argument honored at evaluation time.
+- **fulgur-5ho3** — *closed by this PR* (`target-counter(url, name, <counter-style>)` 3rd argument honored end-to-end for the 5 base `CounterStyle` variants). Any *new* counter styles (`decimal-leading-zero`, `@counter-style` rules) need a fresh issue.
 - **fulgur-11gd** — `<url>` accepts string literal `"#sec1"` and `url("#sec1")`.
 - **fulgur-s4ec** — `attr(<other-name>)` (e.g. `data-ref`) supported.
 - **fulgur-x70n** — `target-text(url, before|after|first-letter)` 2nd argument.
