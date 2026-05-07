@@ -1067,6 +1067,9 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                     parse_counter_style(input)
                                 })
                                 .unwrap_or(CounterStyle::Decimal);
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
                             items.push(ContentItem::TargetCounter {
                                 url_attr,
                                 counter_name,
@@ -1094,6 +1097,9 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                     parse_counter_style(input)
                                 })
                                 .unwrap_or(CounterStyle::Decimal);
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
                             items.push(ContentItem::TargetCounters {
                                 url_attr,
                                 counter_name,
@@ -2424,6 +2430,41 @@ mod tests {
         assert!(
             !any_target,
             "two-arg attr() should drop the target-counter item"
+        );
+    }
+
+    #[test]
+    fn parse_target_counter_extra_trailing_token_drops_item() {
+        // `target-counter()` accepts up to 3 arguments
+        // (`url, name [, counter-style]`). Anything beyond — e.g. a
+        // 4th positional token — must drop the item rather than
+        // silently truncate to a valid prefix.
+        let css =
+            r##"a::after { content: target-counter(attr(href), page, lower-roman, extra); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
+        assert!(
+            !any_target,
+            "extra trailing token should drop the target-counter item"
+        );
+    }
+
+    #[test]
+    fn parse_target_counters_extra_trailing_token_drops_item() {
+        let css = r##"a::after { content: target-counters(attr(href), section, ".", lower-roman, extra); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounters { .. }));
+        assert!(
+            !any_target,
+            "extra trailing token should drop the target-counters item"
         );
     }
 
