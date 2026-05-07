@@ -3428,13 +3428,14 @@ impl<'a> MarginBoxRenderer<'a> {
     /// resolvers return empty strings — see
     /// `gcpm::counter::resolve_content_to_html_with_anchor`.
     ///
-    /// fulgur-63y Task 8 deferred `implicit_href` plumbing for
-    /// margin-box `target-*` (Option 2 in the plan): the dominant use
-    /// case (TOC entries in `::before` / `::after`) already resolves via
-    /// `CounterPass::with_anchor_map`. Margin-box content with
-    /// `target-counter(attr(href), ...)` requires walking
-    /// `pagination_geometry` for the first per-page `<a href="#...">`
-    /// (Option 1) — a follow-up issue tracks that work.
+    /// Margin-box `implicit_href` plumbing is not yet implemented:
+    /// `implicit_href` is always `None` here, so margin-box content with
+    /// `target-counter(attr(href), ...)` resolves to an empty string.
+    /// The dominant use case (TOC entries in `::before` / `::after`)
+    /// already resolves via `CounterPass::with_anchor_map`. Wiring a
+    /// per-page implicit href (e.g. by walking `pagination_geometry`
+    /// for the first `<a href="#...">` on each page) is tracked by
+    /// fulgur-qgy7.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_page(
         &mut self,
@@ -3478,9 +3479,9 @@ impl<'a> MarginBoxRenderer<'a> {
 
         // Resolve HTML for each effective box. Margin-box content goes
         // through `_with_anchor` so `target-*` resolves when `anchor_map`
-        // is present (pass 2). `implicit_href` is `None` for now —
-        // Option 2 from the Task 8 plan; Option 1 (per-page implicit
-        // href via `pagination_geometry`) is a follow-up.
+        // is present (pass 2). `implicit_href` is `None` for now;
+        // margin-box `target-counter(attr(href), ...)` therefore returns
+        // an empty string. Tracked by fulgur-qgy7.
         let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
         for (&pos, rule) in &effective_boxes {
             let content_html = resolve_content_to_html_with_anchor(

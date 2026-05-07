@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 ///
 /// This is a thin shim over [`resolve_content_to_string_with_anchor`]
 /// that passes `None` for the anchor map and implicit href — preserving
-/// the pre-`fulgur-63y` signature for callers that don't (yet) need
+/// the original signature for callers that don't (yet) need
 /// `target-counter()` / `target-text()` resolution.
 pub fn resolve_content_to_string(
     items: &[ContentItem],
@@ -34,8 +34,8 @@ pub fn resolve_content_to_string(
 /// Like [`resolve_content_to_string`], but also resolves
 /// `target-counter()` / `target-counters()` / `target-text()` against
 /// the supplied [`AnchorMap`]. `implicit_href` is the `attr(href)` value
-/// to use for the bare `attr(href)` URL form (the only form fulgur-63y
-/// currently supports).
+/// to use for the bare `attr(href)` URL form (the only form currently
+/// supported).
 ///
 /// When `anchor_map` is `None`, the three target-* variants emit empty
 /// strings. Margin-box content is empty during pass 1 (output is

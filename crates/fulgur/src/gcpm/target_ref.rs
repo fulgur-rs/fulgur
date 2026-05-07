@@ -3,7 +3,7 @@
 //!
 //! `AnchorMap` is built at the end of pass 1 (after pagination has
 //! assigned each DOM element a page) and consumed by pass 2 via the
-//! resolver helpers below. See `docs/plans/2026-05-07-fulgur-63y-target-counter.md`.
+//! resolver helpers below.
 
 use crate::gcpm::CounterStyle;
 use crate::gcpm::counter::{format_counter, format_counter_chain};

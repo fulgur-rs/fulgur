@@ -296,8 +296,9 @@ pub enum ContentItem {
     Leader { style: LeaderStyle },
     /// `target-counter(<url-attr>, <counter-name>)` — resolves the named
     /// counter at the element identified by the URL fragment in
-    /// `attr(<url-attr>)`. fulgur-63y currently restricts `<url-attr>`
-    /// to `"href"`; other attribute names yield an empty string.
+    /// `attr(<url-attr>)`. The current implementation restricts
+    /// `<url-attr>` to `"href"`; other attribute names yield an empty
+    /// string.
     TargetCounter {
         /// Attribute name read from the matched element. Always lowercase.
         url_attr: String,
@@ -428,9 +429,9 @@ impl GcpmContext {
         }
     }
 
-    /// Returns true if any margin-box rule, content-counter mapping,
-    /// or string-set value contains a `target-*` item. Triggers the
-    /// 2-pass pipeline; otherwise the single-pass fast path runs.
+    /// Returns true if any margin-box rule or content-counter mapping
+    /// contains a `target-*` item. Triggers the 2-pass pipeline;
+    /// otherwise the single-pass fast path runs.
     pub fn has_target_references(&self) -> bool {
         self.margin_boxes
             .iter()

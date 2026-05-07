@@ -1681,8 +1681,7 @@ impl CounterPass {
     /// inside `::before` / `::after` `content` resolve against this map.
     /// When unset (pass 1, or single-pass renders without target refs),
     /// those variants substitute short placeholder strings; the width is
-    /// only a rough approximation of the final pass-2 output (see
-    /// `resolve_content` and the fulgur-38y2 fixed-point follow-up).
+    /// a rough approximation only — line breaks may shift between passes.
     pub fn with_anchor_map(mut self, map: crate::gcpm::target_ref::AnchorMap) -> Self {
         self.anchor_map = Some(map);
         self
@@ -1937,8 +1936,7 @@ impl CounterPass {
                 // 2 chars regardless of the final counter's digit count or
                 // chain depth, and `' '` is a constant 1 space regardless
                 // of the resolved label length. Line breaks may therefore
-                // shift between pass 1 and pass 2 — see fulgur-38y2 for
-                // the fixed-point iteration follow-up that resolves this.
+                // shift between pass 1 and pass 2.
                 ContentItem::TargetCounter {
                     url_attr,
                     counter_name,
@@ -3550,7 +3548,7 @@ mod tests {
     /// Pass-1 placeholder path: when no `AnchorMap` is supplied (the
     /// pre-pagination pass), `target-counter()` inside `::after` content
     /// must substitute the `"00"` placeholder. Width is a rough
-    /// approximation — see fulgur-38y2 for the fixed-point follow-up.
+    /// approximation only — line breaks may shift between passes.
     #[test]
     fn counter_pass_target_counter_emits_placeholder_in_pass_one() {
         use crate::gcpm::{

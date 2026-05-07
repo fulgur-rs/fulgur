@@ -18,6 +18,24 @@ pub struct Engine {
     system_fonts: bool,
 }
 
+/// Result of a single render pass.
+///
+/// - `pdf`: serialized PDF bytes for this pass.
+/// - `anchor_map`: cross-reference table built from this pass's
+///   pagination geometry + counter snapshots, populated only when the
+///   parsed GCPM context contains `target-*` references AND this is
+///   pass 1 of a 2-pass render. Otherwise empty — the DOM walk is
+///   skipped to avoid `element_text` cost on every id'd subtree on the
+///   fast path.
+/// - `needs_pass_two`: mirrors that gate; `true` only for pass 1 of a
+///   2-pass render so `render_html` can decide whether to call
+///   `render_pass` again with the populated map.
+struct RenderPassOutput {
+    pdf: Vec<u8>,
+    anchor_map: AnchorMap,
+    needs_pass_two: bool,
+}
+
 impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
@@ -62,13 +80,17 @@ impl Engine {
         // and reports `needs_pass_two` based on that parsed view, so
         // `target-counter()` / `target-counters()` / `target-text()`
         // declared in any of those locations is detected reliably.
-        let (pdf, anchor_map, needs_pass_two) = self.render_pass(html, None)?;
+        let RenderPassOutput {
+            pdf,
+            anchor_map,
+            needs_pass_two,
+        } = self.render_pass(html, None)?;
         if !needs_pass_two {
             return Ok(pdf);
         }
         // Pass 2: re-render with the AnchorMap so `target-*` resolvers
         // substitute resolved values instead of fixed-width placeholders.
-        let (pdf2, _, _) = self.render_pass(html, Some(&anchor_map))?;
+        let RenderPassOutput { pdf: pdf2, .. } = self.render_pass(html, Some(&anchor_map))?;
         Ok(pdf2)
     }
 
@@ -80,22 +102,8 @@ impl Engine {
     /// same. When `None`, those resolvers fall back to placeholders /
     /// empty strings.
     ///
-    /// The returned tuple is `(pdf_bytes, collected_anchor_map,
-    /// needs_pass_two)`:
-    /// - `collected_anchor_map` is the table built from this pass's
-    ///   pagination geometry + counter snapshots when the parsed GCPM
-    ///   context contains `target-*` references AND `anchor_map` is
-    ///   `None` (i.e. this is pass 1 of a 2-pass render). Otherwise it
-    ///   is empty — we skip the DOM walk to avoid `element_text` cost
-    ///   on every id'd subtree on the fast path.
-    /// - `needs_pass_two` mirrors that gate: `true` only for pass 1 of
-    ///   a 2-pass render so `render_html` can decide whether to call
-    ///   `render_pass` again with the populated map.
-    fn render_pass(
-        &self,
-        html: &str,
-        anchor_map: Option<&AnchorMap>,
-    ) -> Result<(Vec<u8>, AnchorMap, bool)> {
+    /// See [`RenderPassOutput`] for the returned fields.
+    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -145,6 +153,13 @@ impl Engine {
         // alongside the AssetBundle / link-loaded contexts (fulgur-mq5).
         let inline_gcpm = crate::blitz_adapter::extract_gcpm_from_inline_styles(&doc);
         gcpm.extend_from(inline_gcpm);
+
+        // Cache the predicate once gcpm is fully populated. It feeds three
+        // gates inside this pass (snapshot recording, the bookmark+anchor
+        // counter-snapshots split, and the AnchorMap-build gate); recomputing
+        // it would re-walk every margin-box rule and content-counter mapping
+        // each time.
+        let has_target_refs = gcpm.has_target_references();
 
         // fulgur-lv0a: resolve the page-1 `@page` size + margin NOW so we can
         // update Blitz's viewport BEFORE the first `resolve()` pass. The
@@ -238,7 +253,7 @@ impl Engine {
         // each pass can opt out of the per-element clone otherwise.
         let record_node_snapshots = (self.config.effective_bookmarks()
             && !gcpm.bookmark_mappings.is_empty())
-            || gcpm.has_target_references();
+            || has_target_refs;
 
         // Extract string-set values via DomPass.
         // Also harvest per-node `name -> latest value` snapshots that the
@@ -308,7 +323,7 @@ impl Engine {
         // `target-*` are active simultaneously.
         let bookmark_active =
             self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
-        let target_refs_active = gcpm.has_target_references();
+        let target_refs_active = has_target_refs;
         let (counter_snapshots_for_bookmark, counter_snapshots_for_anchor) =
             match (bookmark_active, target_refs_active) {
                 (true, true) => (counter_snapshots.clone(), counter_snapshots),
@@ -478,7 +493,7 @@ impl Engine {
         // fixed` / body-direct absolute fragments have been appended,
         // so anchor pages reflect the final paginated layout.
         // `walk_anchors` short-circuits on `MAX_DOM_DEPTH`.
-        let needs_anchor_map_for_pass_two = anchor_map.is_none() && gcpm.has_target_references();
+        let needs_anchor_map_for_pass_two = anchor_map.is_none() && has_target_refs;
         let collected_anchor_map = if needs_anchor_map_for_pass_two {
             build_anchor_map(&doc, &pagination_geometry, &counter_snapshots_for_anchor)
         } else {
@@ -551,7 +566,11 @@ impl Engine {
             self.serialize_settings.clone(),
             anchor_map,
         )?;
-        Ok((pdf, collected_anchor_map, needs_anchor_map_for_pass_two))
+        Ok(RenderPassOutput {
+            pdf,
+            anchor_map: collected_anchor_map,
+            needs_pass_two: needs_anchor_map_for_pass_two,
+        })
     }
 
     /// Render HTML string to a PDF file.

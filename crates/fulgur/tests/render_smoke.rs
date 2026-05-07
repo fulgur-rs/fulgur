@@ -52,6 +52,18 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
         .expect("tagged render")
 }
 
+/// Encode `s` as upper-case UTF-16BE hex, the form Krilla writes into
+/// `/Span << /ActualText <FEFF…> >>` markers in tagged PDFs. Tests use
+/// this to grep ActualText payloads instead of decoding CID-encoded TJ
+/// strings (lopdf 0.40 lacks ToUnicode CMap parsing).
+fn hex_utf16be(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.encode_utf16() {
+        out.push_str(&format!("{:04X}", c));
+    }
+    out
+}
+
 #[test]
 fn test_render_html_resolves_link_stylesheet() {
     let dir = tempdir().unwrap();
@@ -3333,8 +3345,8 @@ fn render_table_pagebreak_does_not_scale_quadratically() {
     );
 }
 
-/// fulgur-63y Task 8: end-to-end smoke for the 2-pass `target-counter`
-/// orchestration. A simple TOC declares `a::after { content: ...
+/// End-to-end smoke for the 2-pass `target-counter` orchestration. A
+/// simple TOC declares `a::after { content: ...
 /// target-counter(attr(href), page) ... }`. After pass 1 paginates the
 /// chapter headings (each on a fresh page via `page-break-before`),
 /// pass 2 renders the TOC links with their resolved page numbers.
@@ -3405,13 +3417,6 @@ fn target_counter_in_toc_renders_page_number() {
     // UTF-16BE hex for "(p.3)" → 0028 0070 002E 0033 0029
     // ActualText payloads are upper-case hex so search both cases for
     // robustness against Krilla version drift.
-    fn hex_utf16be(s: &str) -> String {
-        let mut out = String::new();
-        for c in s.encode_utf16() {
-            out.push_str(&format!("{:04X}", c));
-        }
-        out
-    }
     let p2 = hex_utf16be("(p.2)");
     let p3 = hex_utf16be("(p.3)");
     let lower = decompressed.to_ascii_lowercase();
@@ -3429,16 +3434,17 @@ fn target_counter_in_toc_renders_page_number() {
     );
 }
 
-/// fulgur-63y Task 8 (review fix-up): regression for I1 — `target-*`
-/// declared **only** in a `<link rel="stylesheet">`-loaded CSS file
-/// must still trigger the 2-pass orchestration. The previous pre-parse
-/// probe scanned `assets.combined_css()` plus a literal substring sweep
-/// of the HTML; neither captures `<link>`-loaded files (resolved later
-/// by `parse_html_with_local_resources`), so the literal `target-*`
-/// never appeared in either signal and pass 2 was silently skipped —
-/// resolved page numbers degraded to `"00"` placeholders. The post-parse
-/// gate inside `render_pass` runs after `extend_from(link_gcpm)`, so the
-/// decision is made against the merged GCPM context.
+/// Regression for `target-*` declared **only** in a
+/// `<link rel="stylesheet">`-loaded CSS file: the 2-pass orchestration
+/// must still fire. The previous pre-parse probe scanned
+/// `assets.combined_css()` plus a literal substring sweep of the HTML;
+/// neither captures `<link>`-loaded files (resolved later by
+/// `parse_html_with_local_resources`), so the literal `target-*` never
+/// appeared in either signal and pass 2 was silently skipped —
+/// resolved page numbers degraded to `"00"` placeholders. The
+/// post-parse gate inside `render_pass` runs after
+/// `extend_from(link_gcpm)`, so the decision is made against the merged
+/// GCPM context.
 #[test]
 fn target_counter_in_link_loaded_css_triggers_pass_two() {
     let dir = tempdir().expect("tempdir");
@@ -3508,13 +3514,6 @@ fn target_counter_in_link_loaded_css_triggers_pass_two() {
         }
     }
 
-    fn hex_utf16be(s: &str) -> String {
-        let mut out = String::new();
-        for c in s.encode_utf16() {
-            out.push_str(&format!("{:04X}", c));
-        }
-        out
-    }
     let p2 = hex_utf16be("(p.2)");
     let p3 = hex_utf16be("(p.3)");
     let lower = decompressed.to_ascii_lowercase();

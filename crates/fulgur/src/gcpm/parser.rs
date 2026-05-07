@@ -911,7 +911,7 @@ fn parse_counter_style<'i>(input: &mut Parser<'i, '_>) -> Result<CounterStyle, P
 /// Currently only the `attr(<ident>)` form is recognized — everything
 /// else (string literal, `url(...)`, `attr(<name>, <type>)`) returns
 /// `None`, causing the surrounding item to be dropped silently per
-/// design (`docs/plans/2026-05-07-fulgur-63y-target-counter.md`).
+/// design.
 fn parse_target_url_attr(input: &mut Parser<'_, '_>) -> Option<String> {
     input
         .try_parse(|input| {
@@ -1102,8 +1102,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 Some(name) => name,
                                 None => return Ok(()),
                             };
-                            // Optional 2nd ident is consumed but ignored
-                            // (follow-up: fulgur-x70n).
+                            // Optional 2nd ident is consumed but ignored.
                             let _ = input.try_parse(|input| {
                                 input.expect_comma()?;
                                 input.expect_ident().map(|i| i.to_string())
@@ -2421,10 +2420,10 @@ mod tests {
 
     #[test]
     fn parse_target_counter_accepts_style_arg_for_forward_compat() {
-        // The optional 3rd argument selects the counter style, and per
-        // the Task 3 implementation the style is threaded all the way
-        // through to format_counter() — so we expect LowerRoman to be
-        // stored on the ContentItem (not the Decimal default).
+        // The optional 3rd argument selects the counter style, and the
+        // parser threads the style argument through to format_counter()
+        // — so we expect LowerRoman to be stored on the ContentItem
+        // (not the Decimal default).
         let css = r##"a::after { content: target-counter(attr(href), section, lower-roman); }"##;
         let g = parse_gcpm(css);
         let item = g
