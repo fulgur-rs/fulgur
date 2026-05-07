@@ -5,6 +5,7 @@ pub mod page_settings;
 pub mod parser;
 pub mod running;
 pub mod string_set;
+pub mod target_ref;
 pub mod ua_css;
 
 use bookmark::BookmarkMapping;
@@ -293,6 +294,44 @@ pub enum ContentItem {
     Attr(String),
     /// A CSS leader, e.g. `leader(dotted)`.
     Leader { style: LeaderStyle },
+    /// `target-counter(<url-attr>, <counter-name>)` — resolves the named
+    /// counter at the element identified by the URL fragment in
+    /// `attr(<url-attr>)`. The current implementation restricts
+    /// `<url-attr>` to `"href"`; other attribute names yield an empty
+    /// string.
+    TargetCounter {
+        /// Attribute name read from the matched element. Always lowercase.
+        url_attr: String,
+        /// Counter name being looked up at the target element.
+        counter_name: String,
+        /// Display style applied to the resolved value.
+        style: CounterStyle,
+    },
+    /// `target-counters(<url-attr>, <counter-name>, <separator>)` —
+    /// like `TargetCounter` but joins the entire counter chain at the
+    /// target with `separator`.
+    TargetCounters {
+        url_attr: String,
+        counter_name: String,
+        separator: String,
+        style: CounterStyle,
+    },
+    /// `target-text(<url-attr>)` — resolves to the text content of the
+    /// target element. Only the default `content` form is implemented.
+    TargetText { url_attr: String },
+}
+
+impl ContentItem {
+    /// Returns true if this item is a `target-counter` / `target-counters`
+    /// / `target-text` reference. Used to gate fulgur's 2-pass render.
+    pub fn is_target_reference(&self) -> bool {
+        matches!(
+            self,
+            ContentItem::TargetCounter { .. }
+                | ContentItem::TargetCounters { .. }
+                | ContentItem::TargetText { .. }
+        )
+    }
 }
 
 /// Counter display styles (CSS `list-style-type` subset for counters).
@@ -388,6 +427,19 @@ impl GcpmContext {
             }
             self.cleaned_css.push_str(&other.cleaned_css);
         }
+    }
+
+    /// Returns true if any margin-box rule or content-counter mapping
+    /// contains a `target-*` item. Triggers the 2-pass pipeline;
+    /// otherwise the single-pass fast path runs.
+    pub fn has_target_references(&self) -> bool {
+        self.margin_boxes
+            .iter()
+            .any(|r| r.content.iter().any(ContentItem::is_target_reference))
+            || self
+                .content_counter_mappings
+                .iter()
+                .any(|m| m.content.iter().any(ContentItem::is_target_reference))
     }
 }
 
@@ -534,5 +586,56 @@ mod tests {
     #[test]
     fn test_leader_style_char_custom() {
         assert_eq!(LeaderStyle::Custom("·".to_string()).leader_char(), "·");
+    }
+}
+
+#[cfg(test)]
+mod content_item_target_tests {
+    use super::*;
+
+    #[test]
+    fn target_counter_variant_default_style_is_decimal() {
+        let item = ContentItem::TargetCounter {
+            url_attr: "href".into(),
+            counter_name: "page".into(),
+            style: CounterStyle::Decimal,
+        };
+        match item {
+            ContentItem::TargetCounter { counter_name, .. } => {
+                assert_eq!(counter_name, "page");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn gcpm_context_target_detection() {
+        let mut ctx = GcpmContext::default();
+        assert!(!ctx.has_target_references());
+        ctx.content_counter_mappings.push(ContentCounterMapping {
+            parsed: ParsedSelector::Tag("a".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![ContentItem::TargetCounter {
+                url_attr: "href".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            }],
+        });
+        assert!(ctx.has_target_references());
+    }
+
+    #[test]
+    fn gcpm_context_target_detection_via_margin_box() {
+        let mut ctx = GcpmContext::default();
+        assert!(!ctx.has_target_references());
+        ctx.margin_boxes.push(MarginBoxRule {
+            page_selector: None,
+            position: MarginBoxPosition::TopCenter,
+            content: vec![ContentItem::TargetText {
+                url_attr: "href".into(),
+            }],
+            declarations: String::new(),
+        });
+        assert!(ctx.has_target_references());
     }
 }

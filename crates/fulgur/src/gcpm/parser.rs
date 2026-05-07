@@ -714,10 +714,17 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
             *self.bookmark_label = Some(items);
         } else if name.eq_ignore_ascii_case("content") && self.has_pseudo {
             let items = parse_content_value(input);
+            // Name kept as `has_counter` for continuity with the cascade comment
+            // below; `target-*` items also force the mapping into the
+            // CounterPass-handled bucket because Blitz cannot resolve them.
             let has_counter = items.iter().any(|item| {
                 matches!(
                     item,
-                    ContentItem::Counter { .. } | ContentItem::Counters { .. }
+                    ContentItem::Counter { .. }
+                        | ContentItem::Counters { .. }
+                        | ContentItem::TargetCounter { .. }
+                        | ContentItem::TargetCounters { .. }
+                        | ContentItem::TargetText { .. }
                 )
             });
             // Last-declaration-wins: always update content_items (clear when
@@ -900,6 +907,33 @@ fn parse_counter_style<'i>(input: &mut Parser<'i, '_>) -> Result<CounterStyle, P
     }
 }
 
+/// Parse the `<url>` argument of a `target-*` function.
+/// Currently only the `attr(<ident>)` form is recognized — everything
+/// else (string literal, `url(...)`, `attr(<name>, <type>)`) returns
+/// `None`, causing the surrounding item to be dropped silently per
+/// design.
+fn parse_target_url_attr(input: &mut Parser<'_, '_>) -> Option<String> {
+    input
+        .try_parse(|input| {
+            let token = input.next()?.clone();
+            match token {
+                Token::Function(ref name) if name.eq_ignore_ascii_case("attr") => input
+                    .parse_nested_block(|inner| {
+                        let id = inner.expect_ident()?.to_string();
+                        // Reject `attr(name, <type>)` and similar — only
+                        // the bare `attr(<ident>)` form is supported.
+                        if !inner.is_exhausted() {
+                            return Err(inner.new_error_for_next_token());
+                        }
+                        Ok::<_, ParseError<'_, ()>>(id)
+                    }),
+                _ => Err(input.new_error_for_next_token()),
+            }
+        })
+        .ok()
+        .map(|s| s.to_ascii_lowercase())
+}
+
 /// Parse the policy argument of `element(name, <policy>)`.
 fn parse_element_policy<'i>(
     input: &mut Parser<'i, '_>,
@@ -1014,6 +1048,81 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                         // empty block returns an error.
                         if fn_name.eq_ignore_ascii_case("content") && input.is_exhausted() {
                             items.push(ContentItem::ContentText);
+                            return Ok(());
+                        }
+                        // `target-*` functions: their first argument is
+                        // `attr(<name>)`, not a bare ident, so dispatch
+                        // before `expect_ident()` would consume it.
+                        if fn_name.eq_ignore_ascii_case("target-counter") {
+                            // Grammar: target-counter( attr(<name>) , <counter-name> [, <counter-style>]? )
+                            let url_attr = match parse_target_url_attr(input) {
+                                Some(name) => name,
+                                None => return Ok(()),
+                            };
+                            input.expect_comma()?;
+                            let counter_name = input.expect_ident()?.to_string();
+                            let style = input
+                                .try_parse(|input| {
+                                    input.expect_comma()?;
+                                    parse_counter_style(input)
+                                })
+                                .unwrap_or(CounterStyle::Decimal);
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
+                            items.push(ContentItem::TargetCounter {
+                                url_attr,
+                                counter_name,
+                                style,
+                            });
+                            return Ok(());
+                        }
+                        if fn_name.eq_ignore_ascii_case("target-counters") {
+                            let url_attr = match parse_target_url_attr(input) {
+                                Some(name) => name,
+                                None => return Ok(()),
+                            };
+                            input.expect_comma()?;
+                            let counter_name = input.expect_ident()?.to_string();
+                            input.expect_comma()?;
+                            let separator = match input
+                                .try_parse(|input| input.expect_string().map(|s| s.to_string()))
+                            {
+                                Ok(s) => s,
+                                Err(_) => return Ok(()),
+                            };
+                            let style = input
+                                .try_parse(|input| {
+                                    input.expect_comma()?;
+                                    parse_counter_style(input)
+                                })
+                                .unwrap_or(CounterStyle::Decimal);
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
+                            items.push(ContentItem::TargetCounters {
+                                url_attr,
+                                counter_name,
+                                separator,
+                                style,
+                            });
+                            return Ok(());
+                        }
+                        if fn_name.eq_ignore_ascii_case("target-text") {
+                            let url_attr = match parse_target_url_attr(input) {
+                                Some(name) => name,
+                                None => return Ok(()),
+                            };
+                            // Only the default `content` form is
+                            // implemented. Other forms
+                            // (`target-text(url, before|after|first-letter)`)
+                            // are not yet supported; if a 2nd argument is
+                            // present at all, drop the item rather than
+                            // silently treating it as the default form.
+                            if !input.is_exhausted() {
+                                return Ok(());
+                            }
+                            items.push(ContentItem::TargetText { url_attr });
                             return Ok(());
                         }
                         let arg = input.expect_ident()?.clone();
@@ -2240,5 +2349,184 @@ mod tests {
             !any_counters,
             "non-string separator should drop counters() item"
         );
+    }
+
+    #[test]
+    fn parse_target_counter_attr_href_page() {
+        let css = r#"a::after { content: target-counter(attr(href), page); }"#;
+        let g = parse_gcpm(css);
+        let mapping = &g.content_counter_mappings[0];
+        assert_eq!(
+            mapping.content,
+            vec![ContentItem::TargetCounter {
+                url_attr: "href".into(),
+                counter_name: "page".into(),
+                style: CounterStyle::Decimal,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_target_counters_with_separator() {
+        let css = r#"a::after { content: target-counters(attr(href), section, "."); }"#;
+        let g = parse_gcpm(css);
+        let mapping = &g.content_counter_mappings[0];
+        assert_eq!(
+            mapping.content,
+            vec![ContentItem::TargetCounters {
+                url_attr: "href".into(),
+                counter_name: "section".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_target_text_default_form() {
+        let css = r#"a::after { content: target-text(attr(href)); }"#;
+        let g = parse_gcpm(css);
+        let mapping = &g.content_counter_mappings[0];
+        assert_eq!(
+            mapping.content,
+            vec![ContentItem::TargetText {
+                url_attr: "href".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_target_counter_non_attr_url_drops_item() {
+        // Non-`attr(...)` URL form drops the item entirely: with no
+        // surviving target-* item the rule contains no counter-class
+        // content, so no `ContentCounterMapping` is registered.
+        // Mirror the `counters()` "missing separator" idiom from
+        // `test_parse_counters_missing_separator_drops_item` instead of
+        // indexing `[0]`.
+        let css = r##"a::after { content: target-counter("#sec1", page); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
+        assert!(!any_target, "non-attr URL should drop target-counter item");
+    }
+
+    #[test]
+    fn parse_target_counter_two_arg_attr_drops_item() {
+        // The 2-argument `attr(name, <type>)` form is not part of the
+        // supported `target-*` URL grammar — currently only bare
+        // `attr(<ident>)` is honored. Anything else must drop the item
+        // entirely instead of silently treating the type/fallback
+        // argument as if it were absent.
+        let css = r##"a::after { content: target-counter(attr(href, string), page); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
+        assert!(
+            !any_target,
+            "two-arg attr() should drop the target-counter item"
+        );
+    }
+
+    #[test]
+    fn parse_target_counter_extra_trailing_token_drops_item() {
+        // `target-counter()` accepts up to 3 arguments
+        // (`url, name [, counter-style]`). Anything beyond — e.g. a
+        // 4th positional token — must drop the item rather than
+        // silently truncate to a valid prefix.
+        let css =
+            r##"a::after { content: target-counter(attr(href), page, lower-roman, extra); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounter { .. }));
+        assert!(
+            !any_target,
+            "extra trailing token should drop the target-counter item"
+        );
+    }
+
+    #[test]
+    fn parse_target_counters_extra_trailing_token_drops_item() {
+        let css = r##"a::after { content: target-counters(attr(href), section, ".", lower-roman, extra); }"##;
+        let g = parse_gcpm(css);
+        let any_target = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|i| matches!(i, ContentItem::TargetCounters { .. }));
+        assert!(
+            !any_target,
+            "extra trailing token should drop the target-counters item"
+        );
+    }
+
+    #[test]
+    fn parse_target_text_with_unsupported_2nd_arg_drops_item() {
+        // `target-text(url, before|after|first-letter)` is not yet
+        // implemented. If a 2nd argument is present at all, drop the
+        // item rather than silently aliasing it to the default
+        // `content` form (which would surface a wrong text fragment in
+        // the rendered PDF).
+        for form in ["before", "after", "first-letter", "content"] {
+            let css = format!(r##"a::after {{ content: target-text(attr(href), {form}); }}"##);
+            let g = parse_gcpm(&css);
+            let any_target = g
+                .content_counter_mappings
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .any(|i| matches!(i, ContentItem::TargetText { .. }));
+            assert!(!any_target, "2nd arg `{form}` should drop the item");
+        }
+    }
+
+    #[test]
+    fn parse_target_counter_with_whitespace_and_case() {
+        // Mixed-case function name + extra whitespace inside the call
+        // should still parse to a TargetCounter item identical to the
+        // canonical lowercase / no-whitespace form.
+        let css = r##"a::after { content: Target-Counter(  attr( href )  ,  page  ); }"##;
+        let g = parse_gcpm(css);
+        assert!(
+            g.content_counter_mappings
+                .iter()
+                .any(|m| m.content.contains(&ContentItem::TargetCounter {
+                    url_attr: "href".into(),
+                    counter_name: "page".into(),
+                    style: CounterStyle::Decimal,
+                })),
+            "expected mixed-case + whitespace to parse — got {:?}",
+            g.content_counter_mappings
+        );
+    }
+
+    #[test]
+    fn parse_target_counter_accepts_style_arg_for_forward_compat() {
+        // The optional 3rd argument selects the counter style, and the
+        // parser threads the style argument through to format_counter()
+        // — so we expect LowerRoman to be stored on the ContentItem
+        // (not the Decimal default).
+        let css = r##"a::after { content: target-counter(attr(href), section, lower-roman); }"##;
+        let g = parse_gcpm(css);
+        let item = g
+            .content_counter_mappings
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .find_map(|i| match i {
+                ContentItem::TargetCounter {
+                    counter_name,
+                    style,
+                    ..
+                } => Some((counter_name.clone(), *style)),
+                _ => None,
+            });
+        assert_eq!(item, Some(("section".into(), CounterStyle::LowerRoman)));
     }
 }

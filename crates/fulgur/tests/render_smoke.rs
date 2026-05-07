@@ -52,6 +52,18 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
         .expect("tagged render")
 }
 
+/// Encode `s` as upper-case UTF-16BE hex, the form Krilla writes into
+/// `/Span << /ActualText <FEFF…> >>` markers in tagged PDFs. Tests use
+/// this to grep ActualText payloads instead of decoding CID-encoded TJ
+/// strings (lopdf 0.40 lacks ToUnicode CMap parsing).
+fn hex_utf16be(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.encode_utf16() {
+        out.push_str(&format!("{:04X}", c));
+    }
+    out
+}
+
 #[test]
 fn test_render_html_resolves_link_stylesheet() {
     let dir = tempdir().unwrap();
@@ -3330,5 +3342,191 @@ fn render_table_pagebreak_does_not_scale_quadratically() {
         t10,
         t100,
         ratio,
+    );
+}
+
+/// End-to-end smoke for the 2-pass `target-counter` orchestration. A
+/// simple TOC declares `a::after { content: ...
+/// target-counter(attr(href), page) ... }`. After pass 1 paginates the
+/// chapter headings (each on a fresh page via `page-break-before`),
+/// pass 2 renders the TOC links with their resolved page numbers.
+///
+/// Krilla emits CID-encoded TJ strings, so neither raw byte search for
+/// "(p.2)" nor `fulgur::inspect::inspect` (which lacks ToUnicode CMap
+/// parsing on the lopdf 0.40 stack — see MEMORY) recovers Unicode text
+/// from the content stream. What Krilla DOES write in human-readable
+/// form is the `/Span << /ActualText <FEFF…> >>` marker (PDF tagging
+/// for accessibility): the bracketed hex is UTF-16BE of the
+/// post-resolution text. We assert against that — pass 2 must produce
+/// "(p.2)" and "(p.3)" in some ActualText payload, otherwise the
+/// orchestration didn't fire.
+#[test]
+fn target_counter_in_toc_renders_page_number() {
+    let html = r##"
+<!doctype html>
+<html><head><style>
+  body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+  a::after { content: " (p." target-counter(attr(href), page) ")"; }
+  h2 { page-break-before: always; }
+</style></head>
+<body>
+  <nav class="toc">
+    <a href="#a">Chapter A</a><br>
+    <a href="#b">Chapter B</a>
+  </nav>
+  <h2 id="a">Chapter A</h2>
+  <p>aaa</p>
+  <h2 id="b">Chapter B</h2>
+  <p>bbb</p>
+</body></html>"##;
+
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
+    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .assets(assets)
+        .build()
+        .render_html(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("toc.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    // Walk every content stream, decompress, and concatenate the
+    // resulting bytes so we can grep for ActualText payloads regardless
+    // of which page they live on.
+    let doc = lopdf::Document::load(&path).expect("load pdf");
+    let mut decompressed = String::new();
+    for (_id, obj) in doc.objects.iter() {
+        if let lopdf::Object::Stream(s) = obj {
+            let mut clone = s.clone();
+            let _ = clone.decompress();
+            decompressed.push_str(&String::from_utf8_lossy(&clone.content));
+        }
+    }
+
+    // UTF-16BE hex for "(p.2)" → 0028 0070 002E 0032 0029
+    // UTF-16BE hex for "(p.3)" → 0028 0070 002E 0033 0029
+    // ActualText payloads are upper-case hex so search both cases for
+    // robustness against Krilla version drift.
+    let p2 = hex_utf16be("(p.2)");
+    let p3 = hex_utf16be("(p.3)");
+    let lower = decompressed.to_ascii_lowercase();
+    assert!(
+        lower.contains(&p2.to_ascii_lowercase()),
+        "ActualText does not contain UTF-16BE for (p.2) — orchestration likely failed (pass 2 not firing). \
+         Looked for {p2} in {} bytes of decompressed PDF streams.",
+        lower.len()
+    );
+    assert!(
+        lower.contains(&p3.to_ascii_lowercase()),
+        "ActualText does not contain UTF-16BE for (p.3) — orchestration likely failed. \
+         Looked for {p3} in {} bytes of decompressed PDF streams.",
+        lower.len()
+    );
+}
+
+/// Regression for `target-*` declared **only** in a
+/// `<link rel="stylesheet">`-loaded CSS file: the 2-pass orchestration
+/// must still fire. The previous pre-parse probe scanned
+/// `assets.combined_css()` plus a literal substring sweep of the HTML;
+/// neither captures `<link>`-loaded files (resolved later by
+/// `parse_html_with_local_resources`), so the literal `target-*` never
+/// appeared in either signal and pass 2 was silently skipped —
+/// resolved page numbers degraded to `"00"` placeholders. The
+/// post-parse gate inside `render_pass` runs after
+/// `extend_from(link_gcpm)`, so the decision is made against the merged
+/// GCPM context.
+#[test]
+fn target_counter_in_link_loaded_css_triggers_pass_two() {
+    let dir = tempdir().expect("tempdir");
+    let css_path = dir.path().join("toc.css");
+    // `target-counter(...)` lives ONLY in this file. The HTML below
+    // never contains the substring, so the old pre-parse probe (which
+    // scanned `assets.combined_css()` plus a literal sweep of the HTML)
+    // could not detect it. The new post-parse gate sees it via
+    // `extend_from(link_gcpm)`. `page-break-before` stays in the inline
+    // `<style>` so cascade ordering is uncoupled from this test's
+    // detection-of-target-* assertion.
+    std::fs::write(
+        &css_path,
+        "a::after { content: \" (p.\" target-counter(attr(href), page) \")\"; }\n",
+    )
+    .expect("write css");
+
+    // Note: no `target-counter(` token anywhere in this HTML. The only
+    // GCPM-relevant thing the engine sees inline is the <link> ref.
+    let html = r##"
+<!doctype html>
+<html><head>
+  <link rel="stylesheet" href="toc.css">
+  <style>
+    body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+    h2 { page-break-before: always; }
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <a href="#a">Chapter A</a><br>
+    <a href="#b">Chapter B</a>
+  </nav>
+  <h2 id="a">Chapter A</h2>
+  <p>aaa</p>
+  <h2 id="b">Chapter B</h2>
+  <p>bbb</p>
+</body></html>"##;
+
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans from {}: {e}", font_path.display()));
+    assets.add_css("body { font-family: 'Noto Sans', sans-serif; }");
+
+    let pdf = Engine::builder()
+        .tagged(true)
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render_html(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+
+    let pdf_path = dir.path().join("toc.pdf");
+    std::fs::write(&pdf_path, &pdf).expect("write pdf");
+
+    let doc = lopdf::Document::load(&pdf_path).expect("load pdf");
+    let mut decompressed = String::new();
+    for (_id, obj) in doc.objects.iter() {
+        if let lopdf::Object::Stream(s) = obj {
+            let mut clone = s.clone();
+            let _ = clone.decompress();
+            decompressed.push_str(&String::from_utf8_lossy(&clone.content));
+        }
+    }
+
+    let p2 = hex_utf16be("(p.2)");
+    let p3 = hex_utf16be("(p.3)");
+    let lower = decompressed.to_ascii_lowercase();
+    assert!(
+        lower.contains(&p2.to_ascii_lowercase()),
+        "ActualText missing UTF-16BE for (p.2) — pass 2 did not fire for <link>-loaded \
+         target-counter CSS. Looked for {p2} in {} bytes of decompressed PDF streams.",
+        lower.len()
+    );
+    assert!(
+        lower.contains(&p3.to_ascii_lowercase()),
+        "ActualText missing UTF-16BE for (p.3) — pass 2 did not fire for <link>-loaded \
+         target-counter CSS. Looked for {p3} in {} bytes of decompressed PDF streams.",
+        lower.len()
     );
 }

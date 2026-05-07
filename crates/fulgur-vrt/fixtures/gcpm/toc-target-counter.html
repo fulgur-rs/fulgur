@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!--
+  fulgur-63y Task 9: VRT golden for target-counter(attr(href), page).
+  After pass 1 paginates the chapter headings, pass 2 must rewrite each
+  TOC link's ::after content with the resolved destination page number.
+
+  Plan-divergence notes:
+  - Plan CSS uses `.toc a::after`, but the GCPM CSS parser only accepts
+    simple selectors (one class/id/tag + optional pseudo). A descendant
+    selector like `.toc a` is dropped, so we use bare `a::after` here.
+  - Plan CSS prefixes the page number with `leader('.')`, but body leader
+    is not yet implemented (`ContentItem::Leader` currently no-ops in
+    `resolve_content`); a leader-fill fixture would lock in an empty
+    string, not a leader. We use a literal " p." prefix instead so the
+    fixture exercises the target-counter resolution path concretely.
+  Both gaps are tracked separately from this task.
+-->
+<style>
+@page { size: A5; margin: 18mm; }
+body { font: 12pt 'Noto Sans', sans-serif; }
+a::after { content: " p." target-counter(attr(href), page); }
+ul.toc li { list-style: none; }
+</style>
+</head>
+<body>
+<h1>Contents</h1>
+<ul class="toc">
+  <li><a href="#intro">Introduction</a></li>
+  <li><a href="#methods">Methods</a></li>
+  <li><a href="#results">Results</a></li>
+</ul>
+<h2 id="intro" style="page-break-before: always">Introduction</h2>
+<p>Lorem ipsum.</p>
+<h2 id="methods" style="page-break-before: always">Methods</h2>
+<p>Dolor sit amet.</p>
+<h2 id="results" style="page-break-before: always">Results</h2>
+<p>Consectetur adipiscing.</p>
+</body>
+</html>

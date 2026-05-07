@@ -3,9 +3,10 @@ use crate::draw_primitives::Canvas;
 use crate::drawables::Drawables;
 use crate::error::{Error, Result};
 use crate::gcpm::GcpmContext;
-use crate::gcpm::counter::resolve_content_to_html;
+use crate::gcpm::counter::resolve_content_to_html_with_anchor;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
+use crate::gcpm::target_ref::AnchorMap;
 use krilla::SerializeSettings;
 use krilla::configure::{Configuration, Validator};
 use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
@@ -36,6 +37,7 @@ pub fn render_v2(
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
     html_title: Option<String>,
     serialize_settings: SerializeSettings,
+    anchor_map: Option<&AnchorMap>,
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
@@ -280,6 +282,7 @@ pub fn render_v2(
                 page_size,
                 resolved_margin,
                 page_content_width,
+                anchor_map,
             );
         }
         let per_page = link_collector.take_page(page_idx);
@@ -3417,6 +3420,22 @@ impl<'a> MarginBoxRenderer<'a> {
     ///
     /// `content_width` is the page content area width in pt — used as
     /// the available width during measure passes for top/bottom boxes.
+    ///
+    /// `anchor_map` is the pass-2 cross-reference table; when `Some`,
+    /// `target-counter()` / `target-counters()` / `target-text()` inside
+    /// margin-box `content` resolve via the supplied map. When `None`
+    /// (pass 1, or single-pass renders without target refs), those
+    /// resolvers return empty strings — see
+    /// `gcpm::counter::resolve_content_to_html_with_anchor`.
+    ///
+    /// Margin-box `implicit_href` plumbing is not yet implemented:
+    /// `implicit_href` is always `None` here, so margin-box content with
+    /// `target-counter(attr(href), ...)` resolves to an empty string.
+    /// The dominant use case (TOC entries in `::before` / `::after`)
+    /// already resolves via `CounterPass::with_anchor_map`. Wiring a
+    /// per-page implicit href (e.g. by walking `pagination_geometry`
+    /// for the first `<a href="#...">` on each page) is tracked by
+    /// fulgur-qgy7.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_page(
         &mut self,
@@ -3427,6 +3446,7 @@ impl<'a> MarginBoxRenderer<'a> {
         page_size: crate::config::PageSize,
         resolved_margin: crate::config::Margin,
         content_width: f32,
+        anchor_map: Option<&AnchorMap>,
     ) {
         // Resolve effective boxes: pick the most specific matching rule
         // per position. Pseudo-class selectors (`:first`, `:left`,
@@ -3457,10 +3477,14 @@ impl<'a> MarginBoxRenderer<'a> {
             }
         }
 
-        // Resolve HTML for each effective box.
+        // Resolve HTML for each effective box. Margin-box content goes
+        // through `_with_anchor` so `target-*` resolves when `anchor_map`
+        // is present (pass 2). `implicit_href` is `None` for now;
+        // margin-box `target-counter(attr(href), ...)` therefore returns
+        // an empty string. Tracked by fulgur-qgy7.
         let mut resolved_htmls: BTreeMap<MarginBoxPosition, String> = BTreeMap::new();
         for (&pos, rule) in &effective_boxes {
-            let content_html = resolve_content_to_html(
+            let content_html = resolve_content_to_html_with_anchor(
                 &rule.content,
                 self.running_store,
                 &self.running_states,
@@ -3469,6 +3493,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 total_pages,
                 page_idx,
                 &self.counter_states[page_idx],
+                anchor_map,
+                None,
             );
             if !content_html.is_empty() {
                 let html = if rule.declarations.is_empty() {
