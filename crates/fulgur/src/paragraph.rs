@@ -1374,6 +1374,153 @@ mod tests {
         assert!(s.contains("width: 10.0"), "{}", s);
     }
 
+    // ---------- recalculate_line_box: Text item `continue` arms ----------
+
+    /// Exercises the `LineItem::Text(_) => continue` branches in both Phase 1
+    /// and Phase 2 of `recalculate_line_box`. The image-only tests never
+    /// include Text items, so those arms are otherwise uncovered.
+    #[test]
+    fn recalculate_line_box_text_items_are_skipped() {
+        let run = ShapedGlyphRun {
+            font_data: Arc::new(Vec::new()),
+            font_index: 0,
+            font_size: 12.0,
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: Vec::new(),
+            text: String::new(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let mut line = text_line(16.0, 12.0);
+        line.items.push(LineItem::Text(run));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        // Text items are skipped: height and baseline must be unchanged.
+        assert!(approx(line.height, 16.0), "height={}", line.height);
+        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+    }
+
+    // ---------- recalculate_line_box: Phase-1 line_bottom expansion ----------
+
+    /// When a non-Top/Bottom image's bottom edge (img_top + img.height) exceeds
+    /// the initial line_bottom, Phase 1 must expand line_bottom. This is
+    /// distinct from the top-expansion cases already tested; it exercises the
+    /// `if img_top + img.height > line_bottom { line_bottom = … }` branch.
+    #[test]
+    fn phase1_image_overflows_bottom_expands_line_bottom() {
+        // Use a large descent so that TextBottom places the image below the
+        // original line_bottom (16).
+        //
+        // img_top = baseline + descent - img.height = 12 + 8 - 5 = 15
+        // img_bottom = 15 + 5 = 20 > 16 → line_bottom = 20
+        let metrics = LineFontMetrics {
+            ascent: 12.0,
+            descent: 8.0,
+            x_height: 8.0,
+            subscript_offset: 4.0,
+            superscript_offset: 6.0,
+        };
+        let mut line = text_line(16.0, 12.0);
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            5.0,
+            VerticalAlign::TextBottom,
+        )));
+        recalculate_line_box(&mut line, &metrics);
+        // line_top stays 0 (img_top=15 > 0), shift=0
+        // height = 20 - 0 = 20
+        assert!(approx(line.height, 20.0), "height={}", line.height);
+        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+        if let LineItem::Image(img) = &line.items[0] {
+            assert!(
+                approx(img.computed_y, 15.0),
+                "computed_y={}",
+                img.computed_y
+            );
+        }
+    }
+
+    // ---------- recalculate_line_box: Phase-2 line_top expansion ----------
+
+    /// A Bottom-aligned image whose height exceeds line_bottom causes Phase 2
+    /// to expand line_top upward. This exercises the
+    /// `if img_top < line_top { line_top = img_top }` branch inside Phase 2.
+    #[test]
+    fn bottom_image_taller_than_line_expands_line_top() {
+        // img_top = line_bottom - img.height = 16 - 20 = -4  (<  line_top 0)
+        // → line_top = -4, height = 16 - (-4) = 20, shift = 4
+        let mut line = text_line(16.0, 12.0);
+        line.items.push(LineItem::Image(make_inline_image(
+            10.0,
+            20.0,
+            VerticalAlign::Bottom,
+        )));
+        let m = default_metrics();
+        recalculate_line_box(&mut line, &m);
+        assert!(approx(line.height, 20.0), "height={}", line.height);
+        // baseline = 12 + shift(4) = 16
+        assert!(approx(line.baseline, 16.0), "baseline={}", line.baseline);
+        if let LineItem::Image(img) = &line.items[0] {
+            // computed_y = img_top + shift = -4 + 4 = 0
+            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+        }
+    }
+
+    // ---------- get_decoration_metrics fallback ----------
+
+    /// Passing empty font bytes causes `skrifa::FontRef::from_index` to fail,
+    /// triggering the `else` fallback branch in `get_decoration_metrics`.
+    /// All returned values are simple multiples of `font_size`.
+    #[test]
+    fn get_decoration_metrics_fallback_with_empty_font_data() {
+        let m = get_decoration_metrics(&[], 0, 12.0);
+        // fallback_thickness = 12.0 * 0.05 = 0.6
+        assert!(
+            approx(m.underline_offset, 12.0 * 0.075),
+            "underline_offset={}",
+            m.underline_offset
+        );
+        assert!(
+            approx(m.underline_thickness, 12.0 * 0.05),
+            "underline_thickness={}",
+            m.underline_thickness
+        );
+        assert!(
+            approx(m.strikethrough_offset, 12.0 * 0.3),
+            "strikethrough_offset={}",
+            m.strikethrough_offset
+        );
+        assert!(
+            approx(m.strikethrough_thickness, 12.0 * 0.05),
+            "strikethrough_thickness={}",
+            m.strikethrough_thickness
+        );
+        assert!(
+            approx(m.overline_pos, 12.0 * 0.7),
+            "overline_pos={}",
+            m.overline_pos
+        );
+    }
+
+    /// Varying the font_size scales all fallback values proportionally.
+    #[test]
+    fn get_decoration_metrics_fallback_scales_with_font_size() {
+        let m8 = get_decoration_metrics(&[], 0, 8.0);
+        let m16 = get_decoration_metrics(&[], 0, 16.0);
+        // Every field should double when font_size doubles.
+        assert!(approx(m16.underline_offset, m8.underline_offset * 2.0));
+        assert!(approx(
+            m16.underline_thickness,
+            m8.underline_thickness * 2.0
+        ));
+        assert!(approx(
+            m16.strikethrough_offset,
+            m8.strikethrough_offset * 2.0
+        ));
+        assert!(approx(m16.overline_pos, m8.overline_pos * 2.0));
+    }
+
     // ---------- recalculate_line_box InlineBox `continue` arms (L815, L847) ----------
 
     /// Exercises the `LineItem::InlineBox(_) => continue` arms inside both
@@ -1439,6 +1586,52 @@ mod link_span_tests {
             link: None,
         };
         assert!(run.link.is_none());
+    }
+
+    // ---------- link_span_ptr ----------
+
+    fn make_link_span(url: &str) -> Arc<LinkSpan> {
+        Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new(url.into())),
+            alt_text: None,
+        })
+    }
+
+    #[test]
+    fn link_span_ptr_none_returns_none() {
+        assert_eq!(link_span_ptr(None), None);
+    }
+
+    #[test]
+    fn link_span_ptr_same_arc_yields_same_value() {
+        let span = make_link_span("https://example.com");
+        let p1 = link_span_ptr(Some(&span));
+        let p2 = link_span_ptr(Some(&span));
+        assert!(p1.is_some());
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn link_span_ptr_different_arcs_yield_different_values() {
+        let a = make_link_span("https://a.example.com");
+        let b = make_link_span("https://b.example.com");
+        let pa = link_span_ptr(Some(&a));
+        let pb = link_span_ptr(Some(&b));
+        assert_ne!(
+            pa, pb,
+            "distinct Arc allocations must produce distinct pointers"
+        );
+    }
+
+    #[test]
+    fn link_span_ptr_clone_arc_yields_same_value() {
+        let span = make_link_span("https://example.com");
+        let clone = Arc::clone(&span);
+        assert_eq!(
+            link_span_ptr(Some(&span)),
+            link_span_ptr(Some(&clone)),
+            "Arc::clone shares the same allocation, so pointers must match",
+        );
     }
 }
 
