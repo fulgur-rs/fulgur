@@ -1,0 +1,24 @@
+body {
+  color: #064e3b;
+  font-family: "Noto Sans", sans-serif;
+}
+
+/* Excluded: fulgur renders for the PRINT media type, so screen-only rules
+   never apply. Intentionally aggressive — if @media gating regressed, the
+   red-on-yellow would be impossible to miss in the PDF. */
+@media screen {
+  body {
+    color: red;
+    background: yellow;
+  }
+  p {
+    text-decoration: underline dotted red;
+  }
+}
+
+/* Applied: print-only rules are evaluated against fulgur's print device. */
+@media print {
+  h1 {
+    color: #b91c1c;
+  }
+}
