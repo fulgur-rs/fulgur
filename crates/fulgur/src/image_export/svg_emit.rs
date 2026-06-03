@@ -52,11 +52,70 @@ impl SvgDoc {
 }
 
 use crate::draw_primitives::{BackgroundLayer, BgImageContent, BlockStyle, GradientStopPosition};
-use crate::drawables::ImageEntry;
+use crate::drawables::{Drawables, ImageEntry};
 use crate::image::ImageFormat as InputImageFormat;
 use crate::image_export::b64;
 use crate::image_export::glyph_path::glyph_to_svg_path;
+use crate::image_export::options::ImageOptions;
+use crate::pagination_layout::PaginationGeometryTable;
 use crate::paragraph::{LineItem, ShapedLine};
+
+/// One SVG sub-tree to composite onto the page during rasterization:
+/// `(tree, x_pt, y_pt, w_pt, h_pt)` — the parsed `usvg::Tree` plus its
+/// destination rect in pt-space.
+pub type SvgComposite = (std::sync::Arc<usvg::Tree>, f32, f32, f32, f32);
+
+/// Serialize page-0 drawables to an SVG string + the list of SvgEntry
+/// sub-trees to composite at their pt rect (resvg renders sub-trees more
+/// faithfully than re-nesting). Fragments are converted CSS px → pt. Paint
+/// order is `BTreeMap`(NodeId) order, which approximates document order —
+/// correct for flat single-composed-image layouts. Transforms, clip/opacity
+/// groups, tables, list markers, and multicol are NOT dispatched in v1.
+pub fn page_to_svg(
+    drawables: &Drawables,
+    geometry: &PaginationGeometryTable,
+    opts: &ImageOptions,
+) -> (String, Vec<SvgComposite>) {
+    let mut doc = SvgDoc::new(opts.width_px, opts.height_px, opts.background);
+    let mut svg_composites = Vec::new();
+    let (bx, by) = drawables.body_offset_pt;
+
+    for (node_id, geo) in geometry {
+        let Some(frag) = geo.fragments.iter().find(|f| f.page_index == 0) else {
+            continue;
+        };
+        let x = bx + frag.x * PX_TO_PT;
+        let y = by + frag.y * PX_TO_PT;
+        let w = frag.width * PX_TO_PT;
+        let h = frag.height * PX_TO_PT;
+
+        if let Some(block) = drawables.block_styles.get(node_id) {
+            if block.visible {
+                for (i, layer) in block.style.background_layers.iter().enumerate() {
+                    emit_background_layer(&mut doc, layer, x, y, w, h, *node_id * 16 + i);
+                }
+                emit_block(&mut doc, &block.style, x, y, w, h);
+            }
+        }
+        if let Some(p) = drawables.paragraphs.get(node_id) {
+            if p.visible {
+                emit_paragraph(&mut doc, &p.lines, x, y);
+            }
+        }
+        if let Some(img) = drawables.images.get(node_id) {
+            if img.visible {
+                emit_image(&mut doc, img, x, y, w, h);
+            }
+        }
+        if let Some(svg) = drawables.svgs.get(node_id) {
+            if svg.visible {
+                svg_composites.push((svg.tree.clone(), x, y, w, h));
+            }
+        }
+    }
+
+    (doc.finish(), svg_composites)
+}
 
 /// Emit a paragraph's shaped lines as filled glyph-outline paths. `(ox, oy)`
 /// is the paragraph's top-left in pt. Each line's glyphs are placed on a
