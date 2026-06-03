@@ -12,5 +12,4 @@ mod options;
 mod rasterize;
 mod svg_emit;
 
-// TODO(Task 2): re-enable
-// pub use options::{Background, ImageFormat, ImageOptions};
+pub use options::{Background, ImageFormat, ImageOptions};
