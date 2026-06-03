@@ -231,6 +231,15 @@ enum Commands {
         /// Enable PDF/UA-1 conformance (implies --tagged and --bookmarks).
         #[arg(long = "pdf-ua")]
         pdf_ua: bool,
+
+        /// Output image dimensions in pixels, e.g. "1200x630" (required when -o is
+        /// a .png/.webp file).
+        #[arg(long = "image-size")]
+        image_size: Option<String>,
+
+        /// Device-pixel scale for image output (e.g. 2 for @2x). Default 1.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f32,
     },
     /// Inspect a PDF and extract text positions, images, and metadata as JSON
     Inspect {
@@ -319,6 +328,11 @@ fn parse_margin(s: &str) -> Margin {
     }
 }
 
+fn parse_image_size(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once(['x', 'X', '*'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -345,6 +359,8 @@ fn main() {
             bookmarks,
             tagged,
             pdf_ua,
+            image_size,
+            scale,
         } => {
             if stdin && data.as_ref().is_some_and(|p| p.as_os_str() == "-") {
                 eprintln!("Error: cannot use --stdin and --data - together (both read stdin)");
@@ -492,6 +508,41 @@ fn main() {
             }
 
             let engine = builder.build();
+
+            // Image output path: when -o ends in .png/.webp, render an image instead
+            // of a PDF (inferred from the extension; image output is file-only).
+            let image_format = output.extension().and_then(|e| e.to_str()).and_then(|e| {
+                match e.to_ascii_lowercase().as_str() {
+                    "png" => Some(fulgur::image_export::ImageFormat::Png),
+                    "webp" => Some(fulgur::image_export::ImageFormat::WebpLossless),
+                    _ => None,
+                }
+            });
+
+            if let Some(fmt) = image_format {
+                let size = image_size.as_deref().unwrap_or_else(|| {
+                    eprintln!("Error: --image-size WxH is required for image output");
+                    std::process::exit(1);
+                });
+                let (w, h) = parse_image_size(size).unwrap_or_else(|| {
+                    eprintln!("Error: invalid --image-size '{size}' (expected e.g. 1200x630)");
+                    std::process::exit(1);
+                });
+                if data.is_some() {
+                    eprintln!("Error: --data template mode is not supported for image output yet");
+                    std::process::exit(1);
+                }
+                let mut opts = fulgur::image_export::ImageOptions::new(w, h, fmt);
+                opts.scale = scale;
+                engine
+                    .render_html_to_image_to_file(&input_content, &opts, &output)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    });
+                eprintln!("Wrote {}", output.display());
+                return;
+            }
 
             // Isolate stdout BEFORE rendering for both output modes: blitz-html
             // prints `println!("ERROR: {e}")` for every non-fatal html5ever
