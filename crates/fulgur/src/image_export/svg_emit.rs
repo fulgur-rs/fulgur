@@ -356,10 +356,12 @@ mod tests {
     fn block_emits_background_and_border() {
         use crate::draw_primitives::BlockStyle;
         let mut doc = SvgDoc::new(100, 100, Background::Transparent);
-        let mut style = BlockStyle::default();
-        style.background_color = Some([10, 20, 30, 255]);
-        style.border_color = [0, 0, 0, 255];
-        style.border_widths = [2.0, 2.0, 2.0, 2.0];
+        let style = BlockStyle {
+            background_color: Some([10, 20, 30, 255]),
+            border_color: [0, 0, 0, 255],
+            border_widths: [2.0, 2.0, 2.0, 2.0],
+            ..Default::default()
+        };
         emit_block(&mut doc, &style, 5.0, 6.0, 40.0, 50.0);
         let svg = doc.finish();
         assert!(svg.contains("fill=\"rgb(10,20,30)\""));

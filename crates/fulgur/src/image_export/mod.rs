@@ -45,8 +45,10 @@ mod tests {
 
     #[test]
     fn renders_single_red_block_to_png() {
-        let mut style = BlockStyle::default();
-        style.background_color = Some([255, 0, 0, 255]);
+        let style = BlockStyle {
+            background_color: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
         let mut drawables = Drawables::default();
         drawables.block_styles.insert(
             1,
