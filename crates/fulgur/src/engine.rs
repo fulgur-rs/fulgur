@@ -36,6 +36,34 @@ struct RenderPassOutput {
     needs_pass_two: bool,
 }
 
+/// Result of the parse → style → layout → `Drawables` prefix shared by the
+/// PDF render path (`render_pass` → `render::render_v2`) and the image
+/// export path (`render_html_to_image` → `image_export`).
+///
+/// Holds exactly the values produced by `layout_to_drawables` that
+/// downstream consumers need: the flat per-node `Drawables`, the final
+/// `PaginationGeometryTable` (read back out of `ConvertContext` *after*
+/// convert, since convert can append override fragments), and the GCPM
+/// side-channels (`gcpm`, `running_store`, string-set / counter maps, html
+/// title, implicit-href map) plus the pass-1 `target-*` bookkeeping
+/// (`collected_anchor_map`, `needs_anchor_map_for_pass_two`).
+///
+/// Extracting this prefix is a pure refactor: `render_pass` feeds these
+/// fields into the *unchanged* `render::render_v2` call, so PDF output
+/// stays byte-identical.
+struct LayoutArtifacts {
+    drawables: crate::drawables::Drawables,
+    pagination_geometry: PaginationGeometryTable,
+    gcpm: crate::gcpm::GcpmContext,
+    running_store: crate::gcpm::running::RunningElementStore,
+    string_set_for_render: HashMap<usize, Vec<(String, String)>>,
+    counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    html_title: Option<String>,
+    implicit_href_map: BTreeMap<usize, String>,
+    collected_anchor_map: AnchorMap,
+    needs_anchor_map_for_pass_two: bool,
+}
+
 impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
@@ -104,6 +132,74 @@ impl Engine {
     ///
     /// See [`RenderPassOutput`] for the returned fields.
     fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+        // Shared parse → style → layout → `Drawables` prefix. The image
+        // export path calls the same helper with a different `config`
+        // (fixed image canvas). PDF output stays byte-identical because
+        // this is a pure extraction and the page geometry passed here is
+        // exactly `self.config`.
+        let LayoutArtifacts {
+            drawables,
+            pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
+            html_title,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_anchor_map_for_pass_two,
+        } = self.layout_to_drawables(html, &self.config, anchor_map)?;
+
+        // `fonts` is derived from `self.assets`, not from `config`, so it
+        // is re-derived here for the `render_v2` call (the helper derives
+        // its own copy internally for the layout passes).
+        let fonts = self
+            .assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
+
+        let pdf = crate::render::render_v2(
+            &self.config,
+            &pagination_geometry,
+            &drawables,
+            &gcpm,
+            &running_store,
+            fonts,
+            self.system_fonts,
+            &string_set_for_render,
+            &counter_ops_for_render,
+            html_title,
+            self.serialize_settings.clone(),
+            anchor_map,
+            &implicit_href_map,
+        )?;
+        Ok(RenderPassOutput {
+            pdf,
+            anchor_map: collected_anchor_map,
+            needs_pass_two: needs_anchor_map_for_pass_two,
+        })
+    }
+
+    /// Shared parse → style → layout → `Drawables` prefix used by both the
+    /// PDF render path (`render_pass`) and the image export path
+    /// (`render_html_to_image`).
+    ///
+    /// The page geometry (viewport size, content box, pagination strip
+    /// height) is taken from the passed `config` rather than `self.config`,
+    /// so the image path can supply a fixed image-canvas page size while
+    /// the PDF path passes `&self.config` unchanged. Every other input
+    /// (assets, fonts, base path, system-font flag) comes from `self`.
+    ///
+    /// See [`LayoutArtifacts`] for the returned fields. Extracting this
+    /// prefix is byte-neutral for the PDF path: `render_pass` feeds the
+    /// returned fields into the unchanged `render::render_v2`.
+    fn layout_to_drawables(
+        &self,
+        html: &str,
+        config: &Config,
+        anchor_map: Option<&AnchorMap>,
+    ) -> Result<LayoutArtifacts> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -138,8 +234,8 @@ impl Engine {
         // correctly.
         let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             &html,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            crate::convert::pt_to_px(config.content_width()),
+            crate::convert::pt_to_px(config.page_height()) as u32,
             fonts,
             self.system_fonts,
             self.base_path.as_deref(),
@@ -175,7 +271,7 @@ impl Engine {
                 &gcpm.page_settings,
                 1,
                 0,
-                &self.config,
+                config,
                 false, // RTL not yet known at viewport setup; LTR assumed
             );
         let resolved_page_size = if resolved_landscape {
@@ -214,7 +310,7 @@ impl Engine {
         // later in `bookmark_mappings`) override them via last-match
         // cascade. Skipped when bookmarks are disabled to avoid unnecessary
         // CSS parsing and DOM traversal.
-        if self.config.effective_bookmarks() {
+        if config.effective_bookmarks() {
             let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
             let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
             combined_bookmarks.extend(gcpm.bookmark_mappings);
@@ -252,9 +348,8 @@ impl Engine {
         // empty strings even though `attr(href), page` still works
         // via `AnchorEntry.page_num`. Compute the gate once here so
         // each pass can opt out of the per-element clone otherwise.
-        let record_node_snapshots = (self.config.effective_bookmarks()
-            && !gcpm.bookmark_mappings.is_empty())
-            || has_target_refs;
+        let record_node_snapshots =
+            (config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty()) || has_target_refs;
 
         // Extract string-set values via DomPass.
         // Also harvest per-node `name -> latest value` snapshots that the
@@ -322,8 +417,7 @@ impl Engine {
         // consumes the map by value, so when both gates fire we have to
         // clone first; the clone cost is paid only when bookmarks +
         // `target-*` are active simultaneously.
-        let bookmark_active =
-            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+        let bookmark_active = config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
         let target_refs_active = has_target_refs;
         let (counter_snapshots_for_bookmark, counter_snapshots_for_anchor) =
             match (bookmark_active, target_refs_active) {
@@ -573,25 +667,23 @@ impl Engine {
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
-        let pdf = crate::render::render_v2(
-            &self.config,
-            &convert_ctx.pagination_geometry,
-            &drawables,
-            &gcpm,
-            &running_store,
-            fonts,
-            self.system_fonts,
-            &string_set_for_render,
-            &counter_ops_for_render,
+        // Read geometry back out of `convert_ctx` AFTER convert: convert can
+        // append override fragments (textless `content: url(...)` abs pseudos
+        // with `right`/`bottom` insets), so the production read order is
+        // post-convert. `render_pass` previously passed
+        // `&convert_ctx.pagination_geometry` to `render_v2` for the same
+        // reason — moving it into `LayoutArtifacts` preserves that order.
+        Ok(LayoutArtifacts {
+            drawables,
+            pagination_geometry: convert_ctx.pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
             html_title,
-            self.serialize_settings.clone(),
-            anchor_map,
-            &implicit_href_map,
-        )?;
-        Ok(RenderPassOutput {
-            pdf,
-            anchor_map: collected_anchor_map,
-            needs_pass_two: needs_anchor_map_for_pass_two,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_anchor_map_for_pass_two,
         })
     }
 
@@ -599,6 +691,58 @@ impl Engine {
     pub fn render_html_to_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
         let pdf = self.render_html(html)?;
         std::fs::write(path, pdf)?;
+        Ok(())
+    }
+
+    /// Render `html` to a single image (PNG or lossless WebP) per `options`.
+    ///
+    /// The image is a fixed `width × height` canvas; content is laid into the
+    /// box and overflow is clipped. Only the first page is rendered. Margin
+    /// boxes / running elements / `target-*` two-pass resolution are not
+    /// applied to images in this version.
+    ///
+    /// The page geometry is overridden to a zero-margin page whose size
+    /// exactly matches the image canvas (`options.width_px × height_px`
+    /// converted px → pt), so the laid-out content maps 1:1 onto the
+    /// rasterized canvas. Every other input (assets, fonts, base path,
+    /// system-font flag) comes from the engine, reusing the same
+    /// parse → layout → `Drawables` pipeline as the PDF path.
+    #[cfg(feature = "image-export")]
+    pub fn render_html_to_image(
+        &self,
+        html: &str,
+        options: &crate::image_export::ImageOptions,
+    ) -> crate::error::Result<Vec<u8>> {
+        options.validate()?;
+        let mut config = self.config.clone();
+        config.page_size = crate::config::PageSize {
+            width: crate::convert::px_to_pt(options.width_px as f32),
+            height: crate::convert::px_to_pt(options.height_px as f32),
+        };
+        config.landscape = false;
+        config.margin = crate::config::Margin::uniform(0.0);
+        let artifacts = self.layout_to_drawables(html, &config, None)?;
+        crate::image_export::render_drawables_to_image(
+            &artifacts.drawables,
+            &artifacts.pagination_geometry,
+            options,
+        )
+    }
+
+    /// Render `html` to a single image written to `path`.
+    ///
+    /// Thin wrapper over [`render_html_to_image`](Self::render_html_to_image)
+    /// that writes the encoded bytes to disk.
+    #[cfg(feature = "image-export")]
+    pub fn render_html_to_image_to_file(
+        &self,
+        html: &str,
+        options: &crate::image_export::ImageOptions,
+        path: impl AsRef<std::path::Path>,
+    ) -> crate::error::Result<()> {
+        let bytes = self.render_html_to_image(html, options)?;
+        std::fs::write(path, bytes)
+            .map_err(|e| crate::error::Error::Other(format!("write image failed: {e}")))?;
         Ok(())
     }
 
