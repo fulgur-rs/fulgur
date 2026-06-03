@@ -131,6 +131,32 @@ fulgur render --pdf-ua --language en -o report.pdf report.html
 | `--pdf-ua` | Enable PDF/UA-1 conformance (implies `--tagged` and `--bookmarks`) | false |
 | `--stdin` | Read HTML from stdin | false |
 
+### Image output (experimental)
+
+Give `-o` a `.png` or `.webp` extension and fulgur renders a single fixed-size
+image instead of a PDF. The `image-export` feature is enabled by default in the
+published CLI package.
+
+```bash
+fulgur render card.html -o card.png --image-size 1200x630
+fulgur render card.html -o card.webp --image-size 1200x630 --scale 2
+```
+
+Library users must enable the `image-export` feature in their `Cargo.toml`
+(`fulgur = { version = "...", features = ["image-export"] }`):
+
+```rust
+use fulgur::engine::Engine;
+use fulgur::image_export::{ImageFormat, ImageOptions};
+
+let engine = Engine::builder().build();
+let opts = ImageOptions::new(1200, 630, ImageFormat::Png);
+let png = engine.render_html_to_image(html, &opts)?;
+```
+
+Current limitations: fixed width × height (overflow clipped), single image
+(not multi-page), PNG and lossless WebP only.
+
 ## Library Usage
 
 ```rust

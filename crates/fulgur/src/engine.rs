@@ -741,8 +741,7 @@ impl Engine {
         path: impl AsRef<std::path::Path>,
     ) -> crate::error::Result<()> {
         let bytes = self.render_html_to_image(html, options)?;
-        std::fs::write(path, bytes)
-            .map_err(|e| crate::error::Error::Other(format!("write image failed: {e}")))?;
+        std::fs::write(path, bytes)?;
         Ok(())
     }
 

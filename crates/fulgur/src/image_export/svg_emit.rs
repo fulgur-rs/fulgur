@@ -71,6 +71,18 @@ pub type SvgComposite = (std::sync::Arc<usvg::Tree>, f32, f32, f32, f32);
 /// order is `BTreeMap`(NodeId) order, which approximates document order —
 /// correct for flat single-composed-image layouts. Transforms, clip/opacity
 /// groups, tables, list markers, and multicol are NOT dispatched in v1.
+///
+/// ## Deferred limitations (conscious divergences from the PDF path)
+///
+/// - **Replaced-element placement**: `<img>` and inline `<svg>` elements are
+///   placed at the fragment border box. Padded/bordered replaced elements are
+///   NOT inset to the content box (the PDF path insets by padding + border).
+///   For unpadded/unbordered replaced elements the two positions coincide.
+///
+/// - **SVG z-order**: SVG sub-trees are composited after the whole page SVG,
+///   so across different nodes an SVG paints on top of later nodes' content
+///   (cross-node z-order is approximate). This is fine for flat
+///   single-composed-image layouts.
 pub fn page_to_svg(
     drawables: &Drawables,
     geometry: &PaginationGeometryTable,
@@ -92,6 +104,8 @@ pub fn page_to_svg(
         if let Some(block) = drawables.block_styles.get(node_id) {
             if block.visible {
                 for (i, layer) in block.style.background_layers.iter().enumerate() {
+                    // `*node_id * 16 + i` yields a collision-free gradient id
+                    // as long as a node has fewer than 16 background layers.
                     emit_background_layer(&mut doc, layer, x, y, w, h, *node_id * 16 + i);
                 }
                 emit_block(&mut doc, &block.style, x, y, w, h);
