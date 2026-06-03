@@ -51,7 +51,7 @@ impl SvgDoc {
     }
 }
 
-use crate::draw_primitives::BlockStyle;
+use crate::draw_primitives::{BackgroundLayer, BgImageContent, BlockStyle, GradientStopPosition};
 use crate::drawables::ImageEntry;
 use crate::image::ImageFormat as InputImageFormat;
 use crate::image_export::b64;
@@ -163,6 +163,55 @@ pub fn emit_block(doc: &mut SvgDoc, style: &BlockStyle, x: f32, y: f32, w: f32, 
     }
 }
 
+/// Emit one background layer. v1 supports `LinearGradient`; other contents are
+/// skipped (follow-up). `idx` makes the gradient id unique per layer.
+/// The gradient is rendered top→bottom in objectBoundingBox space; honouring
+/// the CSS angle/corner direction is a follow-up — vertical covers the common
+/// card case.
+pub fn emit_background_layer(
+    doc: &mut SvgDoc,
+    layer: &BackgroundLayer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    idx: usize,
+) {
+    let BgImageContent::LinearGradient { stops, .. } = &layer.content else {
+        return; // raster / svg / radial / conic: follow-up
+    };
+    let id = format!("grad-{idx}");
+    let n = stops.len();
+    let mut defs = format!(
+        r#"<defs><linearGradient id="{id}" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">"#
+    );
+    for (i, s) in stops.iter().enumerate() {
+        if s.is_hint {
+            continue; // interpolation hint marker, not a real color stop
+        }
+        let offset = match s.position {
+            GradientStopPosition::Fraction(f) => f,
+            _ if n > 1 => i as f32 / (n - 1) as f32,
+            _ => 0.0,
+        };
+        let [r, g, b, a] = s.rgba;
+        defs.push_str(&format!(
+            r#"<stop offset="{:.4}" stop-color="rgb({r},{g},{b})" stop-opacity="{:.3}"/>"#,
+            offset.clamp(0.0, 1.0),
+            a as f32 / 255.0
+        ));
+    }
+    defs.push_str("</linearGradient></defs>");
+    doc.push(&defs);
+    doc.push(&format!(
+        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="url(#{id})"/>"#,
+        trim(x),
+        trim(y),
+        trim(w),
+        trim(h),
+    ));
+}
+
 /// Format a float without a trailing `.0` so `472.5` and `900` both read
 /// cleanly in the viewBox.
 fn trim(v: f32) -> String {
@@ -225,6 +274,47 @@ mod tests {
         assert!(svg.contains("<image"));
         assert!(svg.contains("data:image/png;base64,"));
         assert!(svg.contains(r#"x="4""#));
+    }
+
+    #[test]
+    fn linear_gradient_layer_emits_gradient_def() {
+        use crate::draw_primitives::{
+            BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+            GradientStop, GradientStopPosition, LinearGradientDirection,
+        };
+        let layer = BackgroundLayer {
+            content: BgImageContent::LinearGradient {
+                direction: LinearGradientDirection::Angle(0.0),
+                stops: vec![
+                    GradientStop {
+                        position: GradientStopPosition::Fraction(0.0),
+                        rgba: [255, 0, 0, 255],
+                        is_hint: false,
+                    },
+                    GradientStop {
+                        position: GradientStopPosition::Fraction(1.0),
+                        rgba: [0, 0, 255, 255],
+                        is_hint: false,
+                    },
+                ],
+                repeating: false,
+            },
+            intrinsic_width: 0.0,
+            intrinsic_height: 0.0,
+            size: BgSize::Auto,
+            position_x: BgLengthPercentage::Length(0.0),
+            position_y: BgLengthPercentage::Length(0.0),
+            repeat_x: BgRepeat::NoRepeat,
+            repeat_y: BgRepeat::NoRepeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::PaddingBox,
+        };
+        let mut doc = SvgDoc::new(100, 100, Background::Transparent);
+        emit_background_layer(&mut doc, &layer, 0.0, 0.0, 80.0, 60.0, 0);
+        let svg = doc.finish();
+        assert!(svg.contains("<linearGradient"));
+        assert!(svg.contains("stop-color=\"rgb(255,0,0)\""));
+        assert!(svg.contains("url(#grad-0)"));
     }
 
     #[test]
