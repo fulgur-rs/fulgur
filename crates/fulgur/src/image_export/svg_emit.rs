@@ -52,6 +52,51 @@ impl SvgDoc {
 }
 
 use crate::draw_primitives::BlockStyle;
+use crate::image_export::glyph_path::glyph_to_svg_path;
+use crate::paragraph::{LineItem, ShapedLine};
+
+/// Emit a paragraph's shaped lines as filled glyph-outline paths. `(ox, oy)`
+/// is the paragraph's top-left in pt. Each line's glyphs are placed on a
+/// baseline at `oy + line.baseline`; `run.x_offset` and per-glyph
+/// `x_advance`/`x_offset` advance the pen.
+///
+/// `x_advance`, `x_offset`, and `y_offset` in `ShapedGlyph` are EM-fractions
+/// (normalized by dividing by `font_size` in `convert.rs`), so they are
+/// multiplied by `run.font_size` to obtain pt values.
+///
+/// Inline images and inline boxes are skipped in v1.
+pub fn emit_paragraph(doc: &mut SvgDoc, lines: &[ShapedLine], ox: f32, oy: f32) {
+    for line in lines {
+        let baseline_y = oy + line.baseline;
+        for item in &line.items {
+            let LineItem::Text(run) = item else {
+                continue; // inline images / boxes: follow-up task
+            };
+            let mut pen_x = ox + run.x_offset;
+            let mut d = String::new();
+            for g in &run.glyphs {
+                let gx = pen_x + g.x_offset * run.font_size;
+                let gy = baseline_y - g.y_offset * run.font_size;
+                d.push_str(&glyph_to_svg_path(
+                    &run.font_data,
+                    run.font_index,
+                    g.id,
+                    run.font_size,
+                    gx,
+                    gy,
+                ));
+                pen_x += g.x_advance * run.font_size;
+            }
+            if !d.is_empty() {
+                let [r, gc, b, a] = run.color;
+                doc.push(&format!(
+                    r#"<path d="{d}" fill="rgb({r},{gc},{b})" fill-opacity="{:.3}"/>"#,
+                    a as f32 / 255.0
+                ));
+            }
+        }
+    }
+}
 
 /// Emit a block's background fill and a uniform border rect at the given
 /// pt-space rectangle. v1 handles a solid background color, a uniform border
@@ -137,5 +182,50 @@ mod tests {
         let svg = SvgDoc::new(10, 10, Background::Solid([255, 0, 0, 255])).finish();
         assert!(svg.contains("<rect"));
         assert!(svg.contains("fill=\"rgb(255,0,0)\""));
+    }
+
+    #[test]
+    fn paragraph_emits_filled_text_path() {
+        use crate::paragraph::{LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine, TextDecoration};
+        use std::sync::Arc;
+
+        let font = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/.fonts/NotoSans-Regular.ttf"
+        ))
+        .unwrap();
+        // resolve 'A' glyph id robustly
+        let a_id = {
+            use skrifa::MetadataProvider;
+            let f = skrifa::FontRef::from_index(&font, 0).unwrap();
+            f.charmap().map('A').unwrap().to_u32()
+        };
+        let run = ShapedGlyphRun {
+            font_data: Arc::new(font),
+            font_index: 0,
+            font_size: 16.0,
+            color: [200, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: a_id,
+                x_advance: 10.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: "A".into(),
+            x_offset: 0.0,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 20.0,
+            baseline: 14.0,
+            items: vec![LineItem::Text(run)],
+        };
+        let mut doc = SvgDoc::new(100, 100, Background::Transparent);
+        emit_paragraph(&mut doc, &[line], 8.0, 8.0);
+        let svg = doc.finish();
+        assert!(svg.contains("<path"));
+        assert!(svg.contains("fill=\"rgb(200,0,0)\""));
     }
 }
