@@ -15,6 +15,8 @@ pub mod engine;
 pub mod error;
 pub mod gcpm;
 pub mod image;
+#[cfg(feature = "image-export")]
+pub mod image_export;
 pub mod inspect;
 pub(crate) mod link;
 #[doc(hidden)]

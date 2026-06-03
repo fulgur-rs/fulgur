@@ -38,7 +38,17 @@ unicode-properties = "0.1"
 # alongside fulgur, producing different page-count outputs in CLI vs WPT runner
 # (fulgur-zsn8).
 image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = { version = "0.45", optional = true }
+tiny-skia = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# HTML → image (PNG / lossless WebP) output. Off by default so PDF-only
+# users pull no extra dependencies. `image/webp` enables the `image`
+# crate's pure-Rust lossless WebP encoder; PNG uses tiny-skia's built-in
+# encoder. skrifa + image are already direct deps.
+image-export = ["dep:resvg", "dep:tiny-skia", "image/webp"]
 
 # WASM (wasm32-unknown-unknown) build support: pulled in transitively by lopdf/rand.
 # Feature unification propagates `wasm_js` to the lopdf-side dependency so the

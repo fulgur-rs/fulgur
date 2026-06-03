@@ -1118,6 +1118,7 @@ dependencies = [
  "lopdf",
  "minijinja",
  "parley",
+ "resvg",
  "serde",
  "serde_json",
  "skrifa 0.42.1",
@@ -1125,6 +1126,7 @@ dependencies = [
  "taffy",
  "tempfile",
  "thiserror 2.0.18",
+ "tiny-skia",
  "toml",
  "unicode-properties",
  "unicode-segmentation",
@@ -1742,6 +1744,7 @@ checksum = "db35664ce6b9810857a38a906215e75a9c879f0696556a39f59c62829710251a"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "num-traits",
  "png",
 ]
