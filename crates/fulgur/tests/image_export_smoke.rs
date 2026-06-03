@@ -39,3 +39,26 @@ fn scale_doubles_pixel_dimensions() {
     let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
     assert_eq!(img.dimensions(), (100, 80));
 }
+
+#[test]
+fn renders_inline_svg_composite_to_png() {
+    let engine = Engine::builder().build();
+    // A 100x100 canvas; an inline SVG drawing a blue rect filling its box.
+    let html = r##"<html><body style="margin:0">
+        <svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0" y="0" width="100" height="100" fill="#0000ff"/>
+        </svg>
+    </body></html>"##;
+    let mut opts = ImageOptions::new(100, 100, ImageFormat::Png);
+    opts.background = Background::Solid([255, 255, 255, 255]);
+    let bytes = engine.render_html_to_image(html, &opts).unwrap();
+    let img = image::load_from_memory(&bytes)
+        .expect("decode png")
+        .to_rgba8();
+    assert_eq!(img.dimensions(), (100, 100));
+    let p = img.get_pixel(50, 50);
+    assert!(
+        p[2] > 200 && p[0] < 60 && p[1] < 60,
+        "centre should be blue (composited SVG), got {p:?}"
+    );
+}
