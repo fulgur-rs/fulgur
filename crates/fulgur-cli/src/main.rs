@@ -399,6 +399,24 @@ fn main() {
                 std::process::exit(1);
             };
 
+            // Image output path: when -o ends in .png/.webp, render an image
+            // instead of a PDF (inferred from the extension; image output is
+            // file-only). Detect the format and reject unsupported combinations
+            // BEFORE the template-mode block below, which may consume stdin via
+            // `--data -`. Rejecting `--data` here means `render in.html -d - -o
+            // out.png` errors immediately without blocking on stdin.
+            let image_format = output.extension().and_then(|e| e.to_str()).and_then(|e| {
+                match e.to_ascii_lowercase().as_str() {
+                    "png" => Some(fulgur::image_export::ImageFormat::Png),
+                    "webp" => Some(fulgur::image_export::ImageFormat::WebpLossless),
+                    _ => None,
+                }
+            });
+            if image_format.is_some() && data.is_some() {
+                eprintln!("Error: --data template mode is not supported for image output yet");
+                std::process::exit(1);
+            }
+
             // Build assets if fonts, CSS, or images provided
             let assets = if !fonts.is_empty() || !css_files.is_empty() || !images.is_empty() {
                 let mut bundle = AssetBundle::new();
@@ -509,16 +527,9 @@ fn main() {
 
             let engine = builder.build();
 
-            // Image output path: when -o ends in .png/.webp, render an image instead
-            // of a PDF (inferred from the extension; image output is file-only).
-            let image_format = output.extension().and_then(|e| e.to_str()).and_then(|e| {
-                match e.to_ascii_lowercase().as_str() {
-                    "png" => Some(fulgur::image_export::ImageFormat::Png),
-                    "webp" => Some(fulgur::image_export::ImageFormat::WebpLossless),
-                    _ => None,
-                }
-            });
-
+            // Image output branch. `image_format` and the `--data` rejection are
+            // computed/validated earlier (before the template-mode block) so
+            // stdin is never consumed for an image render.
             if let Some(fmt) = image_format {
                 let size = image_size.as_deref().unwrap_or_else(|| {
                     eprintln!("Error: --image-size WxH is required for image output");
@@ -528,10 +539,6 @@ fn main() {
                     eprintln!("Error: invalid --image-size '{size}' (expected e.g. 1200x630)");
                     std::process::exit(1);
                 });
-                if data.is_some() {
-                    eprintln!("Error: --data template mode is not supported for image output yet");
-                    std::process::exit(1);
-                }
                 let mut opts = fulgur::image_export::ImageOptions::new(w, h, fmt);
                 opts.scale = scale;
                 engine

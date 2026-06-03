@@ -41,6 +41,27 @@ fn scale_doubles_pixel_dimensions() {
 }
 
 #[test]
+fn at_page_rule_does_not_override_image_canvas_size() {
+    // An `@page` rule in the HTML must NOT change the fixed image canvas size:
+    // the image canvas marks page_size/margin/landscape as explicit overrides
+    // so `resolve_page_settings` cannot re-apply the `@page` dimensions.
+    let engine = Engine::builder().build();
+    let html = r#"<html><head><style>@page { size: 999px 999px; margin: 50px; }</style></head>
+        <body style="margin:0"><div style="width:100px;height:100px;background:#0000ff"></div></body></html>"#;
+    let mut opts = ImageOptions::new(200, 100, ImageFormat::Png);
+    opts.background = Background::Solid([255, 255, 255, 255]);
+    let bytes = engine.render_html_to_image(html, &opts).unwrap();
+    let img = image::load_from_memory(&bytes)
+        .expect("decode png")
+        .to_rgba8();
+    assert_eq!(
+        img.dimensions(),
+        (200, 100),
+        "@page must not override the fixed image canvas"
+    );
+}
+
+#[test]
 fn renders_inline_svg_composite_to_png() {
     let engine = Engine::builder().build();
     // A 100x100 canvas; an inline SVG drawing a blue rect filling its box.

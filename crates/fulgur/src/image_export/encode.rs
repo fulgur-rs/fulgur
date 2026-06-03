@@ -19,10 +19,13 @@ pub fn encode_pixmap(pixmap: &Pixmap, format: ImageFormat) -> crate::error::Resu
 /// lossless WebP.
 fn encode_webp_lossless(pixmap: &Pixmap) -> crate::error::Result<Vec<u8>> {
     let (w, h) = (pixmap.width(), pixmap.height());
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for px in pixmap.pixels() {
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for (px, chunk) in pixmap.pixels().iter().zip(rgba.chunks_exact_mut(4)) {
         let d = px.demultiply();
-        rgba.extend_from_slice(&[d.red(), d.green(), d.blue(), d.alpha()]);
+        chunk[0] = d.red();
+        chunk[1] = d.green();
+        chunk[2] = d.blue();
+        chunk[3] = d.alpha();
     }
     let mut out = Vec::new();
     let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut out);

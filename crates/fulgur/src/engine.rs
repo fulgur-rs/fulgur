@@ -721,6 +721,12 @@ impl Engine {
         };
         config.landscape = false;
         config.margin = crate::config::Margin::uniform(0.0);
+        // The image canvas is a fixed pixel size. Mark these as explicit
+        // overrides so an `@page` rule in the HTML cannot re-override the
+        // canvas dimensions/margin via `resolve_page_settings`.
+        config.overrides.page_size = true;
+        config.overrides.landscape = true;
+        config.overrides.margin = true;
         let artifacts = self.layout_to_drawables(html, &config, None)?;
         crate::image_export::render_drawables_to_image(
             &artifacts.drawables,

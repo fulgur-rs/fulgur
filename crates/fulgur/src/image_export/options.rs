@@ -67,6 +67,18 @@ impl ImageOptions {
                 "image scale must be a positive, finite number".into(),
             ));
         }
+        // Guard against absurd pixmap allocations (OOM). The device-pixel
+        // dimensions (logical size × scale) must stay under a generous cap.
+        let (w, h) = self.pixmap_dims();
+        const MAX_PIXELS: u64 = 100_000_000; // 100 MP — generous for cards/receipts
+        let pixels = (w as u64)
+            .checked_mul(h as u64)
+            .ok_or_else(|| Error::Other("image dimensions are too large".into()))?;
+        if pixels > MAX_PIXELS {
+            return Err(Error::Other(format!(
+                "image dimensions {w}x{h} exceed the maximum of {MAX_PIXELS} pixels"
+            )));
+        }
         Ok(())
     }
 }
@@ -103,5 +115,18 @@ mod tests {
     fn default_background_is_transparent() {
         let o = ImageOptions::new(10, 10, ImageFormat::Png);
         assert!(matches!(o.background, Background::Transparent));
+    }
+
+    #[test]
+    fn validate_rejects_extreme_dimensions() {
+        // 100_000 × 100_000 = 1e10 pixels, far above the 100 MP cap.
+        let o = ImageOptions::new(100_000, 100_000, ImageFormat::Png);
+        assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_normal_dimensions() {
+        let o = ImageOptions::new(1200, 630, ImageFormat::Png);
+        assert!(o.validate().is_ok());
     }
 }

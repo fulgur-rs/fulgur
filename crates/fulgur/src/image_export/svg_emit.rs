@@ -51,11 +51,14 @@ impl SvgDoc {
     }
 }
 
-use crate::draw_primitives::{BackgroundLayer, BgImageContent, BlockStyle, GradientStopPosition};
+use crate::draw_primitives::{
+    BackgroundLayer, BgImageContent, BlockStyle, GradientStopPosition, LinearGradientCorner,
+    LinearGradientDirection,
+};
 use crate::drawables::{Drawables, ImageEntry};
 use crate::image::ImageFormat as InputImageFormat;
 use crate::image_export::b64;
-use crate::image_export::glyph_path::glyph_to_svg_path;
+use crate::image_export::glyph_path::glyph_to_svg_path_from_outlines;
 use crate::image_export::options::ImageOptions;
 use crate::pagination_layout::PaginationGeometryTable;
 use crate::paragraph::{LineItem, ShapedLine};
@@ -104,9 +107,8 @@ pub fn page_to_svg(
         if let Some(block) = drawables.block_styles.get(node_id) {
             if block.visible {
                 for (i, layer) in block.style.background_layers.iter().enumerate() {
-                    // `*node_id * 16 + i` yields a collision-free gradient id
-                    // as long as a node has fewer than 16 background layers.
-                    emit_background_layer(&mut doc, layer, x, y, w, h, *node_id * 16 + i);
+                    let id = format!("grad-{node_id}-{i}");
+                    emit_background_layer(&mut doc, layer, x, y, w, h, &id);
                 }
                 emit_block(&mut doc, &block.style, x, y, w, h);
             }
@@ -148,19 +150,25 @@ pub fn emit_paragraph(doc: &mut SvgDoc, lines: &[ShapedLine], ox: f32, oy: f32) 
             let LineItem::Text(run) = item else {
                 continue; // inline images / boxes: follow-up task
             };
+            // Parse the font once per run, then reuse the outline set for
+            // every glyph (avoids re-parsing the font file per glyph).
+            use skrifa::MetadataProvider as _;
+            let font = skrifa::FontRef::from_index(&run.font_data, run.font_index).ok();
+            let outlines = font.as_ref().map(|f| f.outline_glyphs());
             let mut pen_x = ox + run.x_offset;
             let mut d = String::new();
             for g in &run.glyphs {
                 let gx = pen_x + g.x_offset * run.font_size;
                 let gy = baseline_y - g.y_offset * run.font_size;
-                d.push_str(&glyph_to_svg_path(
-                    &run.font_data,
-                    run.font_index,
-                    g.id,
-                    run.font_size,
-                    gx,
-                    gy,
-                ));
+                if let Some(outlines) = &outlines {
+                    d.push_str(&glyph_to_svg_path_from_outlines(
+                        outlines,
+                        g.id,
+                        run.font_size,
+                        gx,
+                        gy,
+                    ));
+                }
                 pen_x += g.x_advance * run.font_size;
             }
             if !d.is_empty() {
@@ -237,10 +245,14 @@ pub fn emit_block(doc: &mut SvgDoc, style: &BlockStyle, x: f32, y: f32, w: f32, 
 }
 
 /// Emit one background layer. v1 supports `LinearGradient`; other contents are
-/// skipped (follow-up). `idx` makes the gradient id unique per layer.
-/// The gradient is rendered top→bottom in objectBoundingBox space; honouring
-/// the CSS angle/corner direction is a follow-up — vertical covers the common
-/// card case.
+/// skipped (follow-up). `id_suffix` is the caller-supplied gradient id (unique
+/// per node + layer, e.g. `grad-{node_id}-{layer_idx}`).
+///
+/// The gradient line is computed in `objectBoundingBox` space (unit box, Y-down)
+/// from the CSS direction, mirroring `background.rs::draw_linear_gradient` so
+/// the image matches the PDF path. Corner directions are approximated by their
+/// nominal 45° angle (the exact CSS corner angle depends on the box aspect
+/// ratio; the unit-box approximation is close for near-square boxes).
 pub fn emit_background_layer(
     doc: &mut SvgDoc,
     layer: &BackgroundLayer,
@@ -248,15 +260,19 @@ pub fn emit_background_layer(
     y: f32,
     w: f32,
     h: f32,
-    idx: usize,
+    id_suffix: &str,
 ) {
-    let BgImageContent::LinearGradient { stops, .. } = &layer.content else {
+    let BgImageContent::LinearGradient {
+        direction, stops, ..
+    } = &layer.content
+    else {
         return; // raster / svg / radial / conic: follow-up
     };
-    let id = format!("grad-{idx}");
+    let id = id_suffix;
+    let (x1, y1, x2, y2) = gradient_line(*direction);
     let n = stops.len();
     let mut defs = format!(
-        r#"<defs><linearGradient id="{id}" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">"#
+        r#"<defs><linearGradient id="{id}" x1="{x1:.4}" y1="{y1:.4}" x2="{x2:.4}" y2="{y2:.4}" gradientUnits="objectBoundingBox">"#
     );
     for (i, s) in stops.iter().enumerate() {
         if s.is_hint {
@@ -283,6 +299,45 @@ pub fn emit_background_layer(
         trim(w),
         trim(h),
     ));
+}
+
+/// Compute a linear-gradient line `(x1, y1, x2, y2)` in `objectBoundingBox`
+/// space (unit box, Y-down) from a CSS direction.
+///
+/// Mirrors `background.rs::draw_linear_gradient`: the CSS angle is radians,
+/// `0 = "to top"`, increasing clockwise. In Y-down space the direction is
+/// `(sin a, -cos a)`; centering on `(0.5, 0.5)` with half-length 0.5 gives the
+/// endpoints below. Sanity checks: `a = π` (to bottom, CSS default) →
+/// `(0.5, 0)→(0.5, 1)` (top→bottom, matching the old hardcoded line);
+/// `a = π/2` (to right) → `(0, 0.5)→(1, 0.5)` (left→right).
+///
+/// `Corner` directions are approximated by their nominal 45° angle on a unit
+/// (square) box; the exact CSS corner angle depends on the box aspect ratio
+/// (CSS Images 3 §3.1.1) but is resolved at draw time in the PDF path.
+fn gradient_line(direction: LinearGradientDirection) -> (f32, f32, f32, f32) {
+    let a = match direction {
+        LinearGradientDirection::Angle(a) => a,
+        LinearGradientDirection::Corner(corner) => corner_angle_approx(corner),
+    };
+    let (s, c) = (a.sin(), a.cos());
+    let x1 = 0.5 - 0.5 * s;
+    let y1 = 0.5 + 0.5 * c;
+    let x2 = 0.5 + 0.5 * s;
+    let y2 = 0.5 - 0.5 * c;
+    (x1, y1, x2, y2)
+}
+
+/// Nominal 45° angle (radians, CSS convention: `0 = "to top"`, clockwise) for
+/// each corner direction, on a unit (square) box. This is the aspect-ratio-1
+/// case of `background.rs::corner_to_angle_rad`.
+fn corner_angle_approx(corner: LinearGradientCorner) -> f32 {
+    use std::f32::consts::FRAC_PI_4;
+    match corner {
+        LinearGradientCorner::TopRight => FRAC_PI_4, // 45° (to top right)
+        LinearGradientCorner::BottomRight => 3.0 * FRAC_PI_4, // 135° (to bottom right)
+        LinearGradientCorner::BottomLeft => 5.0 * FRAC_PI_4, // 225° (to bottom left)
+        LinearGradientCorner::TopLeft => 7.0 * FRAC_PI_4, // 315° (to top left)
+    }
 }
 
 /// Format a float without a trailing `.0` so `472.5` and `900` both read
@@ -383,11 +438,58 @@ mod tests {
             clip: BgClip::PaddingBox,
         };
         let mut doc = SvgDoc::new(100, 100, Background::Transparent);
-        emit_background_layer(&mut doc, &layer, 0.0, 0.0, 80.0, 60.0, 0);
+        emit_background_layer(&mut doc, &layer, 0.0, 0.0, 80.0, 60.0, "grad-0-0");
         let svg = doc.finish();
         assert!(svg.contains("<linearGradient"));
         assert!(svg.contains("stop-color=\"rgb(255,0,0)\""));
-        assert!(svg.contains("url(#grad-0)"));
+        assert!(svg.contains("url(#grad-0-0)"));
+    }
+
+    #[test]
+    fn linear_gradient_honors_horizontal_direction() {
+        use crate::draw_primitives::{
+            BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+            GradientStop, GradientStopPosition, LinearGradientDirection,
+        };
+        // Angle(π/2) is "to right" → horizontal gradient: (0,0.5)→(1,0.5).
+        let layer = BackgroundLayer {
+            content: BgImageContent::LinearGradient {
+                direction: LinearGradientDirection::Angle(std::f32::consts::FRAC_PI_2),
+                stops: vec![
+                    GradientStop {
+                        position: GradientStopPosition::Fraction(0.0),
+                        rgba: [255, 0, 0, 255],
+                        is_hint: false,
+                    },
+                    GradientStop {
+                        position: GradientStopPosition::Fraction(1.0),
+                        rgba: [0, 0, 255, 255],
+                        is_hint: false,
+                    },
+                ],
+                repeating: false,
+            },
+            intrinsic_width: 0.0,
+            intrinsic_height: 0.0,
+            size: BgSize::Auto,
+            position_x: BgLengthPercentage::Length(0.0),
+            position_y: BgLengthPercentage::Length(0.0),
+            repeat_x: BgRepeat::NoRepeat,
+            repeat_y: BgRepeat::NoRepeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::PaddingBox,
+        };
+        let mut doc = SvgDoc::new(100, 100, Background::Transparent);
+        emit_background_layer(&mut doc, &layer, 0.0, 0.0, 80.0, 60.0, "grad-0-0");
+        let svg = doc.finish();
+        assert!(svg.contains("<linearGradient"));
+        // Horizontal: x1=0, x2=1, y1=y2=0.5 — NOT the old vertical form.
+        assert!(svg.contains(r#"x1="0.0000""#), "svg: {svg}");
+        assert!(svg.contains(r#"x2="1.0000""#), "svg: {svg}");
+        assert!(svg.contains(r#"y1="0.5000""#), "svg: {svg}");
+        assert!(svg.contains(r#"y2="0.5000""#), "svg: {svg}");
+        // Make sure it is not the old hardcoded vertical line.
+        assert!(!svg.contains(r#"x1="0" y1="0" x2="0" y2="1""#));
     }
 
     #[test]
