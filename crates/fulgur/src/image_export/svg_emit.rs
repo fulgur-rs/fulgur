@@ -52,6 +52,9 @@ impl SvgDoc {
 }
 
 use crate::draw_primitives::BlockStyle;
+use crate::drawables::ImageEntry;
+use crate::image::ImageFormat as InputImageFormat;
+use crate::image_export::b64;
 use crate::image_export::glyph_path::glyph_to_svg_path;
 use crate::paragraph::{LineItem, ShapedLine};
 
@@ -96,6 +99,26 @@ pub fn emit_paragraph(doc: &mut SvgDoc, lines: &[ShapedLine], ox: f32, oy: f32) 
             }
         }
     }
+}
+
+/// Emit a raster image as an SVG `<image>` with a base64 data URI at the
+/// given pt rect. `preserveAspectRatio="none"` makes the bitmap fill the
+/// layout rect, matching how the PDF path scales `<img>` to its box.
+pub fn emit_image(doc: &mut SvgDoc, entry: &ImageEntry, x: f32, y: f32, w: f32, h: f32) {
+    let mime = match entry.format {
+        InputImageFormat::Png => "image/png",
+        InputImageFormat::Jpeg => "image/jpeg",
+        InputImageFormat::Gif => "image/gif",
+    };
+    let data = b64::encode(&entry.image_data);
+    doc.push(&format!(
+        r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none" opacity="{:.3}" href="data:{mime};base64,{data}"/>"#,
+        trim(x),
+        trim(y),
+        trim(w),
+        trim(h),
+        entry.opacity,
+    ));
 }
 
 /// Emit a block's background fill and a uniform border rect at the given
@@ -182,6 +205,26 @@ mod tests {
         let svg = SvgDoc::new(10, 10, Background::Solid([255, 0, 0, 255])).finish();
         assert!(svg.contains("<rect"));
         assert!(svg.contains("fill=\"rgb(255,0,0)\""));
+    }
+
+    #[test]
+    fn image_emits_data_uri() {
+        use crate::drawables::ImageEntry;
+        use std::sync::Arc;
+        let entry = ImageEntry {
+            image_data: Arc::new(vec![0x89, b'P', b'N', b'G']),
+            format: crate::image::ImageFormat::Png,
+            width: 10.0,
+            height: 10.0,
+            opacity: 1.0,
+            visible: true,
+        };
+        let mut doc = SvgDoc::new(100, 100, Background::Transparent);
+        emit_image(&mut doc, &entry, 4.0, 5.0, 20.0, 30.0);
+        let svg = doc.finish();
+        assert!(svg.contains("<image"));
+        assert!(svg.contains("data:image/png;base64,"));
+        assert!(svg.contains(r#"x="4""#));
     }
 
     #[test]
