@@ -1140,6 +1140,7 @@ version = "0.17.0"
 dependencies = [
  "clap",
  "fulgur",
+ "image",
  "libc",
  "serde_json",
  "tempfile",
