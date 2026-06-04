@@ -46,6 +46,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install libfontconfig-dev
+        run: sudo apt-get install -y libfontconfig-dev
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -108,7 +110,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold libfontconfig-dev
       - name: Configure mold linker
         if: matrix.mold
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
@@ -201,7 +203,7 @@ jobs:
           swap-storage: false
       - uses: actions/checkout@v7
       - name: Install poppler-utils
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold libfontconfig-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -281,7 +283,7 @@ jobs:
           shared-key: ubuntu-latest-fulgur
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install poppler-utils
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold libfontconfig-dev
       - name: Configure mold linker
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
       - name: Fetch WPT subset
@@ -343,6 +345,8 @@ jobs:
         with:
           shared-key: ubuntu-latest-fulgur-bindings
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install libfontconfig-dev
+        run: sudo apt-get install -y libfontconfig-dev
       - name: cargo clippy pyfulgur (extension-module)
         run: cargo clippy -p pyfulgur --features extension-module --all-targets -- -D warnings
       - name: cargo clippy fulgur-ruby (ruby-api)

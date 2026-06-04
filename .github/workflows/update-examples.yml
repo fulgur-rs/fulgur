@@ -24,7 +24,7 @@ jobs:
           shared-key: ubuntu-release-fulgur
       - name: Configure fast build
         run: |
-          sudo apt-get update && sudo apt-get install -y mold
+          sudo apt-get update && sudo apt-get install -y mold libfontconfig-dev
           echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
       - name: Build fulgur
         run: cargo build --bin fulgur --release
