@@ -39,7 +39,7 @@ jobs:
             test: wpt_lists
             filter: wpt_list_smoke
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

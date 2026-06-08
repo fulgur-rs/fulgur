@@ -23,7 +23,7 @@ jobs:
   markdownlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: DavidAnson/markdownlint-cli2-action@ded1f9488f68a970bc66ea5619e13e9b52e601cd # v23.2.0
 
   lint:
@@ -39,7 +39,7 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -94,7 +94,7 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -163,7 +163,7 @@ jobs:
     # surface (filesystem, native-only API, missing target cfg) — fix or
     # cfg-gate it before merging. Tracking: fulgur-iym, fulgur-g5bn.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -189,7 +189,7 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - name: Install poppler-utils
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - uses: dtolnay/rust-toolchain@stable
@@ -217,7 +217,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: actions/download-artifact@v8
         with:
           name: lcov
@@ -264,7 +264,7 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -322,7 +322,7 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
         with:
           ruby-version: "3.3"
