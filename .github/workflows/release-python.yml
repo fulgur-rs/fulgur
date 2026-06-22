@@ -51,7 +51,7 @@ jobs:
             rustflags: "-C linker=lld-link"
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}-python-release
@@ -75,7 +75,7 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
