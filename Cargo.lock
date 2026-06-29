@@ -274,7 +274,7 @@ dependencies = [
  "stylo_dom",
  "stylo_taffy",
  "stylo_traits",
- "taffy",
+ "taffy 0.9.2",
  "url",
  "usvg",
  "wuff",
@@ -1123,7 +1123,7 @@ dependencies = [
  "serde_json",
  "skrifa 0.43.2",
  "stylo",
- "taffy",
+ "taffy 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -3556,7 +3556,7 @@ checksum = "b841aad2b770ef75dd134ba885aef0716f2ac3a83ccaf0fc31b09c8b02562e23"
 dependencies = [
  "stylo",
  "stylo_atoms",
- "taffy",
+ "taffy 0.9.2",
 ]
 
 [[package]]
@@ -3650,6 +3650,18 @@ name = "taffy"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41ba83ebaf2954d31d05d67340fd46cebe99da2b7133b0dd68d70c65473a437b"
+dependencies = [
+ "arrayvec",
+ "grid",
+ "serde",
+ "slotmap",
+]
+
+[[package]]
+name = "taffy"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfde4e2f8595f222ceaae1fb16b4963952e9b33e358869dc4cd6316b0e0790cd"
 dependencies = [
  "arrayvec",
  "grid",
