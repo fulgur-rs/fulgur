@@ -103,7 +103,7 @@ jobs:
       # Gemfile.lock は fulgur-jdt3 で commit 方針 (rb_sys host/container drift 防止)。
       # gemspec 側 version が変わると frozen-mode bundler が exit 16 で失敗するため、
       # version bump に合わせて lockfile も更新する。
-      - uses: ruby/setup-ruby@v1.312.0
+      - uses: ruby/setup-ruby@v1.314.0
         with:
           ruby-version: '3.3'
           bundler-cache: false
