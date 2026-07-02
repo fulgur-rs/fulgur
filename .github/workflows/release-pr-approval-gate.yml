@@ -81,3 +81,5 @@ jobs:
           else
             set_status failure "A maintainer must approve this Release PR (on the current commit) before it can merge"
           fi
+
+# gate failure-path test (release-plz-* branch)
