@@ -81,3 +81,5 @@ jobs:
           else
             set_status failure "A maintainer must approve this Release PR (on the current commit) before it can merge"
           fi
+
+# (verify: release-pr-approval gate emits a status on non-release PRs)
