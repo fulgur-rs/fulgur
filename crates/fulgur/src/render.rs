@@ -5860,12 +5860,13 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    // --- PDF/UA mode (Validator::UA1) ---
+    // --- PDF/UA mode (Validator::Ua(Accessibility::UA1)) ---
 
     #[test]
     fn render_smoke_pdf_ua_mode() {
-        // Exercises the Validator::UA1 configuration branch in render_v2:
-        // Configuration::new_with_validator(Validator::UA1) when config.pdf_ua = true.
+        // Exercises the PDF/UA validator configuration branch in render_v2:
+        // ConfigurationBuilder::new().set_validator(Validator::Ua(Accessibility::UA1))
+        // when config.pdf_ua = true.
         // pdf_ua implies both enable_tagging and effective_bookmarks.
         // PDF/UA-1 requires a document title (NoDocumentTitle validation).
         let pdf = crate::engine::Engine::builder()

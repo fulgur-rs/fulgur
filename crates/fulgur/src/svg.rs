@@ -7,6 +7,20 @@ use usvg::Tree;
 
 use crate::draw_primitives::Canvas;
 
+/// Process-wide system-font database for inline-`<svg>` re-parsing.
+///
+/// Loaded once via `LazyLock` and shared by `Arc` clone on every
+/// `render_svg_markup` call. `load_system_fonts()` is an O(N) disk scan, so
+/// building it per inline `<svg>` would be a real regression; caching keeps
+/// one snapshot per process (no determinism change — the font set is fixed
+/// for the process lifetime).
+static SVG_FONTDB: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+    std::sync::LazyLock::new(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    });
+
 /// Parse SVG `markup` into a usvg 0.47 tree for rendering via krilla-svg.
 ///
 /// Inline `<svg>` is parsed twice on purpose: blitz-dom parses it into a
@@ -14,15 +28,23 @@ use crate::draw_primitives::Canvas;
 /// and krilla-svg 0.8 needs a usvg-0.47 tree, so we re-parse the original
 /// markup here. Fonts mirror blitz-dom's `parse_svg` (system fonts; see the
 /// determinism caveat in CLAUDE.md / issue fulgur-a8s) so the 0.47 re-parse
-/// matches current rendering. Bundled-font determinism is a follow-up.
+/// matches current rendering; the font DB is cached process-wide in
+/// `SVG_FONTDB` and shared by `Arc` clone. Bundled-font determinism is a
+/// follow-up.
 pub fn render_svg_markup(markup: &str) -> Option<usvg::Tree> {
-    let mut fontdb = usvg::fontdb::Database::new();
-    fontdb.load_system_fonts();
     let opts = usvg::Options {
-        fontdb: std::sync::Arc::new(fontdb),
+        fontdb: SVG_FONTDB.clone(),
         ..usvg::Options::default()
     };
-    usvg::Tree::from_data(markup.as_bytes(), &opts).ok()
+    match usvg::Tree::from_data(markup.as_bytes(), &opts) {
+        Ok(tree) => Some(tree),
+        Err(e) => {
+            // Core library must not touch fd 1/2 directly (see CLAUDE.md
+            // fd-1 policy); the `log` facade is the sanctioned channel.
+            log::debug!("inline <svg> re-parse failed, dropping element: {e}");
+            None
+        }
+    }
 }
 
 /// An inline `<svg>` element rendered as vector graphics.
