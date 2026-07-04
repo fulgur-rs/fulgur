@@ -983,7 +983,7 @@ fn shape_paragraph_glyph_runs(
     shaped_lines
 }
 
-use crate::blitz_adapter::{extract_inline_svg_tree, get_attr};
+use crate::blitz_adapter::get_attr;
 
 /// Extract a trimmed, non-empty HTML `id` attribute from `node` and wrap it
 /// in an `Arc<String>` so split fragments can share without cloning the string.

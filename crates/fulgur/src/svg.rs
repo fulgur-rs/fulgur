@@ -7,6 +7,24 @@ use usvg::Tree;
 
 use crate::draw_primitives::Canvas;
 
+/// Parse SVG `markup` into a usvg 0.47 tree for rendering via krilla-svg.
+///
+/// Inline `<svg>` is parsed twice on purpose: blitz-dom parses it into a
+/// usvg-0.45 tree used only for Taffy intrinsic sizing (its `svg` feature),
+/// and krilla-svg 0.8 needs a usvg-0.47 tree, so we re-parse the original
+/// markup here. Fonts mirror blitz-dom's `parse_svg` (system fonts; see the
+/// determinism caveat in CLAUDE.md / issue fulgur-a8s) so the 0.47 re-parse
+/// matches current rendering. Bundled-font determinism is a follow-up.
+pub fn render_svg_markup(markup: &str) -> Option<usvg::Tree> {
+    let mut fontdb = usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+    let opts = usvg::Options {
+        fontdb: std::sync::Arc::new(fontdb),
+        ..usvg::Options::default()
+    };
+    usvg::Tree::from_data(markup.as_bytes(), &opts).ok()
+}
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {
@@ -174,5 +192,16 @@ mod tests {
         let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         svg.opacity = 0.0;
         draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn render_svg_markup_parses_valid_svg() {
+        let markup = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+        assert!(render_svg_markup(markup).is_some());
+    }
+
+    #[test]
+    fn render_svg_markup_rejects_garbage() {
+        assert!(render_svg_markup("not svg at all").is_none());
     }
 }

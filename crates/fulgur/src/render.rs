@@ -9,7 +9,7 @@ use crate::gcpm::running::RunningElementStore;
 use crate::gcpm::target_ref::AnchorMap;
 use crate::units::F32Units;
 use krilla::SerializeSettings;
-use krilla::configure::{Configuration, Validator};
+use krilla::configure::{Accessibility, Configuration, ConfigurationBuilder, Validator};
 use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -43,9 +43,12 @@ pub fn render_v2(
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
-            Configuration::new_with_validator(Validator::UA1)
+            ConfigurationBuilder::new()
+                .set_validator(Validator::Ua(Accessibility::UA1))
+                .finish()
+                .expect("PDF/UA-1 validator configuration is always valid")
         } else {
-            Configuration::new()
+            Configuration::default()
         };
         krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
