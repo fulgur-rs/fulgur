@@ -5494,10 +5494,12 @@ fn test_render_html_huge_page_name_is_bounded() {
 /// panicking. Covers the krilla-0.8 inline-SVG re-parse path for codecov
 /// (the VRT crate is excluded from coverage; see CLAUDE.md "Coverage scope").
 ///
-/// Asserts the path renders, not that SVG `<text>` glyphs are present: under a
-/// restricted/pinned font set usvg's fontdb may not resolve generic families
-/// (`sans-serif`), so SVG text can be dropped. Deterministic SVG text is a
-/// fulgur-a8s follow-up; a byte-golden for SVG text is intentionally not added.
+/// Asserts the path renders (valid PDF, no panic), not that SVG `<text>` glyphs
+/// are present. SVG text does render when the fonts resolve (verified via the
+/// `examples/svg` showcase). The known fragility — usvg 0.47 drops `<text>` when
+/// a generic family (`sans-serif`) can't resolve to a loaded font, where usvg
+/// 0.45 fell back — is tracked in fulgur-7boq; a byte-golden for SVG text is
+/// intentionally not added because that render varies with the ambient font set.
 #[test]
 fn render_smoke_inline_svg_with_text() {
     let html = r##"<!DOCTYPE html><html><body>
