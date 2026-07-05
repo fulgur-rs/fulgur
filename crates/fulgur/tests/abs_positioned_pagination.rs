@@ -11,21 +11,10 @@ use support::content_stream::text_matrix_ys;
 use fulgur::{Engine, Margin, PageSize};
 
 fn page_count(pdf: &[u8]) -> usize {
-    let prefix = b"/Type /Page";
-    let mut count = 0usize;
-    let mut i = 0;
-    while i + prefix.len() < pdf.len() {
-        if &pdf[i..i + prefix.len()] == prefix {
-            let next = pdf[i + prefix.len()];
-            if !next.is_ascii_alphanumeric() {
-                count += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
-    count
+    lopdf::Document::load_mem(pdf)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len()
 }
 
 /// Repro distilled from `page-background-002-print-ref.html`: an

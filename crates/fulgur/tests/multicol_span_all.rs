@@ -7,27 +7,16 @@
 
 use fulgur::{Engine, PageSize};
 
-/// Lightweight PDF page counter: counts `/Type /Page` occurrences while
-/// rejecting `/Type /Pages` (the pages catalog). Matches the byte-scan
-/// approach used in `transform_integration.rs` and `style_test.rs` so it
-/// is robust against whatever separator the PDF writer picks.
+/// Lightweight PDF page counter. Parses the PDF with lopdf, which
+/// transparently decompresses krilla 0.8's object streams / compressed xref
+/// (raw-byte `/Type /Page` scanning no longer works once the page dicts live
+/// inside object streams). `get_pages()` returns exactly the leaf page
+/// objects, excluding the `/Type /Pages` tree root.
 fn page_count(pdf_bytes: &[u8]) -> usize {
-    let prefix = b"/Type /Page";
-    let mut count = 0usize;
-    let mut i = 0;
-    while i + prefix.len() < pdf_bytes.len() {
-        if &pdf_bytes[i..i + prefix.len()] == prefix {
-            let next = pdf_bytes[i + prefix.len()];
-            // Reject `/Type /Pages` and any other identifier continuation.
-            if !next.is_ascii_alphanumeric() {
-                count += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
-    count
+    lopdf::Document::load_mem(pdf_bytes)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len()
 }
 
 #[test]

@@ -1,10 +1,36 @@
 use fulgur::config::PageSize;
 use fulgur::engine::Engine;
 
-/// Check whether a PDF byte stream contains a Transparency Group.
+/// Check whether a PDF contains a Transparency Group.
+///
+/// krilla 0.8 emits object streams / compressed xref, so the transparency
+/// group's `/S /Transparency` dict is no longer present in the raw bytes.
+/// Parse with lopdf (which decompresses object streams) and look for any
+/// object whose `/Group` sub-dict has `/S` = `/Transparency`. krilla attaches
+/// the group to the opacity form XObject, which is an `Object::Stream` whose
+/// stream dict carries `/Group`.
 fn has_transparency_group(pdf: &[u8]) -> bool {
-    pdf.windows(b"/S /Transparency".len())
-        .any(|w| w == b"/S /Transparency")
+    let doc = lopdf::Document::load_mem(pdf).expect("load PDF for transparency scan");
+    doc.objects.values().any(|obj| {
+        let dict = match obj {
+            lopdf::Object::Dictionary(d) => d,
+            lopdf::Object::Stream(s) => &s.dict,
+            _ => return false,
+        };
+        let Ok(group) = dict.get(b"Group") else {
+            return false;
+        };
+        // `/Group` may be an inline dict or an indirect reference.
+        let group_dict = match group {
+            lopdf::Object::Dictionary(gd) => Some(gd),
+            lopdf::Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()),
+            _ => None,
+        };
+        group_dict
+            .and_then(|gd| gd.get(b"S").ok())
+            .and_then(|s| s.as_name().ok())
+            == Some(b"Transparency".as_ref())
+    })
 }
 
 #[test]

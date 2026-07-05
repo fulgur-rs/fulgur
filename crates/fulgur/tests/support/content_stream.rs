@@ -3,9 +3,7 @@
 // helpers, so unused items here are expected per-binary.
 #![allow(dead_code)]
 
-use std::process::Command;
-
-/// Counts of PDF content-stream operators after a qpdf `--qdf` expansion.
+/// Counts of PDF content-stream operators.
 /// Only tracks the operators we care about in border/text optimization work.
 #[derive(Debug, Default, Clone)]
 pub struct OpCounts {
@@ -18,63 +16,38 @@ pub struct OpCounts {
     pub rg_stroke: usize,
 }
 
-/// Run `qpdf --qdf --object-streams=disable` on `pdf_bytes` and count
-/// PDF operators. Returns `None` only when qpdf is not installed (tests
-/// should skip — CI always has it, local devs may not). Any other
-/// failure panics so that bugs don't silently appear as skipped tests.
+/// Decode every page's content stream with lopdf and count PDF operators.
+///
+/// krilla 0.8 emits object streams / compressed xref and FLATE-compresses
+/// content streams (`compress_content_streams: true`) by default, so the
+/// drawing operators are no longer present in the raw PDF bytes. lopdf
+/// transparently decompresses both, so we decode each page's content stream
+/// and tally only the operators we care about.
+///
+/// Returns `Option<OpCounts>` to preserve the pre-krilla-0.8 signature (call
+/// sites treat `None` as "skip"). The lopdf path has no external binary
+/// dependency, so this now always returns `Some`.
 pub fn count_ops(pdf_bytes: &[u8]) -> Option<OpCounts> {
-    // Probe: qpdf binary present? If not, return None (skip). If present,
-    // any subsequent failure is a real bug and should panic rather than
-    // silently skip, so tests don't pretend to pass.
-    match Command::new("qpdf").arg("--version").status() {
-        Ok(status) if status.success() => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Ok(status) => panic!("qpdf --version failed: {:?}", status),
-        Err(err) => panic!("failed to execute qpdf --version: {err}"),
-    }
-
-    // tempdir + plain paths: NamedTempFile keeps an open handle, which on
-    // Windows can block qpdf from writing to the output path.
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let tmp = dir.path().join("input.pdf");
-    let out = dir.path().join("output.qdf.pdf");
-    std::fs::write(&tmp, pdf_bytes).expect("write tmp pdf");
-
-    let status = Command::new("qpdf")
-        .args(["--qdf", "--object-streams=disable"])
-        .arg(&tmp)
-        .arg(&out)
-        .status()
-        .expect("spawn qpdf");
-    assert!(status.success(), "qpdf --qdf failed: {:?}", status);
-
-    // `qpdf --qdf` does NOT strip binary streams (embedded fonts, inline
-    // images, etc.), so the output is not valid UTF-8. Scan bytes
-    // directly — PDF operators we care about are ASCII-only and sit at
-    // the end of a line, so suffix matching on byte slices works.
-    let qdf = std::fs::read(&out).expect("read qdf output");
+    let doc = lopdf::Document::load_mem(pdf_bytes).expect("load PDF for op counting");
     let mut c = OpCounts::default();
-    for raw in qdf.split(|&b| b == b'\n') {
-        // Strip trailing \r on CRLF lines.
-        let line: &[u8] = if raw.last() == Some(&b'\r') {
-            &raw[..raw.len() - 1]
-        } else {
-            raw
-        };
-        if line.ends_with(b" m") || line == b"m" {
-            c.m += 1;
-        } else if line.ends_with(b" l") || line == b"l" {
-            c.l += 1;
-        } else if line.ends_with(b" re") {
-            c.re += 1;
-        } else if line == b"S" || line.ends_with(b" S") {
-            c.s_stroke += 1;
-        } else if line == b"q" {
-            c.q += 1;
-        } else if line == b"BT" {
-            c.bt += 1;
-        } else if line.ends_with(b" RG") {
-            c.rg_stroke += 1;
+    for (_page_num, page_id) in doc.get_pages() {
+        let content_bytes = doc
+            .get_page_content(page_id)
+            .expect("get decoded page content stream");
+        let content =
+            lopdf::content::Content::decode(&content_bytes).expect("parse decoded content stream");
+        for op in &content.operations {
+            match op.operator.as_str() {
+                "m" => c.m += 1,
+                "l" => c.l += 1,
+                "re" => c.re += 1,
+                // `S` = stroke path (uppercase); `RG` = stroke color (RGB).
+                "S" => c.s_stroke += 1,
+                "q" => c.q += 1,
+                "BT" => c.bt += 1,
+                "RG" => c.rg_stroke += 1,
+                _ => {}
+            }
         }
     }
     Some(c)
@@ -83,49 +56,30 @@ pub fn count_ops(pdf_bytes: &[u8]) -> Option<OpCounts> {
 /// Extract the `f` (vertical translate) operand of every text matrix
 /// (`a b c d e f Tm`) in `pdf_bytes`, in document order. Krilla emits one
 /// `Tm` per text run, so each returned value is a text run's baseline y in
-/// PDF user space. Returns `None` only when qpdf is not installed (skip);
-/// any other failure panics so bugs don't masquerade as skips.
+/// PDF user space.
+///
+/// Like [`count_ops`], this decodes each page's (FLATE-compressed on krilla
+/// 0.8) content stream via lopdf. Returns `Option<Vec<f32>>` to preserve the
+/// previous signature; the lopdf path always returns `Some`.
 ///
 /// Used to assert vertical placement (e.g. that an end-side margin actually
 /// offsets a `bottom:0` absolute element) without rasterizing.
 pub fn text_matrix_ys(pdf_bytes: &[u8]) -> Option<Vec<f32>> {
-    match Command::new("qpdf").arg("--version").status() {
-        Ok(status) if status.success() => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Ok(status) => panic!("qpdf --version failed: {:?}", status),
-        Err(err) => panic!("failed to execute qpdf --version: {err}"),
-    }
-
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let tmp = dir.path().join("input.pdf");
-    let out = dir.path().join("output.qdf.pdf");
-    std::fs::write(&tmp, pdf_bytes).expect("write tmp pdf");
-
-    let status = Command::new("qpdf")
-        .args(["--qdf", "--object-streams=disable"])
-        .arg(&tmp)
-        .arg(&out)
-        .status()
-        .expect("spawn qpdf");
-    assert!(status.success(), "qpdf --qdf failed: {:?}", status);
-
-    let qdf = std::fs::read(&out).expect("read qdf output");
+    let doc = lopdf::Document::load_mem(pdf_bytes).expect("load PDF for text matrix scan");
     let mut ys = Vec::new();
-    for raw in qdf.split(|&b| b == b'\n') {
-        let line: &[u8] = if raw.last() == Some(&b'\r') {
-            &raw[..raw.len() - 1]
-        } else {
-            raw
-        };
-        if line.ends_with(b" Tm") {
-            // `a b c d e f Tm` — the f operand is the 6th number.
-            let text = String::from_utf8_lossy(line);
-            let nums: Vec<f32> = text
-                .split_whitespace()
-                .filter_map(|t| t.parse::<f32>().ok())
-                .collect();
-            if nums.len() == 6 {
-                ys.push(nums[5]);
+    for (_page_num, page_id) in doc.get_pages() {
+        let content_bytes = doc
+            .get_page_content(page_id)
+            .expect("get decoded page content stream");
+        let content =
+            lopdf::content::Content::decode(&content_bytes).expect("parse decoded content stream");
+        for op in &content.operations {
+            // `a b c d e f Tm` — the f operand is the 6th number. `as_float`
+            // accepts both `Real` and `Integer` (a `0` operand is an integer).
+            if op.operator == "Tm" && op.operands.len() == 6 {
+                if let Ok(f) = op.operands[5].as_float() {
+                    ys.push(f);
+                }
             }
         }
     }

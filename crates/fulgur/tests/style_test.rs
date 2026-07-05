@@ -221,21 +221,13 @@ fn test_overflow_hidden_page_spanning_clip() {
     let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
-    // Count pages using /Type /Page (exclude /Type /Pages)
-    let prefix = b"/Type /Page";
-    let mut page_count = 0usize;
-    let mut i = 0;
-    while i + prefix.len() < pdf_hidden.len() {
-        if &pdf_hidden[i..i + prefix.len()] == prefix {
-            let next = pdf_hidden[i + prefix.len()];
-            if !next.is_ascii_alphanumeric() {
-                page_count += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
+    // Count pages via lopdf, which decompresses krilla 0.8's object streams /
+    // compressed xref (raw-byte `/Type /Page` scanning no longer works).
+    // `get_pages()` excludes the `/Type /Pages` tree root.
+    let page_count = lopdf::Document::load_mem(&pdf_hidden)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len();
     assert!(
         page_count >= 2,
         "expected at least 2 pages for a tall overflow:hidden block, got {page_count}"
