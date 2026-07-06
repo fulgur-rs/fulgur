@@ -2800,11 +2800,12 @@ pub fn append_position_fixed_fragments(
         // entry for the pencil child or v2 never reaches it. The
         // existing root-only fragment carries inline text rendering
         // (fixedpos-001 / 008 ref pattern) but not block descendants.
-        // Skip the descendant walk entirely once the budget is spent: it would
-        // only traverse the subtree without emitting anything (gemini review).
-        if emitted < crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-            record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
-        }
+        // Always walk the subtree (even once the budget is spent): the walk
+        // clears every descendant's entry, which is required because this
+        // fixed pass runs a second time after the absolute pass and must not
+        // leave stale fragments from the first pass behind (Codex review). The
+        // per-node push is itself bounded by the `emitted` budget.
+        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
     }
 
     // Don't allocate empty entries for nodes without fragments.
@@ -2863,26 +2864,26 @@ fn record_fixed_subtree_descendants(
         let entry = geometry.entry(node_id).or_default();
         entry.fragments.clear();
         entry.is_repeat = true;
-        // Zero-area fragments draw nothing, so skipping them is
-        // output-preserving and removes the most common fixed-subtree
-        // amplifier (empty structural wrappers). The aggregate `emitted`
-        // budget is the hard bound on the residual O(descendants × pages).
-        if w > 0.0 || h > 0.0 {
-            for page_index in 0..pages.max(1) {
-                if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                    // Budget spent: return rather than break so the rest of
-                    // this subtree is not walked at all (gemini review).
-                    return;
-                }
-                entry.fragments.push(Fragment {
-                    page_index,
-                    x: stored_x.as_px(),
-                    y: stored_y.as_px(),
-                    width: w.as_px(),
-                    height: h.as_px(),
-                });
-                *emitted += 1;
+        // Per-page repeat fragments, bounded by the aggregate `emitted` budget
+        // (the hard cap on O(descendants × pages)). Use `break`, not `return`,
+        // and do not skip zero-area nodes: the walk must visit and clear every
+        // descendant (the fixed pass runs twice — before and after the absolute
+        // pass — so a later node can hold stale fragments from the first pass),
+        // and a zero-size wrapper's fragment can still scope a visible child via
+        // transform / opacity dispatch, which reads the wrapper's geometry
+        // (Codex review).
+        for page_index in 0..pages.max(1) {
+            if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                break;
             }
+            entry.fragments.push(Fragment {
+                page_index,
+                x: stored_x.as_px(),
+                y: stored_y.as_px(),
+                width: w.as_px(),
+                height: h.as_px(),
+            });
+            *emitted += 1;
         }
 
         let children: Vec<usize> = {
@@ -3325,11 +3326,12 @@ fn record_subtree_fragments_at_offset(
                     // intersected page, so a subtree of many page-spanning
                     // absolutes is O(nodes × pages). Stop past the cap
                     // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
-                    // fixed pass. Return rather than break so the remaining
-                    // subtree is not walked once the budget is spent (gemini
+                    // fixed pass. Use `break`, not `return`: the walk must keep
+                    // visiting (and clearing) the rest of the subtree so no
+                    // stale fragments survive from an earlier pass (Codex
                     // review).
                     if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                        return;
+                        break;
                     }
                     let is_monolithic_continuation =
                         monolithic_adjust > 0.0 && page_index > first_page;
@@ -5278,34 +5280,6 @@ h2 { string-set: chapter-title content(text); }
             });
 
         assert_eq!(fixed_pages, Some(vec![0, 1]));
-    }
-
-    #[test]
-    fn fixed_zero_area_descendant_emits_no_fragments() {
-        // A zero-area fixed descendant draws nothing, so emitting one repeated
-        // fragment per page for it is pure amplification. Skipping zero-area
-        // fragments is output-preserving and removes a fixed-subtree amplifier.
-        let html = r#"
-            <html><body style="margin:0">
-              <div style="position: fixed; top:0; width:100px; height:100px">
-                <div style="width:0; height:0"></div>
-                <div style="width:10px; height:10px"></div>
-              </div>
-              <div style="height:1200px"></div>
-            </body></html>
-        "#;
-        let engine = crate::Engine::builder().build();
-        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
-        let zero_area_repeated = geom
-            .values()
-            .filter(|g| g.is_repeat)
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.width.to_f32() <= 0.0 && f.height.to_f32() <= 0.0)
-            .count();
-        assert_eq!(
-            zero_area_repeated, 0,
-            "zero-area fixed descendant must not emit repeated fragments"
-        );
     }
 
     #[test]
