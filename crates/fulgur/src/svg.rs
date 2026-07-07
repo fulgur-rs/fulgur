@@ -120,6 +120,24 @@ mod tests {
     // Minimal valid SVG: 100x50 red rectangle
     const MINIMAL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
 
+    /// HTML5 allows inline `<svg>` without an `xmlns` declaration, and
+    /// `node.outer_html()` re-serializes such elements verbatim. usvg 0.47
+    /// still parses the resulting bare markup (its parser injects the SVG
+    /// namespace when it sees the `<svg>` element name), so no separate
+    /// namespace-injection step is required in `render_svg_markup`. This test
+    /// pins that behaviour so the inline-SVG re-parse path does not silently
+    /// regress if usvg tightens its parser.
+    #[test]
+    fn render_svg_markup_parses_svg_without_xmlns() {
+        let bare = r#"<svg width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        let tree = render_svg_markup(bare).expect("inline <svg> lacking xmlns should still parse");
+        // Prove a real, non-degenerate parse (usvg must see the 10x10 viewport).
+        assert_eq!(tree.size().width() as i32, 10);
+        assert_eq!(tree.size().height() as i32, 10);
+        // A tag that already declares the namespace must keep working.
+        assert!(render_svg_markup(MINIMAL_SVG).is_some());
+    }
+
     fn parse_tree() -> Arc<Tree> {
         let opts = usvg::Options::default();
         let tree = Tree::from_str(MINIMAL_SVG, &opts).expect("parse minimal svg");
