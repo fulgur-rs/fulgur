@@ -8,25 +8,12 @@
 use fulgur::Engine;
 
 fn page_count(pdf: &[u8]) -> usize {
-    let prefix = b"/Type /Page";
-    let mut n = 0usize;
-    let mut i = 0;
-    while i + prefix.len() <= pdf.len() {
-        if &pdf[i..i + prefix.len()] == prefix {
-            // Reject `/Type /Pages` and any other identifier continuation.
-            // `is_none_or` handles end-of-buffer (no following byte) as a valid match.
-            if pdf
-                .get(i + prefix.len())
-                .is_none_or(|b| !b.is_ascii_alphanumeric())
-            {
-                n += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
-    n
+    // lopdf decompresses krilla 0.8's object streams / compressed xref, so
+    // `get_pages()` returns the leaf page objects (excluding `/Type /Pages`).
+    lopdf::Document::load_mem(pdf)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len()
 }
 
 /// 2-column basic layout renders a non-empty PDF on a single page.

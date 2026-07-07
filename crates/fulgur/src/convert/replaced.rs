@@ -213,10 +213,9 @@ fn convert_svg(
     assets: Option<&AssetBundle>,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(elem) = node.element_data() else {
-        return false;
-    };
-    let Some(tree) = extract_inline_svg_tree(elem) else {
+    // Re-parse the original <svg> markup with fulgur's usvg 0.47 (blitz-dom's
+    // parsed tree is usvg 0.45, incompatible with krilla-svg 0.8).
+    let Some(tree) = crate::svg::render_svg_markup(&node.outer_html()) else {
         return false;
     };
 
@@ -225,7 +224,7 @@ fn convert_svg(
     out.svgs.insert(
         node.id,
         crate::drawables::SvgEntry {
-            tree,
+            tree: std::sync::Arc::new(tree),
             width: content_w.as_pt(),
             height: content_h.as_pt(),
             opacity,

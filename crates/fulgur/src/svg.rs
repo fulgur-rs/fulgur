@@ -7,6 +7,46 @@ use usvg::Tree;
 
 use crate::draw_primitives::Canvas;
 
+/// Process-wide system-font database for inline-`<svg>` re-parsing.
+///
+/// Loaded once via `LazyLock` and shared by `Arc` clone on every
+/// `render_svg_markup` call. `load_system_fonts()` is an O(N) disk scan, so
+/// building it per inline `<svg>` would be a real regression; caching keeps
+/// one snapshot per process (no determinism change — the font set is fixed
+/// for the process lifetime).
+static SVG_FONTDB: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+    std::sync::LazyLock::new(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    });
+
+/// Parse SVG `markup` into a usvg 0.47 tree for rendering via krilla-svg.
+///
+/// Inline `<svg>` is parsed twice on purpose: blitz-dom parses it into a
+/// usvg-0.45 tree used only for Taffy intrinsic sizing (its `svg` feature),
+/// and krilla-svg 0.8 needs a usvg-0.47 tree, so we re-parse the original
+/// markup here. Fonts mirror blitz-dom's `parse_svg` (system fonts; see the
+/// determinism caveat in CLAUDE.md / issue fulgur-a8s) so the 0.47 re-parse
+/// matches current rendering; the font DB is cached process-wide in
+/// `SVG_FONTDB` and shared by `Arc` clone. Bundled-font determinism is a
+/// follow-up.
+pub fn render_svg_markup(markup: &str) -> Option<usvg::Tree> {
+    let opts = usvg::Options {
+        fontdb: SVG_FONTDB.clone(),
+        ..usvg::Options::default()
+    };
+    match usvg::Tree::from_data(markup.as_bytes(), &opts) {
+        Ok(tree) => Some(tree),
+        Err(e) => {
+            // Core library must not touch fd 1/2 directly (see CLAUDE.md
+            // fd-1 policy); the `log` facade is the sanctioned channel.
+            log::debug!("inline <svg> re-parse failed, dropping element: {e}");
+            None
+        }
+    }
+}
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {
@@ -79,6 +119,24 @@ mod tests {
 
     // Minimal valid SVG: 100x50 red rectangle
     const MINIMAL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
+
+    /// HTML5 allows inline `<svg>` without an `xmlns` declaration, and
+    /// `node.outer_html()` re-serializes such elements verbatim. usvg 0.47
+    /// still parses the resulting bare markup (its parser injects the SVG
+    /// namespace when it sees the `<svg>` element name), so no separate
+    /// namespace-injection step is required in `render_svg_markup`. This test
+    /// pins that behaviour so the inline-SVG re-parse path does not silently
+    /// regress if usvg tightens its parser.
+    #[test]
+    fn render_svg_markup_parses_svg_without_xmlns() {
+        let bare = r#"<svg width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        let tree = render_svg_markup(bare).expect("inline <svg> lacking xmlns should still parse");
+        // Prove a real, non-degenerate parse (usvg must see the 10x10 viewport).
+        assert_eq!(tree.size().width() as i32, 10);
+        assert_eq!(tree.size().height() as i32, 10);
+        // A tag that already declares the namespace must keep working.
+        assert!(render_svg_markup(MINIMAL_SVG).is_some());
+    }
 
     fn parse_tree() -> Arc<Tree> {
         let opts = usvg::Options::default();
@@ -174,5 +232,16 @@ mod tests {
         let mut svg = SvgRender::new(parse_tree(), 100.0, 50.0);
         svg.opacity = 0.0;
         draw_onto_surface(&svg);
+    }
+
+    #[test]
+    fn render_svg_markup_parses_valid_svg() {
+        let markup = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+        assert!(render_svg_markup(markup).is_some());
+    }
+
+    #[test]
+    fn render_svg_markup_rejects_garbage() {
+        assert!(render_svg_markup("not svg at all").is_none());
     }
 }

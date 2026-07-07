@@ -254,26 +254,14 @@ fn transformed_element_produces_expected_pagination() {
     let pdf = engine.render(html).expect("render should succeed");
     assert!(pdf.starts_with(b"%PDF-"), "PDF header missing");
 
-    // Count `/Type /Page` occurrences, excluding `/Type /Pages`. Match the
-    // prefix `/Type /Page` followed by a terminator that is not another
-    // alphanumeric (so `/Pages` is rejected). This is still a substring
-    // scan, but it handles both `/Type /Page\n` and `/Type /Page ` style
-    // separators that different PDF writers emit.
-    let prefix = b"/Type /Page";
-    let mut count = 0usize;
-    let mut i = 0;
-    while i + prefix.len() < pdf.len() {
-        if &pdf[i..i + prefix.len()] == prefix {
-            let next = pdf[i + prefix.len()];
-            // Reject `/Type /Pages` and any other identifier continuation.
-            if !next.is_ascii_alphanumeric() {
-                count += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
+    // Count page objects via lopdf, which decompresses krilla 0.8's object
+    // streams / compressed xref (raw-byte `/Type /Page` scanning no longer
+    // works). `get_pages()` returns exactly the leaf page objects, excluding
+    // the `/Type /Pages` tree root.
+    let count = lopdf::Document::load_mem(&pdf)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len();
     assert_eq!(
         count, 1,
         "expected exactly one page for an atomic transformed element, got {count}"

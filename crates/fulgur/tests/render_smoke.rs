@@ -14,29 +14,17 @@ use std::path::PathBuf;
 use fulgur::{AssetBundle, Engine};
 use tempfile::tempdir;
 
-/// Count `/Type /Page` objects (excluding the `/Type /Pages` page-tree
-/// root) directly from raw PDF bytes. Robust to whatever delimiter
-/// krilla emits after `/Type /Page` — unlike a fixed `"/Type /Page\n"`
-/// string match, which silently miscounts if the trailing byte ever
-/// changes. Mirrors the `page_count` helper used by the other
+/// Count the PDF's page objects (excluding the `/Type /Pages` page-tree
+/// root) via lopdf. krilla 0.8 stores page dicts inside object streams /
+/// compressed xref, so raw-byte `/Type /Page` scanning no longer works;
+/// lopdf transparently decompresses them and `get_pages()` returns exactly
+/// the leaf page objects. Mirrors the `page_count` helper used by the other
 /// pagination integration tests.
 fn page_count(pdf: &[u8]) -> usize {
-    let prefix = b"/Type /Page";
-    let mut count = 0;
-    let mut i = 0;
-    while i + prefix.len() < pdf.len() {
-        if &pdf[i..i + prefix.len()] == prefix {
-            // `/Type /Pages` (the tree root) has an alphanumeric next
-            // byte (`s`); a real page object is followed by a delimiter.
-            if !pdf[i + prefix.len()].is_ascii_alphanumeric() {
-                count += 1;
-            }
-            i += prefix.len();
-        } else {
-            i += 1;
-        }
-    }
-    count
+    lopdf::Document::load_mem(pdf)
+        .expect("load PDF for page count")
+        .get_pages()
+        .len()
 }
 
 /// Concatenate every `ShapedGlyphRun` string across a paragraph's shaped
@@ -1106,8 +1094,7 @@ fn render_v2_smoke_paragraph_multi_fragment_slice() {
     // Multi-page sanity check: multiple `Type /Page` entries (one per
     // page object) — without slicing, only the first fragment would
     // emit any glyphs.
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output, got {page_count} pages"
@@ -1257,8 +1244,7 @@ fn render_v2_smoke_split_block_uses_per_slice_height() {
     assert!(!pdf.is_empty());
     // Sanity: must produce a multi-page PDF (the box straddles page
     // bottom).
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output for split block, got {page_count}",
@@ -1329,8 +1315,7 @@ fn render_v2_smoke_body_opacity_multi_page_content_survives() {
     assert!(!pdf.is_empty());
     // Sanity: must be multi-page (filler 800pt + tail 132pt > A4
     // content height of ~842pt).
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output for body-opacity test, got {page_count}",
@@ -1394,8 +1379,7 @@ fn render_v2_smoke_split_opacity_block_uses_per_slice_height() {
     let pdf = engine.render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity.
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output for split-opacity test, got {page_count}",
@@ -1431,8 +1415,7 @@ fn render_v2_smoke_split_overflow_clip_block_uses_per_slice_height() {
     assert!(!pdf.is_empty());
     // Multi-page sanity (filler 600pt + clip 300pt + 12pt margin
     // = 912pt > A4 ~842pt content height).
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output for split-overflow-clip test, got {page_count}",
@@ -1469,8 +1452,7 @@ fn render_v2_smoke_html_opacity_multi_page_content_survives() {
     let pdf = engine.render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     // Multi-page sanity.
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = page_count(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page output for html-opacity test, got {page_count}",
@@ -3254,11 +3236,22 @@ fn content_url_resolves_image_when_base_path_set() {
         .unwrap();
 
     assert!(!pdf.is_empty(), "PDF must be generated");
-    // Verify at least one image object appears in the PDF byte stream.
-    // XObject images are referenced via "/Subtype /Image" in the PDF.
+    // Verify at least one image XObject appears in the PDF. krilla 0.8 stores
+    // XObject dicts inside object streams, so the `/Subtype /Image` marker is
+    // no longer present in the raw bytes — parse with lopdf (which
+    // decompresses object streams) and look for an object whose `/Subtype` is
+    // `/Image`.
+    let doc = lopdf::Document::load_mem(&pdf).expect("load PDF for image check");
+    let has_image = doc.objects.values().any(|obj| {
+        let dict = match obj {
+            lopdf::Object::Dictionary(d) => d,
+            lopdf::Object::Stream(s) => &s.dict,
+            _ => return false,
+        };
+        dict.get(b"Subtype").and_then(|o| o.as_name()).ok() == Some(b"Image".as_ref())
+    });
     assert!(
-        pdf.windows(b"/Subtype /Image".len())
-            .any(|w| w == b"/Subtype /Image"),
+        has_image,
         "PDF must contain at least one image XObject (content: url() not resolved)"
     );
 }
@@ -5493,4 +5486,32 @@ fn test_render_html_huge_page_name_is_bounded() {
     );
     let pdf = Engine::builder().build().render(&html).expect("render");
     assert!(!pdf.is_empty());
+}
+
+/// Inline `<svg>` (shapes + `<text>`) must flow end-to-end through
+/// `convert_svg` → `svg::render_svg_markup` (re-parse of `node.outer_html()`
+/// with usvg 0.47) → `SvgEntry` → render, producing a valid PDF without
+/// panicking. Covers the krilla-0.8 inline-SVG re-parse path for codecov
+/// (the VRT crate is excluded from coverage; see CLAUDE.md "Coverage scope").
+///
+/// Asserts the path renders (valid PDF, no panic), not that SVG `<text>` glyphs
+/// are present. SVG text does render when the fonts resolve (verified via the
+/// `examples/svg` showcase). The known fragility — usvg 0.47 drops `<text>` when
+/// a generic family (`sans-serif`) can't resolve to a loaded font, where usvg
+/// 0.45 fell back — is tracked in fulgur-7boq; a byte-golden for SVG text is
+/// intentionally not added because that render varies with the ambient font set.
+#[test]
+fn render_smoke_inline_svg_with_text() {
+    let html = r##"<!DOCTYPE html><html><body>
+        <svg width="200" height="100" viewBox="0 0 200 100" xmlns="http://www.w3.org/2000/svg">
+          <rect x="0" y="0" width="200" height="100" fill="#eef"/>
+          <circle cx="40" cy="50" r="20" fill="#1e88e5"/>
+          <text x="70" y="55" font-family="sans-serif" font-size="20" fill="#111">Hi</text>
+        </svg></body></html>"##;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"), "inline svg+text produced no PDF");
+    assert!(
+        page_count(&pdf) >= 1,
+        "inline svg+text should render at least one page"
+    );
 }

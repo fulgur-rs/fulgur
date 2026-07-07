@@ -4,15 +4,37 @@
 
 use fulgur::Engine;
 
-/// Returns true if the PDF bytes contain a landscape A4 MediaBox.
+/// Returns true if any page has a landscape A4 MediaBox.
 ///
-/// Krilla emits `/MediaBox [0 0 841.89 595.28]` for landscape A4; portrait
-/// is `/MediaBox [0 0 595.28 841.89]`. PDF bodies contain binary streams
-/// that invalidate `std::str::from_utf8`, so scan the raw byte slice for
-/// the ASCII landscape-width signature.
+/// Krilla emits `MediaBox [0 0 841.89 595.28]` for landscape A4; portrait is
+/// `[0 0 595.28 841.89]`. krilla 0.8 stores page dicts inside object streams,
+/// so the MediaBox is no longer visible in the raw bytes — parse with lopdf
+/// (which decompresses object streams) and read the page dict's `MediaBox`
+/// array directly, checking landscape orientation (width > height) and the
+/// A4 long/short edge dimensions.
 fn has_landscape_a4_mediabox(pdf: &[u8]) -> bool {
-    let needle: &[u8] = b"/MediaBox [0 0 841";
-    pdf.windows(needle.len()).any(|w| w == needle)
+    let doc = lopdf::Document::load_mem(pdf).expect("load PDF for MediaBox check");
+    doc.get_pages().values().any(|&page_id| {
+        let Ok(dict) = doc.get_object(page_id).and_then(|o| o.as_dict()) else {
+            return false;
+        };
+        let Ok(mb) = dict.get(b"MediaBox").and_then(|o| o.as_array()) else {
+            return false;
+        };
+        if mb.len() != 4 {
+            return false;
+        }
+        // Operands are a mix of Integer (`0`) and Real; `as_float` accepts both.
+        let coord = |i: usize| mb[i].as_float().ok();
+        let (Some(x0), Some(y0), Some(x1), Some(y1)) = (coord(0), coord(1), coord(2), coord(3))
+        else {
+            return false;
+        };
+        let width = x1 - x0;
+        let height = y1 - y0;
+        // A4 landscape: 841.89 × 595.28 pt, width > height.
+        width > height && (width - 841.89).abs() < 1.0 && (height - 595.28).abs() < 1.0
+    })
 }
 
 #[test]

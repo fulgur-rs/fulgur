@@ -9,7 +9,7 @@ use crate::gcpm::running::RunningElementStore;
 use crate::gcpm::target_ref::AnchorMap;
 use crate::units::F32Units;
 use krilla::SerializeSettings;
-use krilla::configure::{Configuration, Validator};
+use krilla::configure::{Accessibility, Configuration, ConfigurationBuilder, Validator};
 use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -43,9 +43,12 @@ pub fn render_v2(
 ) -> Result<Vec<u8>> {
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
-            Configuration::new_with_validator(Validator::UA1)
+            ConfigurationBuilder::new()
+                .set_validator(Validator::Ua(Accessibility::UA1))
+                .finish()
+                .expect("PDF/UA-1 validator configuration is always valid")
         } else {
-            Configuration::new()
+            Configuration::default()
         };
         krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
@@ -5857,12 +5860,13 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    // --- PDF/UA mode (Validator::UA1) ---
+    // --- PDF/UA mode (Validator::Ua(Accessibility::UA1)) ---
 
     #[test]
     fn render_smoke_pdf_ua_mode() {
-        // Exercises the Validator::UA1 configuration branch in render_v2:
-        // Configuration::new_with_validator(Validator::UA1) when config.pdf_ua = true.
+        // Exercises the PDF/UA validator configuration branch in render_v2:
+        // ConfigurationBuilder::new().set_validator(Validator::Ua(Accessibility::UA1))
+        // when config.pdf_ua = true.
         // pdf_ua implies both enable_tagging and effective_bookmarks.
         // PDF/UA-1 requires a document title (NoDocumentTitle validation).
         let pdf = crate::engine::Engine::builder()

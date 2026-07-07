@@ -6,7 +6,7 @@ version = "0.33.0"
 # を解決できる必要がある。したがって workspace 継承 (`.workspace = true`) は
 # 使わず、値は root Cargo.toml [workspace.package] と同期させて inline する。
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.86.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fulgur-rs/fulgur"
 homepage = "https://github.com/fulgur-rs/fulgur"
