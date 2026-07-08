@@ -20,14 +20,18 @@ rayon = { version = "1", optional = true }
 cssparser = "0.37"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
+# usvg must match krilla-svg's usvg (0.45). blitz-dom 0.3 pulls its own
+# usvg 0.46 transitively; fulgur never hands a blitz-owned `usvg::Tree`
+# straight to krilla-svg (see `extract_inline_svg_tree`, which re-parses
+# the inline `<svg>` markup so the tree is built with *this* usvg).
 usvg = "0.45"
-blitz-html = "0.2"
-blitz-dom = "0.2"
-blitz-traits = "0.2"
-taffy = "0.9"
-parley = "0.6"
+blitz-html = "0.3.0-alpha.6"
+blitz-dom = { version = "0.3.0-alpha.6", features = ["floats"] }
+blitz-traits = "0.3.0-alpha.6"
+taffy = "=0.11.0-experimental-cache-fix.3"
+parley = "0.10"
 skrifa = "0.43"
-stylo = "0.8.0"
+stylo = "0.18.0"
 woff2-patched = "0.4"
 thiserror = "2"
 minijinja = { version = "=2.21.0", features = ["unstable_machinery"] }
