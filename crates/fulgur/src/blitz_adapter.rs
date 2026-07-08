@@ -21,7 +21,6 @@
 //! for the full investigation and rationale.
 
 use blitz_dom::DocumentConfig;
-use blitz_dom::net::Resource;
 use blitz_html::HtmlDocument;
 
 // Type re-exports for adapter isolation (fulgur-x92a)
@@ -121,9 +120,12 @@ use std::sync::Arc;
 /// and tests no longer name the upstream crates directly.
 pub mod net {
     pub use blitz_dom::net::Resource;
-    pub use blitz_traits::net::{
-        BoxedHandler, Bytes, NetHandler, NetProvider, Request, SharedCallback, Url,
-    };
+    // blitz-traits 0.3 dropped the `NetProvider<Resource>` generic and the
+    // `BoxedHandler<Resource>` / `SharedCallback<Resource>` aliases. The
+    // handler is now an opaque `Box<dyn NetHandler>` that owns its own
+    // delivery channel back into the `Document`, so fulgur no longer names
+    // those aliases.
+    pub use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request, Url};
 }
 
 /// Parse HTML and return a fully resolved document (styles + layout computed).
@@ -240,12 +242,10 @@ pub fn parse_html_with_local_resources(
     system_fonts: bool,
     base_path: Option<&Path>,
 ) -> (HtmlDocument, crate::gcpm::GcpmContext) {
-    use std::collections::HashSet;
-
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
         base_path.map(|p| p.to_path_buf()),
     ));
-    let provider: Arc<dyn NetProvider<Resource>> = net_provider.clone();
+    let provider: Arc<dyn NetProvider> = net_provider.clone();
     let base_url = base_path.and_then(canonical_directory_url);
 
     let mut doc = parse_inner(
@@ -258,39 +258,23 @@ pub fn parse_html_with_local_resources(
         base_url,
     );
 
-    // Identify <link rel=stylesheet media=X> nodes *before* mutating so
-    // their attributes are stable, and before loading so we can filter
-    // out the (wrong-media) resources that blitz's parser already
-    // triggered for them.
-    let rewrites = collect_link_media_rewrites(&doc);
-    let rewrite_node_ids: HashSet<usize> = rewrites.iter().map(|r| r.link_node_id).collect();
-
-    // First drain: load resources that correspond to <link> elements
-    // WITHOUT a media rewrite. Discard resources for nodes we are about
-    // to rewrite — their @import replacements will re-fetch with the
-    // correct MediaList.
-    for resource in net_provider.drain_pending_resources() {
-        if let Resource::Css(node_id, _) = &resource {
-            if rewrite_node_ids.contains(node_id) {
-                continue;
-            }
-        }
-        doc.load_resource(resource);
-    }
-
-    // Apply the DOM rewrite. Mutator's `drop` synchronously triggers
-    // `process_style_element` for each new <style>, which parses the
-    // @import, calls StylesheetLoader → NetProvider::fetch → CssHandler
-    // with `MediaList` properly propagated, and pushes new Resources.
-    apply_link_media_rewrites(&mut doc, &rewrites);
-
-    // Second drain: load the correctly-fetched stylesheets.
-    for resource in net_provider.drain_pending_resources() {
-        doc.load_resource(resource);
-    }
+    // blitz-dom 0.3 evaluates `@media` (and `<link media=…>`) natively via
+    // `DocumentConfig::media_type` (set to `print` in `parse_inner`). That
+    // retires fulgur's old `<link media=…>` → synthetic `<style> @import`
+    // rewrite dance, which only existed because blitz 0.2.4 ignored media
+    // queries. (blitz 0.3 upgrade: fulgur-jg8s.)
+    //
+    // Loaded resources no longer flow through a fulgur-owned callback; the
+    // blitz handler emits `DocumentEvent::ResourceLoad` into the document's
+    // own event channel. `handle_messages` drains that channel and applies
+    // every stylesheet/image/font. `@import` fetches are synchronous, so by
+    // the time `from_html` returns every nested resource is already queued.
+    doc.handle_messages();
 
     // Fold the per-stylesheet GCPM contexts into one. The caller still
-    // has to merge this with its own AssetBundle-derived context.
+    // has to merge this with its own AssetBundle-derived context. (These
+    // are still collected directly in `FulgurNetProvider::fetch` from the
+    // CSS bytes, independently of blitz's resource channel.)
     let mut gcpm = crate::gcpm::GcpmContext::default();
     for ctx in net_provider.drain_gcpm_contexts() {
         gcpm.extend_from(ctx);
@@ -306,7 +290,7 @@ fn parse_inner(
     viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
     system_fonts: bool,
-    net_provider: Option<Arc<dyn NetProvider<Resource>>>,
+    net_provider: Option<Arc<dyn NetProvider>>,
     base_url: Option<String>,
 ) -> HtmlDocument {
     let viewport = Viewport::new(
@@ -341,6 +325,18 @@ fn parse_inner(
         font_ctx,
         base_url: Some(base_url.unwrap_or_else(|| "file:///".to_string())),
         net_provider,
+        // fulgur renders for paged media, so evaluate `@media print` (and
+        // `<link media=print>`) natively. This is the blitz 0.3 official API
+        // that replaces fulgur's previous CSS-text rewrite hack.
+        media_type: Some(style::media_queries::MediaType::print()),
+        // Resolve style sequentially. blitz 0.3 defaults to `Parallel`, which
+        // shares Stylo's global rayon pool and panics with "already mutably
+        // borrowed" when two documents resolve concurrently (blitz #430).
+        // fulgur's core use case — concurrent multi-tenant / batch renders —
+        // does exactly that, and determinism is a project invariant, so we
+        // always resolve on the calling thread. The per-document style cost is
+        // negligible for fulgur's typically small documents.
+        style_threading: blitz_dom::StyleThreading::Sequential,
         ..DocumentConfig::default()
     };
 
@@ -573,9 +569,9 @@ pub fn relayout_position_fixed(doc: &mut HtmlDocument, viewport_w_px: f32, viewp
 /// and counter rules placed directly in an inline `<style>` are lost
 /// (fulgur-mq5).
 ///
-/// Synthetic `<style>` elements injected by [`apply_link_media_rewrites`]
-/// contain `@import url(...) media;` only, so `parse_gcpm` returns an empty
-/// context for them — harmless and intentionally not filtered.
+/// blitz-dom 0.3 evaluates `@media` (and `<link media=…>`) natively via
+/// `DocumentConfig::media_type`, so no synthetic `<style>` bridging is
+/// injected on the fulgur side.
 pub fn extract_gcpm_from_inline_styles(doc: &HtmlDocument) -> crate::gcpm::GcpmContext {
     let mut out = crate::gcpm::GcpmContext::default();
     let root = doc.root_element();
@@ -1127,26 +1123,58 @@ pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
     out
 }
 
-/// Extract the parsed `usvg::Tree` from an inline `<svg>` element, if present.
+/// Extract an inline `<svg>` element as a `usvg::Tree`, if present.
 ///
 /// Blitz parses inline `<svg>` elements during DOM construction (default `svg`
 /// feature on `blitz-dom`) and stores the result on `ElementData::image_data()`
-/// as `ImageData::Svg(Box<usvg::Tree>)`. This helper hides the `ImageData`
-/// enum and the deref-and-clone dance so callers in `convert.rs` don't need
-/// to import blitz internals — preserving the adapter isolation rule.
+/// as `ImageData::Svg(Arc<usvg::Tree>)`.
 ///
-/// The clone is required because Blitz only exposes `&Box<Tree>` via `&Node`;
-/// it is shallow in practice because `usvg::Tree`'s heavy collections (paths,
-/// gradients, fontdb) are `Arc`-shared internally.
-pub fn extract_inline_svg_tree(
-    elem: &blitz_dom::node::ElementData,
-) -> Option<std::sync::Arc<usvg::Tree>> {
+/// We cannot hand that tree straight to krilla-svg: blitz-dom 0.3 depends on a
+/// newer, semver-incompatible `usvg` (0.46) than krilla-svg (0.45), so blitz's
+/// `usvg::Tree` is a *different type* from the one `draw_svg` accepts and cannot
+/// cross the crate boundary. Instead we re-serialize the `<svg>` subtree back to
+/// markup via blitz's `outer_html()` (the element stays in the DOM after parsing)
+/// and re-parse it with *fulgur's* `usvg`, producing a tree krilla-svg accepts.
+/// Taking `&Node` (not `&ElementData`) is what gives us access to `outer_html()`.
+///
+/// The reparse must use the same font database blitz used, otherwise SVG
+/// `<text>` elements lose their glyphs (usvg needs fonts to shape text at parse
+/// time). blitz's `parse_svg` builds `usvg::Options { fontdb: FONT_DB, .. }`
+/// from system fonts; we mirror that with a process-global system-font database
+/// (see [`SVG_FONTDB`]). This inherits fulgur's documented SVG-text determinism
+/// caveat (system fonts must be pinned, e.g. via `FONTCONFIG_FILE`).
+pub fn extract_inline_svg_tree(node: &blitz_dom::Node) -> Option<std::sync::Arc<usvg::Tree>> {
     use blitz_dom::node::ImageData;
-    match elem.image_data()? {
-        ImageData::Svg(tree) => Some(std::sync::Arc::new((**tree).clone())),
-        _ => None,
+    // Only re-parse when blitz actually recognised this element as an inline SVG.
+    let elem = node.element_data()?;
+    if !matches!(elem.image_data()?, ImageData::Svg(_)) {
+        return None;
     }
+
+    // Mirror blitz's own xmlns fixup (see blitz-dom construct.rs): a bare
+    // `<svg>` without a namespace declaration would fail to parse.
+    let mut markup = node.outer_html();
+    if !markup.contains("xmlns") {
+        markup = markup.replacen("<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"", 1);
+    }
+
+    let options = usvg::Options {
+        fontdb: SVG_FONTDB.clone(),
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_data(markup.as_bytes(), &options).ok()?;
+    Some(std::sync::Arc::new(tree))
 }
+
+/// Process-global font database for re-parsing inline `<svg>` text, mirroring
+/// blitz-dom's lazily-initialised `FONT_DB`. Loaded once from the system fonts
+/// so repeated inline-SVG reparses don't rescan the font directories.
+static SVG_FONTDB: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+    std::sync::LazyLock::new(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    });
 
 /// Inspect a node's computed `content` property and return the first `Image`
 /// variant's URL as an owned `String` if the content is a single
@@ -1213,41 +1241,60 @@ fn extract_url_from_stylo_image(image: &style::values::computed::image::Image) -
 
 /// Extract the CSS `vertical-align` value from a node's computed styles and
 /// map it to fulgur's `VerticalAlign` enum.
+///
+/// stylo 0.17 retired the monolithic `vertical-align` longhand and replaced it
+/// with the CSS Inline Level 3 model. The legacy `vertical-align` shorthand now
+/// expands to two computed longhands:
+///
+/// - `baseline-shift`: `sub` / `super` / `top` / `center` / `bottom` /
+///   `<length-percentage>` — the line-box-relative keywords (`top`/`bottom`)
+///   live here, not on `alignment-baseline`.
+/// - `alignment-baseline`: `baseline` / `middle` / `text-top` / `text-bottom`.
+///
+/// All of fulgur's `VerticalAlign` cases remain recoverable; we read both
+/// longhands and merge them. (blitz 0.3 upgrade, fulgur-kjh9.)
 pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::VerticalAlign {
     use crate::paragraph::VerticalAlign;
     use crate::units::F32Units;
+    use style::values::computed::box_::AlignmentBaseline;
+    use style::values::generics::box_::{BaselineShift, BaselineShiftKeyword};
+
     let Some(styles) = node.primary_styles() else {
         return VerticalAlign::Baseline;
     };
-    let va = styles.clone_vertical_align();
-    match va {
-        style::values::generics::box_::VerticalAlign::Keyword(kw) => {
-            use style::values::generics::box_::VerticalAlignKeyword;
-            match kw {
-                VerticalAlignKeyword::Baseline => VerticalAlign::Baseline,
-                VerticalAlignKeyword::Middle => VerticalAlign::Middle,
-                VerticalAlignKeyword::Top => VerticalAlign::Top,
-                VerticalAlignKeyword::Bottom => VerticalAlign::Bottom,
-                VerticalAlignKeyword::Sub => VerticalAlign::Sub,
-                VerticalAlignKeyword::Super => VerticalAlign::Super,
-                VerticalAlignKeyword::TextTop => VerticalAlign::TextTop,
-                VerticalAlignKeyword::TextBottom => VerticalAlign::TextBottom,
-                #[allow(unreachable_patterns)]
-                _ => VerticalAlign::Baseline,
-            }
-        }
-        style::values::generics::box_::VerticalAlign::Length(lp) => {
+
+    // `baseline-shift` carries sub/super, the line-box-relative top/center/
+    // bottom keywords, and explicit numeric offsets. A zero `Length` (the
+    // shorthand default) falls through to the keyword alignment below.
+    match styles.clone_baseline_shift() {
+        BaselineShift::Keyword(BaselineShiftKeyword::Sub) => return VerticalAlign::Sub,
+        BaselineShift::Keyword(BaselineShiftKeyword::Super) => return VerticalAlign::Super,
+        BaselineShift::Keyword(BaselineShiftKeyword::Top) => return VerticalAlign::Top,
+        BaselineShift::Keyword(BaselineShiftKeyword::Bottom) => return VerticalAlign::Bottom,
+        BaselineShift::Keyword(BaselineShiftKeyword::Center) => return VerticalAlign::Middle,
+        BaselineShift::Length(lp) => {
             if let Some(pct) = lp.to_percentage() {
-                VerticalAlign::Percent(pct.0)
+                if pct.0 != 0.0 {
+                    return VerticalAlign::Percent(pct.0);
+                }
             } else {
-                // `.px()` here is parley/stylo's CSS-px scalar. The Pageable
-                // tree is in pt, so convert. For calc() with percentage
-                // components the basis-0 resolve silently drops them —
-                // acceptable because calc() on vertical-align is rare.
+                // `.px()` is stylo's CSS-px scalar; the Pageable tree is in pt,
+                // so convert. For calc() with percentage components the basis-0
+                // resolve silently drops them — acceptable because calc() on
+                // vertical-align is rare.
                 let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
-                VerticalAlign::Length(px.as_px().in_pt())
+                if px != 0.0 {
+                    return VerticalAlign::Length(px.as_px().in_pt());
+                }
             }
         }
+    }
+
+    match styles.clone_alignment_baseline() {
+        AlignmentBaseline::Middle => VerticalAlign::Middle,
+        AlignmentBaseline::TextTop => VerticalAlign::TextTop,
+        AlignmentBaseline::TextBottom => VerticalAlign::TextBottom,
+        _ => VerticalAlign::Baseline,
     }
 }
 
@@ -3487,120 +3534,6 @@ fn extract_content_url(declarations: &str) -> Option<String> {
     None
 }
 
-/// Description of a `<link rel="stylesheet" media=...>` node that needs
-/// to be rewritten into `<style>@import url("...") media;</style>`.
-///
-/// Collected by [`collect_link_media_rewrites`] before DOM mutation so
-/// the href and media values remain borrowed from a stable document
-/// state (no interleaved mutation concerns).
-#[derive(Debug, Clone)]
-pub(crate) struct LinkMediaRewrite {
-    pub link_node_id: usize,
-    pub href: String,
-    pub media: String,
-}
-
-/// Walk the parsed document and return every `<link rel=... stylesheet ...>`
-/// element that carries a non-empty `media` attribute other than `all`.
-///
-/// Returned entries follow pre-order DOM traversal so the resulting
-/// `<style>` elements keep the same cascade order as the original
-/// `<link>` elements — insertion order matters for stylo's origin
-/// sorting.
-pub(crate) fn collect_link_media_rewrites(doc: &HtmlDocument) -> Vec<LinkMediaRewrite> {
-    fn walk(doc: &HtmlDocument, node_id: usize, depth: usize, out: &mut Vec<LinkMediaRewrite>) {
-        if depth >= MAX_DOM_DEPTH {
-            return;
-        }
-        let Some(node) = doc.get_node(node_id) else {
-            return;
-        };
-        if let Some(el) = node.element_data() {
-            if el.name.local.as_ref() == "link" {
-                let rel_ok = get_attr(el, "rel")
-                    .map(|rel| {
-                        rel.split_ascii_whitespace()
-                            .any(|t| t.eq_ignore_ascii_case("stylesheet"))
-                    })
-                    .unwrap_or(false);
-                let href = get_attr(el, "href").unwrap_or("").trim();
-                let media = get_attr(el, "media").unwrap_or("").trim();
-                let media_active = !media.is_empty() && !media.eq_ignore_ascii_case("all");
-                if rel_ok && !href.is_empty() && media_active {
-                    out.push(LinkMediaRewrite {
-                        link_node_id: node_id,
-                        href: href.to_string(),
-                        media: media.to_string(),
-                    });
-                }
-            }
-        }
-        for &child in &node.children {
-            walk(doc, child, depth + 1, out);
-        }
-    }
-
-    let mut out = Vec::new();
-    let root = doc.root_element().id;
-    walk(doc, root, 0, &mut out);
-    out
-}
-
-/// Escape a URL so it can appear inside a CSS `url("...")` literal.
-///
-/// Per CSS Syntax Module Level 3 §4.3.5, double quote and backslash
-/// must be escaped as `\"` and `\\`. Newlines are disallowed inside
-/// quoted strings but can be expressed as a numeric escape `\a`
-/// (followed by a single space that the tokenizer consumes) — we do
-/// the same for carriage return (`\d`).
-fn escape_css_url(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => out.push_str(r"\\"),
-            '"' => out.push_str(r#"\""#),
-            '\n' => out.push_str(r"\a "),
-            '\r' => out.push_str(r"\d "),
-            '\x0c' => out.push_str(r"\c "),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// Replace every collected `<link rel=stylesheet media=X href=Y>` with
-/// a `<style>@import url("Y") X;</style>` element inserted in the same
-/// document position.
-///
-/// Why this shape: blitz-dom 0.2.4's `CssHandler` hardcodes
-/// `MediaList::empty()` when loading `<link>` stylesheets, so the
-/// `media` attribute is silently dropped. However the `@import`
-/// resolution path (`StylesheetLoaderInner::request_stylesheet`) does
-/// propagate the media query into stylo's `ImportRule`, so routing the
-/// load through `@import` re-activates the media restriction.
-///
-/// The `<style>` is inserted *before* the original `<link>` to preserve
-/// cascade order; the `<link>` is then removed. The caller (Task 6
-/// integration) must filter any stylesheet resources that blitz already
-/// fetched for the `<link>` node before DOM mutation, otherwise the
-/// empty-media copy would also apply.
-pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[LinkMediaRewrite]) {
-    for rw in rewrites {
-        let css = format!(
-            r#"@import url("{}") {};"#,
-            escape_css_url(&rw.href),
-            rw.media
-        );
-
-        let mut mutator = doc.mutate();
-        let style_id = mutator.create_element(make_qual_name("style"), vec![]);
-        let text_id = mutator.create_text_node(&css);
-        mutator.append_children(style_id, &[text_id]);
-        mutator.insert_nodes_before(rw.link_node_id, &[style_id]);
-        mutator.remove_and_drop_node(rw.link_node_id);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5769,51 +5702,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_link_media_rewrites_picks_only_linked_sheets_with_non_empty_media() {
-        let html = r#"
-            <html><head>
-                <link rel="stylesheet" href="a.css" media="print">
-                <link rel="stylesheet" href="b.css">
-                <link rel="stylesheet" href="c.css" media="all">
-                <link rel="stylesheet" href="d.css" media="">
-                <link rel="stylesheet" href="e.css" media="screen and (min-width: 600px)">
-                <link rel="stylesheet" href="g.css" media="screen, print">
-                <link rel="alternate stylesheet" href="f.css" media="print">
-                <link rel="icon" href="favicon.ico" media="print">
-            </head><body><p>hi</p></body></html>
-        "#;
-        let doc = parse(html, 800.0, &[]);
-        let rewrites = collect_link_media_rewrites(&doc);
-
-        // a.css and e.css should be rewritten. f.css has `rel="alternate stylesheet"`
-        // which tokenizes to ["alternate", "stylesheet"]; since "stylesheet" is a
-        // token, include it. `media="all"` and `media=""` are treated as identity
-        // (skipped). favicon is not a stylesheet.
-        let hrefs: Vec<&str> = rewrites.iter().map(|r| r.href.as_str()).collect();
-        assert_eq!(hrefs, vec!["a.css", "e.css", "g.css", "f.css"]);
-        let medias: Vec<&str> = rewrites.iter().map(|r| r.media.as_str()).collect();
-        assert_eq!(
-            medias,
-            vec![
-                "print",
-                "screen and (min-width: 600px)",
-                "screen, print",
-                "print"
-            ]
-        );
-    }
-
-    #[test]
-    fn escape_css_url_escapes_backslash_and_quote() {
-        assert_eq!(escape_css_url("a.css"), "a.css");
-        assert_eq!(escape_css_url(r#"a"b.css"#), r#"a\"b.css"#);
-        assert_eq!(escape_css_url(r"a\b.css"), r"a\\b.css");
-        assert_eq!(escape_css_url("a\nb.css"), r"a\a b.css");
-        assert_eq!(escape_css_url("a\rb.css"), r"a\d b.css");
-        assert_eq!(escape_css_url("a\x0cb.css"), r"a\c b.css");
-    }
-
-    #[test]
     fn counter_pass_injected_selector_reconstructs_element_compound() {
         use crate::gcpm::{ContentCounterMapping, ContentItem, ParsedSelector, PseudoElement};
 
@@ -5908,54 +5796,6 @@ mod tests {
         assert_eq!(css_escape_ident("a\x7fb"), r"a\7f b");
         // Empty identifier stays empty.
         assert_eq!(css_escape_ident(""), "");
-    }
-
-    #[test]
-    fn apply_link_media_rewrites_replaces_link_with_style_import() {
-        let html = r#"
-            <html><head>
-                <link rel="stylesheet" href="a.css" media="print">
-                <link rel="stylesheet" href="b.css">
-            </head><body><p>hi</p></body></html>
-        "#;
-        let mut doc = parse(html, 800.0, &[]);
-        let rewrites = collect_link_media_rewrites(&doc);
-        assert_eq!(rewrites.len(), 1);
-
-        apply_link_media_rewrites(&mut doc, &rewrites);
-
-        let head = find_element_by_tag(&doc, "head").expect("head exists");
-        let head_node = doc.get_node(head).unwrap();
-
-        let mut style_text_found: Option<String> = None;
-        let mut a_css_link_found = false;
-        let mut b_css_link_found = false;
-        for &cid in &head_node.children {
-            let child = doc.get_node(cid).unwrap();
-            if let Some(el) = child.element_data() {
-                match el.name.local.as_ref() {
-                    "style" => {
-                        for &gc in &child.children {
-                            let gnode = doc.get_node(gc).unwrap();
-                            if let blitz_dom::node::NodeData::Text(t) = &gnode.data {
-                                style_text_found = Some(t.content.clone());
-                            }
-                        }
-                    }
-                    "link" => match get_attr(el, "href") {
-                        Some("a.css") => a_css_link_found = true,
-                        Some("b.css") => b_css_link_found = true,
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
-        }
-
-        assert!(!a_css_link_found, "<link href=a.css> must be removed");
-        assert!(b_css_link_found, "<link href=b.css> must be preserved");
-        let text = style_text_found.expect("<style> with @import must exist");
-        assert_eq!(text, r#"@import url("a.css") print;"#);
     }
 
     #[test]

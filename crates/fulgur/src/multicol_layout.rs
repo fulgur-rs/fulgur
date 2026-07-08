@@ -340,29 +340,18 @@ impl CacheTree for FulgurLayoutTree<'_> {
     fn cache_get(
         &self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        inputs: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.doc
-            .cache_get(node_id, known_dimensions, available_space, run_mode)
+        self.doc.cache_get(node_id, inputs)
     }
 
     fn cache_store(
         &mut self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        inputs: &taffy::LayoutInput,
         layout_output: taffy::LayoutOutput,
     ) {
-        self.doc.cache_store(
-            node_id,
-            known_dimensions,
-            available_space,
-            run_mode,
-            layout_output,
-        );
+        self.doc.cache_store(node_id, inputs, layout_output);
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
@@ -828,7 +817,6 @@ fn layout_self_inline_root_container(
     let mut rebroken = cloned_layout;
     rebroken.break_all_lines(Some(col_w));
     rebroken.align(
-        Some(col_w),
         parley::Alignment::default(),
         parley::AlignmentOptions::default(),
     );

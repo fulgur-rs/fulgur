@@ -28,9 +28,7 @@
 //! cleaned CSS still contains every other declaration, so cascade,
 //! specificity and `@import` resolution remain delegated to stylo.
 
-use crate::blitz_adapter::net::{
-    BoxedHandler, Bytes, NetProvider, Request, Resource, SharedCallback,
-};
+use crate::blitz_adapter::net::{Bytes, NetHandler, NetProvider, Request};
 use crate::gcpm::GcpmContext;
 use crate::gcpm::parser::parse_gcpm;
 use std::path::{Path, PathBuf};
@@ -59,7 +57,6 @@ pub struct FulgurNetProvider {
 #[derive(Default)]
 struct Inner {
     gcpm_contexts: Vec<GcpmContext>,
-    pending_resources: Vec<Resource>,
 }
 
 impl FulgurNetProvider {
@@ -71,14 +68,6 @@ impl FulgurNetProvider {
             canonical_base,
             inner: Arc::new(Mutex::new(Inner::default())),
         }
-    }
-
-    /// Take the queued [`Resource`] objects loaded so far. The caller
-    /// is expected to apply each one to the document via
-    /// `BaseDocument::load_resource`.
-    pub fn drain_pending_resources(&self) -> Vec<Resource> {
-        let mut inner = self.inner.lock().unwrap();
-        std::mem::take(&mut inner.pending_resources)
     }
 
     /// Take the GCPM contexts extracted from CSS payloads. The caller
@@ -120,7 +109,8 @@ impl FulgurNetProvider {
 
     fn looks_like_css(request: &Request, path: &Path) -> bool {
         // Strict MIME match — `text/cssfoo` must not be treated as CSS.
-        let ct = request.content_type.as_str();
+        // blitz-traits 0.3 made `Request::content_type` an `Option<String>`.
+        let ct = request.content_type.as_deref().unwrap_or("");
         if ct == "text/css" || ct.starts_with("text/css;") {
             return true;
         }
@@ -130,8 +120,8 @@ impl FulgurNetProvider {
     }
 }
 
-impl NetProvider<Resource> for FulgurNetProvider {
-    fn fetch(&self, doc_id: usize, request: Request, handler: BoxedHandler<Resource>) {
+impl NetProvider for FulgurNetProvider {
+    fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
         let Some(canonical_path) = self.resolve_local_path(&request) else {
             return;
         };
@@ -155,20 +145,20 @@ impl NetProvider<Resource> for FulgurNetProvider {
             (Bytes::from(raw_bytes), None)
         };
 
-        let inner = self.inner.clone();
-        let callback: SharedCallback<Resource> = Arc::new(
-            move |_doc_id: usize, result: Result<Resource, Option<String>>| {
-                if let Ok(res) = result {
-                    inner.lock().unwrap().pending_resources.push(res);
-                }
-            },
-        );
+        // blitz-traits 0.3 changed `NetHandler::bytes` to take ownership of
+        // the handler plus a resolved URL, and the handler now owns the
+        // delivery channel back into the `Document` itself (it emits a
+        // `DocumentEvent::ResourceLoad`). fulgur no longer captures the
+        // resulting `Resource`; the caller drains the document's event queue
+        // via `BaseDocument::handle_messages` after parsing. We only need to
+        // forward the (cleaned) bytes.
+        let resolved_url = request.url.to_string();
 
         // `handler.bytes` parses the CSS via stylo, which synchronously
         // triggers `fetch()` again for every `@import` before returning.
         // When it does return, every imported child stylesheet has
         // already pushed its own `GcpmContext`.
-        handler.bytes(doc_id, bytes_for_blitz, callback);
+        handler.bytes(resolved_url, bytes_for_blitz);
 
         // Post-order push: the parent context goes into the buffer
         // *after* its children, so the eventual `cleaned_css`
@@ -201,13 +191,8 @@ mod tests {
         bytes: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
-    impl NetHandler<Resource> for RecordingHandler {
-        fn bytes(
-            self: Box<Self>,
-            _doc_id: usize,
-            bytes: Bytes,
-            _callback: SharedCallback<Resource>,
-        ) {
+    impl NetHandler for RecordingHandler {
+        fn bytes(self: Box<Self>, _resolved_url: String, bytes: Bytes) {
             *self.bytes.lock().unwrap() = Some(bytes.to_vec());
         }
     }
@@ -279,7 +264,7 @@ mod tests {
     #[test]
     fn detects_css_by_content_type() {
         let mut req = make_request("file:///tmp/x");
-        req.content_type = "text/css".to_string();
+        req.content_type = Some("text/css".to_string());
         assert!(FulgurNetProvider::looks_like_css(&req, Path::new("/tmp/x")));
     }
 
@@ -363,10 +348,9 @@ mod tests {
             recorded.lock().unwrap().is_none(),
             "handler must not receive bytes for files outside the base path"
         );
-        assert!(provider.drain_gcpm_contexts().is_empty());
         assert!(
-            provider.drain_pending_resources().is_empty(),
-            "rejected fetches must not register a pending resource"
+            provider.drain_gcpm_contexts().is_empty(),
+            "rejected fetches must not register a GCPM context"
         );
     }
 }

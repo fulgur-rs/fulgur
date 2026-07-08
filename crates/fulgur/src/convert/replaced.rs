@@ -225,10 +225,7 @@ fn convert_svg(
     assets: Option<&AssetBundle>,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(elem) = node.element_data() else {
-        return false;
-    };
-    let Some(tree) = extract_inline_svg_tree(elem) else {
+    let Some(tree) = extract_inline_svg_tree(node) else {
         return false;
     };
 
