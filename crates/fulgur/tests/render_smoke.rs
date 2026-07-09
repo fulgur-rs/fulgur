@@ -5494,3 +5494,238 @@ fn test_render_html_huge_page_name_is_bounded() {
     let pdf = Engine::builder().build().render(&html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+// ── coverage/render-2026-07-09 ─────────────────────────────────────────────
+
+#[test]
+fn tagged_paragraph_link_run_tagging_in_dispatch_fragment() {
+    // render.rs lines 1072-1075: `use_run_tagging` path inside
+    // `dispatch_fragment`'s block+para branch.  A `<p>` has BOTH
+    // `block_styles` (it's a block) and `paragraphs` (inline text) with link
+    // runs.  The node is in `drawables.semantics` (PdfTag::P), so
+    // `run_tag_target` returns Some → `use_run_tagging = true` →
+    // `canvas.link_run_node_id` is set (lines 1073-1075).
+    // Distinct from `tagged_pdf_link_in_overflow_hidden_does_not_panic`
+    // which goes through `draw_under_clip`; this exercises the plain
+    // `dispatch_fragment` code path (no overflow:hidden, no opacity).
+    // The <p> needs visual styling (background + padding) so that
+    // `needs_block_wrapper()` is true → `block_styles` entry is created →
+    // the block+para branch of `dispatch_fragment` is taken → lines 1072-1075
+    // where `use_run_tagging` is checked and `canvas.link_run_node_id` is set.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <p style="background:#fff;padding:4px">Visit <a href="https://example.com">this link</a> for details.</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged para with link must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+}
+
+#[test]
+fn tagged_heading_with_link_backfills_title() {
+    // render.rs line 3898: heading nodes that use per-run tagging (because
+    // their paragraph has link runs) bypass `try_start_tagged` and therefore
+    // never populate `heading_titles` in the `tc_entries` loop.  The backfill
+    // at lines 3885-3898 re-scans `run_entries` for H-tagged nodes and
+    // extracts their `/T` attribute from the paragraph text.
+    // `<h1><a href>link</a></h1>` in tagged mode is the minimal trigger:
+    // the heading is in `run_entries` (use_run_tagging=true) AND is an H tag.
+    // Visual styling on <h1> (background) forces `needs_block_wrapper()` = true
+    // → `block_styles` entry created → block+para branch of `dispatch_fragment`
+    // → `use_run_tagging = true` (link run present, node in semantics, per-run
+    // tag target found) → `try_start_tagged` bypassed → heading goes into
+    // `run_entries`, NOT `tc_entries` → backfill loop at line 3898 fires.
+    let html = r#"<!DOCTYPE html><html lang="en"><body>
+        <h1 style="background:#eee"><a href="https://example.com">Section Heading</a></h1>
+        <p>Body text follows.</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged heading with link must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(
+        s.contains("/H1") || s.contains("/H "),
+        "must have heading structure element"
+    );
+}
+
+#[test]
+fn list_style_type_none_hits_noop_marker_arm() {
+    // render.rs line 3129: `_ => {}` catch-all in `draw_list_item_marker`.
+    // When `list-style-type: none` the marker is `ListItemMarker::None`;
+    // `draw_list_item_marker` is still called but only the no-op `_ => {}`
+    // arm fires (no glyph or image draw).
+    let html = r#"<!DOCTYPE html><html><body>
+        <ul style="list-style-type:none">
+            <li>First item without marker</li>
+            <li>Second item without marker</li>
+        </ul>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn gcpm_page_pseudo_selectors_first_left_right() {
+    // render.rs lines 3542-3556: the `page_selector` match arms in
+    // `MarginBoxRenderer::render_page`.  `:first` fires only on page 1,
+    // `:left` on even pages, `:right` on odd pages.  A three-page document
+    // exercises all three selector branches.
+    let html = r#"<!DOCTYPE html><html><head><style>
+        @page         { margin: 36pt; @top-center { content: "default"; } }
+        @page :first  { margin: 36pt; @top-center { content: "first";   } }
+        @page :left   { margin: 36pt; @top-center { content: "left";    } }
+        @page :right  { margin: 36pt; @top-center { content: "right";   } }
+        body { margin: 0; }
+        .page { height: 900px; background: #f5f5f5; }
+    </style></head><body>
+        <div class="page">page 1</div>
+        <div class="page">page 2</div>
+        <div class="page">page 3</div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+    assert!(page_count(&pdf) >= 3, "must produce at least 3 pages");
+}
+
+#[test]
+fn opacity_block_with_block_children_inside_overflow_clip() {
+    // render.rs lines 1952-1969: nested-opacity branch inside
+    // `draw_under_clip`'s strict-descendant loop.  The outer div has
+    // `overflow:hidden` → `draw_under_clip`.  One of its descendants is an
+    // opacity-scoped block (`opacity:0.6`) whose block children make
+    // `opacity_descendants` non-empty → the `draw_under_opacity` recursive
+    // call at lines 1956-1969 fires.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="overflow:hidden;width:200px;height:120px;border:1px solid #aaa">
+            <div style="opacity:0.6">
+                <div style="height:50px;background:#f0a030">block child A</div>
+                <div style="height:50px;background:#30a0f0">block child B</div>
+            </div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn img_with_overflow_hidden_and_border_draws_via_draw_under_clip() {
+    // render.rs line 1803: `draw_image_inner_paint` inside `draw_under_clip`.
+    // An `<img>` with an explicit border and `overflow:hidden` acquires a
+    // `block_styles` entry (border > 0, has_overflow_clip = true), so it is
+    // routed through `draw_under_clip`.  Inside, `img_for_block =
+    // drawables.images.get(&node_id)` is Some → `draw_image_inner_paint`
+    // fires (line 1803).
+    // Data URIs are not processed by convert_image (requires an AssetBundle
+    // entry).  Register a 1×1 PNG so `drawables.images.get(&node_id)` returns
+    // Some inside `draw_under_clip` → lines 1803-1806 fire.
+    // The border makes `has_visual_style()` true → `block_styles` entry →
+    // `draw_under_clip` is called for this <img> node.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("clip_test.png", TINY_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><body>
+        <img style="overflow:hidden;border:4px solid red;border-radius:6px;
+                    width:60px;height:60px;display:block" src="clip_test.png">
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn multicol_inline_root_with_visual_style_suppresses_para_in_block_branch() {
+    // render.rs line 1061: `para_for_block = None` inside the block+para
+    // branch of `dispatch_fragment` when `has_paragraph_slices = true`.
+    // Case A: the multicol container IS the inline root (text directly inside
+    // the div, no wrapper `<p>`), so the div gets BOTH `block_styles` (visual
+    // style: background + border) AND `paragraph_slices`.  `para_for_block`
+    // is suppressed to None; the block's bg/border draw via `draw_block_v2`
+    // and the lines are painted by `paint_multicol_paragraph_slices`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="column-count:2;background:#f0f0f0;border:1px solid #ccc;
+                    width:400px;column-gap:20px">
+            word word word word word word word word word word word word word
+            word word word word word word word word word word word word word
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn table_overflow_clip_descendant_dispatch_with_transform_and_nested_table() {
+    // render.rs lines 2854-2924: the nested-scope dispatch loop inside
+    // `draw_under_clip_table` for three descendant kinds:
+    //   · lines 2854-2867: a table cell with a CSS transform →
+    //     `draw_under_transform` called from within `draw_under_clip_table`
+    //   · lines 2892-2905: a nested clipping table → recursive
+    //     `draw_under_clip_table` call
+    //   · lines 2910-2924: a cell with an opacity-scoped block child →
+    //     `draw_under_opacity` call from within `draw_under_clip_table`
+    let engine = Engine::builder().build();
+
+    // Case 1: transform inside clipping table
+    let html_tx = r#"<!DOCTYPE html><html><body>
+        <table style="overflow:hidden;width:120px;height:80px">
+            <tr><td style="transform:rotate(10deg);background:#cef">cell</td></tr>
+        </table>
+    </body></html>"#;
+    let pdf_tx = engine
+        .render(html_tx)
+        .expect("render: table clip + cell transform");
+    assert!(!pdf_tx.is_empty());
+
+    // Case 2: nested clipping table
+    let html_nested = r#"<!DOCTYPE html><html><body>
+        <table style="overflow:hidden;width:200px;height:100px">
+            <tr><td>
+                <table style="overflow:hidden;width:80px;height:60px">
+                    <tr><td style="background:#afe">inner cell</td></tr>
+                </table>
+            </td></tr>
+        </table>
+    </body></html>"#;
+    let pdf_nested = engine
+        .render(html_nested)
+        .expect("render: nested clipping tables");
+    assert!(!pdf_nested.is_empty());
+
+    // Case 3: opacity block with block children inside clipping table
+    let html_opacity = r#"<!DOCTYPE html><html><body>
+        <table style="overflow:hidden;width:200px;height:120px">
+            <tr><td>
+                <div style="opacity:0.5">
+                    <div style="height:40px;background:#fa0">inner block</div>
+                </div>
+            </td></tr>
+        </table>
+    </body></html>"#;
+    let pdf_opacity = engine
+        .render(html_opacity)
+        .expect("render: table clip + opacity block");
+    assert!(!pdf_opacity.is_empty());
+}
