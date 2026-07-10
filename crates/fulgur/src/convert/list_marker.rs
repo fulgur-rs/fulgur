@@ -818,6 +818,7 @@ mod tests {
         // resolve_list_marker returns None → marker falls back to text (empty
         // lines, zero width).
         let pdf = crate::engine::Engine::builder()
+            .system_fonts(false)
             .build()
             .render(
                 r#"<!doctype html><html><body>
