@@ -727,6 +727,7 @@ mod tests {
         let bundle = noto_bundle_with_png();
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
+            .system_fonts(false)
             .build()
             .render(
                 r#"<!doctype html><html><body>
@@ -753,6 +754,7 @@ mod tests {
         let bundle = noto_bundle_with_svg();
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
+            .system_fonts(false)
             .build()
             .render(
                 r#"<!doctype html><html><body>
@@ -784,6 +786,7 @@ mod tests {
         let bundle = noto_bundle_with_svg();
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
+            .system_fonts(false)
             .build()
             .render(
                 r#"<!doctype html><html><body>
