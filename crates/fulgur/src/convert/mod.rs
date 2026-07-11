@@ -412,15 +412,22 @@ fn walk_semantics(
             // CSS list-style-type を読んで ListNumbering をオーバーライド
             if matches!(tag, crate::tagging::PdfTag::L { .. }) {
                 if let Some(styles) = node.primary_styles() {
-                    use ::style::properties::longhands::list_style_type::computed_value::T as LST;
+                    use ::style::counter_style::CounterStyle;
                     use krilla::tagging::ListNumbering;
-                    let numbering = match styles.clone_list_style_type() {
-                        LST::Disc => ListNumbering::Disc,
-                        LST::Circle => ListNumbering::Circle,
-                        LST::Square => ListNumbering::Square,
-                        LST::Decimal => ListNumbering::Decimal,
-                        LST::LowerAlpha => ListNumbering::LowerAlpha,
-                        LST::UpperAlpha => ListNumbering::UpperAlpha,
+                    // stylo 0.17 collapsed the `list-style-type` keyword enum into
+                    // `ListStyleType(CounterStyle)`; predefined keywords now arrive
+                    // as `CounterStyle::Name(<ident>)`. Match the ident string the
+                    // same way blitz-dom's own list layout does.
+                    let numbering = match styles.clone_list_style_type().0 {
+                        CounterStyle::Name(name) => match &*name.0 {
+                            "disc" => ListNumbering::Disc,
+                            "circle" => ListNumbering::Circle,
+                            "square" => ListNumbering::Square,
+                            "decimal" => ListNumbering::Decimal,
+                            "lower-alpha" => ListNumbering::LowerAlpha,
+                            "upper-alpha" => ListNumbering::UpperAlpha,
+                            _ => ListNumbering::None,
+                        },
                         _ => ListNumbering::None,
                     };
                     tag = crate::tagging::PdfTag::L { numbering };
@@ -747,11 +754,7 @@ fn convert_multicol_paragraph_slices(
                     .unwrap_or(parley::Alignment::Start);
                 let mut cloned = text_layout.layout.clone();
                 cloned.break_all_lines(Some(group.col_w.to_f32()));
-                cloned.align(
-                    Some(group.col_w.to_f32()),
-                    alignment,
-                    parley::AlignmentOptions::default(),
-                );
+                cloned.align(alignment, parley::AlignmentOptions::default());
                 Some(cloned)
             } else {
                 None

@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Link media example</title>
-  <link rel="stylesheet" href="base.css">
-  <link rel="stylesheet" href="print-only.css" media="print">
+  <title>@media print example</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <h1>Hello</h1>
-  <p>This paragraph reads in the "base" color both in a browser and in fulgur's PDF output. The <code>print-only.css</code> stylesheet is restricted to <code>media="print"</code>; fulgur currently renders with <code>media="screen"</code>, so its rules are excluded.</p>
+  <p>This paragraph reads in the "base" dark-green color. The stylesheet
+    declares a <code>@media screen</code> block (red on yellow) and a
+    <code>@media print</code> block (a print-only heading accent). fulgur
+    renders for <code>media="print"</code>, so the screen block is excluded
+    and only the print accent applies.</p>
 </body>
 </html>

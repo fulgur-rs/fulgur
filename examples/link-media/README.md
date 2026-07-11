@@ -1,26 +1,30 @@
 # link-media
 
-Demonstrates that `<link rel="stylesheet" media="print">` is honoured
-by fulgur: rules from `print-only.css` must **not** appear in the
-rendered PDF, because fulgur's stylo device reports `media="screen"`.
+Demonstrates that fulgur evaluates CSS `@media` rules against the **print**
+media type. `styles.css` carries both a `@media screen` block (red on yellow)
+and a `@media print` block (a print-only heading accent). In fulgur's PDF
+output the screen block is excluded and only the print accent applies.
 
-Without the fulgur-2ai fix, blitz's `CssHandler` hardcoded `MediaList::empty()`
-and the media attribute was silently ignored — the PDF would have shown
-red-on-yellow text. With the fix, `<link media="print">` is rewritten
-to `<style>@import url(...) print;</style>` at DOM level, stylo
-propagates the print media list into the `ImportRule`, and the screen
-device drops it.
+Since the blitz 0.3 upgrade fulgur sets `DocumentConfig::media_type =
+MediaType::print()`, so blitz evaluates `@media` natively — this replaced an
+earlier CSS-text rewrite hack.
 
 ## What you'll see
 
-- `examples/link-media/index.pdf`: dark green text in the "base"
-  color (`#064e3b`), no yellow background, no red strikethrough.
-- Open `examples/link-media/index.html` in a real browser and the
-  output is identical, because a browser's screen media also excludes
-  `print-only.css`.
+- `examples/link-media/index.pdf`: the heading in the print accent color
+  (`#b91c1c`) and the paragraph in the base dark green (`#064e3b`); **no**
+  yellow background and **no** red strikethrough from the `@media screen` block.
+- Open `examples/link-media/index.html` in a real browser and the screen block
+  *does* apply (red on yellow), because a browser uses the screen media type —
+  the inverse of fulgur's print rendering.
 
-The follow-up question "should fulgur render as `print` media instead
-of `screen`?" is tracked separately (`bd show fulgur-801`).
+## Known limitation
+
+The `@media` *at-rule* is gated correctly, but the `<link media="...">`
+*attribute* is not yet honoured: blitz 0.3 still hardcodes an empty media list
+for `<link>` stylesheets, so a `<link rel="stylesheet" media="screen">` would
+still apply under the print device. Use `@media` blocks inside the stylesheet
+to gate by media type until the `<link>` attribute is re-supported.
 
 ## Regenerate
 

@@ -4,7 +4,7 @@ members = ["crates/fulgur", "crates/fulgur-cli", "crates/fulgur-ruby", "crates/f
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fulgur-rs/fulgur"
 homepage = "https://github.com/fulgur-rs/fulgur"

@@ -64,10 +64,7 @@
 use crate::units::F32Units;
 use blitz_dom::BaseDocument;
 use std::collections::{BTreeMap, BTreeSet};
-use taffy::{
-    AvailableSpace, CacheTree, LayoutPartialTree, NodeId, RoundTree, Size, TraversePartialTree,
-    TraverseTree,
-};
+use taffy::{CacheTree, LayoutPartialTree, NodeId, RoundTree, TraversePartialTree, TraverseTree};
 
 /// One placement slot recorded per (source node × page).
 ///
@@ -366,9 +363,9 @@ impl<'a> PaginationLayoutTree<'a> {
             .map(|n| n.final_layout)
             .unwrap_or_default();
 
-        let avail = Size {
-            width: AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
-            height: AvailableSpace::MaxContent,
+        let avail = taffy::Size {
+            width: taffy::AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
+            height: taffy::AvailableSpace::MaxContent,
         };
         taffy::compute_root_layout(self, nid, avail);
 
@@ -2343,7 +2340,7 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
         .lines()
         .map(|line| {
             let m = line.metrics();
-            (m.min_coord, m.max_coord)
+            (m.block_min_coord, m.block_max_coord)
         })
         .collect()
 }
@@ -3782,29 +3779,18 @@ impl CacheTree for PaginationLayoutTree<'_> {
     fn cache_get(
         &self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        inputs: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.doc
-            .cache_get(node_id, known_dimensions, available_space, run_mode)
+        self.doc.cache_get(node_id, inputs)
     }
 
     fn cache_store(
         &mut self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        inputs: &taffy::LayoutInput,
         layout_output: taffy::LayoutOutput,
     ) {
-        self.doc.cache_store(
-            node_id,
-            known_dimensions,
-            available_space,
-            run_mode,
-            layout_output,
-        );
+        self.doc.cache_store(node_id, inputs, layout_output);
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
