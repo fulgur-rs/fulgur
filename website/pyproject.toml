@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mkdocs-material>=9.5",
     "mkdocs-static-i18n>=1.2",
-    "pymdown-extensions>=10.21.3",
+    "pymdown-extensions>=11.0",
 ]
 
 [tool.uv]
