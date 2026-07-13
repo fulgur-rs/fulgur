@@ -671,4 +671,267 @@ mod tests {
             "last glyph must reach text end"
         );
     }
+
+    // ── find_marker_font: drawables fallback edge cases (lines 319-321) ────────
+    //
+    // The three missed regions in the drawables scan are:
+    //   line 319: `if check_chars.iter().all(...)` returning false (font covers nothing)
+    //   line 320: `if let Ok(font_ref) = from_index(...)` Err arm (bad font_data)
+    //   line 321: `if let LineItem::Text(run) = item` non-matching arm (non-Text item)
+
+    #[test]
+    fn find_marker_font_drawables_font_missing_char_does_not_match() {
+        // Drawables has a run with valid NotoSans font_data, but the marker
+        // requests U+E000 (Private Use Area) which NotoSans does not map.
+        // → check_chars.iter().all() returns false → no match in fallback scan
+        // → function returns None (no bundle, no matching drawables entry).
+        let font_data = load_noto_sans_ttf();
+        let run = ShapedGlyphRun {
+            font_data: Arc::clone(&font_data),
+            font_index: 0,
+            font_size: 12.0.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: Arc::from("A"),
+            x_offset: crate::units::Pt::ZERO,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 12.0.as_pt(),
+            baseline: 9.0.as_pt(),
+            items: vec![LineItem::Text(run)],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        let result = find_marker_font(&Marker::Char('\u{E000}'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "PUA char U+E000 must not be found in NotoSans drawables fallback"
+        );
+    }
+
+    #[test]
+    fn find_marker_font_drawables_bad_font_data_skips_invalid_entry() {
+        // Drawables has a run with corrupt font_data (16 zero bytes).
+        // skrifa::FontRef::from_index fails → from_index Err arm executed →
+        // the inner font check is skipped for that entry.
+        // With no bundle and no valid drawables font, returns None.
+        let bad_font = Arc::new(vec![0u8; 16]);
+        let run = ShapedGlyphRun {
+            font_data: Arc::clone(&bad_font),
+            font_index: 0,
+            font_size: 12.0.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![ShapedGlyph {
+                id: 1,
+                x_advance: 0.5,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: Arc::from("A"),
+            x_offset: crate::units::Pt::ZERO,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 12.0.as_pt(),
+            baseline: 9.0.as_pt(),
+            items: vec![LineItem::Text(run)],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        let result = find_marker_font(&Marker::Char('•'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "bad font_data in drawables should not produce a match"
+        );
+    }
+
+    #[test]
+    fn find_marker_font_drawables_non_text_items_not_matched() {
+        // Drawables has a paragraph whose line contains only an InlineImage —
+        // no LineItem::Text. The `if let LineItem::Text(run) = item` arm does
+        // not match; the item is skipped. With no bundle, returns None.
+        let image_item = LineItem::Image(InlineImage {
+            data: Arc::new(vec![]),
+            format: ImageFormat::Png,
+            width: 10.0.as_pt(),
+            height: 10.0.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible: true,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+        });
+        let line = ShapedLine {
+            height: 12.0.as_pt(),
+            baseline: 9.0.as_pt(),
+            items: vec![image_item],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        let result = find_marker_font(&Marker::Char('•'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "non-Text items in drawables must not produce a font match"
+        );
+    }
+
+    // ── find_marker_font: whitespace-only marker vacuously matches ────────────
+
+    #[test]
+    fn find_marker_font_whitespace_only_marker_vacuously_matches_first_font() {
+        // Marker text "   " → after filtering whitespace, check_chars is empty.
+        // check_chars.iter().all(|&c| charmap.map(c).is_some()) is vacuously
+        // true for any font, so the first available font is returned.
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = AssetBundle::new();
+        bundle.fonts.push(Arc::clone(&font_data));
+        let drawables = Drawables::new();
+        let result = find_marker_font(
+            &Marker::String("   ".to_string()),
+            Some(&bundle),
+            &drawables,
+        );
+        assert!(
+            result.is_some(),
+            "whitespace-only marker should vacuously match the first available font"
+        );
+    }
+
+    // ── smoke tests via Engine::render_html (Blitz-dependent paths) ──────────
+    //
+    // These cover branches in resolve_list_marker and resolve_inside_image_marker
+    // that require a live Blitz document and cannot be reached by pure unit tests.
+
+    fn render_html(html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    fn render_with_assets(assets: crate::asset::AssetBundle, html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    // Minimal valid SVG: 10×10 red square.
+    const TINY_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+
+    // resolve_list_marker: AssetKind::Svg arm (lines 88-107).
+    // Triggered by a list-style-image URL that resolves to valid SVG bytes.
+    #[test]
+    fn smoke_svg_list_style_image_outside_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("marker.svg", TINY_SVG.to_vec());
+        bundle.add_css(r#"ul { list-style-image: url("marker.svg"); }"#);
+        let pdf = render_with_assets(
+            bundle,
+            r#"<!doctype html><html><body><ul><li>SVG bullet</li></ul></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_list_marker: AssetKind::Unknown arm (line 108).
+    // Triggered when the list-style-image URL points to an asset whose bytes
+    // don't match any recognized image format → returns None → text marker used.
+    #[test]
+    fn smoke_unknown_format_list_style_image_falls_back_to_text_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("marker.bin", b"not an image at all".to_vec());
+        bundle.add_css(r#"ul { list-style-image: url("marker.bin"); }"#);
+        let pdf = render_with_assets(
+            bundle,
+            r#"<!doctype html><html><body><ul><li>Unknown image type</li></ul></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_inside_image_marker: AssetKind::Svg | AssetKind::Unknown => None (line 151).
+    // SVG is not supported for inline markers (LineItem::Image can't hold SVG),
+    // so the function returns None and falls back to a text marker.
+    #[test]
+    fn smoke_svg_inside_image_marker_falls_back_to_text() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("marker.svg", TINY_SVG.to_vec());
+        bundle
+            .add_css(r#"ul { list-style-position: inside; list-style-image: url("marker.svg"); }"#);
+        let pdf = render_with_assets(
+            bundle,
+            r#"<!doctype html><html><body><ul><li>SVG inside marker</li></ul></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_inside_image_marker: zero line_height guard (line 130).
+    // line-height:0 on the <li> → computed line_height=0 pt → early return None.
+    // The function returns None so no InlineImage marker is produced; instead
+    // the caller falls back to the text-marker path (or no marker at all).
+    #[test]
+    fn smoke_inside_image_marker_zero_line_height_returns_none() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", TEST_PNG_1X1.to_vec());
+        bundle.add_css(
+            r#"ul { list-style-position: inside; list-style-image: url("dot.png"); line-height: 0; }"#,
+        );
+        let pdf = render_with_assets(
+            bundle,
+            r#"<!doctype html><html><body><ul><li>Zero line height</li></ul></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_list_marker: zero/negative line_height guard (line 68).
+    // list-style-position: outside with line-height: 0 → marker_line_height=0 pt
+    // → resolve_list_marker returns None → text marker used as fallback.
+    #[test]
+    fn smoke_outside_image_marker_zero_line_height_falls_back() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", TEST_PNG_1X1.to_vec());
+        bundle.add_css(r#"ul { list-style-image: url("dot.png"); line-height: 0; }"#);
+        let pdf = render_with_assets(
+            bundle,
+            r#"<!doctype html><html><body><ul><li>Outside zero lh</li></ul></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Smoke test for rendering without any list-style-image — exercises
+    // the regular text marker path as a baseline alongside the image tests.
+    #[test]
+    fn smoke_basic_ul_renders_without_assets() {
+        let pdf = render_html(r#"<!doctype html><html><body><ul><li>Item</li></ul></body></html>"#);
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
