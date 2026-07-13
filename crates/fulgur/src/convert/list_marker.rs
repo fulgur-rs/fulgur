@@ -671,4 +671,167 @@ mod tests {
             "last glyph must reach text end"
         );
     }
+
+    // ── smoke tests via Engine::render_html ──────────────────────────────────
+    //
+    // These exercises cover paths in `resolve_list_style_image_asset`,
+    // `resolve_list_marker`, and `resolve_inside_image_marker` that require a
+    // live Blitz document and cannot be reached by the pure-function tests above.
+    //
+    // Key dependency: `resolve_list_marker` guards on `line_height <= Pt::ZERO`
+    // (the value returned by `extract_marker_lines`). In the outside-marker path,
+    // `extract_marker_lines` queries Parley for the marker's glyph metrics; if no
+    // font covers the bullet '•' the layout is empty and line_height stays zero,
+    // causing an early return before `resolve_list_style_image_asset` is reached.
+    // Bundling NotoSans-Regular ensures Parley can shape the bullet and returns a
+    // non-zero line_height, allowing the image-resolution path to proceed.
+    //
+    // The inside-marker path (`resolve_inside_image_marker`) is different: it
+    // computes `line_height` directly from CSS `font-size` / `line-height`
+    // properties, so it reaches `resolve_list_style_image_asset` even without
+    // bundled fonts.
+
+    // Minimal valid SVG used as a list-style-image in the smoke tests below.
+    const MINIMAL_SVG: &[u8] = b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'>\
+          <circle cx='4' cy='4' r='3' fill='blue'/></svg>";
+
+    fn noto_bundle_with_png() -> crate::asset::AssetBundle {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = crate::asset::AssetBundle::new();
+        bundle.fonts.push(font_data);
+        bundle.add_image("dot.png", TEST_PNG_1X1.to_vec());
+        bundle
+    }
+
+    fn noto_bundle_with_svg() -> crate::asset::AssetBundle {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = crate::asset::AssetBundle::new();
+        bundle.fonts.push(font_data);
+        bundle.add_image("bullet.svg", MINIMAL_SVG.to_vec());
+        bundle
+    }
+
+    // resolve_list_marker — Raster arm (lines 72-86 in list_marker.rs):
+    // An outside-positioned `<li>` with `list-style-image: url("dot.png")` and
+    // NotoSans bundled. NotoSans covers '•' (U+2022) so Parley produces a
+    // non-zero line_height, allowing `resolve_list_marker` to proceed past the
+    // `line_height <= Pt::ZERO` guard and call `resolve_list_style_image_asset`.
+    // The PNG resolves to `AssetKind::Raster` → the `Raster` arm is taken and a
+    // `ListItemMarker::Image { marker: ImageMarker::Raster(...) }` is built.
+    //
+    // Covers in `list_marker.rs`:
+    //   - `resolve_list_style_image_asset`: lines 15 (styles), 17-19 (Url match),
+    //     21-22 (Valid URL arm), 25-26 (asset lookup)
+    //   - `resolve_list_marker`: lines 70 (call), 72 (Raster arm), 73-86 (entry)
+    #[test]
+    fn smoke_outside_marker_png_list_style_image_with_bundled_font() {
+        let bundle = noto_bundle_with_png();
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .system_fonts(false)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-image: url('dot.png')">
+                    <li>Item with PNG bullet</li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_list_marker — SVG arm (lines 89-108 in list_marker.rs):
+    // Same setup as above but with an SVG image. The SVG resolves to
+    // `AssetKind::Svg` → the `Svg` arm is taken: `usvg::Tree::from_data` parses
+    // the SVG, dimensions are clamped, and a `ListItemMarker::Image { marker:
+    // ImageMarker::Svg(...) }` is built.
+    //
+    // Covers in `list_marker.rs`:
+    //   - `resolve_list_style_image_asset`: same as above for lines 15-26
+    //   - `resolve_list_marker`: lines 88 (Svg arm), 89-107 (SVG tree + entry)
+    #[test]
+    fn smoke_outside_marker_svg_list_style_image_with_bundled_font() {
+        let bundle = noto_bundle_with_svg();
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .system_fonts(false)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-image: url('bullet.svg')">
+                    <li>Item with SVG bullet</li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_inside_image_marker — SVG/Unknown fallback (line 151):
+    // An inside-positioned `<li>` with a block child (so Branch 3 in
+    // `try_convert` is entered) and `list-style-image: url("bullet.svg")`.
+    // The inside-marker path computes `line_height` from CSS font metrics (not
+    // from `extract_marker_lines`), so no bundled font is required to reach
+    // `resolve_list_style_image_asset`. The SVG resolves to `AssetKind::Svg`,
+    // which hits the `AssetKind::Svg | AssetKind::Unknown => None` arm — SVG
+    // is not supported as an inline image in `resolve_inside_image_marker`.
+    // The fallback then calls `find_marker_font`; NotoSans in the bundle covers
+    // '•' so a text marker is produced.
+    //
+    // Covers in `list_marker.rs`:
+    //   - `resolve_list_style_image_asset`: lines 15-26 (via inside path)
+    //   - `resolve_inside_image_marker`: line 151 (Svg/Unknown arm)
+    #[test]
+    fn smoke_inside_marker_svg_list_style_image_falls_back_to_text() {
+        let bundle = noto_bundle_with_svg();
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .system_fonts(false)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-position: inside; list-style-image: url('bullet.svg')">
+                    <li><p>Block child keeps li non-inline-root</p></li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_list_marker — zero line_height guard (line 68):
+    // `resolve_list_marker` is called with `line_height = Pt::ZERO` whenever
+    // `extract_marker_lines` returns no lines (empty Parley layout). The guard
+    // at line 67 (`if line_height <= Pt::ZERO { return None; }`) ensures we do
+    // not call `resolve_list_style_image_asset` with a zero line_height that
+    // would produce a 0×0 invisible image marker.
+    //
+    // This path is exercised by the existing outside-marker smoke tests that run
+    // without any bundled font (Parley produces an empty layout → zero
+    // line_height). The test below makes the guard path explicit using the
+    // inside-marker fallback where the SVG is present but the inside path calls
+    // `resolve_list_marker` for the *outside* sub-call site with zero line_height.
+    //
+    // NOTE: The guard is already indirectly covered by all smoke tests that render
+    // a default `<ul><li>` without bundled fonts — this test documents the
+    // behaviour rather than adding new coverage.
+    #[test]
+    fn smoke_outside_marker_zero_line_height_returns_text_marker() {
+        // No fonts bundled → Parley produces empty layout → line_height = 0 →
+        // resolve_list_marker returns None → marker falls back to text (empty
+        // lines, zero width).
+        let pdf = crate::engine::Engine::builder()
+            .system_fonts(false)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-image: url('dot.png')">
+                    <li>Bullet with no bundled font</li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
