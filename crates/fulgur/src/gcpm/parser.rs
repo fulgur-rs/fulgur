@@ -3259,4 +3259,229 @@ mod tests {
         assert!(ctx.cleaned_css.contains("body { color: red; }"));
         assert!(ctx.cleaned_css.contains("p { margin: 0; }"));
     }
+
+    // -----------------------------------------------------------------------
+    // css_escape_string — all escape branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_css_escape_string_plain() {
+        assert_eq!(css_escape_string("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_css_escape_string_double_quote() {
+        assert_eq!(css_escape_string(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn test_css_escape_string_backslash() {
+        assert_eq!(css_escape_string("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_css_escape_string_newline() {
+        // \n → \a  (CSS escape: U+000A)
+        assert_eq!(css_escape_string("line1\nline2"), "line1\\a line2");
+    }
+
+    #[test]
+    fn test_css_escape_string_carriage_return() {
+        // \r → \d  (CSS escape: U+000D)
+        assert_eq!(css_escape_string("cr\rend"), "cr\\d end");
+    }
+
+    #[test]
+    fn test_css_escape_string_null() {
+        // \0 → \0  (CSS escape: U+0000)
+        assert_eq!(css_escape_string("null\0char"), "null\\0 char");
+    }
+
+    #[test]
+    fn test_css_escape_string_other_control_char() {
+        // U+0001 (SOH) is a control char (not \n, \r, \0) → \1  (hex escape)
+        assert_eq!(css_escape_string("\x01"), "\\1 ");
+        // U+001F (US) → \1f
+        assert_eq!(css_escape_string("\x1f"), "\\1f ");
+    }
+
+    #[test]
+    fn test_css_escape_string_mixed() {
+        let input = "a\"b\\c\nd";
+        let expected = "a\\\"b\\\\c\\a d";
+        assert_eq!(css_escape_string(input), expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_counter_ops — `none` keyword stops the loop
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_counter_reset_none_produces_no_ops() {
+        // `counter-reset: none` resets nothing — the loop must break immediately.
+        let css = "body { counter-reset: none; }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.counter_mappings.is_empty(),
+            "counter-reset: none should produce no counter mapping"
+        );
+    }
+
+    #[test]
+    fn test_counter_increment_none_produces_no_ops() {
+        let css = "h2 { counter-increment: none; }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.counter_mappings.is_empty(),
+            "counter-increment: none should produce no counter mapping"
+        );
+    }
+
+    #[test]
+    fn test_counter_reset_default_value_is_zero() {
+        // `counter-reset: chapter` without an integer defaults to 0.
+        let css = "body { counter-reset: chapter; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Reset {
+                name: "chapter".into(),
+                value: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_increment_with_explicit_value() {
+        // `counter-increment: chapter 3` increments by 3 rather than the default 1.
+        let css = "h2 { counter-increment: chapter 3; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Increment {
+                name: "chapter".into(),
+                value: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_set_default_value_is_zero() {
+        // `counter-set: chapter` without a value defaults to 0 (same as counter-reset).
+        let css = "h2 { counter-set: chapter; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.counter_mappings[0].ops,
+            vec![CounterOp::Set {
+                name: "chapter".into(),
+                value: 0,
+            }]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_counter_style — upper-latin / lower-latin aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_counter_style_upper_latin_alias() {
+        // `upper-latin` is an alias for `upper-alpha` per CSS Lists 3.
+        let css = r#"@page { @bottom-center { content: counter(section, upper-latin); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::UpperAlpha,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_style_lower_latin_alias() {
+        // `lower-latin` is an alias for `lower-alpha` per CSS Lists 3.
+        let css = r#"@page { @bottom-center { content: counter(section, lower-latin); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::LowerAlpha,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_style_lower_roman() {
+        let css = r#"@page { @bottom-center { content: counter(page, lower-roman); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::LowerRoman,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_style_upper_alpha() {
+        let css = r#"@page { @bottom-center { content: counter(section, upper-alpha); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::UpperAlpha,
+            }]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_page_size_value — non-ident, non-dimension token (the `_ => None` arm)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_page_size_invalid_token_not_stored() {
+        // A numeric value (not a <dimension>) is not a valid size — the declaration
+        // must be silently dropped (CSS: invalid declaration → ignore).
+        assert_no_page_settings("@page { size: 100; }");
+    }
+
+    #[test]
+    fn test_page_size_zero_dimension_not_stored() {
+        // A zero or negative explicit dimension must be silently dropped
+        // (css_unit_to_pt is applied and the result filtered by > 0.0).
+        assert_no_page_settings("@page { size: 0pt; }");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bookmark_level_value — boundary: value above u8::MAX is rejected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bookmark_level_above_u8_max_rejected() {
+        // Values above 255 cannot be losslessly stored as u8; they must be silently
+        // rejected (the bookmark mapping is empty because neither level nor label
+        // was produced).
+        let css = "h1 { bookmark-level: 256; }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.bookmark_mappings.is_empty(),
+            "bookmark-level: 256 should be rejected (exceeds u8::MAX)"
+        );
+    }
+
+    #[test]
+    fn test_bookmark_level_u8_max_accepted() {
+        // 255 is the maximum accepted value.
+        let css = "h1 { bookmark-level: 255; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        assert_eq!(
+            ctx.bookmark_mappings[0].level,
+            Some(BookmarkLevel::Integer(255))
+        );
+    }
 }
