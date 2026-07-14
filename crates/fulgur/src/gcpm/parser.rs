@@ -3303,6 +3303,8 @@ mod tests {
         assert_eq!(css_escape_string("\x01"), "\\1 ");
         // U+001F (US) → \1f
         assert_eq!(css_escape_string("\x1f"), "\\1f ");
+        // U+007F (DEL) is also a control char → \7f
+        assert_eq!(css_escape_string("\x7f"), "\\7f ");
     }
 
     #[test]
@@ -3334,6 +3336,16 @@ mod tests {
         assert!(
             ctx.counter_mappings.is_empty(),
             "counter-increment: none should produce no counter mapping"
+        );
+    }
+
+    #[test]
+    fn test_counter_set_none_produces_no_ops() {
+        let css = "h2 { counter-set: none; }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.counter_mappings.is_empty(),
+            "counter-set: none should produce no counter mapping"
         );
     }
 
@@ -3454,6 +3466,7 @@ mod tests {
         // A zero or negative explicit dimension must be silently dropped
         // (css_unit_to_pt is applied and the result filtered by > 0.0).
         assert_no_page_settings("@page { size: 0pt; }");
+        assert_no_page_settings("@page { size: -10pt; }");
     }
 
     // -----------------------------------------------------------------------
