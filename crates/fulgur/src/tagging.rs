@@ -369,4 +369,155 @@ mod tests {
             TagKind::Link(_)
         ));
     }
+
+    // ── heading level clamping ────────────────────────────────────────────────
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_level_zero_clamped_to_one() {
+        // level=0 is below the valid range; clamp(1,6) must bring it up to 1
+        // so NonZeroU16::new(1) succeeds and we still get an Hn tag.
+        let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, None, None);
+        assert!(
+            matches!(k, krilla::tagging::TagKind::Hn(_)),
+            "level=0 should produce Hn after clamping to 1"
+        );
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_level_above_six_clamped() {
+        // level=7 and level=255 are above the valid range; clamp(1,6) caps at 6.
+        for level in [7u8, 10, 255] {
+            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level }, None, None);
+            assert!(
+                matches!(k, krilla::tagging::TagKind::Hn(_)),
+                "level={level} should produce Hn after clamping to 6"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_level_clamping_with_title() {
+        // Clamping path with a heading_title to confirm both clamp and title flow.
+        let title = Some("Appendix".to_owned());
+        let k_low = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, title.clone(), None);
+        let k_high = pdf_tag_to_krilla_tag(&PdfTag::H { level: 9 }, title, None);
+        assert!(matches!(k_low, krilla::tagging::TagKind::Hn(_)));
+        assert!(matches!(k_high, krilla::tagging::TagKind::Hn(_)));
+    }
+
+    // ── SemanticEntry ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn semantic_entry_construction_and_clone() {
+        // No parent, no alt text.
+        let e1 = SemanticEntry {
+            tag: PdfTag::P,
+            parent: None,
+            alt_text: None,
+        };
+        assert!(e1.parent.is_none());
+        assert!(e1.alt_text.is_none());
+
+        // With parent NodeId and alt text.
+        let e2 = SemanticEntry {
+            tag: PdfTag::Figure,
+            parent: Some(42_usize),
+            alt_text: Some("company logo".to_owned()),
+        };
+        assert_eq!(e2.parent, Some(42));
+        assert_eq!(e2.alt_text.as_deref(), Some("company logo"));
+
+        // Decorative image: alt_text = Some("").
+        let e3 = SemanticEntry {
+            tag: PdfTag::Figure,
+            parent: None,
+            alt_text: Some(String::new()),
+        };
+        assert_eq!(e3.alt_text.as_deref(), Some(""));
+
+        // Clone reproduces all fields.
+        let e2c = e2.clone();
+        assert_eq!(e2c.parent, e2.parent);
+        assert_eq!(e2c.alt_text, e2.alt_text);
+    }
+
+    // ── PdfTag derives ────────────────────────────────────────────────────────
+
+    #[test]
+    fn pdf_tag_partial_eq_and_clone() {
+        let a = PdfTag::H { level: 3 };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        assert_ne!(PdfTag::P, PdfTag::Div);
+        assert_ne!(
+            PdfTag::H { level: 1 },
+            PdfTag::H { level: 2 },
+            "different heading levels must not compare equal"
+        );
+        assert_ne!(
+            PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Disc,
+            },
+            PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Decimal,
+            },
+            "list numbering variants must not compare equal"
+        );
+        assert_ne!(
+            PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Row,
+            },
+            PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Column,
+            },
+            "different TH scopes must not compare equal"
+        );
+    }
+
+    #[test]
+    fn pdf_tag_debug_is_non_empty() {
+        // Smoke-test that Debug is implemented and produces something legible.
+        assert!(!format!("{:?}", PdfTag::P).is_empty());
+        assert!(!format!("{:?}", PdfTag::H { level: 2 }).is_empty());
+        assert!(
+            !format!(
+                "{:?}",
+                PdfTag::L {
+                    numbering: krilla::tagging::ListNumbering::Disc
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    // ── classify_element edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn classify_element_is_case_sensitive() {
+        // HTML local names are always lowercase in the DOM; uppercase must not match.
+        for tag in ["P", "H1", "DIV", "SPAN", "TABLE", "UL", "LI"] {
+            assert_eq!(
+                classify_element(tag),
+                None,
+                "uppercase '{tag}' should return None (case-sensitive match)"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_element_none_for_interactive_and_metadata_elements() {
+        // Interactive, form, media, and metadata elements carry no PDF semantic tag.
+        for tag in [
+            "form", "input", "button", "select", "textarea", "label", "fieldset", "legend", "head",
+            "body", "html", "meta", "link", "title", "noscript", "iframe", "video", "audio",
+            "source", "canvas", "map", "area",
+        ] {
+            assert_eq!(
+                classify_element(tag),
+                None,
+                "element '{tag}' should return None"
+            );
+        }
+    }
 }
