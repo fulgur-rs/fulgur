@@ -437,6 +437,7 @@ mod tests {
 
         // Clone reproduces all fields.
         let e2c = e2.clone();
+        assert_eq!(e2c.tag, e2.tag);
         assert_eq!(e2c.parent, e2.parent);
         assert_eq!(e2c.alt_text, e2.alt_text);
     }
