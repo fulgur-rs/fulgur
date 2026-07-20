@@ -374,35 +374,40 @@ mod tests {
 
     #[test]
     fn pdf_tag_to_krilla_tag_heading_level_zero_clamped_to_one() {
-        // level=0 is below the valid range; clamp(1,6) must bring it up to 1
-        // so NonZeroU16::new(1) succeeds and we still get an Hn tag.
+        // level=0 is below the valid range; clamp(1,6) must bring it up to 1.
         let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, None, None);
-        assert!(
-            matches!(k, krilla::tagging::TagKind::Hn(_)),
-            "level=0 should produce Hn after clamping to 1"
-        );
+        let krilla::tagging::TagKind::Hn(tag) = k else {
+            panic!("expected TagKind::Hn for level=0");
+        };
+        assert_eq!(tag.level().get(), 1, "level=0 should clamp to 1");
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_heading_level_above_six_clamped() {
-        // level=7 and level=255 are above the valid range; clamp(1,6) caps at 6.
+        // level=7, 10, 255 are above the valid range; clamp(1,6) caps at 6.
         for level in [7u8, 10, 255] {
             let k = pdf_tag_to_krilla_tag(&PdfTag::H { level }, None, None);
-            assert!(
-                matches!(k, krilla::tagging::TagKind::Hn(_)),
-                "level={level} should produce Hn after clamping to 6"
-            );
+            let krilla::tagging::TagKind::Hn(tag) = k else {
+                panic!("expected TagKind::Hn for level={level}");
+            };
+            assert_eq!(tag.level().get(), 6, "level={level} should clamp to 6");
         }
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_heading_level_clamping_with_title() {
-        // Clamping path with a heading_title to confirm both clamp and title flow.
+        // Clamping path with a heading_title: confirm both clamp and title flow.
         let title = Some("Appendix".to_owned());
         let k_low = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, title.clone(), None);
         let k_high = pdf_tag_to_krilla_tag(&PdfTag::H { level: 9 }, title, None);
-        assert!(matches!(k_low, krilla::tagging::TagKind::Hn(_)));
-        assert!(matches!(k_high, krilla::tagging::TagKind::Hn(_)));
+        let krilla::tagging::TagKind::Hn(tag_low) = k_low else {
+            panic!("expected Hn for level=0");
+        };
+        let krilla::tagging::TagKind::Hn(tag_high) = k_high else {
+            panic!("expected Hn for level=9");
+        };
+        assert_eq!(tag_low.level().get(), 1, "level=0 should clamp to 1");
+        assert_eq!(tag_high.level().get(), 6, "level=9 should clamp to 6");
     }
 
     // ── SemanticEntry ─────────────────────────────────────────────────────────
