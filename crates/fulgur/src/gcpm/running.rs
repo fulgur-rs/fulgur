@@ -424,6 +424,22 @@ mod tests {
         }
     }
 
+    /// Foreign content is the other side of both namespace checks: SVG
+    /// children may self-close, and SVG `<style>` is *not* raw text — the
+    /// parser decoded its references, so re-encoding them is the correct
+    /// inverse and the foreign-content reparse decodes them again.
+    #[test]
+    fn serialize_node_handles_foreign_content() {
+        let out = serialize_first_div(
+            r#"<div><svg viewBox="0 0 10 10"><circle r="4"/><style>circle &gt; * {fill:red}</style></svg></div>"#,
+        );
+        assert!(out.contains(r#"<circle r="4" />"#), "{out}");
+        assert!(
+            out.contains("<style>circle &gt; * {fill:red}</style>"),
+            "{out}"
+        );
+    }
+
     /// Over-escaping tripwire: `<style>` is a raw text element, so the parser
     /// never decoded references inside it and re-encoding would corrupt the
     /// selector (`.a > b` → `.a &gt; b`).
