@@ -7100,8 +7100,11 @@ h2 { string-set: chapter-title content(text); }
         let mut doc_avoid = parse(html_avoid, 600.0);
         let para_id_avoid = find_by_id(&doc_avoid, "para").expect("paragraph not found");
         let table_avoid = blitz_adapter::extract_column_style_table(&doc_avoid);
-        let geom_avoid =
-            super::run_pass_with_break_styles(doc_avoid.deref_mut(), 300.0_f32.as_px(), &table_avoid);
+        let geom_avoid = super::run_pass_with_break_styles(
+            doc_avoid.deref_mut(),
+            300.0_f32.as_px(),
+            &table_avoid,
+        );
         let avoid_geom = geom_avoid
             .get(&para_id_avoid)
             .expect("break-inside:avoid paragraph must have geometry");
