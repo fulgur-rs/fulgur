@@ -7021,22 +7021,21 @@ h2 { string-set: chapter-title content(text); }
                 <div style="height: 200px">first</div>
                 <div style="break-before: page; height: 200px">second</div>
               </section>
-              <p style="height: 50px">after section</p>
+              <p id="after-section" style="height: 50px">after section</p>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
+        let after_id = find_by_id(&*doc, "after-section").expect("trailing paragraph not found");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
-        let max_page = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .map(|f| f.page_index)
-            .max()
-            .unwrap_or(0);
+        let after_page = geom
+            .get(&after_id)
+            .and_then(|g| g.fragments.iter().map(|f| f.page_index).max())
+            .expect("trailing paragraph must have a fragment");
         assert!(
-            max_page >= 2,
+            after_page >= 2,
             "break-after:page on section (recursion path, lines 876-881) must push \
-             trailing content to page >= 2; max_page={max_page}, geom={geom:?}"
+             trailing content to page >= 2; after_page={after_page}, geom={geom:?}"
         );
     }
 
@@ -7051,19 +7050,23 @@ h2 { string-set: chapter-title content(text); }
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 250px">spacer</div>
-              <p style="break-inside: avoid; width: 100px">
+              <p id="avoid" style="break-inside: avoid; width: 100px">
                 wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
                 wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
               </p>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
+        let avoid_id = find_by_id(&*doc, "avoid").expect("avoid paragraph not found");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
-        assert!(
-            geom.values().all(|g| !g.is_split()),
-            "break-inside:avoid must prevent inline splitting (lines 719-733); \
-             no node should have multiple fragments; geom={geom:?}"
+        let avoid_geom = geom
+            .get(&avoid_id)
+            .expect("break-inside:avoid paragraph must have geometry");
+        assert_eq!(
+            avoid_geom.fragments.len(),
+            1,
+            "break-inside:avoid paragraph must emit one fragment; geom={geom:?}"
         );
     }
 }
