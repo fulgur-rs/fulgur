@@ -7025,7 +7025,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let after_id = find_by_id(&*doc, "after-section").expect("trailing paragraph not found");
+        let after_id = find_by_id(&doc, "after-section").expect("trailing paragraph not found");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
         let after_page = geom
@@ -7057,7 +7057,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let avoid_id = find_by_id(&*doc, "avoid").expect("avoid paragraph not found");
+        let avoid_id = find_by_id(&doc, "avoid").expect("avoid paragraph not found");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
         let avoid_geom = geom
