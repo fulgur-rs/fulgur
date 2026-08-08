@@ -6961,4 +6961,158 @@ h2 { string-set: chapter-title content(text); }
              implied_page_count must be 2 (pages 0 and 1); geom={geom:?}"
         );
     }
+
+    // ── fragment_pagination_root early-return guards (lines 409, 412) ──────
+
+    /// When `page_height_px = 0.0`, `fragment_pagination_root` must return 0
+    /// and leave geometry empty (the `<= 0.0` guard at line 412 fires after
+    /// the body-id check passes).
+    ///
+    /// This calls `fragment_pagination_root` directly on a freshly-constructed
+    /// tree because `run_pass_inner` has its own combined guard that would skip
+    /// the call entirely — the only path that reaches line 412 is a direct
+    /// call.
+    #[test]
+    fn zero_page_height_returns_empty_geometry() {
+        let mut doc = parse("<html><body><p>content</p></body></html>", 600.0);
+        let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 0.0);
+        let count = tree.fragment_pagination_root();
+        assert_eq!(
+            count, 0,
+            "page_height_px=0 must return 0 from fragment_pagination_root (line 412 guard)"
+        );
+        assert!(
+            tree.geometry.is_empty(),
+            "page_height_px=0 must leave geometry empty; geometry={:?}",
+            tree.geometry
+        );
+    }
+
+    /// When `body_id` is `None`, `fragment_pagination_root` must return 0 and
+    /// leave geometry empty (the `let Some(body_id)` guard at line 409).
+    #[test]
+    fn no_body_forces_zero_fragments() {
+        let mut doc = parse("<html><body><p>content</p></body></html>", 600.0);
+        let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+        tree.body_id = None;
+        let count = tree.fragment_pagination_root();
+        assert_eq!(
+            count, 0,
+            "body_id=None must return 0 from fragment_pagination_root (line 409 guard)"
+        );
+        assert!(
+            tree.geometry.is_empty(),
+            "body_id=None must leave geometry empty; geometry={:?}",
+            tree.geometry
+        );
+    }
+
+    // ── break-after:page in the needs_recursion block path (lines 876-881) ──
+
+    /// A section with `break-after: page` whose child carries `break-before:
+    /// page` must go through `fragment_block_subtree` (needs_recursion=true).
+    /// After the subtree returns, lines 876-881 fire and advance `page_index`,
+    /// so any content following the section lands on page ≥ 2.
+    #[test]
+    fn break_after_page_in_block_path_advances_page() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="break-after: page">
+                <div style="height: 200px">first</div>
+                <div style="break-before: page; height: 200px">second</div>
+              </section>
+              <p id="after-section" style="height: 50px">after section</p>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let after_id = find_by_id(&doc, "after-section").expect("trailing paragraph not found");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
+        let after_page = geom
+            .get(&after_id)
+            .and_then(|g| g.fragments.iter().map(|f| f.page_index).max())
+            .expect("trailing paragraph must have a fragment");
+        assert!(
+            after_page >= 2,
+            "break-after:page on section (recursion path, lines 876-881) must push \
+             trailing content to page >= 2; after_page={after_page}, geom={geom:?}"
+        );
+    }
+
+    // ── break-inside: avoid suppresses inline split (lines 719, 733) ────────
+
+    /// A paragraph with `break-inside: avoid` near a page boundary must not be
+    /// split at the line level.  Lines 719-733: `avoid_inside = true` causes
+    /// `line_metrics = Vec::new()`, bypassing `fragment_inline_root` so the
+    /// paragraph falls into the block path and emits as a single fragment.
+    ///
+    /// Two-pass structure: pass 1 (break-inside:auto) confirms the paragraph
+    /// genuinely exercises the inline-split path (baseline ≥ 2 fragments).
+    /// Pass 2 (break-inside:avoid) confirms the constraint collapses that to
+    /// exactly 1 fragment.
+    ///
+    /// Design: `height: 200px; overflow: visible` on the paragraph decouples
+    /// `child_h` (Taffy box = 200 px, below the 301 px oversized threshold) from
+    /// `para_total_h` (Parley line span >> 300 px for 32 words at 50 px width).
+    /// At cursor_y = 0 the advance-page pre-check never fires, so both paths
+    /// start with cursor_y = 0; only the inline/block routing differs.
+    #[test]
+    fn break_inside_avoid_suppresses_inline_split() {
+        // Pass 1 — baseline: no break-inside constraint, cursor starts at 0.
+        // Parley lays out 32 "wrap" words at 50 px width into many narrow lines
+        // whose total span (~640 px) far exceeds the 300 px page.
+        // fragment_inline_root splits the paragraph → ≥ 2 fragments.
+        let html_auto = r#"
+            <html><body style="margin: 0; padding: 0">
+              <p id="para" style="break-inside: auto; width: 50px; height: 200px; overflow: visible">
+                wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
+                wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
+              </p>
+            </body></html>
+        "#;
+        let mut doc_auto = parse(html_auto, 600.0);
+        let para_id_auto = find_by_id(&doc_auto, "para").expect("paragraph not found");
+        let table_auto = blitz_adapter::extract_column_style_table(&doc_auto);
+        let geom_auto =
+            super::run_pass_with_break_styles(doc_auto.deref_mut(), 300.0_f32.as_px(), &table_auto);
+        let baseline_frags = geom_auto
+            .get(&para_id_auto)
+            .map(|g| g.fragments.len())
+            .unwrap_or(0);
+        assert!(
+            baseline_frags > 1,
+            "baseline (break-inside:auto): fragment_inline_root must split the \
+             paragraph across pages; got {baseline_frags} fragment(s) — \
+             geom={geom_auto:?}"
+        );
+
+        // Pass 2 — with avoid: line_metrics = Vec::new() (lines 719-733) so the
+        // block path runs.  child_h = 200 px < page_height + 1 = 301 px,
+        // so no oversized slicing → exactly 1 block fragment.
+        let html_avoid = r#"
+            <html><body style="margin: 0; padding: 0">
+              <p id="para" style="break-inside: avoid; width: 50px; height: 200px; overflow: visible">
+                wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
+                wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap wrap
+              </p>
+            </body></html>
+        "#;
+        let mut doc_avoid = parse(html_avoid, 600.0);
+        let para_id_avoid = find_by_id(&doc_avoid, "para").expect("paragraph not found");
+        let table_avoid = blitz_adapter::extract_column_style_table(&doc_avoid);
+        let geom_avoid = super::run_pass_with_break_styles(
+            doc_avoid.deref_mut(),
+            300.0_f32.as_px(),
+            &table_avoid,
+        );
+        let avoid_geom = geom_avoid
+            .get(&para_id_avoid)
+            .expect("break-inside:avoid paragraph must have geometry");
+        assert_eq!(
+            avoid_geom.fragments.len(),
+            1,
+            "break-inside:avoid paragraph must emit one block fragment (lines 719-733); \
+             geom={geom_avoid:?}"
+        );
+    }
 }
