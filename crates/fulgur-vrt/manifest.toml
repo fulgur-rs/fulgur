@@ -71,6 +71,10 @@ margin_pt = 0.0
 path = "layout/multicol-table-width.html"
 
 [[fixture]]
+path = "layout/repeating-table-header.html"
+margin_pt = 0.0
+
+[[fixture]]
 path = "layout/overflow-hidden.html"
 margin_pt = 0.0
 

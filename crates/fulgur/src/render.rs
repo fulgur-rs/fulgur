@@ -1081,7 +1081,7 @@ pub(crate) fn dispatch_fragment(
     page_index: u32,
 ) {
     if let Some(table) = drawables.tables.get(&node_id) {
-        draw_table_v2(canvas, table, x_pt, y_pt, frag);
+        draw_table_v2(canvas, table, geom, x_pt, y_pt, frag);
         return;
     }
     // True when this block / list-item / paragraph spans multiple
@@ -2835,12 +2835,12 @@ fn draw_block_inner_paint(
 ///
 /// Tables with `overflow: hidden | clip` route through
 /// [`draw_under_clip_table`] instead so the clip path wraps every
-/// cell dispatched in the same scope. Multi-page table header
-/// repetition (`<thead>` cloned on continuation pages) is deferred
-/// to a later change.
+/// cell dispatched in the same scope. Split tables size their frame
+/// from the current fragment in both paths.
 fn draw_table_v2(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::TableEntry,
+    geom: &crate::pagination_layout::PaginationGeometry,
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
@@ -2848,35 +2848,41 @@ fn draw_table_v2(
     use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        let (total_width, total_height) = table_box_size(entry, frag);
+        let (total_width, total_height) = table_box_size(entry, geom, frag);
         if entry.visible {
             paint_table_outer_frame(canvas, entry, x, y, total_width, total_height);
         }
     });
 }
 
-/// Resolve the table's outer-frame width/height from the cached
-/// layout. Falls back to the current Fragment height (and finally
-/// `cached_height`) when `layout_size` is unset (test-only paths).
+/// Resolve the table's outer-frame width/height from split geometry
+/// or the cached layout. Falls back to the current Fragment height
+/// (and finally `cached_height`) when `layout_size` is unset.
 fn table_box_size(
     entry: &crate::drawables::TableEntry,
+    geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
 ) -> (f32, f32) {
     let total_width = entry
         .layout_size
         .map(|s| s.width.to_f32())
         .unwrap_or(entry.width.to_f32());
-    let total_height = entry
-        .layout_size
-        .map(|s| s.height.to_f32())
-        .unwrap_or_else(|| {
-            let from_frag = frag.height.in_pt().to_f32();
-            if from_frag > 0.0 {
-                from_frag
-            } else {
-                entry.cached_height.to_f32()
-            }
-        });
+    let fragment_height = frag.height.in_pt().to_f32();
+    let total_height = if geom.is_split() && fragment_height > 0.0 {
+        fragment_height
+    } else {
+        entry
+            .layout_size
+            .map(|s| s.height.to_f32())
+            .unwrap_or_else(|| {
+                let from_frag = fragment_height;
+                if from_frag > 0.0 {
+                    from_frag
+                } else {
+                    entry.cached_height.to_f32()
+                }
+            })
+    };
     (total_width, total_height)
 }
 
@@ -2904,8 +2910,8 @@ fn paint_table_outer_frame(
     );
 }
 
-/// Push a `compute_overflow_clip_path` clip around the table's outer
-/// frame, dispatch each cell descendant inside the clip, then pop.
+/// Push a `compute_overflow_clip_path` clip around the table's current
+/// fragment frame, dispatch each cell descendant inside the clip, then pop.
 /// Mirrors [`draw_under_clip`]'s shape for blocks but specialised for
 /// tables (no list-item marker, no shared-node_id inner content).
 #[allow(clippy::too_many_arguments)]
@@ -2924,8 +2930,7 @@ fn draw_under_clip_table(
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
-    let _ = geom;
-    let (total_width, total_height) = table_box_size(table, frag);
+    let (total_width, total_height) = table_box_size(table, geom, frag);
 
     draw_with_opacity(canvas, table.opacity, |canvas| {
         // bg / border / shadow OUTSIDE the clip, mirroring
@@ -5223,9 +5228,32 @@ mod tests {
         };
         let entry = make_table_entry_for_size(Some(sz), 200.0, 50.0);
         let frag = make_frag_with_height(99.0);
-        let (w, h) = table_box_size(&entry, &frag);
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![frag.clone()],
+            is_repeat: false,
+        };
+        let (w, h) = table_box_size(&entry, &geom, &frag);
         assert!((w - 120.0).abs() < 0.001, "width from layout_size");
         assert!((h - 80.0).abs() < 0.001, "height from layout_size");
+    }
+
+    #[test]
+    fn table_box_size_split_table_uses_fragment_height() {
+        use crate::units::F32Units;
+        let sz = crate::draw_primitives::Size {
+            width: 120.0_f32.as_pt(),
+            height: 80.0_f32.as_pt(),
+        };
+        let entry = make_table_entry_for_size(Some(sz), 200.0, 50.0);
+        let frag = make_frag_with_height(40.0);
+        let mut continuation = frag.clone();
+        continuation.page_index = 1;
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![frag.clone(), continuation],
+            is_repeat: false,
+        };
+        let (_, h) = table_box_size(&entry, &geom, &frag);
+        assert!((h - 30.0).abs() < 0.01, "height = frag.height.in_pt()");
     }
 
     #[test]
@@ -5233,7 +5261,11 @@ mod tests {
         // frag.height = 40 CSS px → 40 × 0.75 = 30 PDF pt (via Px::in_pt)
         let entry = make_table_entry_for_size(None, 150.0, 99.0);
         let frag = make_frag_with_height(40.0);
-        let (w, h) = table_box_size(&entry, &frag);
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![frag.clone()],
+            is_repeat: false,
+        };
+        let (w, h) = table_box_size(&entry, &geom, &frag);
         assert!((w - 150.0).abs() < 0.001, "width falls back to entry.width");
         assert!((h - 30.0).abs() < 0.01, "height = frag.height.in_pt()");
     }
@@ -5244,7 +5276,11 @@ mod tests {
         // guard, so cached_height is used instead.
         let entry = make_table_entry_for_size(None, 150.0, 55.0);
         let frag = make_frag_with_height(0.0);
-        let (w, h) = table_box_size(&entry, &frag);
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![frag.clone()],
+            is_repeat: false,
+        };
+        let (w, h) = table_box_size(&entry, &geom, &frag);
         assert!((w - 150.0).abs() < 0.001, "width falls back to entry.width");
         assert!(
             (h - 55.0).abs() < 0.001,
