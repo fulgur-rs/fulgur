@@ -1126,25 +1126,62 @@ mod tests {
 
     // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
 
-    /// `map_extent` maps `ShapeExtent::Contain` → `RadialExtent::ClosestSide`
-    /// (line 516). CSS Images §3.6.1 defines `contain` as an alias for
-    /// `closest-side`.
+    /// Returns the `RadialExtent` of the first radial gradient background layer,
+    /// or `None` if no such layer exists or the size is explicit rather than
+    /// an extent keyword.
+    fn first_radial_gradient_extent(html: &str) -> Option<crate::draw_primitives::RadialExtent> {
+        use crate::draw_primitives::{BgImageContent, RadialGradientSize};
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::RadialGradient { size, .. } => match size {
+                        RadialGradientSize::Extent(ext) => Some(*ext),
+                        RadialGradientSize::Explicit { .. } => None,
+                    },
+                    _ => None,
+                })
+        })
+    }
+
+    /// `map_extent` maps `ShapeExtent::ClosestSide` → `RadialExtent::ClosestSide`.
+    /// CSS Images §3.6.1 also defines `contain` as an alias, but Stylo does not
+    /// produce `ShapeExtent::Contain` from parsed CSS, so the canonical keyword
+    /// `closest-side` is used here. Inspecting the converted `RadialExtent`
+    /// directly ensures that an incorrect mapping leaves the assertion red even
+    /// when the output is a valid PDF.
     #[test]
-    fn radial_gradient_contain_extent() {
-        assert_pdf(
-            &render_bg("radial-gradient(contain circle at center, red, blue)"),
-            "contain_extent",
+    fn radial_gradient_closest_side_extent() {
+        use crate::draw_primitives::RadialExtent;
+        let html = r#"<html><body><div style="width:120px;height:80px;background:radial-gradient(closest-side circle at center, red, blue)"></div></body></html>"#;
+        let extent = first_radial_gradient_extent(html)
+            .expect("radial-gradient(closest-side ...) must produce a radial gradient layer");
+        assert_eq!(
+            extent,
+            RadialExtent::ClosestSide,
+            "`closest-side` must map to ClosestSide"
         );
     }
 
-    /// `map_extent` maps `ShapeExtent::Cover` → `RadialExtent::FarthestCorner`
-    /// (line 517). CSS Images §3.6.1 defines `cover` as an alias for
-    /// `farthest-corner`.
+    /// `map_extent` maps `ShapeExtent::FarthestCorner` → `RadialExtent::FarthestCorner`.
+    /// CSS Images §3.6.1 also defines `cover` as an alias, but Stylo does not
+    /// produce `ShapeExtent::Cover` from parsed CSS, so the canonical keyword
+    /// `farthest-corner` is used here.
     #[test]
-    fn radial_gradient_cover_extent() {
-        assert_pdf(
-            &render_bg("radial-gradient(cover circle at center, red, blue)"),
-            "cover_extent",
+    fn radial_gradient_farthest_corner_extent() {
+        use crate::draw_primitives::RadialExtent;
+        let html = r#"<html><body><div style="width:120px;height:80px;background:radial-gradient(farthest-corner circle at center, red, blue)"></div></body></html>"#;
+        let extent = first_radial_gradient_extent(html)
+            .expect("radial-gradient(farthest-corner ...) must produce a radial gradient layer");
+        assert_eq!(
+            extent,
+            RadialExtent::FarthestCorner,
+            "`farthest-corner` must map to FarthestCorner"
         );
     }
 }
