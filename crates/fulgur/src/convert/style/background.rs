@@ -1184,4 +1184,27 @@ mod tests {
             "`farthest-corner` must map to FarthestCorner"
         );
     }
+
+    /// `first_radial_gradient_extent` returns `None` for a radial gradient with
+    /// an explicit radius (`circle 50px`) — hits the
+    /// `RadialGradientSize::Explicit { .. } => None` arm of the helper.
+    #[test]
+    fn radial_gradient_explicit_size_gives_no_extent() {
+        let html = r#"<html><body><div style="width:120px;height:80px;background:radial-gradient(circle 50px, red, blue)"></div></body></html>"#;
+        assert!(
+            first_radial_gradient_extent(html).is_none(),
+            "explicit-radius radial gradient has no RadialExtent keyword"
+        );
+    }
+
+    /// `first_radial_gradient_extent` returns `None` when there is no radial
+    /// gradient layer at all — hits the `_ => None` arm for non-radial content.
+    #[test]
+    fn non_radial_background_gives_no_extent() {
+        let html = r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red, blue)"></div></body></html>"#;
+        assert!(
+            first_radial_gradient_extent(html).is_none(),
+            "linear-gradient has no RadialExtent"
+        );
+    }
 }
