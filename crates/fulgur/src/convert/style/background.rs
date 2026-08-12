@@ -1188,9 +1188,15 @@ mod tests {
     /// `first_radial_gradient_extent` returns `None` for a radial gradient with
     /// an explicit radius (`circle 50px`) — hits the
     /// `RadialGradientSize::Explicit { .. } => None` arm of the helper.
+    /// The first assertion confirms a radial gradient layer was actually produced
+    /// so that a regression (layer dropped) cannot mask the uncovered branch.
     #[test]
     fn radial_gradient_explicit_size_gives_no_extent() {
         let html = r#"<html><body><div style="width:120px;height:80px;background:radial-gradient(circle 50px, red, blue)"></div></body></html>"#;
+        assert!(
+            first_gradient_stop_count(html).is_some(),
+            "circle 50px must produce a radial gradient layer"
+        );
         assert!(
             first_radial_gradient_extent(html).is_none(),
             "explicit-radius radial gradient has no RadialExtent keyword"
@@ -1199,9 +1205,15 @@ mod tests {
 
     /// `first_radial_gradient_extent` returns `None` when there is no radial
     /// gradient layer at all — hits the `_ => None` arm for non-radial content.
+    /// The first assertion confirms the linear gradient layer was actually produced
+    /// so that a regression (layer dropped) cannot mask the uncovered branch.
     #[test]
     fn non_radial_background_gives_no_extent() {
         let html = r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red, blue)"></div></body></html>"#;
+        assert!(
+            first_gradient_stop_count(html).is_some(),
+            "linear-gradient must produce a gradient layer"
+        );
         assert!(
             first_radial_gradient_extent(html).is_none(),
             "linear-gradient has no RadialExtent"
