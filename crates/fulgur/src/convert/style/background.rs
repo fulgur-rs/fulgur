@@ -1124,7 +1124,7 @@ mod tests {
         );
     }
 
-    // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
+    // ── map_extent: canonical radial-gradient extent keywords ────────────────
 
     /// Returns the `RadialExtent` of the first radial gradient background layer,
     /// or `None` if no such layer exists or the size is explicit rather than
