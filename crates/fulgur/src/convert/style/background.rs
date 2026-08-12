@@ -1100,4 +1100,51 @@ mod tests {
             "conic gradient stops must be capped, got {count}"
         );
     }
+
+    // ── first_gradient_stop_count: BgImageContent match arms ─────────────────
+
+    /// `first_gradient_stop_count` covers the `BgImageContent::RadialGradient`
+    /// arm of its internal match — the existing cap test only exercises the
+    /// `LinearGradient` arm (line 1022).  This test exercises line 1023 and
+    /// also confirms that the radial-gradient path respects the cap.
+    #[test]
+    fn radial_gradient_stop_count_is_defensively_capped() {
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:radial-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("radial gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "radial gradient stops must be capped, got {count}"
+        );
+    }
+
+    // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
+
+    /// `map_extent` maps `ShapeExtent::Contain` → `RadialExtent::ClosestSide`
+    /// (line 516). CSS Images §3.6.1 defines `contain` as an alias for
+    /// `closest-side`.
+    #[test]
+    fn radial_gradient_contain_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(contain circle at center, red, blue)"),
+            "contain_extent",
+        );
+    }
+
+    /// `map_extent` maps `ShapeExtent::Cover` → `RadialExtent::FarthestCorner`
+    /// (line 517). CSS Images §3.6.1 defines `cover` as an alias for
+    /// `farthest-corner`.
+    #[test]
+    fn radial_gradient_cover_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(cover circle at center, red, blue)"),
+            "cover_extent",
+        );
+    }
 }
