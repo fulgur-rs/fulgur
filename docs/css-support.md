@@ -77,3 +77,15 @@ Related follow-ups:
 
 VRT goldens covering this feature live under
 `crates/fulgur-vrt/fixtures/layout/overflow-*.html`.
+
+### Tables
+
+Supported:
+
+- Multi-page tables repeat computed `table-header-group` sections on each
+  continuation page. Use `thead { display: table-row-group; }` to disable
+  repetition for a specific header group.
+
+See `docs/plans/2026-08-11-repeating-table-headers.md` for the
+fragmentation coordinator. The VRT golden lives at
+`crates/fulgur-vrt/fixtures/layout/repeating-table-header.html`.

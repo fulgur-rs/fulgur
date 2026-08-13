@@ -2847,6 +2847,15 @@ fn draw_table_v2(
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
+    // A split table can record a zero-height fragment — nested tables
+    // whose header does not fit the remaining outer strip do this on
+    // page 0. `table_box_size` then falls back to the full layout box
+    // (the unsplit zero-height path still needs `cached_height`), so
+    // painting here would leak a full-size frame as a sliver.
+    if geom.is_split() && frag.height <= crate::units::Px::ZERO {
+        return;
+    }
+
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         let (total_width, total_height) = table_box_size(entry, geom, frag);
         if entry.visible {
@@ -2929,6 +2938,12 @@ fn draw_under_clip_table(
     page_index: u32,
 ) {
     use crate::draw_primitives::draw_with_opacity;
+
+    // Same zero-height split skip as `draw_table_v2`: a 0-tall slice
+    // must not paint or clip at `layout_size` / `cached_height`.
+    if geom.is_split() && frag.height <= crate::units::Px::ZERO {
+        return;
+    }
 
     let (total_width, total_height) = table_box_size(table, geom, frag);
 
@@ -5268,6 +5283,31 @@ mod tests {
         let (w, h) = table_box_size(&entry, &geom, &frag);
         assert!((w - 150.0).abs() < 0.001, "width falls back to entry.width");
         assert!((h - 30.0).abs() < 0.01, "height = frag.height.in_pt()");
+    }
+
+    #[test]
+    fn table_box_size_split_zero_height_falls_back_to_layout_size() {
+        // The paint guard in `draw_table_v2` / `draw_under_clip_table`
+        // skips this slice. `table_box_size` itself must keep the
+        // layout_size fallback so unsplit callers are unchanged.
+        use crate::units::F32Units;
+        let sz = crate::draw_primitives::Size {
+            width: 120.0_f32.as_pt(),
+            height: 80.0_f32.as_pt(),
+        };
+        let entry = make_table_entry_for_size(Some(sz), 200.0, 50.0);
+        let frag = make_frag_with_height(0.0);
+        let mut continuation = make_frag_with_height(40.0);
+        continuation.page_index = 1;
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![frag.clone(), continuation],
+            is_repeat: false,
+        };
+        let (_, h) = table_box_size(&entry, &geom, &frag);
+        assert!(
+            (h - 80.0).abs() < 0.001,
+            "split zero-height still reports layout_size; paint must skip"
+        );
     }
 
     #[test]
