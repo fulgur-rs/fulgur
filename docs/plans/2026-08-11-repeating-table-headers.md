@@ -1212,6 +1212,13 @@ fn repeated_table_header_renders_with_clip_link_and_tags() {
 
     let pdf = render_small(&html);
     let document = lopdf::Document::load_mem(&pdf).expect("PDF must parse");
+    assert!(
+        document
+            .catalog()
+            .expect("PDF must have a catalog")
+            .has(b"StructTreeRoot"),
+        "tagged PDF catalog must contain /StructTreeRoot"
+    );
     let pages = document.get_pages();
     assert!(pages.len() >= 2);
     for (page_number, page_id) in pages {
@@ -1231,7 +1238,7 @@ Run:
 cargo test -p fulgur --test table_header_test repeated_table_header_renders_with_clip_link_and_tags -- --exact
 ```
 
-Expected: PASS with at least two parseable pages, exactly one link annotation on every page, and no Krilla tag panic.
+Expected: PASS with at least two parseable pages, exactly one link annotation on every page, a Catalog `/StructTreeRoot` entry, and no Krilla tag panic.
 
 Do not add a tagged-structure snapshot in this change. Repeated-instance artifact semantics are explicitly deferred, and the existing snapshot helper compares the entire binary PDF rather than exposing a focused structure-tree oracle.
 

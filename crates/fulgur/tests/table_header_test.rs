@@ -124,6 +124,13 @@ fn repeated_table_header_renders_with_clip_link_and_tags() {
 
     let pdf = render_small(&html);
     let document = lopdf::Document::load_mem(&pdf).expect("PDF should parse");
+    assert!(
+        document
+            .catalog()
+            .expect("PDF must have a catalog")
+            .has(b"StructTreeRoot"),
+        "tagged PDF catalog must contain /StructTreeRoot"
+    );
     let pages = document.get_pages();
     assert!(pages.len() >= 2, "table should span at least two pages");
     for (page_number, page_id) in pages {
