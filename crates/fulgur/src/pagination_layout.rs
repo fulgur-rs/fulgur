@@ -1399,6 +1399,49 @@ fn would_split_block_subtree(
 /// `fragment_pagination_root` and `fragment_block_subtree` to decide
 /// whether a body-direct (or nested) child needs to be entered for
 /// break recursion even when it fits the current page strip whole.
+/// True when the header band can be recorded once and cloned onto every
+/// continuation page.
+///
+/// [`record_header_template`] snapshots the band's coordinates directly rather
+/// than running it through the fragmenter, so a forced break or a page-name
+/// change inside a header cell has nothing to act on and is silently dropped
+/// (fulgur-naj7.7: `break-after: page` on a `<div>` inside a `<th>` rendered
+/// one page where two are required). A band that fragments is also not a band
+/// — "repeat this strip on each page" and "this strip itself spans pages" are
+/// contradictory requests.
+///
+/// Rather than drop the author's break, decline to repeat: the caller falls
+/// through to [`fragment_block_subtree_inner`], which honours breaks normally.
+/// The table then paginates without a repeated header.
+fn header_band_is_repeatable(
+    doc: &BaseDocument,
+    header: &RepeatingTableHeader,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
+    depth: usize,
+) -> bool {
+    for &cell_id in &header.header_cell_ids {
+        // The break may sit on the header cell itself as well as below it.
+        if let Some(props) = column_styles.and_then(|t| t.get(&cell_id))
+            && (matches!(
+                props.break_before,
+                Some(crate::draw_primitives::BreakBefore::Page)
+            ) || matches!(
+                props.break_after,
+                Some(crate::draw_primitives::BreakAfter::Page)
+            ))
+        {
+            return false;
+        }
+        if has_forced_break_below(doc, cell_id, column_styles, depth)
+            || has_page_name_change_below(doc, cell_id, used_page_names, depth)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn has_forced_break_below(
     doc: &BaseDocument,
     node_id: usize,
@@ -1828,6 +1871,7 @@ fn fragment_block_subtree(
 ) -> (u32, f32) {
     if depth < crate::MAX_DOM_DEPTH
         && let Some(header) = repeating_table_header(doc, parent_id, depth + 1)
+        && header_band_is_repeatable(doc, &header, column_styles, used_page_names, depth + 1)
     {
         return fragment_repeating_table(
             geometry,
