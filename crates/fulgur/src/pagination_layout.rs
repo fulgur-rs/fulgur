@@ -2588,11 +2588,16 @@ fn fragment_block_subtree_inner(
             } else {
                 0.0
             };
-            if occupied_page_extent > 0.0
-                && let Some(ref mut rs) = row_state
-            {
-                rs.start_initial_page_occupied = false;
-            }
+            // `start_initial_page_occupied` records whether the page was
+            // already occupied when the ROW began, and every cell of that row
+            // restores from it (see the `allow_same_row_rebase` branch). It is
+            // a per-row constant, so a child consuming the strip must not
+            // clear it: doing so left the row's second and later cells
+            // believing they started on an empty page, skipping the
+            // occupied-strip page-break check and painting past the page
+            // bottom (fulgur-naj7.3: measured right-tall = [(0, y=80, h=30)],
+            // bottom 110 on a 100px page, while the row's left cell had
+            // already moved to page 1).
             initial_page_occupied = false;
             page_index = np;
             // fulgur-u0p0: when the recursion stayed on the same page,
