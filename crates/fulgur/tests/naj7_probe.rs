@@ -620,3 +620,46 @@ fn probe_finding12_table_layout_size_always_present() {
         missing.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression probe for the fulgur-naj7.6 fix itself: a first body row whose
+// height comes from the cell (text content, no child block) must be measured
+// at its full height, not at the height of its first text line.
+// ---------------------------------------------------------------------------
+
+const TEXT_ONLY_TALL_FIRST_ROW: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  #lead { height: 60px; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th { box-sizing: border-box; padding: 0; height: 20px; }
+  td { box-sizing: border-box; padding: 0; height: 30px; font-size: 8px; }
+</style></head><body>
+  <div id="lead"></div>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td>first row text</td></tr>
+      <tr><td>second row text</td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_naj7_6_measures_text_only_first_row_at_full_height() {
+    let engine = engine_200x100();
+    let layout = engine.layout(TEXT_ONLY_TALL_FIRST_ROW).expect("layout");
+    let table = table_fragments(&layout, "t");
+    println!("[naj7.6-regression] table = {table:?}");
+
+    // lead 60 + band 20 + first row 30 = 110 > the 100px page, so the table
+    // must not start on page 0 at all. A page-0 fragment here means the band
+    // was reserved for a row that cannot follow it — the orphan the naj7.6
+    // fix removes. Text-only cells have no block child to measure, which is
+    // exactly the case the first version of that fix under-counted.
+    assert!(
+        !table.iter().any(|(page, _, _)| *page == 0),
+        "fulgur-naj7.6 fix does not fire for a text-only first row: \
+         table = {table:?}"
+    );
+}

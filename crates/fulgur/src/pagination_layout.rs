@@ -1839,6 +1839,17 @@ fn repeating_table_header(
         .filter_map(|&id| doc.get_node(id))
         .filter(|cell| (cell.final_layout.location.y - body_origin_px).abs() < 0.5)
         .map(|cell| {
+            // Only a cell with several block children has a leading unit
+            // smaller than itself: the first child can stay while the rest
+            // move on. A cell holding one child — or bare text, which Blitz
+            // wraps in a single anonymous box — places all or nothing, and
+            // its height is usually set on the cell anyway, so measuring the
+            // first text line instead would badly under-count and let the
+            // orphan check pass on a row that cannot fit (fulgur-naj7.6:
+            // a text-only `td { height: 30px }` measured one ~16px line).
+            if cell.children.len() < 2 {
+                return cell.final_layout.size.height;
+            }
             cell.children
                 .iter()
                 .filter_map(|&child| doc.get_node(child))
