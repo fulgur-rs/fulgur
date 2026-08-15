@@ -663,3 +663,80 @@ fn probe_naj7_6_measures_text_only_first_row_at_full_height() {
          table = {table:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Nesting check for the fulgur-naj7.5 guard and for any future header hoisting.
+//
+// `repeating_table_header` compares `header_top_px` against `body_origin_px`,
+// both read from `final_layout.location.y`. Taffy positions are PARENT-RELATIVE,
+// so that comparison is only meaningful if header cells and body cells sit at
+// the same depth under a common ancestor. Nested tables put them in different
+// coordinate spaces.
+// ---------------------------------------------------------------------------
+
+const NESTED_TABLES: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 180px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  #outer-h { height: 20px; background: rgb(1,1,1); }
+  #inner-h { height: 18px; background: rgb(2,2,2); }
+  .r { height: 24px; background: rgb(3,3,3); }
+</style></head><body>
+  <table id="outer">
+    <thead><tr><th id="outer-h">OuterH</th></tr></thead>
+    <tbody>
+      <tr><td>
+        <table id="inner">
+          <thead><tr><th id="inner-h">InnerH</th></tr></thead>
+          <tbody>
+            <tr><td><div class="r" id="i1"></div></td></tr>
+            <tr><td><div class="r" id="i2"></div></td></tr>
+            <tr><td><div class="r" id="i3"></div></td></tr>
+            <tr><td><div class="r" id="i4"></div></td></tr>
+            <tr><td><div class="r" id="i5"></div></td></tr>
+          </tbody>
+        </table>
+      </td></tr>
+      <tr><td><div class="r" id="o2"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_nested_tables_keep_both_headers_repeating() {
+    let engine = engine_200x100();
+    let layout = engine.layout(NESTED_TABLES).expect("layout");
+
+    let outer = table_fragments(&layout, "outer");
+    let inner = table_fragments(&layout, "inner");
+    println!("[nested] outer table = {outer:?}");
+    println!("[nested] inner table = {inner:?}");
+    for id in ["outer-h", "inner-h", "i1", "i5", "o2"] {
+        println!("[nested] {id} = {:?}", block_fragments(&layout, id));
+    }
+
+    // Both tables span pages here, so each must keep repeating its own header:
+    // the naj7.5 guard must not misfire on the inner table just because its
+    // cells live in a different coordinate space from the outer table's.
+    let inner_h = block_fragments(&layout, "inner-h");
+    assert!(
+        inner_h.len() > 1,
+        "inner table's header stopped repeating under nesting: {inner_h:?} \
+         (inner table fragments = {inner:?})"
+    );
+
+    // And nothing may spill past the 100px page box.
+    let mut overflow: Vec<(&str, (u32, f32, f32))> = Vec::new();
+    for id in ["outer-h", "inner-h", "i1", "i5", "o2"] {
+        for f in block_fragments(&layout, id) {
+            if f.1 + f.2 > 100.0 + 0.01 {
+                overflow.push((id, f));
+            }
+        }
+    }
+    assert!(
+        overflow.is_empty(),
+        "nested table content overflows the page bottom: {overflow:?}"
+    );
+}
