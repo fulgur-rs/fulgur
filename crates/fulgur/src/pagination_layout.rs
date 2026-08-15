@@ -1631,6 +1631,10 @@ struct RepeatingTableHeader {
     body_cell_ids: Vec<usize>,
     body_origin_px: f32,
     band_height_px: f32,
+    /// Smallest leading fragmentable unit of the first body row. The band
+    /// alone fitting is not enough to start the table on a page — if not even
+    /// this clears the band, the page carries only a repeated header.
+    first_body_lead_px: f32,
 }
 
 fn collect_repeating_table_cells(
@@ -1774,12 +1778,35 @@ fn repeating_table_header(
         return None;
     }
 
+    // Cells sharing the body's top edge form the first body row. What has to
+    // clear the band is not the whole row but its smallest leading
+    // fragmentable unit — a cell whose content splits can put its first block
+    // on this page and carry the rest over, which is useful output rather than
+    // an orphaned header. Take each first-row cell's leading child (its own
+    // box when it has no children) and keep the smallest: if even that does
+    // not fit, no body content can land here.
+    let first_body_lead_px = body_cell_ids
+        .iter()
+        .filter_map(|&id| doc.get_node(id))
+        .filter(|cell| (cell.final_layout.location.y - body_origin_px).abs() < 0.5)
+        .map(|cell| {
+            cell.children
+                .iter()
+                .filter_map(|&child| doc.get_node(child))
+                .map(|child| child.final_layout.size.height)
+                .next()
+                .unwrap_or(cell.final_layout.size.height)
+        })
+        .reduce(f32::min)
+        .unwrap_or(0.0);
+
     Some(RepeatingTableHeader {
         table_id,
         header_cell_ids,
         body_cell_ids,
         body_origin_px,
         band_height_px,
+        first_body_lead_px,
     })
 }
 
@@ -1998,7 +2025,23 @@ fn fragment_repeating_table(
         );
     }
 
-    let (first_page, first_table_top) = if cursor_in + header.band_height_px > page_height_px {
+    // Starting the table here requires room for the band AND at least one body
+    // row. Testing the band alone produced a page holding nothing but a
+    // repeated header, with every body row pushed to the next page
+    // (fulgur-naj7.6: measured table = [(0, y=60, h=20), (1, y=0, h=80)] with
+    // both rows on page 1). An orphaned header row is never useful output, and
+    // css-tables-3 likewise bounds repetition to cases where it does not eat
+    // the page.
+    let first_row_reserve = header.band_height_px + header.first_body_lead_px;
+    let band_overflows = cursor_in + header.band_height_px > page_height_px;
+    // The band fits but its first body row does not: starting here would emit
+    // a header with nothing under it. Only worth moving if the pair actually
+    // fits on an empty page — an oversized first row has to start somewhere,
+    // and pushing it would just leave a blank page behind.
+    let orphaned_header = !band_overflows
+        && cursor_in + first_row_reserve > page_height_px
+        && first_row_reserve <= page_height_px;
+    let (first_page, first_table_top) = if band_overflows || orphaned_header {
         (page_in + 1, 0.0)
     } else {
         (page_in, cursor_in)
@@ -5268,8 +5311,12 @@ mod tests {
         assert!(later.y.to_f32() >= table_top + 19.5);
     }
 
+    /// Supersedes `table_moves_first_body_row_when_only_header_fits_remaining_space`
+    /// (PR #710), which expected the header on pages `[0, 1]` — page 0 carrying
+    /// the header with no row under it. The whole table now starts on page 1
+    /// instead (fulgur-naj7.6).
     #[test]
-    fn table_moves_first_body_row_when_only_header_fits_remaining_space() {
+    fn table_starts_on_next_page_when_only_the_header_would_fit() {
         let html = r#"<!doctype html>
             <html><head><style>
               html, body { margin: 0; padding: 0; }
@@ -5295,13 +5342,14 @@ mod tests {
         assert_eq!(row.page_index, 1);
         assert!((row.y.to_f32() - 20.0).abs() < 0.5);
         assert!(row.y.to_f32() + row.height.to_f32() <= 100.0);
+        // No orphaned header on page 0 — the table begins on page 1.
         assert_eq!(
             geometry[&header_id]
                 .fragments
                 .iter()
                 .map(|fragment| fragment.page_index)
                 .collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![1]
         );
         assert!(
             geometry[&table_id]
