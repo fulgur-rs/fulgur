@@ -132,12 +132,11 @@ fn probe_zero_height_table_fragment_never_coexists_with_live_cells() {
                     .iter()
                     .copied()
                     .filter(|desc| {
-                        layout
-                            .geometry
-                            .get(desc)
-                            .is_some_and(|dg| {
-                                dg.fragments.iter().any(|df| df.page_index == frag.page_index)
-                            })
+                        layout.geometry.get(desc).is_some_and(|dg| {
+                            dg.fragments
+                                .iter()
+                                .any(|df| df.page_index == frag.page_index)
+                        })
                     })
                     .collect();
                 println!(
@@ -205,8 +204,7 @@ fn probe_finding1_non_first_cell_overflows_page_bottom() {
     let engine = engine_200x100();
 
     let repeating = TWO_CELL_ROW.replace("THEAD_OVERRIDE", "");
-    let opted_out =
-        TWO_CELL_ROW.replace("THEAD_OVERRIDE", "thead { display: table-row-group; }");
+    let opted_out = TWO_CELL_ROW.replace("THEAD_OVERRIDE", "thead { display: table-row-group; }");
 
     let l_rep = engine.layout(&repeating).expect("layout (repeating)");
     let l_opt = engine.layout(&opted_out).expect("layout (opted out)");
@@ -603,7 +601,10 @@ fn probe_finding12_table_layout_size_always_present() {
             }
         }
     }
-    println!("[finding12] tables with layout_size=None: {}", missing.len());
+    println!(
+        "[finding12] tables with layout_size=None: {}",
+        missing.len()
+    );
     for m in &missing {
         println!("[finding12]   {m}");
     }

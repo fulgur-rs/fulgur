@@ -1638,6 +1638,7 @@ fn collect_repeating_table_cells(
     node_id: usize,
     in_header: bool,
     depth: usize,
+    header_claimed: &mut bool,
     header_cell_ids: &mut Vec<usize>,
     body_cell_ids: &mut Vec<usize>,
 ) {
@@ -1651,7 +1652,23 @@ fn collect_repeating_table_cells(
         return;
     };
     let next_in_header = match display {
-        DisplayInside::TableHeaderGroup => true,
+        // css-tables-3: "If a table owns multiple `display: table-header-group`
+        // boxes, only the first is treated as a header; the others are treated
+        // as if they had `display: table-row-group`."
+        //
+        // Promoting every header group made the band span from the table's top
+        // down to the *last* one, so a header group placed after a `tbody`
+        // produced a band taller than the rows above it and blew the page box
+        // (fulgur-naj7.5). Children are visited in document order, so the first
+        // group to reach this arm is the one the spec designates.
+        DisplayInside::TableHeaderGroup => {
+            if *header_claimed {
+                false
+            } else {
+                *header_claimed = true;
+                true
+            }
+        }
         DisplayInside::TableRowGroup
         | DisplayInside::TableFooterGroup
         | DisplayInside::TableRow
@@ -1673,6 +1690,7 @@ fn collect_repeating_table_cells(
             child_id,
             next_in_header,
             depth + 1,
+            header_claimed,
             header_cell_ids,
             body_cell_ids,
         );
@@ -1695,12 +1713,16 @@ fn repeating_table_header(
 
     let mut header_cell_ids = Vec::new();
     let mut body_cell_ids = Vec::new();
+    // Threaded across siblings so only the first `table-header-group` in
+    // document order becomes the header — see `collect_repeating_table_cells`.
+    let mut header_claimed = false;
     for &child_id in &table.children {
         collect_repeating_table_cells(
             doc,
             child_id,
             false,
             child_depth,
+            &mut header_claimed,
             &mut header_cell_ids,
             &mut body_cell_ids,
         );
@@ -1727,6 +1749,26 @@ fn repeating_table_header(
     if !header_top_px.is_finite() || !header_bottom_px.is_finite() || !body_origin_px.is_finite() {
         return None;
     }
+
+    // `band_height_px` below measures the strip from the table's top edge down
+    // to where the body starts, which is only the header's own box when the
+    // header actually sits at the top of the table.
+    //
+    // CSS 2.1 §17.5.1 says a `table-header-group` is "always displayed before
+    // all other rows and row groups" regardless of its source position, but
+    // that reordering happens in layout and the upstream engine does not
+    // implement it — a header group written after a `tbody` keeps its
+    // in-flow offset here. Reserving a band that spans the rows above it
+    // then produces a fragment taller than the page box (fulgur-naj7.5:
+    // measured [(0, h=120), (1, h=100), (2, h=100)] on a 100px page).
+    //
+    // Since fulgur consumes layout rather than producing it, it cannot honour
+    // the reordering on its own. Decline to repeat instead of emitting broken
+    // geometry; the table still paginates, just without a repeated header.
+    if header_top_px > body_origin_px {
+        return None;
+    }
+
     let band_height_px = header_bottom_px.max(body_origin_px);
     if band_height_px <= 0.0 {
         return None;
@@ -4629,8 +4671,15 @@ mod tests {
         walk(doc, doc.root_element().id, id)
     }
 
+    /// css-tables-3: "If a table owns multiple `display: table-header-group`
+    /// boxes, only the first is treated as a header; the others are treated as
+    /// if they had `display: table-row-group`."
+    ///
+    /// Supersedes `repeating_table_metadata_uses_computed_display_and_full_band`
+    /// (PR #710), which asserted that `tbody.repeat` — the *second* header
+    /// group here — also contributed a header cell.
     #[test]
-    fn repeating_table_metadata_uses_computed_display_and_full_band() {
+    fn repeating_table_metadata_uses_only_the_first_header_group() {
         let doc = parse(
             r#"
                 <html><head><style>
@@ -4658,12 +4707,15 @@ mod tests {
         let h2 = find_by_id(&doc, "h2").unwrap();
         let b1 = find_by_id(&doc, "b1").unwrap();
         let foot = find_by_id(&doc, "foot").unwrap();
-        let body_y = doc.get_node(b1).unwrap().final_layout.location.y;
+        // The body now starts at the demoted second header group, not at `b1`.
+        let body_y = doc.get_node(h2).unwrap().final_layout.location.y;
 
         let metadata = repeating_table_header(&doc, table_id, 1).unwrap();
 
         assert_eq!(metadata.table_id, table_id);
-        assert_eq!(metadata.header_cell_ids, vec![h1, h1b, h2]);
+        // Only `<thead>`'s cells are headers; `tbody.repeat` is demoted.
+        assert_eq!(metadata.header_cell_ids, vec![h1, h1b]);
+        assert!(metadata.body_cell_ids.contains(&h2));
         assert!(metadata.body_cell_ids.contains(&b1));
         assert!(metadata.body_cell_ids.contains(&foot));
         assert!((metadata.body_origin_px - body_y).abs() < 0.5);
@@ -4885,8 +4937,12 @@ mod tests {
         assert!(repeated > opt_out);
     }
 
+    /// Supersedes `non_thead_and_multiple_header_groups_repeat_full_band`
+    /// (PR #710), which asserted that *every* `table-header-group` repeats.
+    /// css-tables-3 gives that status to the first one only; `tbody.repeat`
+    /// below is the second and must paginate as ordinary body content.
     #[test]
-    fn non_thead_and_multiple_header_groups_repeat_full_band() {
+    fn only_the_first_header_group_repeats_per_css_tables_3() {
         let html = r#"<!doctype html>
             <html><head><style>
               html, body { margin: 0; padding: 0; }
@@ -4916,27 +4972,32 @@ mod tests {
             .map(|fragment| fragment.page_index)
             .collect::<Vec<_>>();
 
-        for header_id in [h1_id, h2_id] {
-            assert!(geometry[&header_id].is_repeat);
-            assert_eq!(
-                geometry[&header_id]
-                    .fragments
-                    .iter()
-                    .map(|fragment| fragment.page_index)
-                    .collect::<Vec<_>>(),
-                table_pages
-            );
-        }
+        assert!(geometry[&h1_id].is_repeat, "the first header group repeats");
+        assert_eq!(
+            geometry[&h1_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            table_pages
+        );
+        assert!(
+            !geometry[&h2_id].is_repeat,
+            "the second header group is demoted to table-row-group and must not repeat"
+        );
         let continuation = geometry[&b4_id]
             .fragments
             .iter()
             .filter(|fragment| fragment.page_index > table_pages[0])
             .collect::<Vec<_>>();
         assert!(!continuation.is_empty());
+        // The reserved band is one 20px header row (`<thead>`), not two:
+        // the demoted `tbody.repeat` paginates as body content now, so
+        // continuation rows clear 20px rather than the former 40px.
         assert!(
             continuation
                 .iter()
-                .all(|fragment| fragment.y.to_f32() >= 39.5)
+                .all(|fragment| fragment.y.to_f32() >= 19.5)
         );
     }
 
