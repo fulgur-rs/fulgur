@@ -563,17 +563,22 @@ fn probe_finding9_multicol_inside_repeated_header() {
         .iter()
         .find(|(_, b)| b.id.as_deref().map(|s| s.as_str()) == Some("mc"))
         .map(|(id, _)| *id);
-    if let Some(id) = mc_id {
-        if let Some(g) = layout.geometry.get(&id) {
-            let repeats = g.fragments.len();
-            let is_repeat = g.is_repeat;
-            println!("[finding9] mc geometry: fragments={repeats} is_repeat={is_repeat}");
-            assert!(
-                !is_repeat,
-                "finding #9 REPRODUCED — a multicol container carries is_repeat=true, \
-                 breaking the invariant render.rs:1357 relies on"
-            );
-        }
+    if let Some(g) = mc_id.and_then(|id| layout.geometry.get(&id)) {
+        let repeats = g.fragments.len();
+        let is_repeat = g.is_repeat;
+        println!("[finding9] mc geometry: fragments={repeats} is_repeat={is_repeat}");
+        // VERDICT (fulgur-naj7.12 spike): `is_repeat = true` here is
+        // CORRECT, not a bug. The premise this probe originally
+        // encoded — that only `position: fixed` produces it — was the
+        // stale part. What must hold is the repetition contract: the
+        // fragments are copies of the whole container, so `is_split()`
+        // stays false and `render.rs` must not partition it.
+        assert!(is_repeat, "a multicol inside a repeated header repeats");
+        assert!(
+            !g.is_split(),
+            "finding #9 REGRESSED — a repeated container reported as split, \
+                 which would make render.rs partition copies as if they were slices"
+        );
     }
 }
 

@@ -1354,11 +1354,20 @@ fn paint_multicol_paragraph_slices(
     // `multicol-inline-root-split-case-a`: padding 40px, cutoff
     // ≈ 88pt, but valid slices reach origin_pt.1 + size_pt.1 ≈ 105pt).
     //
-    // `is_split()` (false when `is_repeat=true`) is the right gate:
-    // multicol containers can't be `position: fixed` (the only producer
-    // of `is_repeat=true` geometry; see `pagination_layout.rs:2251`),
-    // so `is_split() == fragments.len() > 1` for any valid input here.
-    // Using the predicate documents the intent.
+    // `is_split()` (false when `is_repeat=true`) is the right gate, but
+    // NOT because multicol can only ever have one fragment per page. It
+    // used to say `position: fixed` was the sole producer of
+    // `is_repeat=true`, so `is_split() == fragments.len() > 1` here; a
+    // repeated table header can hold a multicol container too, which
+    // makes that premise false (fulgur-naj7.12 measured `is_repeat=true`
+    // with one fragment per page for `#mc` inside a `<th>`).
+    //
+    // The predicate is still correct under the real rule: `is_repeat`
+    // fragments are *copies* of the whole container, not slices of it,
+    // so each page must draw the full column content and partitioning
+    // would be wrong. The spike confirmed the rendered output — the
+    // header's paragraphs appear complete on every page
+    // (`tests/naj7_spike_is_repeat.rs`).
     let needs_partition = container_geom.is_split();
     let run_tag_node_id = run_tag_target(drawables, source_node_id);
     let use_run_tagging = canvas.tag_collector.is_some()

@@ -109,6 +109,12 @@ pub struct Fragment {
 #[derive(Clone, Debug, Default)]
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
+    /// Producers: `append_position_fixed_fragments` (`position: fixed`)
+    /// and `append_repeated_header_fragments` (a repeating
+    /// `table-header-group` and every descendant of its cells, which
+    /// includes multicol containers — see `fulgur-naj7.12`). Consumers
+    /// must treat the fragments as copies of the whole node, never as
+    /// slices of it.
     pub is_repeat: bool,
 }
 

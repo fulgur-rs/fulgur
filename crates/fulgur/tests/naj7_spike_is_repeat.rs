@@ -1,0 +1,138 @@
+//! Spike for `fulgur-naj7.12`: what does `is_repeat` mean once a repeated
+//! table header can contain a multicol container?
+//!
+//! `is_split()` is `!is_repeat && fragments.len() > 1`, and `render.rs:1362`
+//! gates multicol partitioning on it. `probe_finding9` showed a multicol inside
+//! a repeated header carries `is_repeat = true` with 4 fragments, which makes
+//! `is_split()` false — so the container is NOT partitioned per page.
+//!
+//! The question this file answers is whether that is the wrong behaviour or
+//! merely a stale justification: if the 4 fragments are *repetitions* (the same
+//! column content redrawn on each page) then `is_split() == false` is correct
+//! and only the comment is wrong. If content goes missing or is partitioned
+//! wrongly, the semantics need reworking.
+//!
+//! Run with:
+//!   cargo test -p fulgur --test naj7_spike_is_repeat -- --nocapture
+
+use fulgur::{Engine, Margin, PageSize};
+
+/// Header carries a 2-column multicol with three distinguishable paragraphs;
+/// the body is long enough to span four pages.
+const MULTICOL_IN_HEADER: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  #mc { columns: 2; column-gap: 0; height: 30px; }
+  #mc p { margin: 0; font-size: 8px; }
+  td { height: 20px; font-size: 8px; }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th><div id="mc"><p>AAA</p><p>BBB</p><p>CCC</p></div></th></tr></thead>
+    <tbody>
+      <tr><td>r1</td></tr><tr><td>r2</td></tr><tr><td>r3</td></tr><tr><td>r4</td></tr>
+      <tr><td>r5</td></tr><tr><td>r6</td></tr><tr><td>r7</td></tr><tr><td>r8</td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+fn engine_200x100() -> Engine {
+    Engine::builder()
+        .page_size(PageSize {
+            width: 150.0,
+            height: 75.0,
+        })
+        .margin(Margin::uniform(0.0))
+        .build()
+}
+
+#[test]
+fn spike_multicol_in_repeated_header_renders_on_every_page() {
+    let engine = engine_200x100();
+
+    // Geometry side: what the pagination pass believes.
+    let layout = engine.layout(MULTICOL_IN_HEADER).expect("layout");
+    let mc_id = layout
+        .drawables
+        .block_styles
+        .iter()
+        .find(|(_, b)| b.id.as_deref().map(|s| s.as_str()) == Some("mc"))
+        .map(|(id, _)| *id)
+        .expect("multicol drawable");
+    let mc_geom = layout.geometry.get(&mc_id).expect("multicol geometry");
+    println!(
+        "[spike] mc: is_repeat={} is_split={} fragments={:?}",
+        mc_geom.is_repeat,
+        mc_geom.is_split(),
+        mc_geom
+            .fragments
+            .iter()
+            .map(|f| (f.page_index, f.y.to_f32(), f.height.to_f32()))
+            .collect::<Vec<_>>()
+    );
+
+    // Render side: what actually lands on each page.
+    let pdf = engine.render(MULTICOL_IN_HEADER).expect("render");
+    let dir = std::env::temp_dir().join("naj7-spike");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("multicol-header.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+
+    let inspected = fulgur::inspect::inspect(&path).expect("inspect");
+    println!("[spike] pages = {}", inspected.pages);
+
+    let mut per_page: std::collections::BTreeMap<u32, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for item in &inspected.text_items {
+        per_page
+            .entry(item.page)
+            .or_default()
+            .push(item.text.trim().to_string());
+    }
+    for (page, texts) in &per_page {
+        println!("[spike] page {page}: {texts:?}");
+    }
+
+    // `inspect` yields raw glyph ids here rather than decoded text (the subset
+    // font carries no usable ToUnicode mapping for this fixture), so compare
+    // glyph sequences instead of looking for "AAA". That is the stronger claim
+    // anyway: the header's items must be *identical* on every page, which is
+    // exactly what "repetition, not split" means.
+    let pages: Vec<u32> = per_page.keys().copied().collect();
+    assert!(
+        pages.len() >= 3,
+        "table must span at least 3 pages: {pages:?}"
+    );
+
+    let header_signature: Vec<String> = per_page[&pages[0]].iter().take(3).cloned().collect();
+    assert_eq!(
+        header_signature.len(),
+        3,
+        "expected three header paragraphs on the first page"
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    for page in &pages {
+        let texts = &per_page[page];
+        for item in &header_signature {
+            if !texts.contains(item) {
+                missing.push(format!("page {page} is missing header item {item:?}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "repeated header's multicol content does not survive on every page:\n{}\n\
+         per-page text: {per_page:?}",
+        missing.join("\n")
+    );
+
+    // And the geometry must stay a repetition, never a split: partitioning a
+    // repeated container per page is what `render.rs:1362` must NOT do.
+    assert!(mc_geom.is_repeat, "multicol in a repeated header repeats");
+    assert!(
+        !mc_geom.is_split(),
+        "a repeated container must not be treated as split"
+    );
+}
