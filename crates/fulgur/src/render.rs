@@ -2939,32 +2939,38 @@ fn draw_under_clip_table(
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
-    // Same zero-height split skip as `draw_table_v2`: a 0-tall slice
-    // must not paint or clip at `layout_size` / `cached_height`.
-    if geom.is_split() && frag.height <= crate::units::Px::ZERO {
-        return;
-    }
+    // A 0-tall split slice must not paint or clip at `layout_size` /
+    // `cached_height` — same reason as `draw_table_v2`. Unlike that
+    // no-clip path we must NOT return here: `build_page_skip_sets`
+    // (see `render.rs:463`) routes every cell of an `overflow: hidden`
+    // table through this function, so an early return would drop the
+    // whole page's cells — repeated header included. Suppress the
+    // outer frame and the clip, then dispatch descendants as usual.
+    let zero_height_slice = geom.is_split() && frag.height <= crate::units::Px::ZERO;
 
     let (total_width, total_height) = table_box_size(table, geom, frag);
 
     draw_with_opacity(canvas, table.opacity, |canvas| {
         // bg / border / shadow OUTSIDE the clip, mirroring
         // `draw_under_clip` for blocks (`pageable.rs:1796-1827`).
-        if table.visible {
+        if table.visible && !zero_height_slice {
             paint_table_outer_frame(canvas, table, x_pt, y_pt, total_width, total_height);
         }
 
         // Push clip — fall through to descendant dispatch even if
         // `compute_overflow_clip_path` returns `None` so the cells
         // still paint (defensive, mirrors `draw_under_clip`).
-        let clip_pushed = if let Some(clip_path) =
-            crate::draw_primitives::compute_overflow_clip_path(
-                &table.style,
-                x_pt,
-                y_pt,
-                total_width,
-                total_height,
-            ) {
+        // A zero-height slice clips to nothing, so skip the push
+        // entirely rather than erase the descendants we just kept.
+        let clip_pushed = if zero_height_slice {
+            false
+        } else if let Some(clip_path) = crate::draw_primitives::compute_overflow_clip_path(
+            &table.style,
+            x_pt,
+            y_pt,
+            total_width,
+            total_height,
+        ) {
             canvas
                 .surface
                 .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
