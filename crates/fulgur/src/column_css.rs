@@ -1058,11 +1058,11 @@ fn walk(
                 props.merge(rule.props.clone());
             }
         }
-        if let Some(elem) = node.element_data() {
-            if let Some(inline) = crate::blitz_adapter::get_attr(elem, "style") {
-                let inline_props = parse_declaration_block(inline);
-                props.merge(inline_props);
-            }
+        if let Some(elem) = node.element_data()
+            && let Some(inline) = crate::blitz_adapter::get_attr(elem, "style")
+        {
+            let inline_props = parse_declaration_block(inline);
+            props.merge(inline_props);
         }
         if !props.is_empty() {
             table.insert(node_id, props);

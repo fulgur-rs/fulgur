@@ -309,14 +309,13 @@ pub(super) fn find_marker_font(
     for entry in drawables.paragraphs.values() {
         for line in &entry.lines {
             for item in &line.items {
-                if let LineItem::Text(run) = item {
-                    if let Ok(font_ref) =
+                if let LineItem::Text(run) = item
+                    && let Ok(font_ref) =
                         skrifa::FontRef::from_index(&run.font_data, run.font_index)
-                    {
-                        let charmap = font_ref.charmap();
-                        if check_chars.iter().all(|c| charmap.map(*c).is_some()) {
-                            return Some((Arc::clone(&run.font_data), run.font_index));
-                        }
+                {
+                    let charmap = font_ref.charmap();
+                    if check_chars.iter().all(|c| charmap.map(*c).is_some()) {
+                        return Some((Arc::clone(&run.font_data), run.font_index));
                     }
                 }
             }
