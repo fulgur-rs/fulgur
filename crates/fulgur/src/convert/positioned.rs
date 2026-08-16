@@ -120,23 +120,23 @@ fn resolve_cb_for_absolute(
                 parent_offset_in_cb_bp: (offset_x, offset_y),
             });
         }
-        if let Some(elem) = cur.element_data() {
-            if elem.name.local.as_ref() == "body" {
-                let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
-                if let Some((vw, vh)) = viewport_size_px {
-                    if padding_box_size.0 <= Px::ZERO {
-                        padding_box_size.0 = vw.as_px();
-                    }
-                    if padding_box_size.1 <= Px::ZERO {
-                        padding_box_size.1 = vh.as_px();
-                    }
+        if let Some(elem) = cur.element_data()
+            && elem.name.local.as_ref() == "body"
+        {
+            let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
+            if let Some((vw, vh)) = viewport_size_px {
+                if padding_box_size.0 <= Px::ZERO {
+                    padding_box_size.0 = vw.as_px();
                 }
-                body_fallback = Some(AbsCb {
-                    padding_box_size,
-                    border_top_left,
-                    parent_offset_in_cb_bp: (offset_x, offset_y),
-                });
+                if padding_box_size.1 <= Px::ZERO {
+                    padding_box_size.1 = vh.as_px();
+                }
             }
+            body_fallback = Some(AbsCb {
+                padding_box_size,
+                border_top_left,
+                parent_offset_in_cb_bp: (offset_x, offset_y),
+            });
         }
         offset_x += cur.final_layout.location.x;
         offset_y += cur.final_layout.location.y;

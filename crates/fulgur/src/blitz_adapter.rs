@@ -270,10 +270,10 @@ pub fn parse_html_with_local_resources(
     // to rewrite — their @import replacements will re-fetch with the
     // correct MediaList.
     for resource in net_provider.drain_pending_resources() {
-        if let Resource::Css(node_id, _) = &resource {
-            if rewrite_node_ids.contains(node_id) {
-                continue;
-            }
+        if let Resource::Css(node_id, _) = &resource
+            && rewrite_node_ids.contains(node_id)
+        {
+            continue;
         }
         doc.load_resource(resource);
     }
@@ -693,10 +693,11 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
             return None;
         }
         let node = doc.get_node(node_id)?;
-        if let Some(el) = node.element_data() {
-            if el.name.local.as_ref() == "title" && el.name.ns == blitz_dom::ns!(html) {
-                return Some(node_id);
-            }
+        if let Some(el) = node.element_data()
+            && el.name.local.as_ref() == "title"
+            && el.name.ns == blitz_dom::ns!(html)
+        {
+            return Some(node_id);
         }
         for &child_id in &node.children {
             if let Some(found) = find_title(doc, child_id, depth + 1) {
@@ -712,10 +713,10 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
 
     let mut text = String::new();
     for &child_id in &title_node.children {
-        if let Some(child) = base.get_node(child_id) {
-            if let blitz_dom::node::NodeData::Text(t) = &child.data {
-                text.push_str(&t.content);
-            }
+        if let Some(child) = base.get_node(child_id)
+            && let blitz_dom::node::NodeData::Text(t) = &child.data
+        {
+            text.push_str(&t.content);
         }
     }
 
@@ -1104,10 +1105,10 @@ fn find_element_by_tag_recursive(
         return None;
     }
     let node = doc.get_node(node_id)?;
-    if let Some(el) = node.element_data() {
-        if el.name.local.as_ref() == tag {
-            return Some(node_id);
-        }
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == tag
+    {
+        return Some(node_id);
     }
     for &child_id in &node.children {
         if let Some(found) = find_element_by_tag_recursive(doc, child_id, tag, depth + 1) {
@@ -1186,12 +1187,11 @@ pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
             out.push_str(&t.content);
         }
         for &child_id in &node.children {
-            if let Some(child) = doc.get_node(child_id) {
-                if let blitz_dom::node::NodeData::Element(el) = &child.data {
-                    if is_block_boundary_tag(el.name.local.as_ref()) {
-                        push_separator(out);
-                    }
-                }
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Element(el) = &child.data
+                && is_block_boundary_tag(el.name.local.as_ref())
+            {
+                push_separator(out);
             }
             walk(doc, child_id, depth + 1, out);
         }
@@ -1479,14 +1479,14 @@ fn collect_caption_tables_recursive(
     let is_table = node
         .element_data()
         .is_some_and(|el| el.name.local.as_ref() == "table");
-    if is_table {
-        if let Some(&caption_id) = node.children.iter().find(|&&child_id| {
+    if is_table
+        && let Some(&caption_id) = node.children.iter().find(|&&child_id| {
             doc.get_node(child_id)
                 .and_then(|c| c.element_data())
                 .is_some_and(|el| el.name.local.as_ref() == "caption")
-        }) {
-            out.push((node_id, caption_id));
-        }
+        })
+    {
+        out.push((node_id, caption_id));
     }
     let children = node.children.clone();
     for child_id in children {
@@ -2505,10 +2505,10 @@ impl CounterPass {
 
             // Set data attribute once
             let qual = make_qual_name("data-fulgur-cid");
-            if let Some(node_mut) = doc.get_node_mut(node_id) {
-                if let Some(elem_mut) = node_mut.element_data_mut() {
-                    elem_mut.attrs.set(qual, &v);
-                }
+            if let Some(node_mut) = doc.get_node_mut(node_id)
+                && let Some(elem_mut) = node_mut.element_data_mut()
+            {
+                elem_mut.attrs.set(qual, &v);
             }
             Some(v)
         } else {
@@ -3379,10 +3379,10 @@ pub fn rewrite_marker_content_url(css: &str) -> String {
         if ch == '}' {
             brace_depth = brace_depth.saturating_sub(1);
             // If the top at-rule was opened at the current depth, pop it.
-            if let Some(&(depth, _)) = at_stack.last() {
-                if depth == brace_depth {
-                    at_stack.pop();
-                }
+            if let Some(&(depth, _)) = at_stack.last()
+                && depth == brace_depth
+            {
+                at_stack.pop();
             }
             i += 1;
             continue;
@@ -3611,24 +3611,24 @@ pub(crate) fn collect_link_media_rewrites(doc: &HtmlDocument) -> Vec<LinkMediaRe
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
-        if let Some(el) = node.element_data() {
-            if el.name.local.as_ref() == "link" {
-                let rel_ok = get_attr(el, "rel")
-                    .map(|rel| {
-                        rel.split_ascii_whitespace()
-                            .any(|t| t.eq_ignore_ascii_case("stylesheet"))
-                    })
-                    .unwrap_or(false);
-                let href = get_attr(el, "href").unwrap_or("").trim();
-                let media = get_attr(el, "media").unwrap_or("").trim();
-                let media_active = !media.is_empty() && !media.eq_ignore_ascii_case("all");
-                if rel_ok && !href.is_empty() && media_active {
-                    out.push(LinkMediaRewrite {
-                        link_node_id: node_id,
-                        href: href.to_string(),
-                        media: media.to_string(),
-                    });
-                }
+        if let Some(el) = node.element_data()
+            && el.name.local.as_ref() == "link"
+        {
+            let rel_ok = get_attr(el, "rel")
+                .map(|rel| {
+                    rel.split_ascii_whitespace()
+                        .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+                })
+                .unwrap_or(false);
+            let href = get_attr(el, "href").unwrap_or("").trim();
+            let media = get_attr(el, "media").unwrap_or("").trim();
+            let media_active = !media.is_empty() && !media.eq_ignore_ascii_case("all");
+            if rel_ok && !href.is_empty() && media_active {
+                out.push(LinkMediaRewrite {
+                    link_node_id: node_id,
+                    href: href.to_string(),
+                    media: media.to_string(),
+                });
             }
         }
         for &child in &node.children {
@@ -4222,10 +4222,10 @@ mod tests {
         let mut h1_ids: Vec<usize> = Vec::new();
         fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
             if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "h1" {
-                        out.push(id);
-                    }
+                if let Some(el) = node.element_data()
+                    && el.name.local.as_ref() == "h1"
+                {
+                    out.push(id);
                 }
                 for &c in &node.children {
                     walk(doc, c, out);
@@ -4392,10 +4392,11 @@ mod tests {
 
         fn find_inner_li(doc: &HtmlDocument, id: usize, ol_depth: usize) -> Option<usize> {
             if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "li" && ol_depth >= 2 {
-                        return Some(id);
-                    }
+                if let Some(el) = node.element_data()
+                    && el.name.local.as_ref() == "li"
+                    && ol_depth >= 2
+                {
+                    return Some(id);
                 }
                 let next_depth = node
                     .element_data()
@@ -5033,10 +5034,10 @@ mod tests {
         let mut doc = parse(html, 400.0, &[]);
         fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
             if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "h1" {
-                        return Some(id);
-                    }
+                if let Some(el) = node.element_data()
+                    && el.name.local.as_ref() == "h1"
+                {
+                    return Some(id);
                 }
                 for &c in &node.children {
                     if let Some(found) = find_h1(doc, c) {
@@ -5763,11 +5764,11 @@ mod tests {
                 return;
             }
             if let Some(node) = doc.get_node(id) {
-                if let Some(el) = node.element_data() {
-                    if el.name.local.as_ref() == "p" {
-                        *out = Some(id);
-                        return;
-                    }
+                if let Some(el) = node.element_data()
+                    && el.name.local.as_ref() == "p"
+                {
+                    *out = Some(id);
+                    return;
                 }
                 for &c in &node.children {
                     walk(doc, c, out);
@@ -5787,10 +5788,10 @@ mod tests {
     fn find_element_by_local_name(doc: &HtmlDocument, name: &str) -> Option<usize> {
         fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
             let node = doc.get_node(id)?;
-            if let Some(ed) = node.element_data() {
-                if ed.name.local.as_ref() == name {
-                    return Some(id);
-                }
+            if let Some(ed) = node.element_data()
+                && ed.name.local.as_ref() == name
+            {
+                return Some(id);
             }
             for &c in &node.children {
                 if let Some(v) = walk(doc, c, name) {
@@ -6022,10 +6023,10 @@ mod tests {
                 return None;
             }
             let node = doc.get_node(node_id)?;
-            if let Some(el) = node.element_data() {
-                if el.name.local.as_ref().contains('{') {
-                    return Some(node_id);
-                }
+            if let Some(el) = node.element_data()
+                && el.name.local.as_ref().contains('{')
+            {
+                return Some(node_id);
             }
             for &child_id in &node.children {
                 if let Some(hit) = find_crafted_tag(doc, child_id, depth + 1) {
@@ -6172,10 +6173,10 @@ mod tests {
                 return None;
             }
             let node = doc.get_node(node_id)?;
-            if let Some(el) = node.element_data() {
-                if get_attr(el, "id") == Some(want) {
-                    return Some(node_id);
-                }
+            if let Some(el) = node.element_data()
+                && get_attr(el, "id") == Some(want)
+            {
+                return Some(node_id);
             }
             for &child_id in &node.children {
                 if let Some(found) = walk(doc, child_id, want, depth + 1) {
@@ -6782,10 +6783,10 @@ mod marker_rewrite_tests {
     fn find_first_element(doc: &HtmlDocument, name: &str) -> Option<usize> {
         fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
             let node = doc.get_node(id)?;
-            if let Some(ed) = node.element_data() {
-                if ed.name.local.as_ref() == name {
-                    return Some(id);
-                }
+            if let Some(ed) = node.element_data()
+                && ed.name.local.as_ref() == name
+            {
+                return Some(id);
             }
             for &c in &node.children {
                 if let Some(v) = walk(doc, c, name) {
@@ -6826,6 +6827,34 @@ mod marker_rewrite_tests {
         let css = r#"li::marker { content: "→ "; }"#;
         let result = rewrite_marker_content_url(css);
         assert!(!result.contains("list-style-image"));
+    }
+
+    /// Minified CSS closes the at-rule immediately after the inner rule's
+    /// `}`, so the scanner hits the top-level closing-brace branch that pops
+    /// `at_stack` (the whitespace-separated form in the test below is
+    /// consumed by the selector scanner instead and never reaches it).
+    /// A second `::marker` rule after the block proves the pop happened:
+    /// it must be emitted unwrapped, not re-wrapped in `@media print`.
+    #[test]
+    fn test_rewrite_marker_content_url_at_media_minified_pops_at_stack() {
+        let css =
+            r#"@media print{li::marker{content:url("a.png")}}li::marker{content:url("b.png")}"#;
+        let result = rewrite_marker_content_url(css);
+        let suffix = &result[css.len()..];
+
+        assert_eq!(
+            suffix.matches("@media print").count(),
+            1,
+            "only the first rule may be re-wrapped in @media print, suffix:\n{suffix}"
+        );
+        assert!(
+            suffix.contains("@media print{li{list-style-image:url(\"a.png\")}}"),
+            "in-@media rule must stay wrapped, suffix:\n{suffix}"
+        );
+        assert!(
+            suffix.contains("\nli{list-style-image:url(\"b.png\")}"),
+            "post-@media rule must be emitted unwrapped, suffix:\n{suffix}"
+        );
     }
 
     #[test]

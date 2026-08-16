@@ -142,16 +142,16 @@ fn extract_var_names(expr: &ast::Expr<'_>) -> Vec<String> {
 
 /// Accumulate `set`/`setblock` variable bindings from a statement into the scope.
 fn accumulate_set_in_scope(stmt: &ast::Stmt<'_>, scope: &mut Scope) {
-    if let ast::Stmt::Set(s) = stmt {
-        if let ast::Expr::Var(v) = &s.target {
-            let rhs_path = resolve_expr_path(&s.expr, scope).unwrap_or_default();
-            scope.insert(v.id.to_string(), rhs_path);
-        }
+    if let ast::Stmt::Set(s) = stmt
+        && let ast::Expr::Var(v) = &s.target
+    {
+        let rhs_path = resolve_expr_path(&s.expr, scope).unwrap_or_default();
+        scope.insert(v.id.to_string(), rhs_path);
     }
-    if let ast::Stmt::SetBlock(sb) = stmt {
-        if let ast::Expr::Var(v) = &sb.target {
-            scope.insert(v.id.to_string(), vec![]);
-        }
+    if let ast::Stmt::SetBlock(sb) = stmt
+        && let ast::Expr::Var(v) = &sb.target
+    {
+        scope.insert(v.id.to_string(), vec![]);
     }
 }
 

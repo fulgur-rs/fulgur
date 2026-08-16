@@ -96,13 +96,13 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String,
     // Skip non-rendered subtrees so <script>/<style> bodies don't leak into
     // named strings when a broad selector (e.g. `body`) is used as the
     // string-set target.
-    if let Some(elem) = node.element_data() {
-        if matches!(
+    if let Some(elem) = node.element_data()
+        && matches!(
             elem.name.local.as_ref(),
             "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
-        ) {
-            return;
-        }
+        )
+    {
+        return;
     }
     match &node.data {
         blitz_dom::NodeData::Text(text_data) => out.push_str(&text_data.content),
@@ -134,6 +134,23 @@ fn normalize_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `string-set` targets are often broad selectors (`body`, `html`), so
+    /// `collect_text` must not pull `<style>` / `<script>` bodies or `<head>`
+    /// metadata into the named string.
+    #[test]
+    fn extract_text_content_skips_non_rendered_subtrees() {
+        let html = "<html><head><title>TITLETEXT</title></head>\
+                    <body><style>p{color:HIDDENCSS}</style>\
+                    <script>var HIDDENJS = 1;</script>\
+                    <p>VISIBLETEXT</p></body></html>";
+        let doc = crate::blitz_adapter::parse(html, 600.0, &[]);
+        let text = extract_text_content(&doc, doc.root_element().id);
+        assert!(text.contains("VISIBLETEXT"), "body text missing: {text}");
+        assert!(!text.contains("HIDDENCSS"), "<style> leaked: {text}");
+        assert!(!text.contains("HIDDENJS"), "<script> leaked: {text}");
+        assert!(!text.contains("TITLETEXT"), "<head> leaked: {text}");
+    }
 
     #[test]
     fn test_string_set_store_basic() {

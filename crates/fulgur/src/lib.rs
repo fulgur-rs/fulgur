@@ -1,14 +1,3 @@
-// MSRV 1.89 newly enables clippy's MSRV-gated `collapsible_if` suggestion
-// for let-chains (stabilized in Rust 1.88), firing on ~60 pre-existing
-// nested if-let sites across this crate. Suppressed here to keep the MSRV
-// bump (PR #701) a mechanical version-number change rather than a large
-// reindent across 12+ files; tracked for a follow-up migration in
-// fulgur-pt70. (A second lint, `manual_is_multiple_of`, hit 5 sites too,
-// but that one isn't in clippy's table at our 1.89 MSRV floor — `#[allow]`ing
-// an unknown lint is itself a hard error under `-D warnings` on that exact
-// toolchain, so those 5 sites were fixed directly instead of suppressed.)
-#![allow(clippy::collapsible_if)]
-
 /// Maximum DOM tree depth before recursion is cut off. Prevents stack overflow
 /// from pathologically deep HTML input.
 pub(crate) const MAX_DOM_DEPTH: usize = 512;

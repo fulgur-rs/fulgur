@@ -547,51 +547,51 @@ fn extract_text_items(
                     ty = ctm[1] * tlm_e + ctm[3] * tlm_f + ctm[5];
                 }
                 "Tj" => {
-                    if let Some(text_obj) = operands.first() {
-                        if let Ok(bytes) = text_obj.as_str() {
-                            let text = decode_pdf_string(bytes);
-                            if !text.trim().is_empty() {
-                                let w = estimate_width(&text, font_size);
-                                text_bytes += text.len();
-                                items.push(TextItem {
-                                    page: page_num,
-                                    x: tx,
-                                    y: ty,
-                                    width: w,
-                                    height: font_size,
-                                    text,
-                                    font: font_name.to_string(),
-                                    font_size,
-                                });
-                                tx += w;
-                            }
+                    if let Some(text_obj) = operands.first()
+                        && let Ok(bytes) = text_obj.as_str()
+                    {
+                        let text = decode_pdf_string(bytes);
+                        if !text.trim().is_empty() {
+                            let w = estimate_width(&text, font_size);
+                            text_bytes += text.len();
+                            items.push(TextItem {
+                                page: page_num,
+                                x: tx,
+                                y: ty,
+                                width: w,
+                                height: font_size,
+                                text,
+                                font: font_name.to_string(),
+                                font_size,
+                            });
+                            tx += w;
                         }
                     }
                 }
                 "TJ" => {
-                    if let Some(array_obj) = operands.first() {
-                        if let Ok(array) = array_obj.as_array() {
-                            let mut combined = String::new();
-                            for elem in array {
-                                if let Ok(bytes) = elem.as_str() {
-                                    combined.push_str(&decode_pdf_string(bytes));
-                                }
+                    if let Some(array_obj) = operands.first()
+                        && let Ok(array) = array_obj.as_array()
+                    {
+                        let mut combined = String::new();
+                        for elem in array {
+                            if let Ok(bytes) = elem.as_str() {
+                                combined.push_str(&decode_pdf_string(bytes));
                             }
-                            if !combined.trim().is_empty() {
-                                let w = estimate_width(&combined, font_size);
-                                text_bytes += combined.len();
-                                items.push(TextItem {
-                                    page: page_num,
-                                    x: tx,
-                                    y: ty,
-                                    width: w,
-                                    height: font_size,
-                                    text: combined,
-                                    font: font_name.to_string(),
-                                    font_size,
-                                });
-                                tx += w;
-                            }
+                        }
+                        if !combined.trim().is_empty() {
+                            let w = estimate_width(&combined, font_size);
+                            text_bytes += combined.len();
+                            items.push(TextItem {
+                                page: page_num,
+                                x: tx,
+                                y: ty,
+                                width: w,
+                                height: font_size,
+                                text: combined,
+                                font: font_name.to_string(),
+                                font_size,
+                            });
+                            tx += w;
                         }
                     }
                 }
@@ -648,17 +648,17 @@ fn resolve_page_resources(
             Ok(lopdf::Object::Dictionary(d)) => d,
             _ => return None,
         };
-        if let Ok(res) = dict.get(b"Resources") {
-            if let Ok((id, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
-                let origin = match id {
-                    // `/Resources N 0 R`: the dictionary *is* object N.
-                    Some(id) => ResourcesOrigin::Object(id),
-                    // A direct dictionary nested inside the object being examined
-                    // — whether that is the page itself or an ancestor node.
-                    None => ResourcesOrigin::DirectIn(owner_id),
-                };
-                return Some((origin, resources));
-            }
+        if let Ok(res) = dict.get(b"Resources")
+            && let Ok((id, lopdf::Object::Dictionary(resources))) = doc.dereference(res)
+        {
+            let origin = match id {
+                // `/Resources N 0 R`: the dictionary *is* object N.
+                Some(id) => ResourcesOrigin::Object(id),
+                // A direct dictionary nested inside the object being examined
+                // — whether that is the page itself or an ancestor node.
+                None => ResourcesOrigin::DirectIn(owner_id),
+            };
+            return Some((origin, resources));
         }
         // Following `/Parent` is a hop against the same budget, so a chain of
         // ancestors and a chain of aliases cannot be spent independently.
@@ -765,39 +765,39 @@ fn collect_image_xobjects(
     budget: &mut usize,
 ) -> (ImageXObjects, bool) {
     let mut image_xobjects = ImageXObjects::new();
-    if let Ok(xo) = resources.get(b"XObject") {
-        if let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo) {
-            for (name, obj_ref) in xobjects.iter() {
-                // Charged before the dereference and the name clone below, so an
-                // over-budget dictionary stops partway instead of completing.
-                *budget = budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
-                if *budget == 0 {
-                    return (image_xobjects, false);
-                }
-                if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
-                    let subtype = xobj
+    if let Ok(xo) = resources.get(b"XObject")
+        && let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo)
+    {
+        for (name, obj_ref) in xobjects.iter() {
+            // Charged before the dereference and the name clone below, so an
+            // over-budget dictionary stops partway instead of completing.
+            *budget = budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+            if *budget == 0 {
+                return (image_xobjects, false);
+            }
+            if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
+                let subtype = xobj
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|o| obj_as_name_str(o))
+                    .unwrap_or_default();
+                if subtype == "Image" {
+                    let fmt = detect_image_format(&xobj.dict);
+                    let w_px = xobj
                         .dict
-                        .get(b"Subtype")
+                        .get(b"Width")
                         .ok()
-                        .and_then(|o| obj_as_name_str(o))
-                        .unwrap_or_default();
-                    if subtype == "Image" {
-                        let fmt = detect_image_format(&xobj.dict);
-                        let w_px = xobj
-                            .dict
-                            .get(b"Width")
-                            .ok()
-                            .and_then(|o| o.as_i64().ok())
-                            .unwrap_or(0) as u32;
-                        let h_px = xobj
-                            .dict
-                            .get(b"Height")
-                            .ok()
-                            .and_then(|o| o.as_i64().ok())
-                            .unwrap_or(0) as u32;
-                        let name_str = String::from_utf8_lossy(name).into_owned();
-                        image_xobjects.insert(name_str, (fmt, w_px, h_px));
-                    }
+                        .and_then(|o| o.as_i64().ok())
+                        .unwrap_or(0) as u32;
+                    let h_px = xobj
+                        .dict
+                        .get(b"Height")
+                        .ok()
+                        .and_then(|o| o.as_i64().ok())
+                        .unwrap_or(0) as u32;
+                    let name_str = String::from_utf8_lossy(name).into_owned();
+                    image_xobjects.insert(name_str, (fmt, w_px, h_px));
                 }
             }
         }
@@ -935,48 +935,47 @@ fn extract_image_items(
                     *ctm_stack.last_mut().unwrap() = concat_matrix(&current, &new_m);
                 }
                 "Do" => {
-                    if let Some(name_obj) = op.operands.first() {
-                        if let Some(name) = obj_as_name_str(name_obj) {
-                            if let Some((fmt, w_px, h_px)) = image_xobjects.get(name) {
-                                let ctm = ctm_stack.last().unwrap_or(&identity);
-                                // PDF images occupy the unit square [0,1]x[0,1].
-                                // Transform all 4 corners through the CTM and take
-                                // the axis-aligned bounding box so rotated/sheared
-                                // images produce correct width/height.
-                                let corners = [
-                                    transform_point(ctm, 0.0, 0.0),
-                                    transform_point(ctm, 1.0, 0.0),
-                                    transform_point(ctm, 0.0, 1.0),
-                                    transform_point(ctm, 1.0, 1.0),
-                                ];
-                                let min_x = corners
-                                    .iter()
-                                    .map(|(x, _)| *x)
-                                    .fold(f32::INFINITY, f32::min);
-                                let max_x = corners
-                                    .iter()
-                                    .map(|(x, _)| *x)
-                                    .fold(f32::NEG_INFINITY, f32::max);
-                                let min_y = corners
-                                    .iter()
-                                    .map(|(_, y)| *y)
-                                    .fold(f32::INFINITY, f32::min);
-                                let max_y = corners
-                                    .iter()
-                                    .map(|(_, y)| *y)
-                                    .fold(f32::NEG_INFINITY, f32::max);
-                                items.push(ImageItem {
-                                    page: page_num,
-                                    x: min_x,
-                                    y: min_y,
-                                    width: max_x - min_x,
-                                    height: max_y - min_y,
-                                    format: fmt.clone(),
-                                    width_px: *w_px,
-                                    height_px: *h_px,
-                                });
-                            }
-                        }
+                    if let Some(name_obj) = op.operands.first()
+                        && let Some(name) = obj_as_name_str(name_obj)
+                        && let Some((fmt, w_px, h_px)) = image_xobjects.get(name)
+                    {
+                        let ctm = ctm_stack.last().unwrap_or(&identity);
+                        // PDF images occupy the unit square [0,1]x[0,1].
+                        // Transform all 4 corners through the CTM and take
+                        // the axis-aligned bounding box so rotated/sheared
+                        // images produce correct width/height.
+                        let corners = [
+                            transform_point(ctm, 0.0, 0.0),
+                            transform_point(ctm, 1.0, 0.0),
+                            transform_point(ctm, 0.0, 1.0),
+                            transform_point(ctm, 1.0, 1.0),
+                        ];
+                        let min_x = corners
+                            .iter()
+                            .map(|(x, _)| *x)
+                            .fold(f32::INFINITY, f32::min);
+                        let max_x = corners
+                            .iter()
+                            .map(|(x, _)| *x)
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        let min_y = corners
+                            .iter()
+                            .map(|(_, y)| *y)
+                            .fold(f32::INFINITY, f32::min);
+                        let max_y = corners
+                            .iter()
+                            .map(|(_, y)| *y)
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        items.push(ImageItem {
+                            page: page_num,
+                            x: min_x,
+                            y: min_y,
+                            width: max_x - min_x,
+                            height: max_y - min_y,
+                            format: fmt.clone(),
+                            width_px: *w_px,
+                            height_px: *h_px,
+                        });
                     }
                 }
                 _ => {}
