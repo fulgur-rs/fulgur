@@ -440,7 +440,57 @@ fn parse_margin(s: &str) -> Margin {
     }
 }
 
+/// Minimal `log` sink that writes to **stderr**.
+///
+/// `crates/fulgur` reports non-fatal problems through the `log` facade —
+/// missing assets (`asset.rs`), unparseable CSS (`column_css.rs`), and
+/// fragments placed past the page box (`pagination_layout.rs`). A
+/// facade with no installed logger silently drops every one of them, so
+/// until this existed the CLI showed the user nothing: a render that
+/// paints content off the paper and loses it exits `0` with no output.
+///
+/// stderr, not stdout: `-o -` writes PDF bytes to stdout and any other
+/// byte there corrupts the stream (see [`StdoutIsolator`]).
+///
+/// Deliberately not `env_logger` — that pulls a regex / ANSI stack in
+/// for what is one `writeln!`, and `RUST_LOG=<level>` covers the whole
+/// need here. Unrecognised values fall back to the default rather than
+/// erroring, since logging configuration must never fail a render.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!(
+                "{}: {}",
+                record.level().as_str().to_lowercase(),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install [`StderrLogger`], honouring `RUST_LOG` (default: `warn`).
+fn init_logging() {
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Warn);
+    // Only fails if a logger is already installed, which cannot happen
+    // here — but a logging failure must never abort a render.
+    if log::set_logger(&StderrLogger).is_ok() {
+        log::set_max_level(level);
+    }
+}
+
 fn main() {
+    init_logging();
     let cli = Cli::parse();
 
     match cli.command {
