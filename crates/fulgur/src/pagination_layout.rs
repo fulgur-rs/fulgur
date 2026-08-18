@@ -7156,7 +7156,8 @@ h2 { string-set: chapter-title content(text); }
 
     /// `drive_taffy_root_layout` skips the `used_page_names` prefill when
     /// `used_page_names` is already `Some` (the `if self.used_page_names.is_none()`
-    /// guard at lines 352-356). Geometry must still match the direct walk.
+    /// guard at lines 352-356). The pre-set mapping must survive the call
+    /// unchanged, and geometry must match the direct walk's page assignments.
     #[test]
     fn drive_taffy_root_layout_page_names_already_set_does_not_overwrite() {
         let html = r#"<html><body><div style="height: 200px"></div></body></html>"#;
@@ -7167,16 +7168,39 @@ h2 { string-set: chapter-title content(text); }
         let taffy_geom = {
             let mut doc = parse(html, 600.0);
             let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
-            // Pre-populate used_page_names so the is_none() branch is skipped.
-            tree.used_page_names = Some(BTreeMap::new());
+            // Pre-populate used_page_names with a sentinel entry to prove that
+            // drive_taffy_root_layout does not overwrite it when already Some
+            // (the `if self.used_page_names.is_none()` branch is skipped).
+            let sentinel_id = usize::MAX;
+            let mut pre_set: BTreeMap<usize, (Option<String>, Option<String>)> = BTreeMap::new();
+            pre_set.insert(sentinel_id, (Some("sentinel".to_string()), None));
+            tree.used_page_names = Some(pre_set);
             tree.drive_taffy_root_layout();
+            // Sentinel must survive: if the is_none() branch fired it would be
+            // replaced by compute_used_page_names which cannot produce sentinel_id.
+            assert_eq!(
+                tree.used_page_names
+                    .as_ref()
+                    .and_then(|m| m.get(&sentinel_id)),
+                Some(&(Some("sentinel".to_string()), None)),
+                "drive_taffy_root_layout must not overwrite used_page_names when already Some"
+            );
             tree.take_geometry()
         };
+        // Entry count must match.
         assert_eq!(
             direct_geom.len(),
             taffy_geom.len(),
             "pre-set used_page_names must not change geometry entry count"
         );
+        // Page indices of each node must also match.
+        for (id, direct) in &direct_geom {
+            let taffy = taffy_geom.get(id).expect("same node id in both passes");
+            assert_eq!(
+                direct.fragments[0].page_index, taffy.fragments[0].page_index,
+                "node {id} must land on the same page in both passes"
+            );
+        }
     }
 
     // ── whitespace-only text nodes skipped during fragmentation ───────────────
