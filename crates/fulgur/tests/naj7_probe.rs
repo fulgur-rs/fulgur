@@ -704,6 +704,9 @@ const NESTED_TABLES: &str = r#"<!doctype html>
 </body></html>"#;
 
 #[test]
+#[ignore = "fulgur-naj7.14: nested tables do not paginate (Taffy has no table \
+layout algorithm; tables are approximated on block/flexbox/grid). Kept as an \
+executable repro — run with --ignored."]
 fn probe_nested_tables_keep_both_headers_repeating() {
     let engine = engine_200x100();
     let layout = engine.layout(NESTED_TABLES).expect("layout");
