@@ -7258,7 +7258,7 @@ h2 { string-set: chapter-title content(text); }
         for ws_id in &ws_ids {
             assert!(
                 !table.contains_key(ws_id),
-                "whitespace text node {ws_id} must not appear in geometry (line 514 skip)"
+                "whitespace text node {ws_id} must not appear in geometry"
             );
         }
         // Expect body + d1 + d2 = 3 entries (whitespace nodes excluded).
