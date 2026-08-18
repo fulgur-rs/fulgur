@@ -1,19 +1,20 @@
-//! Spike for `fulgur-naj7.12`: what does `is_repeat` mean once a repeated
-//! table header can contain a multicol container?
+//! Repetition contract for `PaginationGeometry::is_repeat`.
 //!
-//! `is_split()` is `!is_repeat && fragments.len() > 1`, and `render.rs:1362`
-//! gates multicol partitioning on it. `probe_finding9` showed a multicol inside
-//! a repeated header carries `is_repeat = true` with 4 fragments, which makes
-//! `is_split()` false — so the container is NOT partitioned per page.
+//! `is_split()` is `!is_repeat && fragments.len() > 1`, and `render.rs` gates
+//! multicol partitioning on it. Two producers set `is_repeat`:
+//! `append_position_fixed_fragments` and `append_repeated_header_fragments` —
+//! so a multicol container inside a repeating table header carries
+//! `is_repeat = true` with one fragment per page.
 //!
-//! The question this file answers is whether that is the wrong behaviour or
-//! merely a stale justification: if the 4 fragments are *repetitions* (the same
-//! column content redrawn on each page) then `is_split() == false` is correct
-//! and only the comment is wrong. If content goes missing or is partitioned
-//! wrongly, the semantics need reworking.
+//! The contract those fragments must satisfy: they are **copies of the whole
+//! container, not slices of it**. Every page draws the full column content, and
+//! `is_split()` stays false so the renderer never partitions a copy as if it
+//! were a slice. `render.rs` once justified its gate by claiming `position:
+//! fixed` was the only producer of `is_repeat`; repeating headers falsified
+//! that premise while leaving the behaviour correct, and this test is what
+//! keeps the behaviour pinned now that the old rationale is gone.
 //!
-//! Run with:
-//!   cargo test -p fulgur --test naj7_spike_is_repeat -- --nocapture
+//! Investigated under `fulgur-naj7.12`.
 
 use fulgur::{Engine, Margin, PageSize};
 
@@ -48,7 +49,7 @@ fn engine_200x100() -> Engine {
 }
 
 #[test]
-fn spike_multicol_in_repeated_header_renders_on_every_page() {
+fn repeated_header_multicol_is_copied_not_split() {
     let engine = engine_200x100();
 
     // Geometry side: what the pagination pass believes.

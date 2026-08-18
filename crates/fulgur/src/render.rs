@@ -1367,7 +1367,7 @@ fn paint_multicol_paragraph_slices(
     // so each page must draw the full column content and partitioning
     // would be wrong. The spike confirmed the rendered output — the
     // header's paragraphs appear complete on every page
-    // (`tests/naj7_spike_is_repeat.rs`).
+    // (`tests/repeated_header_is_repeat_contract.rs`).
     let needs_partition = container_geom.is_split();
     let run_tag_node_id = run_tag_target(drawables, source_node_id);
     let use_run_tagging = canvas.tag_collector.is_some()
