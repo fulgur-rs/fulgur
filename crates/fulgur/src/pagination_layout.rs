@@ -7090,4 +7090,184 @@ h2 { string-set: chapter-title content(text); }
             "zero page height must leave geometry table empty"
         );
     }
+
+    // ── run_pass_inner else path when page_height_px = 0 ─────────────────────
+
+    /// `run_pass` with `page_height_px = 0` must not call
+    /// `fragment_pagination_root` (the `if body_id.is_some() && page_height_px
+    /// > 0.0` condition is false) and must return an empty geometry table.
+    /// Exercises the else path of the guard at `run_pass_inner` line 254.
+    #[test]
+    fn run_pass_zero_page_height_returns_empty_geometry() {
+        let mut doc = parse(
+            "<html><body><div style=\"height: 100px\"></div></body></html>",
+            600.0,
+        );
+        let table = run_pass(&mut doc, 0.0);
+        assert!(
+            table.is_empty(),
+            "run_pass with page_height=0 must return empty geometry, got {table:?}"
+        );
+    }
+
+    // ── fragment_pagination_root with no body ─────────────────────────────────
+
+    /// When `body_id` is `None`, `fragment_pagination_root` must return 0
+    /// immediately via the `let Some(body_id) = self.body_id else { return 0 }`
+    /// guard (line 409). Exercises the else arm that html5ever's body synthesis
+    /// never reaches on the normal parse path.
+    #[test]
+    fn fragment_pagination_root_no_body_returns_zero() {
+        let mut doc = parse(
+            "<html><body><div style=\"height: 100px\"></div></body></html>",
+            600.0,
+        );
+        let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+        tree.body_id = None;
+        let emitted = tree.fragment_pagination_root();
+        assert_eq!(
+            emitted, 0,
+            "no body → fragment_pagination_root must return 0"
+        );
+        let geom = tree.take_geometry();
+        assert!(
+            geom.is_empty(),
+            "no body → geometry must be empty, got {geom:?}"
+        );
+    }
+
+    // ── drive_taffy_root_layout with no body ──────────────────────────────────
+
+    /// `drive_taffy_root_layout` must return early (without panicking) when
+    /// `body_id` is `None` — the `let Some(body_id) = self.body_id else { return }`
+    /// guard at lines 357-359. Geometry table stays empty.
+    #[test]
+    fn drive_taffy_root_layout_no_body_is_noop() {
+        let mut doc = parse("<html><body></body></html>", 600.0);
+        let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+        tree.body_id = None;
+        tree.drive_taffy_root_layout();
+        let geom = tree.take_geometry();
+        assert!(
+            geom.is_empty(),
+            "no body → drive_taffy_root_layout must leave geometry empty, got {geom:?}"
+        );
+    }
+
+    /// `drive_taffy_root_layout` skips the `used_page_names` prefill when
+    /// `used_page_names` is already `Some` (the `if self.used_page_names.is_none()`
+    /// guard at lines 352-356). The pre-set mapping must survive the call
+    /// unchanged, and geometry must match the direct walk's page assignments.
+    #[test]
+    fn drive_taffy_root_layout_page_names_already_set_does_not_overwrite() {
+        let html = r#"<html><body><div style="height: 200px"></div></body></html>"#;
+        let direct_geom = {
+            let mut doc = parse(html, 600.0);
+            run_pass(&mut doc, 800.0)
+        };
+        let taffy_geom = {
+            let mut doc = parse(html, 600.0);
+            let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+            // Pre-populate used_page_names with a sentinel entry to prove that
+            // drive_taffy_root_layout does not overwrite it when already Some
+            // (the `if self.used_page_names.is_none()` branch is skipped).
+            let sentinel_id = usize::MAX;
+            let mut pre_set: BTreeMap<usize, (Option<String>, Option<String>)> = BTreeMap::new();
+            pre_set.insert(sentinel_id, (Some("sentinel".to_string()), None));
+            tree.used_page_names = Some(pre_set);
+            tree.drive_taffy_root_layout();
+            // Sentinel must survive: if the is_none() branch fired it would be
+            // replaced by compute_used_page_names which cannot produce sentinel_id.
+            assert_eq!(
+                tree.used_page_names
+                    .as_ref()
+                    .and_then(|m| m.get(&sentinel_id)),
+                Some(&(Some("sentinel".to_string()), None)),
+                "drive_taffy_root_layout must not overwrite used_page_names when already Some"
+            );
+            tree.take_geometry()
+        };
+        // Entry count must match.
+        assert_eq!(
+            direct_geom.len(),
+            taffy_geom.len(),
+            "pre-set used_page_names must not change geometry entry count"
+        );
+        // Page indices of each node must also match.
+        for (id, direct) in &direct_geom {
+            let taffy = taffy_geom.get(id).expect("same node id in both passes");
+            assert_eq!(
+                direct.fragments[0].page_index, taffy.fragments[0].page_index,
+                "node {id} must land on the same page in both passes"
+            );
+        }
+    }
+
+    // ── whitespace-only text nodes skipped during fragmentation ───────────────
+
+    /// Whitespace-only text nodes that html5ever injects between block children
+    /// must be skipped (`continue`) by the fragmenter — they must not enter the
+    /// geometry table or advance the page cursor (line 514 in
+    /// `fragment_pagination_root`).
+    ///
+    /// The HTML `<body>\n  <div>...</div>\n</body>` produces text nodes whose
+    /// `.content` is `"\n  "` / `"\n"` — all whitespace. The two 400px divs
+    /// each fit on an 800px page; if whitespace nodes were counted as zero-height
+    /// elements they would still enter `geometry` and inflate `table.len()`.
+    #[test]
+    fn whitespace_only_body_text_nodes_are_skipped() {
+        // html5ever injects `"\n  "` text nodes between these elements.
+        let html = "
+            <html><body>
+              <div id=\"d1\" style=\"height: 400px\"></div>
+              <div id=\"d2\" style=\"height: 400px\"></div>
+            </body></html>
+        ";
+        let mut doc = parse(html, 600.0);
+        // Locate the two div IDs and body's whitespace-text-node children before
+        // calling run_pass, so we can verify presence/absence in the table.
+        let d1_id = find_by_id(doc.deref_mut(), "d1").expect("div#d1");
+        let d2_id = find_by_id(doc.deref_mut(), "d2").expect("div#d2");
+        let body_id_opt = {
+            let tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+            tree.body_id
+        };
+        let body_children: Vec<usize> = body_id_opt
+            .and_then(|bid| doc.get_node(bid))
+            .map(|b| b.children.clone())
+            .unwrap_or_default();
+        let ws_ids: Vec<usize> = body_children
+            .into_iter()
+            .filter(|&cid| {
+                doc.get_node(cid)
+                    .and_then(|n| n.text_data())
+                    .is_some_and(|t| t.content.chars().all(char::is_whitespace))
+            })
+            .collect();
+        assert!(
+            !ws_ids.is_empty(),
+            "html5ever must inject at least one whitespace text node between block children"
+        );
+
+        let table = run_pass(&mut doc, 800.0);
+
+        // Both div elements must be in geometry.
+        assert!(table.contains_key(&d1_id), "div#d1 must appear in geometry");
+        assert!(table.contains_key(&d2_id), "div#d2 must appear in geometry");
+        // Whitespace-only text nodes must NOT be in geometry.
+        for ws_id in &ws_ids {
+            assert!(
+                !table.contains_key(ws_id),
+                "whitespace text node {ws_id} must not appear in geometry"
+            );
+        }
+        // Expect body + d1 + d2 = 3 entries (whitespace nodes excluded).
+        let n = table.len();
+        assert_eq!(n, 3, "expected body + 2 divs = 3 geometry entries, got {n}");
+        // All three fit on page 0 (400 + 400 = 800 ≤ 800).
+        for (id, geom) in &table {
+            let pg = geom.fragments[0].page_index;
+            assert_eq!(pg, 0, "node {id} should be on page 0, got page {pg}");
+        }
+    }
 }
