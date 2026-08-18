@@ -7219,19 +7219,51 @@ h2 { string-set: chapter-title content(text); }
         // html5ever injects `"\n  "` text nodes between these elements.
         let html = "
             <html><body>
-              <div style=\"height: 400px\"></div>
-              <div style=\"height: 400px\"></div>
+              <div id=\"d1\" style=\"height: 400px\"></div>
+              <div id=\"d2\" style=\"height: 400px\"></div>
             </body></html>
         ";
         let mut doc = parse(html, 600.0);
-        let table = run_pass(&mut doc, 800.0);
-        // Expect body + 2 element children = 3 entries.
-        // Whitespace text nodes must not appear in the geometry table.
-        let n = table.len();
-        assert_eq!(
-            n, 3,
-            "expected body + 2 divs = 3 geometry entries, got {n} (whitespace nodes may have leaked)"
+        // Locate the two div IDs and body's whitespace-text-node children before
+        // calling run_pass, so we can verify presence/absence in the table.
+        let d1_id = find_by_id(doc.deref_mut(), "d1").expect("div#d1");
+        let d2_id = find_by_id(doc.deref_mut(), "d2").expect("div#d2");
+        let body_id_opt = {
+            let tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
+            tree.body_id
+        };
+        let body_children: Vec<usize> = body_id_opt
+            .and_then(|bid| doc.get_node(bid))
+            .map(|b| b.children.clone())
+            .unwrap_or_default();
+        let ws_ids: Vec<usize> = body_children
+            .into_iter()
+            .filter(|&cid| {
+                doc.get_node(cid)
+                    .and_then(|n| n.text_data())
+                    .is_some_and(|t| t.content.chars().all(char::is_whitespace))
+            })
+            .collect();
+        assert!(
+            !ws_ids.is_empty(),
+            "html5ever must inject at least one whitespace text node between block children"
         );
+
+        let table = run_pass(&mut doc, 800.0);
+
+        // Both div elements must be in geometry.
+        assert!(table.contains_key(&d1_id), "div#d1 must appear in geometry");
+        assert!(table.contains_key(&d2_id), "div#d2 must appear in geometry");
+        // Whitespace-only text nodes must NOT be in geometry.
+        for ws_id in &ws_ids {
+            assert!(
+                !table.contains_key(ws_id),
+                "whitespace text node {ws_id} must not appear in geometry (line 514 skip)"
+            );
+        }
+        // Expect body + d1 + d2 = 3 entries (whitespace nodes excluded).
+        let n = table.len();
+        assert_eq!(n, 3, "expected body + 2 divs = 3 geometry entries, got {n}");
         // All three fit on page 0 (400 + 400 = 800 ≤ 800).
         for (id, geom) in &table {
             let pg = geom.fragments[0].page_index;
