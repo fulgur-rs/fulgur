@@ -7124,6 +7124,9 @@ mod tests {
                         .is_some_and(|next| !next.is_ascii_alphanumeric())
             })
             .count();
-        assert!(page_count >= 2, "expected at least 2 pages, got {page_count}");
+        assert!(
+            page_count >= 2,
+            "expected at least 2 pages, got {page_count}"
+        );
     }
 }
