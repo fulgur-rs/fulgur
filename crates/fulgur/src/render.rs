@@ -7111,8 +7111,8 @@ mod tests {
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
-        // Use a 12-byte window to distinguish /Type /Page (individual page) from
-        // /Type /Pages (page-tree node): the byte after "Page" must be non-alphanumeric.
+        // Scan the 11-byte /Type /Page prefix and check the following byte to
+        // distinguish individual pages from the /Type /Pages tree node.
         let prefix = b"/Type /Page";
         let page_count = pdf
             .windows(prefix.len())
