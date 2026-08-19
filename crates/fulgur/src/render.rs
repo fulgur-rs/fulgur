@@ -7094,8 +7094,10 @@ mod tests {
 
     #[test]
     fn render_smoke_multicol_multi_page_partition() {
-        // A tall multicol container spanning multiple pages triggers the
+        // A column-span:all child forces the multicol container to be treated as
+        // split across pages (container_geom.is_split() = true), triggering the
         // above/below/straddles partition filter in paint_multicol_paragraph_slices.
+        // Without column-span:all the container stays atomic and is_split remains false.
         let pdf = render_html(
             r#"<!doctype html><html><body>
             <div style="column-count:2;column-gap:20px;width:400px">
@@ -7103,11 +7105,13 @@ mod tests {
                  mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.</p>
               <p>Second long paragraph to push content across page boundaries:
                  lorem ipsum dolor sit amet consectetur adipiscing elit sed.</p>
-              <div style="height:900px"></div>
+              <div style="column-span:all;height:900px"></div>
               <p>Third paragraph after tall spacer ensures multi-page layout.</p>
             </div>
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
+        let page_count = pdf.windows(11).filter(|w| *w == b"/Type /Page").count();
+        assert!(page_count >= 2, "expected at least 2 pages, got {page_count}");
     }
 }
