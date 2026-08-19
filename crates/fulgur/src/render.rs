@@ -7052,4 +7052,62 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    #[test]
+    fn render_smoke_margin_box_with_css_declarations() {
+        // `color: red` in @bottom-center populates MarginBoxRule.declarations,
+        // triggering the format!("<div style=\"{}\">...</div>") wrapper path.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page {
+              size: A4; margin: 20mm;
+              @bottom-center {
+                content: "Footer text";
+                color: red;
+                font-size: 10pt;
+              }
+            }
+            </style></head><body><p>Body content.</p></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_multicol_paragraph_with_link() {
+        // Tagged mode + multicol + paragraph with <a href> triggers
+        // use_run_tagging=true in paint_multicol_paragraph_slices.
+        let pdf = crate::engine::Engine::builder()
+            .tagged(true)
+            .lang("en")
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <div style="column-count:2;column-gap:20px;width:400px">
+                  <p>Go to <a href="https://example.com">example.com</a> for info.</p>
+                  <p>Also visit <a href="https://other.org">other.org</a> too.</p>
+                </div>
+                </body></html>"#,
+            )
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_multicol_multi_page_partition() {
+        // A tall multicol container spanning multiple pages triggers the
+        // above/below/straddles partition filter in paint_multicol_paragraph_slices.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="column-count:2;column-gap:20px;width:400px">
+              <p>Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda
+                 mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.</p>
+              <p>Second long paragraph to push content across page boundaries:
+                 lorem ipsum dolor sit amet consectetur adipiscing elit sed.</p>
+              <div style="height:900px"></div>
+              <p>Third paragraph after tall spacer ensures multi-page layout.</p>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
