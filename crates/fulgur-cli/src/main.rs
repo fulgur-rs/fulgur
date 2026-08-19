@@ -465,7 +465,13 @@ impl log::Log for StderrLogger {
 
     fn log(&self, record: &log::Record<'_>) {
         if self.enabled(record.metadata()) {
-            eprintln!(
+            // `eprintln!` panics on a write failure (e.g. a broken pipe);
+            // a logging failure must never abort an otherwise-successful
+            // render (CodeRabbit review, PR #719), so write directly and
+            // ignore the `Result`.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
                 "{}: {}",
                 record.level().as_str().to_lowercase(),
                 record.args()
