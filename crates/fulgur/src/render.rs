@@ -7111,7 +7111,19 @@ mod tests {
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
-        let page_count = pdf.windows(11).filter(|w| *w == b"/Type /Page").count();
+        // Use a 12-byte window to distinguish /Type /Page (individual page) from
+        // /Type /Pages (page-tree node): the byte after "Page" must be non-alphanumeric.
+        let prefix = b"/Type /Page";
+        let page_count = pdf
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(i, window)| {
+                *window == prefix
+                    && pdf
+                        .get(*i + prefix.len())
+                        .is_some_and(|next| !next.is_ascii_alphanumeric())
+            })
+            .count();
         assert!(page_count >= 2, "expected at least 2 pages, got {page_count}");
     }
 }
