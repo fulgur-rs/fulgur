@@ -3577,4 +3577,106 @@ mod tests {
         assert_no_page_settings("@page { size: 0pt; }");
         assert_no_page_settings("@page { size: 0mm 200pt; }");
     }
+
+    // ── parse_page_size_value: second token is not a dimension ───────────────
+
+    #[test]
+    fn test_page_size_second_token_not_dimension_drops_size() {
+        // `red` is an ident, not a dimension. The try_parse for the second
+        // token fails (`_ => Err(...)` branch). Then the trailing-token check
+        // fires on the remaining `red` and the whole declaration returns None.
+        assert_no_page_settings("@page { size: 210mm red; }");
+    }
+
+    // ── parse_page_margin_value: zero-value case ─────────────────────────────
+
+    #[test]
+    fn test_page_margin_empty_value_is_ignored() {
+        // An empty `margin:` value causes parse_page_margin_value to collect
+        // zero length values. The 0-value match arm returns None, so no
+        // margin (or page settings) is stored.
+        let ctx = parse_gcpm("@page { margin: ; }");
+        assert!(
+            ctx.page_settings.is_empty(),
+            "empty margin must not produce page settings"
+        );
+    }
+
+    // ── parse_string_set_value: attr() branch and catch-all ─────────────────
+
+    #[test]
+    fn test_string_set_attr_function_in_value() {
+        // `attr(data-heading)` exercises the `attr` branch in
+        // parse_string_set_value and stores a StringSetValue::Attr entry.
+        let css = r#".section { string-set: chapterTitle attr(data-heading); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![crate::gcpm::StringSetValue::Attr(
+                "data-heading".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_string_set_unknown_token_is_silently_ignored() {
+        // A bare ident in a string-set value is unrecognised (`_ => {}` arm).
+        // No valid value is collected, so parse_string_set_value returns Err
+        // and no mapping is recorded.
+        let ctx = parse_gcpm(r#".section { string-set: chapterTitle bareidentifier; }"#);
+        assert!(ctx.string_set_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_string_set_empty_content_function_breaks_parse() {
+        // `content()` with an empty argument block causes the inner
+        // expect_ident() to fail. The error propagates via `?` and the loop
+        // breaks. No value is collected → no mapping.
+        let ctx = parse_gcpm(r#".section { string-set: chapterTitle content(); }"#);
+        assert!(ctx.string_set_mappings.is_empty());
+    }
+
+    // ── target-counters: non-string separator ────────────────────────────────
+
+    #[test]
+    fn test_target_counters_non_string_separator_drops_item() {
+        // `notastring` is an ident, not a quoted string. expect_string() fails
+        // and the `Err(_) => return Ok(())` arm fires — no TargetCounters item
+        // is pushed.
+        let css = r#"@page { @top-center { content: target-counters(attr(href), section, notastring); } }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.margin_boxes.is_empty() || ctx.margin_boxes[0].content.is_empty());
+    }
+
+    // ── target-text: URL argument that parse_target_url cannot parse ─────────
+
+    #[test]
+    fn test_target_text_bad_url_drops_item() {
+        // A bare ident inside target-text() is not an attr(), url(), or quoted
+        // string. parse_target_url returns None, `None => return Ok(())` fires,
+        // and no TargetText item is pushed.
+        let css = r#"@page { @top-center { content: target-text(bareident); } }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.margin_boxes.is_empty() || ctx.margin_boxes[0].content.is_empty());
+    }
+
+    // ── content() function: unknown argument ─────────────────────────────────
+
+    #[test]
+    fn test_content_function_unknown_arg_produces_no_item() {
+        // `content(unknown)` matches none of "text"/"before"/"after".
+        // The `_ => {}` arm fires and no item is pushed.
+        let css = r#"@page { @top-center { content: content(unknown); } }"#;
+        let ctx = parse_gcpm(css);
+        let items = ctx
+            .margin_boxes
+            .first()
+            .map(|b| b.content.as_slice())
+            .unwrap_or(&[]);
+        assert!(
+            items.is_empty(),
+            "unknown content() arg must not push an item"
+        );
+    }
 }
