@@ -85,6 +85,48 @@ Supported:
 - Multi-page tables repeat computed `table-header-group` sections on each
   continuation page. Use `thead { display: table-row-group; }` to disable
   repetition for a specific header group.
+- Only the first `table-header-group` is treated as a header; later ones
+  are treated as if they had `display: table-row-group`, per CSS Tables
+  Level 3.
+- A table does not start on a page that has room for the repeated band
+  but not for the first body row — an orphaned header carries no
+  information and the same header is redrawn on the next page anyway.
+
+Not supported:
+
+- `border-collapse: collapse`. The upstream layout engine
+  (`blitz-dom` 0.2.4) has no implementation, so adjacent cell borders are
+  drawn as if `separate` and shared edges paint twice. Upstream issue:
+  `DioxusLabs/blitz#386`. The VRT fixture below uses `border-collapse`,
+  so its golden bakes in the current behaviour and will need regenerating
+  when upstream lands it.
+- Hoisting a header group to the top of its table. CSS 2.1 §17.5.1
+  requires a `table-header-group` to be rendered before all other rows
+  regardless of source position. That reordering belongs to layout, and
+  the engine fulgur builds on does not perform it, so a header group
+  written after a `tbody` keeps its in-flow position. fulgur declines to
+  repeat such a group rather than reserve a band spanning the rows above
+  it. WPT `css/CSS2/tables/table-header-group-005.xht` fails for this
+  reason (tracked as `fulgur-naj7.13`).
+- Fragmenting nested tables. A table inside a cell of another table does
+  not split: both keep a single fragment and the content overflows the
+  page. Taffy has no table layout algorithm — `taffy::compute` provides
+  `block`, `flexbox`, `grid` and `leaf` — and tables are approximated on
+  top of those (tracked as `fulgur-naj7.14`).
+- A header band that itself fragments. A forced break or a page-name
+  change inside a header cell would make the band span pages, which
+  contradicts repeating it; fulgur declines to repeat and lets the table
+  paginate normally, so the break is honoured.
+- `repeat-on-break` (CSS Repeated Headers and Footers). Stylo 0.8 does
+  not parse the property, so the `display: table-row-group` opt-out above
+  is the only way to suppress repetition — at the cost of discarding the
+  header semantics along with the repetition.
+
+Note that CSS Tables Level 3 §6 (Fragmentation) has no web-platform-tests
+coverage, and `css/CSS2/tables/table-header-group-004.xht` is flagged
+`may paged` — it passes whether or not headers repeat. Regression coverage
+for this area therefore lives in fulgur's own geometry probes
+(`crates/fulgur/tests/naj7_probe.rs`) rather than in an external suite.
 
 See `docs/plans/2026-08-11-repeating-table-headers.md` for the
 fragmentation coordinator. The VRT golden lives at
