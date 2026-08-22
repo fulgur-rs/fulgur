@@ -265,6 +265,56 @@ fn test_render_html_inline_style_running_element_not_duplicated() {
     );
 }
 
+/// Folding an inline `<style>`'s `cleaned_css` into `css_to_inject` must not
+/// move that stylesheet to the end of the cascade.
+///
+/// `parse_gcpm` preserves all non-GCPM CSS verbatim in `cleaned_css`, so the
+/// fold-in re-injects the *entire* inline stylesheet — not just the
+/// `display: none` rewrite it exists to deliver — as the last child of
+/// `<head>` (`InjectCssPass` → `inject_style_node`, which appends). Any
+/// `<link>` that followed the `<style>` in source order then loses ties it
+/// should win.
+///
+/// Here `<style>` comes first and hides `.probe`; the later `<link>` shows
+/// it. Equal specificity, so source order decides and the `<link>` must win.
+#[test]
+fn inline_style_before_link_keeps_cascade_order() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("style.css"), ".probe { display: block; }").unwrap();
+
+    let html = r#"<!DOCTYPE html>
+<html><head>
+<style>.probe { display: none; }</style>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<p class="probe">PROBEWORD</p>
+<p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
+    assert!(
+        text.contains("PROBEWORD"),
+        "the <link> follows the inline <style> in source order and so wins \
+         the specificity tie — `.probe` must be visible. Its absence means \
+         the inline stylesheet was re-injected after the <link>, reordering \
+         the cascade; got: {text:?}"
+    );
+}
+
 /// Regression for FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md: a
 /// `position: running(name)` element with a `visibility: hidden` ancestor,
 /// styled via `AssetBundle` CSS (the `--css` CLI flag's delivery

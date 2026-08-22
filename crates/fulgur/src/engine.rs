@@ -237,20 +237,41 @@ impl Engine {
         // Blitz's native HTML parser untouched. `InjectCssPass` /
         // `css_to_inject` is therefore the ONLY place that can apply
         // `parse_gcpm`'s `display: none` rewrite for
-        // `position: running(name)` declared inline, so (unlike
-        // `link_gcpm` above) its `cleaned_css` MUST be folded into
-        // `css_to_inject` here. Omitting this used to mean the rewrite
-        // never reached the DOM for inline-`<style>`-sourced running
-        // elements — the "real" copy rendered a second time alongside its
-        // `@page` margin-box copy (fulgur-css-flag-running, follow-up to
-        // the --css + hidden-ancestor running-element fix). Concatenation
-        // mirrors `GcpmContext::extend_from`'s newline-joining.
+        // `position: running(name)` declared inline. Omitting it used to
+        // mean the rewrite never reached the DOM for
+        // inline-`<style>`-sourced running elements — the "real" copy
+        // rendered a second time alongside its `@page` margin-box copy
+        // (fulgur-css-flag-running, follow-up to the --css +
+        // hidden-ancestor running-element fix).
+        //
+        // Inject ONLY the generated `display: none` rules, not
+        // `inline_gcpm.cleaned_css`. `parse_gcpm` preserves all non-GCPM
+        // CSS verbatim in `cleaned_css`, so folding the whole string in
+        // re-injects the author's entire inline stylesheet as the last
+        // child of `<head>`, so a `<link>` that followed the `<style>` in
+        // source order loses specificity ties it should win. Regression
+        // coverage:
+        // `render_smoke.rs::inline_style_before_link_keeps_cascade_order`.
+        //
+        // It would also strip any `<style media="...">` scoping, since
+        // `InjectCssPass` writes a plain `<style>` with no media
+        // attribute. That one is currently moot — blitz-dom 0.2.4 ignores
+        // `media` on inline `<style>` just as it does on `<link>` (which
+        // is why `LinkMediaRewritePass` exists), so the author's own copy
+        // is unscoped too. Injecting only the generated rules keeps this
+        // path from becoming a second thing to fix if inline `media`
+        // support lands.
+        //
+        // Concatenation mirrors `GcpmContext::extend_from`'s
+        // newline-joining.
         let inline_gcpm = crate::blitz_adapter::extract_gcpm_from_inline_styles(&doc);
-        if !inline_gcpm.cleaned_css.is_empty() {
+        let inline_running_css =
+            crate::blitz_adapter::build_running_display_none_css(&inline_gcpm.running_mappings);
+        if !inline_running_css.is_empty() {
             if !css_to_inject.is_empty() {
                 css_to_inject.push('\n');
             }
-            css_to_inject.push_str(&inline_gcpm.cleaned_css);
+            css_to_inject.push_str(&inline_running_css);
         }
         gcpm.extend_from(inline_gcpm);
 
