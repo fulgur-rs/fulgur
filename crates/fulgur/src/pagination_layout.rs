@@ -4136,6 +4136,7 @@ pub fn append_position_absolute_body_direct_fragments(
             pages,
             !body_has_in_flow_content,
             &mut emitted,
+            running_store,
         );
     }
 
@@ -4163,6 +4164,7 @@ fn record_subtree_fragments_at_offset(
     total_pages: u32,
     may_extend_pages: bool,
     emitted: &mut usize,
+    running_store: Option<&crate::gcpm::running::RunningElementStore>,
 ) {
     #[allow(clippy::too_many_arguments)]
     fn walk(
@@ -4192,6 +4194,7 @@ fn record_subtree_fragments_at_offset(
         cb_size: (f32, f32),
         depth: usize,
         emitted: &mut usize,
+        running_store: Option<&crate::gcpm::running::RunningElementStore>,
     ) {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
@@ -4423,6 +4426,47 @@ fn record_subtree_fragments_at_offset(
             let Some(child) = doc.get_node(child_id) else {
                 continue;
             };
+            // fulgur: `position: running(name)` children are rewritten to
+            // `display: none` by `gcpm::parser::parse_gcpm`'s cleaned_css
+            // (they are removed from normal flow and repainted only via
+            // their `@page` margin box). A `display: none` node collapses
+            // to a zero-size Taffy box, so the generic below (height-gated
+            // on `h_for_paging > 0.0`) never records a geometry entry for
+            // it — unlike `fragment_pagination_root`'s in-flow body walk,
+            // which has the equivalent carve-out at the cursor level. Without
+            // this check here, a running element nested inside a
+            // `position: absolute` / body-direct-abs subtree never lands in
+            // `geometry`, so `collect_running_element_states` can't find its
+            // NodeId and the margin box it should populate renders empty
+            // (fulgur `--css` + hidden-ancestor running-element bug).
+            // Mirror the main walk: record a zero-size marker at the
+            // running child's current subtree position and skip recursing
+            // into it (it has no flow content of its own to lay out).
+            if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
+                if child.element_data().is_some() && page_h_px > 0.0 {
+                    let child_y_for_paging =
+                        root_xy_for_paging.1 + offset_in_subtree.1 + child.final_layout.location.y;
+                    let page_index = (child_y_for_paging / page_h_px).max(0.0).floor() as u32;
+                    let page_index = page_index.min(total_pages.saturating_sub(1));
+                    let stored_x =
+                        root_xy_for_paging.0 + offset_in_subtree.0 + child.final_layout.location.x
+                            - body_offset.0;
+                    let stored_y =
+                        child_y_for_paging - (page_index as f32) * page_h_px - body_offset.1;
+                    geometry
+                        .entry(child_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: stored_x.as_px(),
+                            y: stored_y.as_px(),
+                            width: 0.0_f32.as_px(),
+                            height: 0.0_f32.as_px(),
+                        });
+                }
+                continue;
+            }
             // Out-of-flow descendants:
             //   - `position: fixed` is a repeat element handled by
             //     `append_position_fixed_fragments`; skip it here so it
@@ -4496,6 +4540,7 @@ fn record_subtree_fragments_at_offset(
                             child_cb_size,
                             depth + 1,
                             emitted,
+                            running_store,
                         );
                         continue;
                     }
@@ -4527,6 +4572,7 @@ fn record_subtree_fragments_at_offset(
                 child_cb_size,
                 depth + 1,
                 emitted,
+                running_store,
             );
             if has_contain_size(child) {
                 monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
@@ -4554,6 +4600,7 @@ fn record_subtree_fragments_at_offset(
         (0.0, 0.0),
         0,
         emitted,
+        running_store,
     );
 }
 
@@ -6605,6 +6652,96 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// Regression for the `--css` + hidden-ancestor running-element bug
+    /// (FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md): `gcpm::parser::parse_gcpm`
+    /// rewrites `position: running(name)` to `display: none` in its
+    /// `cleaned_css` output (the real DOM copy must not also paint in
+    /// normal flow — only its `@page` margin-box copy should). When the
+    /// running element is nested inside a `position: absolute` ancestor
+    /// (the common "absolute + invisible wrapper" header/footer idiom),
+    /// its now-zero-size Taffy box used to fall through
+    /// `record_subtree_fragments_at_offset`'s height gate
+    /// (`h_for_paging > 0.0`) with no running-element carve-out — unlike
+    /// `fragment_pagination_root`'s in-flow body walk, which records a
+    /// zero-height marker for running children unconditionally. The
+    /// element's NodeId never reached `geometry`, so
+    /// `collect_running_element_states` silently produced nothing and the
+    /// margin box rendered empty.
+    #[test]
+    fn running_element_nested_in_absolute_subtree_lands_in_geometry_when_display_none() {
+        use crate::blitz_adapter;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        let css = r#"
+            @page { @top-center { content: element(top-center); } }
+            .absolute { position: absolute; }
+            .invisible { visibility: hidden; }
+            #top-center { position: running(top-center); }
+        "#;
+        let gcpm = parse_gcpm(css);
+        assert!(
+            gcpm.cleaned_css.contains("display: none"),
+            "sanity: parse_gcpm must rewrite position:running to display:none \
+             in cleaned_css; got {:?}",
+            gcpm.cleaned_css
+        );
+
+        let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="absolute invisible">
+    <div id="top-center">HEADER</div>
+  </div>
+  <p>Body content.</p>
+</body></html>"#;
+
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+
+        // Mirrors `Engine::layout_to_drawables`: cleaned_css (the
+        // display:none rewrite) is injected via `InjectCssPass` — this is
+        // exactly what happens for AssetBundle / `--css`-sourced CSS.
+        let inject = blitz_adapter::InjectCssPass {
+            css: gcpm.cleaned_css.clone(),
+        };
+        blitz_adapter::apply_single_pass(&inject, &mut doc, &pass_ctx);
+
+        let running_pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+        blitz_adapter::apply_single_pass(&running_pass, &mut doc, &pass_ctx);
+        let store = running_pass.into_running_store();
+
+        blitz_adapter::resolve(&mut doc);
+
+        let mut geometry = PaginationGeometryTable::new();
+        append_position_absolute_body_direct_fragments(
+            &mut geometry,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            Some(&store),
+        );
+
+        let found = geometry
+            .keys()
+            .any(|&node_id| store.instance_for_node(node_id).is_some());
+        assert!(
+            found,
+            "running element nested in a position:absolute subtree must land \
+             in geometry even when display:none collapses its layout box; \
+             geometry keys={:?}",
+            geometry.keys().collect::<Vec<_>>()
+        );
+
+        let states = collect_running_element_states(&geometry, &store);
+        let entry = states[0]
+            .get("top-center")
+            .expect("top-center running instance must be recorded for page 0");
+        assert_eq!(entry.instance_ids.len(), 1);
+    }
+
     /// fulgur-6tco: synthesize a geometry table + string_set_by_node
     /// map and verify `collect_string_set_states` produces the expected
     /// per-page `(start, first, last)` shape.
@@ -7427,6 +7564,7 @@ h2 { string-set: chapter-title content(text); }
             3,
             true,
             &mut 0,
+            None,
         );
 
         let pages: Vec<u32> = geom
@@ -9553,6 +9691,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             false,
             &mut 0,
+            None,
         );
         assert!(
             !geom.contains_key(&fixed_id),
@@ -9590,6 +9729,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             false,
             &mut 0,
+            None,
         );
         assert!(
             geom.contains_key(&nested_id),

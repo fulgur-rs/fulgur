@@ -211,6 +211,68 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     assert!(pdf.starts_with(b"%PDF"));
 }
 
+/// Regression for FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md: a
+/// `position: running(name)` element with a `visibility: hidden` ancestor,
+/// styled via `AssetBundle` CSS (the `--css` CLI flag's delivery
+/// mechanism), must still populate its `@page` margin box.
+///
+/// `gcpm::parser::parse_gcpm` rewrites `position: running()` to
+/// `display: none` in its `cleaned_css` output (the real DOM copy must not
+/// also paint in normal flow). That collapses the element's Taffy layout
+/// box to zero size; when the element is nested inside a
+/// `position: absolute` ancestor — the idiomatic "absolute + invisible
+/// wrapper" header/footer pattern used to keep the "real" copy out of
+/// normal flow — the zero-size box used to fall out of
+/// `PaginationGeometryTable` entirely (missing running-element carve-out
+/// in `pagination_layout::record_subtree_fragments_at_offset`), so the
+/// margin box silently rendered empty with no error. The identical CSS
+/// inlined into a `<style>` tag happened to work by accident (see the bug
+/// report), which is why this regression needs the AssetBundle delivery
+/// path specifically.
+#[test]
+fn test_render_html_css_flag_running_element_with_hidden_ancestor() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        @page { margin: 100px 50px; @top-center { content: element(top-center); } }
+        .absolute { position: absolute; }
+        .invisible { visibility: hidden; }
+        #top-center { position: running(top-center); }
+        "#,
+    );
+    // Single-token sentinels: `-raw` pdftotext extraction can drop the
+    // inter-word space at a soft line-wrap boundary inside the (narrow)
+    // margin box, which is a pdftotext quirk unrelated to what this test
+    // is checking — a single word sides-steps it entirely.
+    let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="absolute invisible">
+    <div id="top-center">PAGEHEADERSENTINEL</div>
+  </div>
+  <p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .assets(assets)
+        .build()
+        .render(html)
+        .expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("PAGEHEADERSENTINEL"),
+        "running element's margin-box copy must render despite the hidden \
+         ancestor when CSS is delivered via AssetBundle (--css); got: {text:?}"
+    );
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
+}
+
 #[test]
 fn test_render_html_link_stylesheet_with_import() {
     // @import within a <link>-loaded stylesheet should also be
