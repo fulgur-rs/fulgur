@@ -178,7 +178,9 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     // <link>-loaded CSS that contains @page / running / counter rules
     // must produce a PDF identical in structure to the same CSS passed
     // via --css. Specifically the running header div should NOT appear
-    // as body content.
+    // as body content — it must be extracted into the margin box and
+    // suppressed at its source position (verified via `RUNNINGHEADERTEXT`
+    // occurring exactly once below), not rendered a second time inline.
     let dir = tempdir().unwrap();
     let css_path = dir.path().join("style.css");
     std::fs::write(
@@ -191,10 +193,13 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     )
     .unwrap();
 
+    // Single-token sentinel: see the comment on
+    // `test_render_html_css_flag_running_element_with_hidden_ancestor` for
+    // why (avoids a `-raw` pdftotext line-wrap space-drop quirk).
     let html = r#"<!DOCTYPE html>
 <html><head><link rel="stylesheet" href="style.css"></head>
 <body>
-<div class="pageHeader">RUNNING HEADER TEXT</div>
+<div class="pageHeader">RUNNINGHEADERTEXT</div>
 <h1>Body Heading</h1>
 <p>Body paragraph.</p>
 </body></html>"#;
@@ -202,13 +207,62 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     let engine = Engine::builder().base_path(dir.path()).build();
     let pdf = engine.render(html).expect("render");
 
-    // Crude check: the PDF should have at least one page and not be
-    // empty. A more thorough comparison would require pdf parsing in
-    // tests, which we skip; the PR's verification step renders the
-    // header-footer example and visually compares against the
-    // --css output.
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert_eq!(
+        text.matches("RUNNINGHEADERTEXT").count(),
+        1,
+        "running element sourced from a <link>-loaded stylesheet must be \
+         suppressed at its source position (display:none) and appear only \
+         via its @page margin-box copy, not twice; got: {text:?}"
+    );
+}
+
+/// Regression: the same duplication bug as
+/// `test_render_html_link_stylesheet_with_gcpm`, but for a running element
+/// declared in an inline `<style>` tag instead of a `<link>`-loaded
+/// stylesheet. `Engine::layout_to_drawables` used to snapshot
+/// `css_to_inject` from `gcpm.cleaned_css` *before* folding in
+/// `extract_gcpm_from_inline_styles`'s context, so the `display: none`
+/// rewrite `parse_gcpm` performs for `position: running(name)` never
+/// reached the DOM for inline-`<style>`-sourced CSS — only AssetBundle /
+/// `--css`-sourced CSS got the rewrite injected. Without a hidden-ancestor
+/// wrapper to mask it, the running element's "real" copy rendered inline
+/// in normal flow *and* its extracted copy rendered in the margin box.
+#[test]
+fn test_render_html_inline_style_running_element_not_duplicated() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+@page { @top-center { content: element(pageHeader); } }
+.pageHeader { position: running(pageHeader); }
+</style></head>
+<body>
+<div class="pageHeader">RUNNINGHEADERTEXT</div>
+<p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder().build().render(html).expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert_eq!(
+        text.matches("RUNNINGHEADERTEXT").count(),
+        1,
+        "running element sourced from an inline <style> tag must be \
+         suppressed at its source position (display:none) and appear only \
+         via its @page margin-box copy, not twice; got: {text:?}"
+    );
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
 }
 
 /// Regression for FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md: a

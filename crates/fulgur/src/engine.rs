@@ -181,7 +181,13 @@ impl Engine {
         let combined_css = crate::blitz_adapter::rewrite_marker_content_url(&combined_css);
 
         let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
-        let css_to_inject = gcpm.cleaned_css.clone();
+        // `css_to_inject` drives `InjectCssPass` below, which writes a
+        // plain, unconditional `<style>` into the document — there is no
+        // way to attach a `media` attribute to it. AssetBundle / `--css`
+        // CSS has no media scoping to begin with, so snapshotting it here
+        // (before the `<link>` fold below) is correct and required: unlike
+        // `<link>`-sourced CSS, it's fine for this to be unconditional.
+        let mut css_to_inject = gcpm.cleaned_css.clone();
 
         let fonts = self.fonts();
 
@@ -191,14 +197,24 @@ impl Engine {
         // stylesheets, which we fold into the AssetBundle-derived
         // context below.
         //
-        // `cleaned_css` is folded too: it is consumed by `render.rs` as
-        // the sole stylesheet for the margin-box mini-documents (see
-        // `render_to_pdf_with_gcpm` and `strip_display_none`). Without
-        // it, declarations like `.pageHeader { font-size: 8px; }`
-        // defined in a `<link>`-loaded stylesheet would never reach
-        // the margin-box renderer, so headers/footers would appear in
-        // default browser styles even though their content resolved
-        // correctly.
+        // `cleaned_css` is folded into `gcpm.cleaned_css` too — but
+        // deliberately NOT into `css_to_inject` above. `gcpm.cleaned_css`
+        // is consumed by `render.rs` as the sole stylesheet for the
+        // margin-box mini-documents (see `render_to_pdf_with_gcpm` and
+        // `strip_display_none`), where declarations like
+        // `.pageHeader { font-size: 8px; }` defined in a `<link>`-loaded
+        // stylesheet need to reach the margin-box renderer. But
+        // `<link>`-sourced CSS is *also* independently served straight to
+        // Blitz's native cascade — cleaned and already media-aware — by
+        // `net::FulgurNetProvider::fetch` (it runs `parse_gcpm` per fetched
+        // stylesheet and hands Blitz the cleaned text, respecting whatever
+        // `media` rewrite `apply_link_media_rewrites` applied). Folding
+        // `link_gcpm.cleaned_css` into `css_to_inject` here as well would
+        // inject it a second time via `InjectCssPass`, which writes an
+        // unconditional `<style>` with no media attribute — bypassing
+        // `<link media="print">` exclusion on screen renders (regression
+        // caught by `link_media_attribute.rs`'s
+        // `link_media_print_does_not_apply_on_screen`).
         let (mut doc, link_gcpm, link_column_css) =
             crate::blitz_adapter::parse_html_with_local_resources(
                 &html,
@@ -215,7 +231,27 @@ impl Engine {
         // DOM to collect any `@page`, margin-box, running-element, and
         // counter constructs declared inline so they are honored
         // alongside the AssetBundle / link-loaded contexts (fulgur-mq5).
+        //
+        // Unlike `<link>`, inline `<style>` has no interception point
+        // equivalent to `net::FulgurNetProvider::fetch` — it goes through
+        // Blitz's native HTML parser untouched. `InjectCssPass` /
+        // `css_to_inject` is therefore the ONLY place that can apply
+        // `parse_gcpm`'s `display: none` rewrite for
+        // `position: running(name)` declared inline, so (unlike
+        // `link_gcpm` above) its `cleaned_css` MUST be folded into
+        // `css_to_inject` here. Omitting this used to mean the rewrite
+        // never reached the DOM for inline-`<style>`-sourced running
+        // elements — the "real" copy rendered a second time alongside its
+        // `@page` margin-box copy (fulgur-css-flag-running, follow-up to
+        // the --css + hidden-ancestor running-element fix). Concatenation
+        // mirrors `GcpmContext::extend_from`'s newline-joining.
         let inline_gcpm = crate::blitz_adapter::extract_gcpm_from_inline_styles(&doc);
+        if !inline_gcpm.cleaned_css.is_empty() {
+            if !css_to_inject.is_empty() {
+                css_to_inject.push('\n');
+            }
+            css_to_inject.push_str(&inline_gcpm.cleaned_css);
+        }
         gcpm.extend_from(inline_gcpm);
 
         // Cache the predicate once gcpm is fully populated. It feeds three
