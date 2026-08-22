@@ -7052,4 +7052,82 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- MarginBoxRenderer: declarations wrapping (non-content CSS on margin boxes) ---
+
+    #[test]
+    fn render_smoke_margin_box_with_css_declarations() {
+        // MarginBoxRenderer::render_page (lines 3762-3768): when a margin-box
+        // rule carries extra CSS declarations beyond `content` (e.g. `color`,
+        // `font-size`), the resolved content HTML is wrapped in a
+        // `<div style="...">` so those styles apply to the rendered box.
+        // Exercises the non-empty `rule.declarations` branch.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page {
+              size: A4; margin: 20mm;
+              @top-center { content: "Styled Header"; color: red; font-size: 12pt; }
+              @bottom-center { content: "Footer"; font-weight: bold; }
+            }
+            </style></head><body>
+            <p>Content with styled margin boxes.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- MarginBoxRenderer: corner positions bypass size-distribution (Stage 2) ---
+
+    #[test]
+    fn render_smoke_margin_box_corner_positions() {
+        // MarginBoxRenderer::render_page stage 2 (line 3849): corner positions
+        // (`@top-left-corner`, `@top-right-corner`, etc.) return `None` from
+        // `pos.edge()`, hitting the `None => continue` arm and skipping the
+        // size-distribution loop. Stage 3 then falls back to
+        // `pos.bounding_rect(page_size, resolved_margin)` (the `unwrap_or_else`
+        // path) to obtain the render rect, since `all_rects` has no entry for
+        // corners. Also exercises Stage 1a and 1b skip paths for corners.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page {
+              size: A4; margin: 20mm;
+              @top-left-corner    { content: "TL"; }
+              @top-right-corner   { content: "TR"; }
+              @bottom-left-corner  { content: "BL"; }
+              @bottom-right-corner { content: "BR"; }
+            }
+            </style></head><body>
+            <p>Content with corner margin boxes.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- MarginBoxRenderer: should_replace=false when specific rule already set ---
+
+    #[test]
+    fn render_smoke_margin_box_should_replace_false() {
+        // MarginBoxRenderer::render_page (lines 3727-3735): when two rules
+        // targeting the same margin-box position both carry a page selector
+        // (e.g. both are specific pseudo-class rules), the second rule does NOT
+        // replace the first — `should_replace` evaluates to `false` because
+        // `existing.page_selector.is_none()` is false for the already-inserted
+        // specific rule. Both `:first` and `:right` target `@top-center` here;
+        // on page 1 `:first` fires first; processing `:right` next for page 1
+        // finds a non-None existing selector and skips the insert.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page { size: A4; margin: 20mm; }
+            @page :first { @top-center { content: "First page header"; } }
+            @page :right { @top-center { content: "Right page header"; } }
+            </style></head><body>
+            <p>Page one.</p>
+            <div style="height:900px"></div>
+            <p>Page two.</p>
+            <div style="height:900px"></div>
+            <p>Page three.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
