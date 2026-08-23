@@ -7289,4 +7289,61 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
     }
+
+    // ── inline root page-advance (lines 750-752) ─────────────────────────────────
+
+    /// Lines 750-752: a multi-line paragraph (inline root) is pushed to the
+    /// next page when `cursor_y + para_total_h > page_height_px`.
+    ///
+    /// A 60 px spacer occupies most of the 80 px page strip.  The `<br>`
+    /// guarantee guarantees two Parley line boxes regardless of font or
+    /// viewport width, so `para_total_h` is definitively > the remaining 20 px.
+    /// `fragment_pagination_root` must advance `page_index` before delegating
+    /// to `fragment_inline_root` (lines 751-752 execute).
+    #[test]
+    fn inline_root_advances_page_when_para_does_not_fit_remaining_space() {
+        let html = r#"
+            <html><body style="margin:0;padding:0">
+              <div style="height:60px"></div>
+              <p style="margin:0">Line one<br>Line two</p>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 80.0);
+        let has_page1 = table
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .any(|f| f.page_index >= 1);
+        assert!(
+            has_page1,
+            "multi-line paragraph overflowing remaining 20 px must advance to page >= 1; \
+             table={table:?}",
+        );
+    }
+
+    // ── inline root break-after: page (lines 772-778) ────────────────────────────
+
+    /// Lines 772-778: `break-after: page` on a multi-line paragraph (inline
+    /// root with `line_metrics.len() > 1`) must increment `page_index` after
+    /// `fragment_inline_root` returns, pushing the next body-direct sibling
+    /// onto page 1.
+    #[test]
+    fn inline_root_break_after_page_advances_page_index() {
+        let html = r#"
+            <html><body style="margin:0;padding:0">
+              <p style="margin:0;break-after:page">Line one<br>Line two</p>
+              <div style="height:50px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-after: page on a multi-line inline root must push next sibling to page 1; \
+             geom={geom:?}",
+        );
+    }
 }
