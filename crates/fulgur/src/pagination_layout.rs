@@ -7313,12 +7313,14 @@ h2 { string-set: chapter-title content(text); }
         let para_id = find_by_id(doc.deref_mut(), "p1").expect("p#p1");
         let para_page = table
             .get(&para_id)
-            .and_then(|g| g.fragments.first())
-            .map(|f| f.page_index)
-            .unwrap_or(0);
-        assert!(
-            para_page >= 1,
-            "multi-line paragraph overflowing remaining 20 px must advance to page >= 1; \
+            .expect("p#p1 must appear in geometry table")
+            .fragments
+            .first()
+            .expect("p#p1 must have at least one fragment")
+            .page_index;
+        assert_eq!(
+            para_page, 1,
+            "multi-line paragraph overflowing remaining 20 px must advance to page 1; \
              got page_index={para_page}",
         );
     }
@@ -7343,9 +7345,11 @@ h2 { string-set: chapter-title content(text); }
         let div_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
         let div_page = geom
             .get(&div_id)
-            .and_then(|g| g.fragments.first())
-            .map(|f| f.page_index)
-            .unwrap_or(0);
+            .expect("div#after must appear in geometry table")
+            .fragments
+            .first()
+            .expect("div#after must have at least one fragment")
+            .page_index;
         assert_eq!(
             div_page, 1,
             "break-after: page on a multi-line inline root must push next sibling to page 1; \
