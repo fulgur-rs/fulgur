@@ -7305,19 +7305,21 @@ h2 { string-set: chapter-title content(text); }
         let html = r#"
             <html><body style="margin:0;padding:0">
               <div style="height:60px"></div>
-              <p style="margin:0">Line one<br>Line two</p>
+              <p id="p1" style="margin:0">Line one<br>Line two</p>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 80.0);
-        let has_page1 = table
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .any(|f| f.page_index >= 1);
+        let para_id = find_by_id(doc.deref_mut(), "p1").expect("p#p1");
+        let para_page = table
+            .get(&para_id)
+            .and_then(|g| g.fragments.first())
+            .map(|f| f.page_index)
+            .unwrap_or(0);
         assert!(
-            has_page1,
+            para_page >= 1,
             "multi-line paragraph overflowing remaining 20 px must advance to page >= 1; \
-             table={table:?}",
+             got page_index={para_page}",
         );
     }
 
@@ -7332,18 +7334,22 @@ h2 { string-set: chapter-title content(text); }
         let html = r#"
             <html><body style="margin:0;padding:0">
               <p style="margin:0;break-after:page">Line one<br>Line two</p>
-              <div style="height:50px"></div>
+              <div id="after" style="height:50px"></div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
-        assert!(
-            geom.values()
-                .flat_map(|g| g.fragments.iter())
-                .any(|f| f.page_index == 1),
+        let div_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
+        let div_page = geom
+            .get(&div_id)
+            .and_then(|g| g.fragments.first())
+            .map(|f| f.page_index)
+            .unwrap_or(0);
+        assert_eq!(
+            div_page, 1,
             "break-after: page on a multi-line inline root must push next sibling to page 1; \
-             geom={geom:?}",
+             got page_index={div_page}",
         );
     }
 }
