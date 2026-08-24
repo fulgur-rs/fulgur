@@ -2,6 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+---
+
+> **Superseded in part.** This plan records the design as authored; it is not
+> kept in sync with later changes. The header contract has since narrowed: only
+> the *first* `table-header-group` repeats (later ones are treated as
+> `table-row-group`), a group that is not at the top of its table is not
+> repeated at all, and a table does not start on a page with room for the band
+> but not for its first body row. The tests named below were renamed and their
+> expectations updated to match. For the current contract see the Tables section
+> of `docs/css-support.md`.
+
 **Goal:** Repeat computed table header groups on every continuation page while reserving their height in table body fragmentation.
 
 **Architecture:** Add a thin table coordinator around the existing `fragment_block_subtree`. The coordinator classifies Blitz's table cells from computed `DisplayInside`, enables the existing `RowState` for flattened table rows, fragments body cells with a reduced virtual page height, maps body geometry back while preserving `is_repeat`, and clones the complete header geometry. The renderer continues consuming geometry, but split table frames and clips use the current fragment height.
