@@ -869,3 +869,95 @@ fn probe_break_after_last_row_makes_no_header_only_page() {
          body pages={body_pages:?}"
     );
 }
+
+/// An out-of-flow first child does not hold the row open, so it must not be
+/// taken as the leading unit that has to fit under the band.
+const ABS_FIRST_CHILD_IN_BODY_CELL: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  #lead { height: 60px; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th { box-sizing: border-box; padding: 0; height: 20px; }
+  td { box-sizing: border-box; padding: 0; position: relative; }
+  #floaty { position: absolute; top: 0; left: 0; width: 20px; height: 5px;
+            background: rgb(8,8,8); }
+  .m { height: 30px; background: rgb(6,6,6); }
+</style></head><body>
+  <div id="lead"></div>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td>
+        <div id="floaty"></div>
+        <div class="m" id="real"></div>
+      </td></tr>
+      <tr><td><div class="m" id="real2"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_out_of_flow_first_child_does_not_shrink_the_reserve() {
+    let engine = engine_200x100();
+    let layout = engine.layout(ABS_FIRST_CHILD_IN_BODY_CELL).expect("layout");
+    let table = table_fragments(&layout, "t");
+    let real = block_fragments(&layout, "real");
+    println!("[abs-lead] table = {table:?}  real = {real:?}");
+
+    // lead 60 + band 20 + row 30 = 110 > 100, so the table must not start on
+    // page 0. Measuring the 5px absolute box as the leading unit would make
+    // 60 + 20 + 5 = 85 look like it fits and strand the header there.
+    let body_pages: std::collections::BTreeSet<u32> = real.iter().map(|(p, _, _)| *p).collect();
+    let header_only: Vec<u32> = table
+        .iter()
+        .map(|(p, _, _)| *p)
+        .filter(|p| !body_pages.contains(p))
+        .collect();
+    assert!(
+        header_only.is_empty(),
+        "an out-of-flow first child shrank the reserve: pages {header_only:?} carry \
+         the band with no body row (table={table:?}, real={real:?})"
+    );
+}
+
+/// `break-after: page` on the header row itself.
+const BREAK_ON_HEADER_ROW: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; height: 30px; }
+  #hrow { break-after: page; }
+  .m { height: 30px; background: rgb(6,6,6); }
+</style></head><body>
+  <table id="t">
+    <thead><tr id="hrow"><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m" id="d1"></div></td></tr>
+      <tr><td><div class="m" id="d2"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+#[ignore = "forced breaks on rows and row groups are not honoured anywhere in tables — the same break is ignored without a thead. Executable repro — run with --ignored."]
+fn probe_forced_break_on_header_row() {
+    let engine = engine_200x100();
+    let layout = engine.layout(BREAK_ON_HEADER_ROW).expect("layout");
+    let d1 = block_fragments(&layout, "d1");
+    println!("[hdr-row-break] d1 = {d1:?}");
+
+    // Same shape without a repeating header, to tell a repeating-path defect
+    // from the general row-break limitation.
+    let plain = BREAK_ON_HEADER_ROW
+        .replace("<thead><tr id=\"hrow\"><th>H</th></tr></thead>", "")
+        .replace("<tbody>", "<tbody><tr id=\"hrow\"><td>H</td></tr>");
+    let plain_layout = engine.layout(&plain).expect("layout");
+    let plain_d1 = block_fragments(&plain_layout, "d1");
+    println!("[hdr-row-break] no-thead d1 = {plain_d1:?}");
+
+    assert!(
+        d1[0].0 > 0,
+        "break-after:page on the header row was ignored: d1={d1:?} \
+         (same break on a plain row: {plain_d1:?})"
+    );
+}

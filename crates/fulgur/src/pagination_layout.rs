@@ -516,9 +516,7 @@ impl<'a> PaginationLayoutTree<'a> {
             };
             // Skip pure-whitespace text nodes — same convention as
             // multicol_layout's `partition_children_into_segments`.
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             // CSS 2.1 §10.6.4 / §9.6: out-of-flow elements
@@ -1359,9 +1357,7 @@ fn would_split_block_subtree(
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         {
@@ -1535,9 +1531,7 @@ fn has_page_name_change_below(
         // Skip whitespace-only text and out-of-flow children — same
         // filters as the fragmenter loop, so the predicate matches
         // exactly what `fragment_block_subtree` would compare.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         if child.element_data().is_none() {
@@ -1850,9 +1844,12 @@ fn repeating_table_header(
                 .iter()
                 .filter_map(|&child| doc.get_node(child))
                 .filter(|child| {
-                    !child
-                        .text_data()
-                        .is_some_and(|text| text.content.chars().all(char::is_whitespace))
+                    // Same filters the body fragmenter applies: whitespace
+                    // formatting nodes carry no content, and out-of-flow boxes
+                    // do not hold the row open, so neither can be the leading
+                    // unit that has to fit under the band.
+                    !crate::blitz_adapter::is_whitespace_only_text_node(child)
+                        && !crate::blitz_adapter::is_out_of_flow_node(child)
                         && child.final_layout.size.height > 0.0
                 })
                 .collect();
@@ -2325,9 +2322,7 @@ fn fragment_block_subtree_inner(
             continue;
         };
         // Whitespace-only text — same skip as `fragment_pagination_root`.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         // CSS 2.1 §10.6.4: out-of-flow children do not contribute to
@@ -3533,9 +3528,7 @@ fn record_fixed_subtree_descendants(
             if is_oof {
                 continue;
             }
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             let child_offset = (
@@ -3578,9 +3571,7 @@ fn record_fixed_subtree_descendants(
         if is_oof {
             continue;
         }
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
@@ -3651,9 +3642,7 @@ pub fn append_position_absolute_body_direct_fragments(
         let Some(child) = doc.get_node(child_id) else {
             return false;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             return false;
         }
         if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
@@ -4072,9 +4061,7 @@ fn record_subtree_fragments_at_offset(
                 }
             }
             // Skip whitespace-only text (matches fragmenter).
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             let child_offset = (
