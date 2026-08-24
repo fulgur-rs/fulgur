@@ -903,6 +903,10 @@ fn probe_out_of_flow_first_child_does_not_shrink_the_reserve() {
     let table = table_fragments(&layout, "t");
     let real = block_fragments(&layout, "real");
     println!("[abs-lead] table = {table:?}  real = {real:?}");
+    // Without these, missing geometry would leave `header_only` empty and the
+    // test would pass while checking nothing.
+    assert!(!table.is_empty(), "table must record pagination geometry");
+    assert!(!real.is_empty(), "body row must record pagination geometry");
 
     // lead 60 + band 20 + row 30 = 110 > 100, so the table must not start on
     // page 0. Measuring the 5px absolute box as the leading unit would make
@@ -955,8 +959,24 @@ fn probe_forced_break_on_header_row() {
     let plain_d1 = block_fragments(&plain_layout, "d1");
     println!("[hdr-row-break] no-thead d1 = {plain_d1:?}");
 
+    // The control is what makes the header-row claim meaningful: if plain rows
+    // start honouring the break, this probe's premise has changed and the
+    // #[ignore] reasoning needs revisiting — catch that separately from the
+    // header-row assertion below.
+    assert_eq!(
+        plain_d1
+            .first()
+            .expect("plain table must record a body fragment")
+            .0,
+        0,
+        "plain table rows now honour break-after: page: {plain_d1:?}"
+    );
+
     assert!(
-        d1[0].0 > 0,
+        d1.first()
+            .expect("header table must record a body fragment")
+            .0
+            > 0,
         "break-after:page on the header row was ignored: d1={d1:?} \
          (same break on a plain row: {plain_d1:?})"
     );
