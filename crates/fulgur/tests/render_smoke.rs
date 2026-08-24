@@ -3632,8 +3632,10 @@ fn outline_titles(pdf_bytes: &[u8]) -> Vec<String> {
         // an integration test crate.
         if s.starts_with(&[0xFE, 0xFF]) {
             let chars: Vec<u16> = s[2..]
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| u16::from_be_bytes(c))
                 .collect();
             String::from_utf16_lossy(&chars)
         } else {
