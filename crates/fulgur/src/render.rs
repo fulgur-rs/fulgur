@@ -6033,6 +6033,91 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // Minimal 1×1 white JPEG (SOF0 baseline, JFIF APP0 header).
+    const WHITE_1X1_JPEG: &[u8] = &[
+        0xFF, 0xD8, // SOI
+        0xFF, 0xE0, // APP0 (JFIF)
+        0x00, 0x10, // length = 16
+        0x4A, 0x46, 0x49, 0x46, 0x00, // "JFIF\0"
+        0x01, 0x01, // version
+        0x00, // units
+        0x00, 0x01, // X density
+        0x00, 0x01, // Y density
+        0x00, 0x00, // thumbnail
+        0xFF, 0xC0, // SOF0
+        0x00, 0x0B, // length = 11
+        0x08, // precision = 8
+        0x00, 0x01, // height = 1
+        0x00, 0x01, // width = 1
+        0x01, // components = 1
+        0x01, 0x11, 0x00, // component 1
+        0xFF, 0xD9, // EOI
+    ];
+
+    // Minimal 1×1 red GIF89a (2-entry global color table, LZW-coded single pixel).
+    const RED_1X1_GIF: &[u8] = &[
+        // Header
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // "GIF89a"
+        // Logical Screen Descriptor
+        0x01, 0x00, // width = 1 (LE)
+        0x01, 0x00, // height = 1 (LE)
+        0x80, // packed: GCT flag=1, color_res=0, sort=0, GCT size=0 → 2 entries
+        0x00, // background color index
+        0x00, // pixel aspect ratio
+        // Global Color Table (2 × 3 bytes)
+        0xFF, 0x00, 0x00, // entry 0: red
+        0x00, 0x00, 0x00, // entry 1: black (filler)
+        // Image Descriptor
+        0x2C, // image separator
+        0x00, 0x00, // image left = 0
+        0x00, 0x00, // image top = 0
+        0x01, 0x00, // image width = 1 (LE)
+        0x01, 0x00, // image height = 1 (LE)
+        0x00, // packed: no local CT, not interlaced
+        // Image Data (LZW min code size=2; CLEAR=4, pixel_index=0, EOI=5)
+        0x02, // LZW minimum code size = 2
+        0x02, // sub-block byte count = 2
+        0x44, // LZW stream byte 0 (3-bit codes packed LSB-first: 4,0,5 → 0x44)
+        0x01, // LZW stream byte 1 (remaining bit of code 5)
+        0x00, // block terminator
+        // Trailer
+        0x3B,
+    ];
+
+    #[test]
+    fn render_smoke_jpeg_image_in_flow() {
+        // Exercises decode_image_for_v2 → ImageFormat::Jpeg branch.
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("img.jpg", WHITE_1X1_JPEG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <img src="img.jpg" style="width:64px;height:64px;">
+                </body></html>"#,
+            )
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_gif_image_in_flow() {
+        // Exercises decode_image_for_v2 → ImageFormat::Gif branch.
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("img.gif", RED_1X1_GIF.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <img src="img.gif" style="width:64px;height:64px;">
+                </body></html>"#,
+            )
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // --- draw_svg_v2 / draw_svg_inner_paint ---
 
     #[test]
@@ -6147,6 +6232,27 @@ mod tests {
                 </body></html>"#,
             )
             .expect("tagged render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_pdf_with_table() {
+        // Exercises try_start_tagged for Table/Th/Td elements (the `_ => None` arm).
+        // In tagged mode the table cells are wrapped in artifact spans rather than
+        // semantic structure elements, which exercises the fallback path.
+        let pdf = crate::engine::Engine::builder()
+            .tagged(true)
+            .lang("en")
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <table>
+                  <tr><th>Header A</th><th>Header B</th></tr>
+                  <tr><td>Cell 1</td><td>Cell 2</td></tr>
+                </table>
+                </body></html>"#,
+            )
+            .expect("tagged render with table");
         assert!(pdf.starts_with(b"%PDF"));
     }
 
