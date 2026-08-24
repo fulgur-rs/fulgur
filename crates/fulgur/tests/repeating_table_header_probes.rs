@@ -814,7 +814,7 @@ const BREAK_ON_BODY_ROW: &str = r#"<!doctype html>
 </body></html>"#;
 
 #[test]
-#[ignore = "a forced break on a body row or row group is dropped: the body path receives flattened cell ids, so the styled row node is never visited. Executable repro — run with --ignored."]
+#[ignore = "forced breaks on table rows and row groups are not honoured at all — see the sibling no-thead probe. Executable repro — run with --ignored."]
 fn probe_forced_break_on_body_row_is_honoured() {
     let engine = engine_200x100();
     let layout = engine.layout(BREAK_ON_BODY_ROW).expect("layout");
@@ -978,5 +978,21 @@ fn probe_forced_break_on_header_row() {
             > 0,
         "break-after:page on the header row was ignored: d1={d1:?} \
          (same break on a plain row: {plain_d1:?})"
+    );
+}
+
+#[test]
+#[ignore = "forced breaks on table rows and row groups are not honoured at all — see the sibling no-thead probe. Executable repro — run with --ignored."]
+fn probe_forced_break_on_body_row_without_thead() {
+    let engine = engine_200x100();
+    let html = BREAK_ON_BODY_ROW.replace("<thead><tr><th>H</th></tr></thead>", "");
+    let layout = engine.layout(&html).expect("layout");
+    let a1 = block_fragments(&layout, "a1");
+    let a2 = block_fragments(&layout, "a2");
+    println!("[break-row-nothead] a1 = {a1:?}  a2 = {a2:?}");
+    assert!(
+        a2[0].0 > a1[0].0,
+        "break-before:page on a body row is ignored even without a repeating \
+         header, so this is a general table limitation: a1={a1:?}, a2={a2:?}"
     );
 }
