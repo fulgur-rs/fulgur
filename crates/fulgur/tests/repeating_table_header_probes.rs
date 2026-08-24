@@ -1034,7 +1034,7 @@ const ZERO_HEIGHT_ROW_WITH_ABS_PSEUDO: &str = r#"<!doctype html>
 </body></html>"#;
 
 #[test]
-#[ignore = "premise not reachable yet: break-before:page on a row is not honoured, so the zero-height row never reaches a second page. Executable repro — run with --ignored."]
+#[ignore = "break-before:page at the head of a cell is not honoured, so this shape never reaches a second page. The reachable variant — a break after an in-flow sibling in the same cell — is covered by probe_painted_zero_height_box_keeps_its_table_page. Run with --ignored."]
 fn probe_zero_height_row_with_visible_pseudo_keeps_its_page() {
     let engine = engine_200x100();
     let layout = engine
@@ -1049,14 +1049,55 @@ fn probe_zero_height_row_with_visible_pseudo_keeps_its_page() {
     let table_pages: std::collections::BTreeSet<u32> = table.iter().map(|(p, _, _)| *p).collect();
     let all_pages: std::collections::BTreeSet<u32> = layout
         .geometry
-        .iter()
-        .flat_map(|(_, g)| g.fragments.iter().map(|f| f.page_index))
+        .values()
+        .flat_map(|g| g.fragments.iter().map(|f| f.page_index))
         .collect();
     println!("[zero-abs] table_pages={table_pages:?} all_geometry_pages={all_pages:?}");
     for (page, _, _) in &ghost {
         assert!(
             table_pages.contains(page),
             "page {page} carries a renderable zero-height row but no table slice: \
+             table={table:?}, ghost={ghost:?}"
+        );
+    }
+}
+
+/// A zero-height box that still paints (box-shadow), moved to a continuation
+/// page by a break placed *after* an in-flow sibling in the same cell.
+const ZERO_HEIGHT_PAINTED_AFTER_SIBLING: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #ghost { height: 0; break-before: page; box-shadow: 0 0 0 6px rgb(9,9,9); }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td>
+        <div class="m" id="vis"></div>
+        <div id="ghost"></div>
+      </td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_painted_zero_height_box_keeps_its_table_page() {
+    let engine = engine_200x100();
+    let layout = engine
+        .layout(ZERO_HEIGHT_PAINTED_AFTER_SIBLING)
+        .expect("layout");
+    let table = table_fragments(&layout, "t");
+    let ghost = block_fragments(&layout, "ghost");
+    println!("[painted-zero] table = {table:?}  ghost = {ghost:?}");
+
+    let table_pages: std::collections::BTreeSet<u32> = table.iter().map(|(p, _, _)| *p).collect();
+    for (page, _, _) in &ghost {
+        assert!(
+            table_pages.contains(page),
+            "page {page} paints a zero-height box but has no table slice: \
              table={table:?}, ghost={ghost:?}"
         );
     }

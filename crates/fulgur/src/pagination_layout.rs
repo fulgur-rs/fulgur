@@ -2158,10 +2158,17 @@ fn fragment_repeating_table(
     let body_content_pages: std::collections::BTreeSet<u32> = body_geometry
         .iter()
         .filter(|(node_id, _)| **node_id != header.table_id)
-        .flat_map(|(_, geom)| {
+        .flat_map(|(node_id, geom)| {
+            // A cell's own zero-height fragment is just the continuation the
+            // fragmenter opens on the page it advanced to — no content landed
+            // there. A zero-height fragment for anything *below* a cell is a
+            // box that was actually placed on that page, and it can still
+            // paint (border, background, box-shadow), so the table must keep
+            // its slice and repeated header there.
+            let is_cell = header.body_cell_ids.contains(node_id);
             geom.fragments
                 .iter()
-                .filter(|fragment| fragment.height > crate::units::Px::ZERO)
+                .filter(move |fragment| !is_cell || fragment.height > crate::units::Px::ZERO)
                 .map(|fragment| fragment.page_index)
         })
         .collect();
