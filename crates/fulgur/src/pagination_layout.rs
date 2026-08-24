@@ -2221,7 +2221,17 @@ fn fragment_repeating_table(
         remaining_repeat_budget,
     );
 
-    (body_end_page, body_end_cursor + header.band_height_px)
+    // The band only occupies space on pages that kept a table fragment. A
+    // trailing forced break can leave the end page with none (see the `retain`
+    // above), and adding the band here would push the table's next sibling down
+    // by a header that was never drawn.
+    let end_page_carries_band = table_pages.iter().any(|&(page, _)| page == body_end_page);
+    let end_cursor = if end_page_carries_band {
+        body_end_cursor + header.band_height_px
+    } else {
+        body_end_cursor
+    };
+    (body_end_page, end_cursor)
 }
 
 #[allow(clippy::too_many_arguments)]

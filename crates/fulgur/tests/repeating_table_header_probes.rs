@@ -844,6 +844,7 @@ const BREAK_AFTER_LAST_ROW: &str = r#"<!doctype html>
       <tr><td><div class="m" id="last"></div></td></tr>
     </tbody>
   </table>
+  <div class="m" id="after"></div>
 </body></html>"#;
 
 #[test]
@@ -866,6 +867,15 @@ fn probe_break_after_last_row_makes_no_header_only_page() {
         phantom.is_empty(),
         "trailing break manufactured header-only page(s) {phantom:?}: table={table:?}, \
          body pages={body_pages:?}"
+    );
+
+    // The sibling after the table must not be offset by a band that was never
+    // drawn: it starts on the page the break moved to, at its top.
+    let after = block_fragments(&layout, "after");
+    println!("[break-after] after = {after:?}");
+    assert!(
+        after[0].1 < 0.5,
+        "sibling placed below a header that was never drawn: after={after:?}"
     );
 }
 
