@@ -793,3 +793,79 @@ fn probe_formatted_markup_does_not_defeat_orphan_check() {
          the band with no body row (table={table:?}, r1={r1:?})"
     );
 }
+
+/// A forced break on a body `<tr>` must move the following rows to a new page.
+const BREAK_ON_BODY_ROW: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; height: 30px; }
+  #brk { break-before: page; }
+  .m { height: 30px; background: rgb(6,6,6); }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m" id="a1"></div></td></tr>
+      <tr id="brk"><td><div class="m" id="a2"></div></td></tr>
+      <tr><td><div class="m" id="a3"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+#[ignore = "a forced break on a body row or row group is dropped: the body path receives flattened cell ids, so the styled row node is never visited. Executable repro — run with --ignored."]
+fn probe_forced_break_on_body_row_is_honoured() {
+    let engine = engine_200x100();
+    let layout = engine.layout(BREAK_ON_BODY_ROW).expect("layout");
+    let a1 = block_fragments(&layout, "a1");
+    let a2 = block_fragments(&layout, "a2");
+    println!("[break-row] a1 = {a1:?}  a2 = {a2:?}");
+    assert!(
+        a2[0].0 > a1[0].0,
+        "break-before:page on a body row was ignored: a1={a1:?}, a2={a2:?}"
+    );
+}
+
+/// A forced break after the last body block must not manufacture a page that
+/// carries only a cloned header.
+const BREAK_AFTER_LAST_ROW: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #last { break-after: page; }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m" id="b1"></div></td></tr>
+      <tr><td><div class="m" id="last"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+#[ignore = "a break after the last body block closes the table with a zero-height fragment on the next page, and the band is added unconditionally, manufacturing a header-only page. Executable repro — run with --ignored."]
+fn probe_break_after_last_row_makes_no_header_only_page() {
+    let engine = engine_200x100();
+    let layout = engine.layout(BREAK_AFTER_LAST_ROW).expect("layout");
+    let table = table_fragments(&layout, "t");
+    let b1 = block_fragments(&layout, "b1");
+    let last = block_fragments(&layout, "last");
+    println!("[break-after] table = {table:?}  b1 = {b1:?}  last = {last:?}");
+
+    let body_pages: std::collections::BTreeSet<u32> =
+        b1.iter().chain(last.iter()).map(|(p, _, _)| *p).collect();
+    let phantom: Vec<u32> = table
+        .iter()
+        .map(|(p, _, _)| *p)
+        .filter(|p| !body_pages.contains(p))
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "trailing break manufactured header-only page(s) {phantom:?}: table={table:?}, \
+         body pages={body_pages:?}"
+    );
+}
