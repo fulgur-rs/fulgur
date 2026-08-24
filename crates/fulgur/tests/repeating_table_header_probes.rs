@@ -1006,3 +1006,58 @@ fn probe_forced_break_on_body_row_without_thead() {
          header, so this is a general table limitation: a1={a1:?}, a2={a2:?}"
     );
 }
+
+/// A zero-height body node can still render: an absolutely positioned pseudo
+/// hangs off it. Such a page must keep its table slice and repeated header.
+const ZERO_HEIGHT_ROW_WITH_ABS_PSEUDO: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #ghost { height: 0; position: relative; break-before: page; }
+  #ghost::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0;
+    width: 40px; height: 12px;
+    background: rgb(7,7,7);
+  }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m" id="c1"></div></td></tr>
+      <tr><td><div id="ghost"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+#[ignore = "premise not reachable yet: break-before:page on a row is not honoured, so the zero-height row never reaches a second page. Executable repro — run with --ignored."]
+fn probe_zero_height_row_with_visible_pseudo_keeps_its_page() {
+    let engine = engine_200x100();
+    let layout = engine
+        .layout(ZERO_HEIGHT_ROW_WITH_ABS_PSEUDO)
+        .expect("layout");
+    let table = table_fragments(&layout, "t");
+    let ghost = block_fragments(&layout, "ghost");
+    println!("[zero-abs] table = {table:?}  ghost = {ghost:?}");
+
+    // Wherever the zero-height row landed, the table must still have a slice
+    // there — its positioned pseudo is painted relative to that box.
+    let table_pages: std::collections::BTreeSet<u32> = table.iter().map(|(p, _, _)| *p).collect();
+    let all_pages: std::collections::BTreeSet<u32> = layout
+        .geometry
+        .iter()
+        .flat_map(|(_, g)| g.fragments.iter().map(|f| f.page_index))
+        .collect();
+    println!("[zero-abs] table_pages={table_pages:?} all_geometry_pages={all_pages:?}");
+    for (page, _, _) in &ghost {
+        assert!(
+            table_pages.contains(page),
+            "page {page} carries a renderable zero-height row but no table slice: \
+             table={table:?}, ghost={ghost:?}"
+        );
+    }
+}
