@@ -847,7 +847,6 @@ const BREAK_AFTER_LAST_ROW: &str = r#"<!doctype html>
 </body></html>"#;
 
 #[test]
-#[ignore = "a break after the last body block closes the table with a zero-height fragment on the next page, and the band is added unconditionally, manufacturing a header-only page. Executable repro — run with --ignored."]
 fn probe_break_after_last_row_makes_no_header_only_page() {
     let engine = engine_200x100();
     let layout = engine.layout(BREAK_AFTER_LAST_ROW).expect("layout");

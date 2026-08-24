@@ -2150,10 +2150,33 @@ fn fragment_repeating_table(
         remaining_repeat_budget,
     );
 
+    // Pages that actually carry body content. A forced break after the last
+    // body block advances the fragmenter and closes the table with a
+    // zero-height fragment on the following page; adding the band to that would
+    // promote it into a real page holding nothing but a cloned header, and
+    // shift everything after the table down by the phantom band.
+    let body_content_pages: std::collections::BTreeSet<u32> = body_geometry
+        .iter()
+        .filter(|(node_id, _)| **node_id != header.table_id)
+        .flat_map(|(_, geom)| {
+            geom.fragments
+                .iter()
+                .filter(|fragment| fragment.height > crate::units::Px::ZERO)
+                .map(|fragment| fragment.page_index)
+        })
+        .collect();
+
     let mut table_pages = BTreeMap::<u32, f32>::new();
     for (node_id, mut source) in body_geometry {
         source.fragments.sort_by_key(|fragment| fragment.page_index);
         if node_id == header.table_id {
+            // Keep a zero-height slice only where body content shares the page
+            // (the occupied-strip case); drop it when the table has nothing
+            // left to show there.
+            source.fragments.retain(|fragment| {
+                fragment.height > crate::units::Px::ZERO
+                    || body_content_pages.contains(&fragment.page_index)
+            });
             for fragment in &mut source.fragments {
                 fragment.height = (fragment.height.to_f32() + header.band_height_px).as_px();
                 let table_top = fragment.y.to_f32();
