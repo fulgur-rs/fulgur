@@ -126,7 +126,7 @@ Note that CSS Tables Level 3 §6 (Fragmentation) has no web-platform-tests
 coverage, and `css/CSS2/tables/table-header-group-004.xht` is flagged
 `may paged` — it passes whether or not headers repeat. Regression coverage
 for this area therefore lives in fulgur's own geometry probes
-(`crates/fulgur/tests/naj7_probe.rs`) rather than in an external suite.
+(`crates/fulgur/tests/repeating_table_header_probes.rs`) rather than in an external suite.
 
 See `docs/plans/2026-08-11-repeating-table-headers.md` for the
 fragmentation coordinator. The VRT golden lives at

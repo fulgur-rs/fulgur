@@ -106,27 +106,35 @@ fn repeated_header_multicol_is_copied_not_split() {
         "table must span at least 3 pages: {pages:?}"
     );
 
-    let header_signature: Vec<String> = per_page[&pages[0]].iter().take(3).cloned().collect();
-    assert_eq!(
-        header_signature.len(),
-        3,
-        "expected three header paragraphs on the first page"
-    );
-
-    let mut missing: Vec<String> = Vec::new();
-    for page in &pages {
-        let texts = &per_page[page];
-        for item in &header_signature {
-            if !texts.contains(item) {
-                missing.push(format!("page {page} is missing header item {item:?}"));
-            }
-        }
+    // Derive the repeated set instead of assuming it is the first three items:
+    // ordering and item count depend on font shaping and subsetting, and page 0
+    // also carries body text. What the contract actually claims is that some
+    // non-empty set of items appears identically on every page — that set is the
+    // header, and computing it as the intersection makes no positional
+    // assumption.
+    //
+    // Note this compares glyph sequences, not decoded text: the subset font
+    // carries no usable ToUnicode mapping here, which is also why the fixture
+    // depends on the bundled font configuration rather than system fonts.
+    let mut repeated: std::collections::BTreeSet<String> =
+        per_page[&pages[0]].iter().cloned().collect();
+    for page in &pages[1..] {
+        let on_page: std::collections::BTreeSet<String> = per_page[page].iter().cloned().collect();
+        repeated = repeated.intersection(&on_page).cloned().collect();
     }
     assert!(
-        missing.is_empty(),
-        "repeated header's multicol content does not survive on every page:\n{}\n\
-         per-page text: {per_page:?}",
-        missing.join("\n")
+        !repeated.is_empty(),
+        "no text item survives on every page, so nothing is being repeated: \
+         {per_page:?}"
+    );
+
+    // The body rows differ per page, so the repeated set must be strictly
+    // smaller than any single page's contents — otherwise we are comparing
+    // pages that happen to be identical rather than isolating the header.
+    assert!(
+        repeated.len() < per_page[&pages[0]].len(),
+        "every item repeats, so the fixture is not exercising a split body: \
+         {per_page:?}"
     );
 
     // And the geometry must stay a repetition, never a split: partitioning a

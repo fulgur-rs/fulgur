@@ -16,9 +16,11 @@ fn render_small(html: &str) -> Vec<u8> {
 }
 
 fn count_red_ops_in_content(bytes: &[u8]) -> usize {
-    let Ok(content) = lopdf::content::Content::decode(bytes) else {
-        return 0;
-    };
+    // Returning 0 here would let "no red operators on this page" hold for a
+    // stream we simply failed to parse, hiding the very regression the callers
+    // assert against.
+    let content =
+        lopdf::content::Content::decode(bytes).expect("page content stream should decode");
     content
         .operations
         .iter()

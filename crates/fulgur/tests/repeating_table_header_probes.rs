@@ -1,11 +1,11 @@
-//! Reachability probes for the PR #710 review findings (epic `fulgur-naj7`).
+//! Geometry probes for repeating table headers.
 //!
-//! These are *verification* tests, not regression guards: each one asserts the
-//! geometry that the review claimed, so running the file on unmodified `pr710`
-//! tells us which findings are live bugs and which are defensive hardening.
+//! Each test asserts the geometry the fragmenter must produce, measured through
+//! `Engine::layout()`. CSS Tables 3 §6 (Fragmentation) has no web-platform-tests
+//! coverage, so these are the regression net for this area.
 //!
 //! Run with:
-//!   cargo test -p fulgur --test naj7_probe -- --nocapture
+//!   cargo test -p fulgur --test repeating_table_header_probes -- --nocapture
 
 use fulgur::{Engine, Margin, PageSize};
 
@@ -563,7 +563,10 @@ fn probe_finding9_multicol_inside_repeated_header() {
         .iter()
         .find(|(_, b)| b.id.as_deref().map(|s| s.as_str()) == Some("mc"))
         .map(|(id, _)| *id);
-    if let Some(g) = mc_id.and_then(|id| layout.geometry.get(&id)) {
+    let g = mc_id
+        .and_then(|id| layout.geometry.get(&id))
+        .expect("multicol geometry — the fixture must produce one");
+    {
         let repeats = g.fragments.len();
         let is_repeat = g.is_repeat;
         println!("[finding9] mc geometry: fragments={repeats} is_repeat={is_repeat}");
@@ -741,5 +744,52 @@ fn probe_nested_tables_keep_both_headers_repeating() {
     assert!(
         overflow.is_empty(),
         "nested table content overflows the page bottom: {overflow:?}"
+    );
+}
+
+/// Indented markup puts whitespace-only text nodes between `<td>` and its block
+/// children, so a raw `children.len()` test passes the multi-child branch and
+/// then measures the leading unit on a 0-height whitespace node.
+const FORMATTED_TALL_FIRST_ROW: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  #lead { height: 60px; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th { box-sizing: border-box; padding: 0; height: 20px; }
+  td { box-sizing: border-box; padding: 0; }
+  .row { height: 30px; background: rgb(4,4,4); }
+</style></head><body>
+  <div id="lead"></div>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>
+          <div class="row" id="r1"></div>
+          <div class="row" id="r2"></div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_formatted_markup_does_not_defeat_orphan_check() {
+    let engine = engine_200x100();
+    let layout = engine.layout(FORMATTED_TALL_FIRST_ROW).expect("layout");
+    let table = table_fragments(&layout, "t");
+    let r1 = block_fragments(&layout, "r1");
+    println!("[ws-probe] table = {table:?}  r1 = {r1:?}");
+
+    let body_pages: std::collections::BTreeSet<u32> = r1.iter().map(|(p, _, _)| *p).collect();
+    let header_only: Vec<u32> = table
+        .iter()
+        .map(|(p, _, _)| *p)
+        .filter(|p| !body_pages.contains(p))
+        .collect();
+    assert!(
+        header_only.is_empty(),
+        "whitespace text nodes defeat the orphan check: pages {header_only:?} carry \
+         the band with no body row (table={table:?}, r1={r1:?})"
     );
 }

@@ -1839,23 +1839,37 @@ fn repeating_table_header(
         .filter_map(|&id| doc.get_node(id))
         .filter(|cell| (cell.final_layout.location.y - body_origin_px).abs() < 0.5)
         .map(|cell| {
-            // Only a cell with several block children has a leading unit
-            // smaller than itself: the first child can stay while the rest
-            // move on. A cell holding one child — or bare text, which Blitz
-            // wraps in a single anonymous box — places all or nothing, and
-            // its height is usually set on the cell anyway, so measuring the
-            // first text line instead would badly under-count and let the
-            // orphan check pass on a row that cannot fit (fulgur-naj7.6:
-            // a text-only `td { height: 30px }` measured one ~16px line).
-            if cell.children.len() < 2 {
-                return cell.final_layout.size.height;
-            }
-            cell.children
+            // Count real boxes, not raw children. Blitz keeps whitespace-only
+            // text nodes between formatted elements, so indented markup gives
+            // `[ws, div, ws, div, ws]` — testing `children.len()` there passes
+            // the multi-child branch and then measures the leading whitespace
+            // node at height 0, which silently defeated the orphan check on
+            // any normally-formatted document.
+            let boxes: Vec<_> = cell
+                .children
                 .iter()
                 .filter_map(|&child| doc.get_node(child))
-                .map(|child| child.final_layout.size.height)
-                .next()
-                .unwrap_or(cell.final_layout.size.height)
+                .filter(|child| {
+                    !child
+                        .text_data()
+                        .is_some_and(|text| text.content.chars().all(char::is_whitespace))
+                        && child.final_layout.size.height > 0.0
+                })
+                .collect();
+
+            // Only a cell with several boxes has a leading unit smaller than
+            // itself: the first can stay on this page while the rest move on.
+            // A cell holding one box — or bare text, which Blitz wraps in a
+            // single anonymous box — places all or nothing, and its height is
+            // usually set on the cell anyway (fulgur-naj7.6: a text-only
+            // `td { height: 30px }` otherwise measured one ~16px line).
+            let Some(lead) = boxes.first().filter(|_| boxes.len() >= 2) else {
+                return cell.final_layout.size.height;
+            };
+
+            // The leading unit's *bottom*, not its height: padding-top and any
+            // gap above it also have to fit before the row places content.
+            lead.final_layout.location.y + lead.final_layout.size.height
         })
         .reduce(f32::min)
         .unwrap_or(0.0);
