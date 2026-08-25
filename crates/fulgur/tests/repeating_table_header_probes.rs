@@ -1102,3 +1102,84 @@ fn probe_painted_zero_height_box_keeps_its_table_page() {
         );
     }
 }
+
+/// The last body block sits inside a wrapper, so the wrapper — not the cell —
+/// gets the empty continuation on the page the break advances to.
+const TRAILING_BREAK_INSIDE_WRAPPER: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #last { break-after: page; }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><section id="wrap">
+        <div class="m"></div>
+        <div class="m" id="last"></div>
+      </section></td></tr>
+    </tbody>
+  </table>
+  <div class="m" id="after"></div>
+</body></html>"#;
+
+#[test]
+fn probe_wrapper_continuation_is_not_body_content() {
+    let engine = engine_200x100();
+    let layout = engine
+        .layout(TRAILING_BREAK_INSIDE_WRAPPER)
+        .expect("layout");
+    let table = table_fragments(&layout, "t");
+    let after = block_fragments(&layout, "after");
+    println!(
+        "[wrapper] table = {table:?}  wrap = {:?}  after = {after:?}",
+        block_fragments(&layout, "wrap")
+    );
+    assert!(!table.is_empty(), "table must record geometry");
+    assert!(!after.is_empty(), "sibling must record geometry");
+    assert!(
+        after[0].1 < 0.5,
+        "sibling offset by a band for a page whose only body fragment is an \
+         empty wrapper continuation: after={after:?}, table={table:?}"
+    );
+}
+
+/// A zero-height `<td>` that still paints must keep its page's table slice.
+const PAINTED_ZERO_HEIGHT_CELL: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #first { break-after: page; }
+  #ghost { height: 0; box-shadow: 0 0 0 6px rgb(9,9,9); }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m" id="first"></div></td></tr>
+      <tr><td id="ghost"></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_painted_zero_height_cell_keeps_its_table_page() {
+    let engine = engine_200x100();
+    let layout = engine.layout(PAINTED_ZERO_HEIGHT_CELL).expect("layout");
+    let table = table_fragments(&layout, "t");
+    let ghost = block_fragments(&layout, "ghost");
+    println!("[painted-cell] table = {table:?}  ghost = {ghost:?}");
+    assert!(!table.is_empty(), "table must record geometry");
+
+    let table_pages: std::collections::BTreeSet<u32> = table.iter().map(|(p, _, _)| *p).collect();
+    for (page, _, _) in &ghost {
+        assert!(
+            table_pages.contains(page),
+            "page {page} paints a zero-height cell but has no table slice: \
+             table={table:?}, ghost={ghost:?}"
+        );
+    }
+}

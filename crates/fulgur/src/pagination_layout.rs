@@ -2158,17 +2158,26 @@ fn fragment_repeating_table(
     let body_content_pages: std::collections::BTreeSet<u32> = body_geometry
         .iter()
         .filter(|(node_id, _)| **node_id != header.table_id)
-        .flat_map(|(node_id, geom)| {
-            // A cell's own zero-height fragment is just the continuation the
-            // fragmenter opens on the page it advanced to — no content landed
-            // there. A zero-height fragment for anything *below* a cell is a
-            // box that was actually placed on that page, and it can still
-            // paint (border, background, box-shadow), so the table must keep
-            // its slice and repeated header there.
-            let is_cell = header.body_cell_ids.contains(node_id);
+        .flat_map(|(_, geom)| {
+            // Distinguish a box placed on this page from the empty
+            // continuation the fragmenter opens to close a node that started
+            // earlier. A zero-height fragment counts as content only when the
+            // node has nothing on an earlier page — then it was placed here
+            // and can still paint (border, background, box-shadow). Node
+            // identity is the wrong axis for this: cells and their wrappers
+            // both produce continuations, and both can also be genuinely
+            // placed zero-height boxes.
+            let first_page = geom
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .min();
             geom.fragments
                 .iter()
-                .filter(move |fragment| !is_cell || fragment.height > crate::units::Px::ZERO)
+                .filter(move |fragment| {
+                    fragment.height > crate::units::Px::ZERO
+                        || Some(fragment.page_index) == first_page
+                })
                 .map(|fragment| fragment.page_index)
         })
         .collect();
