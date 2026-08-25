@@ -2150,10 +2150,49 @@ fn fragment_repeating_table(
         remaining_repeat_budget,
     );
 
+    // Pages that actually carry body content. A forced break after the last
+    // body block advances the fragmenter and closes the table with a
+    // zero-height fragment on the following page; adding the band to that would
+    // promote it into a real page holding nothing but a cloned header, and
+    // shift everything after the table down by the phantom band.
+    let body_content_pages: std::collections::BTreeSet<u32> = body_geometry
+        .iter()
+        .filter(|(node_id, _)| **node_id != header.table_id)
+        .flat_map(|(_, geom)| {
+            // Distinguish a box placed on this page from the empty
+            // continuation the fragmenter opens to close a node that started
+            // earlier. A zero-height fragment counts as content only when the
+            // node has nothing on an earlier page — then it was placed here
+            // and can still paint (border, background, box-shadow). Node
+            // identity is the wrong axis for this: cells and their wrappers
+            // both produce continuations, and both can also be genuinely
+            // placed zero-height boxes.
+            let first_page = geom
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .min();
+            geom.fragments
+                .iter()
+                .filter(move |fragment| {
+                    fragment.height > crate::units::Px::ZERO
+                        || Some(fragment.page_index) == first_page
+                })
+                .map(|fragment| fragment.page_index)
+        })
+        .collect();
+
     let mut table_pages = BTreeMap::<u32, f32>::new();
     for (node_id, mut source) in body_geometry {
         source.fragments.sort_by_key(|fragment| fragment.page_index);
         if node_id == header.table_id {
+            // Keep a zero-height slice only where body content shares the page
+            // (the occupied-strip case); drop it when the table has nothing
+            // left to show there.
+            source.fragments.retain(|fragment| {
+                fragment.height > crate::units::Px::ZERO
+                    || body_content_pages.contains(&fragment.page_index)
+            });
             for fragment in &mut source.fragments {
                 fragment.height = (fragment.height.to_f32() + header.band_height_px).as_px();
                 let table_top = fragment.y.to_f32();
@@ -2163,6 +2202,14 @@ fn fragment_repeating_table(
                     .or_insert(table_top);
             }
         } else {
+            // Drop the continuations that live only on pages the table just
+            // gave up. `draw_block_inner_paint` paints a zero-height fragment
+            // of a split block at its full `layout_size`, so a styled cell or
+            // wrapper left behind would still show — at the offset of a header
+            // that is no longer there, possibly over the following sibling.
+            source
+                .fragments
+                .retain(|fragment| body_content_pages.contains(&fragment.page_index));
             for fragment in &mut source.fragments {
                 fragment.y = (fragment.y.to_f32() + header.band_height_px).as_px();
             }
@@ -2198,7 +2245,17 @@ fn fragment_repeating_table(
         remaining_repeat_budget,
     );
 
-    (body_end_page, body_end_cursor + header.band_height_px)
+    // The band only occupies space on pages that kept a table fragment. A
+    // trailing forced break can leave the end page with none (see the `retain`
+    // above), and adding the band here would push the table's next sibling down
+    // by a header that was never drawn.
+    let end_page_carries_band = table_pages.iter().any(|&(page, _)| page == body_end_page);
+    let end_cursor = if end_page_carries_band {
+        body_end_cursor + header.band_height_px
+    } else {
+        body_end_cursor
+    };
+    (body_end_page, end_cursor)
 }
 
 #[allow(clippy::too_many_arguments)]

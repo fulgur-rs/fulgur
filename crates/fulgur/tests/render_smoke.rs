@@ -6499,3 +6499,99 @@ fn render_unaffected_by_at_page_only_margin_without_builder_override() {
         .expect("no builder override means Config::validate must not reject @page-only CSS");
     assert!(!pdf.is_empty());
 }
+
+/// A `break-after: page` on the last body block ends the table on the page it
+/// advances to. That page keeps no table fragment, so the band must not be
+/// added to the returned cursor — otherwise the table's next sibling renders
+/// below a header that was never drawn.
+#[test]
+fn table_sibling_after_trailing_forced_break_is_not_offset_by_a_phantom_band() {
+    let html = r#"<!doctype html>
+<html><head><style>
+  @page { size: 200px 100px; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #last { break-after: page; }
+</style></head><body>
+  <table>
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><div class="m"></div></td></tr>
+      <tr><td><div class="m" id="last"></div></td></tr>
+    </tbody>
+  </table>
+  <div class="m" id="after"></div>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("table with a trailing forced break should render");
+    assert!(!pdf.is_empty());
+}
+
+/// A zero-height box that still paints — here via `box-shadow` — moved to a
+/// continuation page by a forced break must keep the table slice and repeated
+/// header on that page.
+#[test]
+fn table_page_with_only_a_painted_zero_height_box_still_renders() {
+    let html = r#"<!doctype html>
+<html><head><style>
+  @page { size: 200px 100px; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #ghost { height: 0; break-before: page; box-shadow: 0 0 0 6px rgb(9,9,9); }
+</style></head><body>
+  <table>
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td>
+        <div class="m"></div>
+        <div id="ghost"></div>
+      </td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("painted zero-height continuation should render");
+    assert!(!pdf.is_empty());
+}
+
+/// When a trailing forced break leaves a page without a table fragment, a
+/// styled wrapper inside the cell must not be left painting there: a
+/// zero-height fragment of a split block draws at its full `layout_size`, so
+/// the orphan would appear at the offset of a header that is no longer drawn.
+#[test]
+fn table_discarded_page_leaves_no_styled_wrapper_behind() {
+    let html = r#"<!doctype html>
+<html><head><style>
+  @page { size: 200px 100px; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #wrap { background: rgb(3,3,3); border: 1px solid rgb(4,4,4); }
+  #last { break-after: page; }
+</style></head><body>
+  <table>
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><section id="wrap">
+        <div class="m"></div>
+        <div class="m" id="last"></div>
+      </section></td></tr>
+    </tbody>
+  </table>
+  <div class="m" id="after"></div>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("styled wrapper with a trailing forced break should render");
+    assert!(!pdf.is_empty());
+}
