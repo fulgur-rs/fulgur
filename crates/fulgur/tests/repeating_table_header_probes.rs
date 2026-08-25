@@ -1232,3 +1232,86 @@ fn probe_discarded_page_keeps_no_descendant_orphans() {
          table={table:?}, wrap={wrap:?}"
     );
 }
+
+/// Inline-block children share one inline formatting context; the fragmenter
+/// keeps that atomic, so the first one is not an independently placeable lead.
+const INLINE_BLOCK_LEAD_IN_CELL: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  #lead { height: 60px; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th { box-sizing: border-box; padding: 0; height: 20px; }
+  td { box-sizing: border-box; padding: 0; }
+  span { display: inline-block; width: 20px; height: 10px; background: rgb(5,5,5); }
+  #tall { height: 30px; background: rgb(6,6,6); }
+</style></head><body>
+  <div id="lead"></div>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td id="cell"><span id="s1"></span><span id="s2"></span></td></tr>
+      <tr><td><div id="tall"></div></td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+#[ignore = "does not reproduce as reported: the table does not split at all here, so no header-only page appears. It does show content past the page bottom (tall bottom 120 on a 100px page) — a separate defect. Run with --ignored."]
+fn probe_inline_lead_does_not_shrink_the_reserve() {
+    let engine = engine_200x100();
+    let layout = engine.layout(INLINE_BLOCK_LEAD_IN_CELL).expect("layout");
+    let table = table_fragments(&layout, "t");
+    let s1 = block_fragments(&layout, "s1");
+    println!("[inline-lead] table = {table:?}  s1 = {s1:?}");
+    println!(
+        "[inline-lead] tall = {:?}",
+        block_fragments(&layout, "tall")
+    );
+    assert!(!table.is_empty(), "table must record geometry");
+
+    // The reported symptom was a header-only page 0. What actually happens is
+    // that the table never splits, so its last row runs past the page bottom.
+    let tall = block_fragments(&layout, "tall");
+    let overflow: Vec<_> = tall
+        .iter()
+        .filter(|(_, y, h)| y + h > 100.0 + 0.01)
+        .collect();
+    assert!(
+        overflow.is_empty(),
+        "table did not split and its content ran past the page bottom: \
+         {overflow:?} (table={table:?}, s1={s1:?})"
+    );
+}
+
+/// An out-of-flow descendant's forced break is skipped by the fragmenter, so it
+/// must not disqualify the header band from repeating.
+const ABS_BREAK_IN_HEADER: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  th { height: 20px; position: relative; }
+  td { height: 30px; }
+  #abs { position: absolute; top: 0; left: 0; width: 1px; height: 1px;
+         break-after: page; }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th id="hdr">H<div id="abs"></div></th></tr></thead>
+    <tbody>
+      <tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr>
+      <tr><td>4</td></tr><tr><td>5</td></tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+#[test]
+fn probe_out_of_flow_break_does_not_disqualify_the_header() {
+    let engine = engine_200x100();
+    let layout = engine.layout(ABS_BREAK_IN_HEADER).expect("layout");
+    let hdr = block_fragments(&layout, "hdr");
+    println!("[abs-break] hdr = {hdr:?}");
+    assert!(
+        hdr.len() > 1,
+        "an out-of-flow break stopped the header repeating: hdr={hdr:?}"
+    );
+}

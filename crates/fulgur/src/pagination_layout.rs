@@ -1457,6 +1457,17 @@ fn has_forced_break_below(
         return false;
     };
     for &child_id in &node.children {
+        // A break declared inside an out-of-flow subtree is never honoured —
+        // the fragmenter skips absolute / fixed / floated children entirely —
+        // so it is not evidence that this subtree fragments. Counting it made
+        // `header_band_is_repeatable` decline a perfectly repeatable header
+        // over a declaration with no effect.
+        if doc
+            .get_node(child_id)
+            .is_some_and(crate::blitz_adapter::is_out_of_flow_node)
+        {
+            continue;
+        }
         if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
             && (matches!(
                 props.break_before,
