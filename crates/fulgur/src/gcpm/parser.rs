@@ -3577,4 +3577,120 @@ mod tests {
         assert_no_page_settings("@page { size: 0pt; }");
         assert_no_page_settings("@page { size: 0mm 200pt; }");
     }
+
+    // ── parse_counter_style: upper-alpha / upper-latin / lower-latin aliases ──
+
+    #[test]
+    fn test_counter_upper_alpha_style() {
+        // `upper-alpha` → CounterStyle::UpperAlpha.
+        // The `"upper-alpha" | "upper-latin"` match arm (line ~974) was not
+        // previously exercised by any test.
+        let css = r#"@page { @bottom-center { content: counter(chapter, upper-alpha); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::UpperAlpha,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_upper_latin_style_alias() {
+        // `upper-latin` is an alias for `upper-alpha` (same match arm, line ~974).
+        let css = r#"@page { @bottom-center { content: counter(chapter, upper-latin); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::UpperAlpha,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_counter_lower_latin_style_alias() {
+        // `lower-latin` is an alias for `lower-alpha` (line ~975).
+        let css = r#"@page { @bottom-center { content: counter(section, lower-latin); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::LowerAlpha,
+            }]
+        );
+    }
+
+    // ── GcpmSheetParser::parse_prelude: non-@page at-rule error path ──────────
+
+    #[test]
+    fn test_non_page_at_rule_does_not_crash_and_is_preserved() {
+        // An at-rule other than `@page` must not be extracted as a page rule
+        // and must survive verbatim in `cleaned_css`.
+        // Exercises the early-return error path in `GcpmSheetParser::parse_prelude`
+        // (the `!name.eq_ignore_ascii_case("page")` guard).
+        let css = "@media screen { body { color: red; } }";
+        let ctx = parse_gcpm(css);
+        assert!(ctx.margin_boxes.is_empty());
+        assert!(ctx.page_settings.is_empty());
+        assert!(ctx.running_mappings.is_empty());
+        assert!(
+            ctx.cleaned_css.contains("@media"),
+            "non-page at-rule must survive in cleaned_css: {:?}",
+            ctx.cleaned_css
+        );
+    }
+
+    #[test]
+    fn test_non_page_at_rule_mixed_with_gcpm() {
+        // A `@media` rule alongside real GCPM content: `@media` must survive
+        // in `cleaned_css` while `@page` is removed.
+        let css = "@media print { body { margin: 0; } } @page { size: A4; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.page_settings.len(), 1);
+        assert_eq!(
+            ctx.page_settings[0].size,
+            Some(PageSizeDecl::Keyword("A4".to_string()))
+        );
+        assert!(
+            ctx.cleaned_css
+                .contains("@media print { body { margin: 0; } }"),
+            "complete @media rule must survive in cleaned_css: {:?}",
+            ctx.cleaned_css
+        );
+        assert!(
+            !ctx.cleaned_css.contains("@page"),
+            "@page must be removed: {:?}",
+            ctx.cleaned_css
+        );
+    }
+
+    // ── parse_counter_style: upper-alpha / upper-latin via pseudo-element ─────
+
+    #[test]
+    fn test_pseudo_counter_upper_alpha_style() {
+        // Same `upper-alpha` arm, but accessed through a pseudo-element
+        // `content:` declaration to confirm `parse_content_value` routes it
+        // through `parse_counter_style` correctly.
+        let css = r#"li::before { content: counter(item, upper-alpha) ". "; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.content_counter_mappings.len(), 1);
+        let items = &ctx.content_counter_mappings[0].content;
+        assert!(
+            items.iter().any(|i| matches!(
+                i,
+                ContentItem::Counter {
+                    style: CounterStyle::UpperAlpha,
+                    ..
+                }
+            )),
+            "expected UpperAlpha counter in items: {items:?}"
+        );
+    }
 }

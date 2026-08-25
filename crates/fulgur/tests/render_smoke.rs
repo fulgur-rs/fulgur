@@ -3635,8 +3635,7 @@ fn outline_titles(pdf_bytes: &[u8]) -> Vec<String> {
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .copied()
-                .map(u16::from_be_bytes)
+                .map(|&c| u16::from_be_bytes(c))
                 .collect();
             String::from_utf16_lossy(&chars)
         } else {

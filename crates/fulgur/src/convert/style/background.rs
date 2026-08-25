@@ -1100,4 +1100,37 @@ mod tests {
             "conic gradient stops must be capped, got {count}"
         );
     }
+
+    /// Same cap on the radial-gradient stop-building path.  Exercises the
+    /// `BgImageContent::RadialGradient { stops, .. }` arm of the
+    /// `first_gradient_stop_count` helper (previously uncovered).
+    #[test]
+    fn radial_gradient_stop_count_is_defensively_capped() {
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:radial-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("radial gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "radial gradient stops must be capped, got {count}"
+        );
+    }
+
+    /// A document with only `background-color` (no `background-image`) produces
+    /// no gradient layers; `first_gradient_stop_count` must return `None`.
+    #[test]
+    fn first_gradient_stop_count_returns_none_without_gradient() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:80px;height:80px;background-color:red"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "solid background-color should not produce a gradient stop count"
+        );
+    }
 }

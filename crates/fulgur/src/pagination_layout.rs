@@ -8732,4 +8732,203 @@ h2 { string-set: chapter-title content(text); }
             "zero page height must leave geometry table empty"
         );
     }
+
+    // ── PaginationGeometry::is_split ──────────────────────────────────────────
+
+    #[test]
+    fn is_split_empty_fragments_returns_false() {
+        let geom = PaginationGeometry::default();
+        assert!(!geom.is_split());
+    }
+
+    #[test]
+    fn is_split_single_fragment_not_repeat_returns_false() {
+        let mut geom = PaginationGeometry::default();
+        geom.fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        assert!(!geom.is_split());
+    }
+
+    #[test]
+    fn is_split_two_fragments_not_repeat_returns_true() {
+        let mut geom = PaginationGeometry::default();
+        for page in [0_u32, 1] {
+            geom.fragments.push(Fragment {
+                page_index: page,
+                x: 0.0_f32.as_px(),
+                y: 0.0_f32.as_px(),
+                width: 100.0_f32.as_px(),
+                height: 50.0_f32.as_px(),
+            });
+        }
+        assert!(geom.is_split());
+    }
+
+    #[test]
+    fn is_split_two_fragments_is_repeat_returns_false() {
+        let mut geom = PaginationGeometry {
+            is_repeat: true,
+            ..Default::default()
+        };
+        for page in [0_u32, 1] {
+            geom.fragments.push(Fragment {
+                page_index: page,
+                x: 0.0_f32.as_px(),
+                y: 0.0_f32.as_px(),
+                width: 100.0_f32.as_px(),
+                height: 50.0_f32.as_px(),
+            });
+        }
+        assert!(
+            !geom.is_split(),
+            "is_repeat=true prevents split classification"
+        );
+    }
+
+    // ── collect_counter_states ───────────────────────────────────────────────
+
+    #[test]
+    fn counter_states_empty_geometry_returns_one_empty_page() {
+        let geom = PaginationGeometryTable::new();
+        let ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
+    }
+
+    #[test]
+    fn counter_states_reset_op_sets_counter_value() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let mut ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        ops.insert(
+            10,
+            vec![crate::gcpm::CounterOp::Reset {
+                name: "chapter".into(),
+                value: 3,
+            }],
+        );
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].get("chapter").copied(), Some(3));
+    }
+
+    #[test]
+    fn counter_states_increment_op_adds_to_counter() {
+        let mut geom = PaginationGeometryTable::new();
+        for (node_id, page) in [(10_usize, 0_u32), (20, 0)] {
+            geom.entry(node_id).or_default().fragments.push(Fragment {
+                page_index: page,
+                x: 0.0_f32.as_px(),
+                y: 0.0_f32.as_px(),
+                width: 100.0_f32.as_px(),
+                height: 50.0_f32.as_px(),
+            });
+        }
+        let mut ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        ops.insert(
+            10,
+            vec![crate::gcpm::CounterOp::Reset {
+                name: "chapter".into(),
+                value: 0,
+            }],
+        );
+        ops.insert(
+            20,
+            vec![crate::gcpm::CounterOp::Increment {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        );
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].get("chapter").copied(), Some(1));
+    }
+
+    #[test]
+    fn counter_states_set_op_forces_counter_value() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let mut ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        ops.insert(
+            10,
+            vec![
+                crate::gcpm::CounterOp::Reset {
+                    name: "idx".into(),
+                    value: 99,
+                },
+                crate::gcpm::CounterOp::Set {
+                    name: "idx".into(),
+                    value: 7,
+                },
+            ],
+        );
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].get("idx").copied(), Some(7));
+    }
+
+    #[test]
+    fn counter_states_carries_across_pages() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        geom.entry(20).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let mut ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        ops.insert(
+            10,
+            vec![crate::gcpm::CounterOp::Reset {
+                name: "chapter".into(),
+                value: 1,
+            }],
+        );
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].get("chapter").copied(), Some(1));
+        assert_eq!(states[1].get("chapter").copied(), Some(1));
+    }
+
+    #[test]
+    fn counter_states_node_without_ops_is_skipped() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(99).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let ops: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = BTreeMap::new();
+        let states = collect_counter_states(&geom, &ops);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
+    }
 }

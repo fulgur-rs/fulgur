@@ -3643,4 +3643,50 @@ mod tests {
             group.paragraph_splits
         );
     }
+
+    // ── resolve_calc_value: CSS calc() with a percentage component ──────────
+
+    #[test]
+    fn multicol_calc_mixed_padding_triggers_resolve_calc_value() {
+        // `calc(10% + 5px)` mixes a percentage and an absolute length.
+        // Stylo cannot resolve it at computed time, so stylo_taffy stores it
+        // as an opaque calc pointer (`CompactLength::is_calc()` == true).
+        // When `compute_multicol_layout` calls `resolve_or_zero` on the
+        // padding (lines 527-528 of multicol_layout.rs), the closure
+        //   `|val, b| tree.resolve_calc_value(val, b)`
+        // is invoked, which exercises `FulgurLayoutTree::resolve_calc_value`
+        // (lines 389-391) delegating to `BaseDocument::resolve_calc_value`.
+        //
+        // In contrast, a pure-percentage padding (`padding: 10%`) is stored
+        // as `Percent(0.1)` — `is_calc()` is false, the closure is skipped,
+        // and those lines stay uncovered.
+        //
+        // With body margin:0 and viewport 400px the containing block is 400px
+        // wide. `calc(10% + 5px)` resolves to 40 + 5 = 45px on every side.
+        let html = r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="column-count: 2; column-gap: 0; padding: calc(10% + 5px);">
+              <p id="a">alpha alpha alpha alpha</p>
+              <p id="b">beta beta beta beta</p>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        tree.layout_multicol_subtrees();
+
+        let a = layout_of_id(&doc, "a");
+        // padding-left = calc(10% + 5px) = 45px → child.x must reflect this inset.
+        assert!(
+            (a.location.x - 45.0).abs() < 2.0,
+            "calc() padding-left expected ≈ 45, got {}",
+            a.location.x
+        );
+        // padding-top = calc(10% + 5px) = 45px → first child.y must reflect this inset.
+        assert!(
+            (a.location.y - 45.0).abs() < 2.0,
+            "calc() padding-top expected ≈ 45, got {}",
+            a.location.y
+        );
+    }
 }

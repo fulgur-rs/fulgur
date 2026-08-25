@@ -1271,6 +1271,52 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // Smoke: a <div> with `display:list-item` AND an explicit numeric
+    // `line-height` renders without crashing.  Empirically Blitz assigns
+    // `list_item_data` with an outside marker layout for this combination, so
+    // the outside-marker path (branch 1) fires rather than the fallback
+    // (branch 2) — but the render path is still exercised end-to-end.
+    #[test]
+    fn smoke_display_list_item_div_with_numeric_line_height() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <div style="display:list-item;line-height:1.5">Numeric line-height</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Smoke: same as above but with an absolute-length `line-height`.
+    #[test]
+    fn smoke_display_list_item_div_with_length_line_height() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <div style="display:list-item;line-height:24px">Absolute line-height</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Smoke: a <div> with `display:list-item` and `list-style-image:url(dot.png)`
+    // renders without crashing.  Blitz assigns `list_item_data` with an outside
+    // marker layout for this combination (branch 1), so the outside-marker path
+    // with an image marker is exercised.
+    #[test]
+    fn smoke_display_list_item_div_with_inline_image_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <div style="display:list-item;list-style-image:url(dot.png)">Image marker</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // try_convert branch 3 (inside marker, non-inline-root, non-empty children):
     // when `list-style-image` is set AND `list-style-position: inside`, and the
     // `<li>` has a block child (making it non-inline-root), the non-empty-children
@@ -1437,6 +1483,55 @@ mod tests {
                 <a href="#section"><ul><li>Internal link item</li></ul></a>
                 <h2 id="section">Section</h2>
                 </body></html>"##,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item, line_height Number arm):
+    // Blitz sets `list_item_data = None` when `list-style-type: none`, which
+    // routes the element through branch 2 instead of branch 1.  Combined with
+    // a numeric `line-height`, the `LineHeight::Number` arm (line 85) is taken.
+    // `resolve_list_marker` returns Some (list-style-image in bundle) so the
+    // success path (lines 91-118) is also executed.
+    #[test]
+    fn smoke_branch2_list_style_none_with_image_number_line_height() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul>
+                    <li style="list-style-type:none;list-style-image:url('dot.png');line-height:1.5">
+                        Item without text marker, numeric line-height
+                    </li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item, line_height Length arm):
+    // Same as above but with an absolute-length `line-height` so the
+    // `LineHeight::Length` arm (line 86) is taken.
+    #[test]
+    fn smoke_branch2_list_style_none_with_image_length_line_height() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul>
+                    <li style="list-style-type:none;list-style-image:url('dot.png');line-height:24px">
+                        Item without text marker, absolute line-height
+                    </li>
+                </ul>
+                </body></html>"#,
             )
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
