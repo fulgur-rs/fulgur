@@ -2967,6 +2967,52 @@ fn css_escape_ident(s: &str) -> String {
     out
 }
 
+/// Render a [`ParsedSelector`] back to CSS selector text.
+///
+/// Selector components here come from the trusted author CSS via
+/// `gcpm::parser` (`Token::Ident` in cssparser), not from arbitrary HTML.
+/// Tag names are lowercased to match HTML's case-insensitive convention;
+/// id/class are still escaped because a hostile author can craft a bare
+/// token containing metacharacters via CSS escapes — defense in depth on
+/// the trusted side, and required by `element_specificity_prefix` for the
+/// untrusted case (fulgur-ka6c).
+fn selector_text(parsed: &ParsedSelector) -> String {
+    match parsed {
+        ParsedSelector::Tag(name) => name.to_ascii_lowercase(),
+        ParsedSelector::Class(name) => format!(".{}", css_escape_ident(name)),
+        ParsedSelector::Id(name) => format!("#{}", css_escape_ident(name)),
+    }
+}
+
+/// Serialize running-element mappings into the `display: none` rules that
+/// suppress each running element's "real" copy at its source position.
+///
+/// `parse_gcpm` performs this rewrite inline, by editing
+/// `position: running(name)` into `display: none` inside its `cleaned_css`.
+/// That works for CSS fulgur injects wholesale (AssetBundle / `--css`) and
+/// for CSS it serves to Blitz itself (`net::FulgurNetProvider::fetch`), but
+/// not for an inline `<style>`, which Blitz has already parsed from the
+/// source document by the time fulgur sees it. Re-injecting that
+/// stylesheet's whole `cleaned_css` would deliver the rewrite, but
+/// `cleaned_css` preserves all non-GCPM CSS verbatim, so it also re-runs
+/// every ordinary rule as the last child of `<head>` — moving the sheet to
+/// the end of the cascade and dropping its `media` attribute. Emitting only
+/// the generated rules keeps the author's own cascade untouched.
+///
+/// Injected via [`InjectCssPass`], each rule carries the same specificity as
+/// the author's simple-selector rule and so wins by source order — which is
+/// what suppression needs, since the author's sheet declares no competing
+/// `display` for these elements. Cost is O(mappings): no DOM walk, no
+/// per-node rule.
+pub(crate) fn build_running_display_none_css(mappings: &[RunningMapping]) -> String {
+    use std::fmt::Write;
+    let mut css = String::new();
+    for m in mappings {
+        let _ = write!(css, "{}{{display:none}}", selector_text(&m.parsed));
+    }
+    css
+}
+
 /// Serialize flattened static pseudo-content mappings into CSS: one
 /// `<selector><pseudo> { content: "<flattened>" }` rule per mapping.
 ///
@@ -2982,19 +3028,7 @@ pub(crate) fn build_static_content_css(mappings: &[StaticContentMapping]) -> Str
     use std::fmt::Write;
     let mut css = String::new();
     for m in mappings {
-        let selector = match &m.parsed {
-            // Selector components here come from the trusted author CSS via
-            // `gcpm::parser` (`Token::Ident` in cssparser), not from
-            // arbitrary HTML. Tag names are lowercased to match HTML's
-            // case-insensitive convention; id/class are still escaped
-            // because a hostile author can craft a bare token containing
-            // metacharacters via CSS escapes — defense in depth on the
-            // trusted side, and required by `element_specificity_prefix`
-            // for the untrusted case (fulgur-ka6c).
-            ParsedSelector::Tag(name) => name.to_ascii_lowercase(),
-            ParsedSelector::Class(name) => format!(".{}", css_escape_ident(name)),
-            ParsedSelector::Id(name) => format!("#{}", css_escape_ident(name)),
-        };
+        let selector = selector_text(&m.parsed);
         let pseudo = match m.pseudo {
             PseudoElement::Before => "::before",
             PseudoElement::After => "::after",
@@ -3660,6 +3694,35 @@ mod tests {
     #[test]
     fn build_static_content_css_empty_for_no_mappings() {
         assert!(build_static_content_css(&[]).is_empty());
+    }
+
+    #[test]
+    fn build_running_display_none_css_serializes_selectors_and_escapes() {
+        let mappings = vec![
+            RunningMapping {
+                parsed: ParsedSelector::Tag("HEADER".into()),
+                running_name: "top".into(),
+            },
+            RunningMapping {
+                parsed: ParsedSelector::Class("page-header".into()),
+                running_name: "top".into(),
+            },
+            // A selector metacharacter must be escaped so the injected rule
+            // is well-formed and cannot widen its own match set.
+            RunningMapping {
+                parsed: ParsedSelector::Id("a b".into()),
+                running_name: "bottom".into(),
+            },
+        ];
+        assert_eq!(
+            build_running_display_none_css(&mappings),
+            r"header{display:none}.page-header{display:none}#a\ b{display:none}"
+        );
+    }
+
+    #[test]
+    fn build_running_display_none_css_empty_for_no_mappings() {
+        assert!(build_running_display_none_css(&[]).is_empty());
     }
 
     /// `relayout_position_fixed` must reshape every `position: fixed`

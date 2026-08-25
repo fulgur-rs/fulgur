@@ -122,6 +122,21 @@ pub struct ColumnStyleProps {
     /// resolution happens later in `compute_used_page_names`, this field
     /// stores only the author's declared value.
     pub page: Option<PageName>,
+    /// `orphans: <integer>` (CSS Fragmentation 3 §4.4): the minimum number
+    /// of line boxes that must be left in the fragment being closed.
+    /// `None` means the author did not set it — consumers use the initial
+    /// value `2`. Values below `1` are invalid per spec and dropped at
+    /// parse time.
+    ///
+    /// Unlike the other fields here, `orphans` and `widows` are
+    /// **inherited** properties. This table performs no inheritance, so a
+    /// value set on an ancestor is propagated to descendants explicitly by
+    /// [`inherit_line_break_constraints`].
+    pub orphans: Option<u32>,
+    /// `widows: <integer>` (CSS Fragmentation 3 §4.4): the minimum number
+    /// of line boxes that must be carried into the next fragment. See
+    /// [`ColumnStyleProps::orphans`] for the inheritance note.
+    pub widows: Option<u32>,
 }
 
 impl ColumnStyleProps {
@@ -146,6 +161,12 @@ impl ColumnStyleProps {
         if other.page.is_some() {
             self.page = other.page;
         }
+        if other.orphans.is_some() {
+            self.orphans = other.orphans;
+        }
+        if other.widows.is_some() {
+            self.widows = other.widows;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -155,6 +176,8 @@ impl ColumnStyleProps {
             && self.break_after.is_none()
             && self.break_before.is_none()
             && self.page.is_none()
+            && self.orphans.is_none()
+            && self.widows.is_none()
     }
 }
 
@@ -463,6 +486,22 @@ fn parse_break_inside_value<'i>(
     }
 }
 
+/// Parse the value side of `orphans` / `widows` (CSS Fragmentation 3
+/// §4.4): a single `<integer>` that must be **positive**.
+///
+/// Zero and negatives are invalid per spec, and a `0` reaching the
+/// fragmenter would let it emit a fragment holding no line boxes, so
+/// they drop the declaration and the initial value `2` applies. Values
+/// are clamped to `u32`; a non-integer (`2.5`, `auto`, a percentage)
+/// likewise drops.
+fn parse_line_count_value<'i>(input: &mut Parser<'i, '_>) -> Result<u32, ParseError<'i, ()>> {
+    let n = input.expect_integer()?;
+    if n < 1 {
+        return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid));
+    }
+    Ok(n as u32)
+}
+
 fn parse_break_after_value<'i>(
     input: &mut Parser<'i, '_>,
 ) -> Result<BreakAfter, ParseError<'i, ()>> {
@@ -629,6 +668,14 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         } else if name.eq_ignore_ascii_case("page") {
             if let Ok(v) = input.parse_entirely(parse_page_value) {
                 self.props.page = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("orphans") {
+            if let Ok(v) = input.parse_entirely(parse_line_count_value) {
+                self.props.orphans = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("widows") {
+            if let Ok(v) = input.parse_entirely(parse_line_count_value) {
+                self.props.widows = Some(v);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -1183,6 +1230,48 @@ mod tests {
         let rules = parse_stylesheet(".keep { break-inside: avoid; }");
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].props.break_inside, Some(BreakInside::Avoid));
+    }
+
+    #[test]
+    fn parse_orphans_and_widows_integers() {
+        let props = parse_declaration_block("orphans: 3; widows: 4");
+        assert_eq!(props.orphans, Some(3));
+        assert_eq!(props.widows, Some(4));
+    }
+
+    #[test]
+    fn parse_orphans_widows_via_selector() {
+        let rules = parse_stylesheet("p { orphans: 5; widows: 6; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].props.orphans, Some(5));
+        assert_eq!(rules[0].props.widows, Some(6));
+    }
+
+    #[test]
+    fn parse_orphans_widows_reject_non_positive() {
+        // CSS Fragmentation 3 §4.4 requires a positive integer. `0` is
+        // additionally dangerous: it would let the fragmenter emit a
+        // fragment holding no line boxes.
+        assert_eq!(parse_declaration_block("orphans: 0").orphans, None);
+        assert_eq!(parse_declaration_block("widows: 0").widows, None);
+        assert_eq!(parse_declaration_block("orphans: -2").orphans, None);
+        assert_eq!(parse_declaration_block("widows: -1").widows, None);
+    }
+
+    #[test]
+    fn parse_orphans_widows_reject_non_integers() {
+        assert_eq!(parse_declaration_block("orphans: 2.5").orphans, None);
+        assert_eq!(parse_declaration_block("widows: auto").widows, None);
+        assert_eq!(parse_declaration_block("orphans: 50%").orphans, None);
+        assert_eq!(parse_declaration_block("widows: 2 3").widows, None);
+    }
+
+    #[test]
+    fn orphans_widows_last_wins_in_the_cascade() {
+        let mut a = parse_declaration_block("orphans: 2; widows: 2");
+        a.merge(parse_declaration_block("widows: 7"));
+        assert_eq!(a.orphans, Some(2), "undeclared field survives the merge");
+        assert_eq!(a.widows, Some(7));
     }
 
     #[test]

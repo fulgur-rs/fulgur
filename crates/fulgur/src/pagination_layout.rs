@@ -105,10 +105,30 @@ pub struct Fragment {
 /// is a complete redraw at the same coordinates. Used by
 /// [`append_position_fixed_fragments`] for `position: fixed` elements
 /// that repeat on every page.
+///
+/// # Inline-root decoration (fulgur-pgbrk R1)
+///
+/// `content_lead_in` / `content_lead_out` are non-zero only for an
+/// inline root that the fragmenter split at line boundaries. Parley's
+/// line metrics are **content-box relative** (the first line's
+/// `min_coord` is `0.0` even under a `150px` `padding-top`), so the
+/// fragmenter has to fold the box's own decoration back in to describe
+/// the border box. Following `box-decoration-break: slice`
+/// (CSS Fragmentation 3 §5.4, the initial value), `content_lead_in` is
+/// carried by the **first** fragment only and `content_lead_out` by the
+/// **last** — which is why they live here and not on [`Fragment`].
+///
+/// Consumers that partition *line boxes* by accumulating `frag.height`
+/// (`render::paragraph_lines_for_page`) must subtract both back out
+/// first, since `ShapedLine::height` covers line boxes only.
 #[derive(Clone, Debug, Default)]
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
     pub is_repeat: bool,
+    /// `border-top + padding-top`, included in the FIRST fragment's height.
+    pub content_lead_in: crate::units::Px,
+    /// `padding-bottom + border-bottom`, included in the LAST fragment's height.
+    pub content_lead_out: crate::units::Px,
 }
 
 impl PaginationGeometry {
@@ -128,6 +148,1365 @@ impl PaginationGeometry {
 /// [`crate::multicol_layout::MulticolGeometryTable`]: PDF byte order
 /// downstream depends on iteration order.
 pub type PaginationGeometryTable = BTreeMap<usize, PaginationGeometry>;
+
+/// One fragment placed past the bottom of its page's content strip
+/// (fulgur-pgbrk R3).
+///
+/// A fragment whose bottom edge falls below `page_height_px` is laid
+/// out into the page's bottom margin — over any running footer — and,
+/// if it clears the paper edge as well, is clipped away by the PDF
+/// MediaBox and silently lost. Both outcomes are pagination defects:
+/// CSS Fragmentation §4.1 permits monolithic content to overflow, but
+/// it equally permits slicing, and fulgur already slices in the
+/// body-direct path. Overflow is therefore always a fulgur
+/// inconsistency, never a spec requirement.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FragmentOverflow {
+    pub node_id: usize,
+    pub page_index: u32,
+    /// px by which the fragment's bottom edge exceeds the content strip.
+    pub overshoot_px: f32,
+    /// The same node has a further fragment on a later page, so this
+    /// fragment is a *slice* whose height should have been clipped to
+    /// the strip. Distinguishes a fragment-height bookkeeping bug from
+    /// genuinely unbreakable content that had nowhere to go.
+    pub continues_on_later_page: bool,
+}
+
+/// Tolerance for the overflow test, matching the epsilon already used
+/// inline elsewhere in this module.
+const OVERFLOW_EPS_PX: f32 = 0.5;
+
+/// Tolerance for the "is this leaf oversized" gate that decides whether
+/// [`slice_oversized_leaf`] runs at all — see that function's doc
+/// comment ("Oversize tolerance") for the 220pt→294px Taffy rounding
+/// case this absorbs. Deliberately larger than [`OVERFLOW_EPS_PX`]:
+/// that constant guards genuine strip-crossing overflow detection
+/// (where a tighter epsilon is correct), while this one exists purely
+/// to swallow px-rounding noise before a box is judged too tall for a
+/// page at all. The two gates that decide whether to call
+/// `slice_oversized_leaf` (`oversized` and `spills_strip` at this
+/// module's flex/grid-cell call site) must share this tolerance —
+/// using `OVERFLOW_EPS_PX` for one and not the other let a box in the
+/// 0.5–1.0px gap defeat the tolerance via the other gate (Codex review,
+/// PR #719).
+const OVERSIZE_QUANTIZATION_TOLERANCE_PX: f32 = 1.0;
+
+/// CSS 3 Fragmentation initial value for `orphans`.
+const ORPHANS_INITIAL: usize = 2;
+/// CSS 3 Fragmentation initial value for `widows`.
+const WIDOWS_INITIAL: usize = 2;
+
+/// Resolve the `orphans` / `widows` in effect at `node_id`, falling back
+/// to the CSS initial value `2` for each (fulgur-pgbrk R6).
+///
+/// Both are **inherited** properties (CSS Fragmentation 3 §4.4), but
+/// `ColumnStyleTable` is a sparse side-table with no inheritance: it
+/// records only the elements an author actually wrote a declaration on.
+/// Rather than densify the table — every descendant of a `<body>` with
+/// `widows: 3` would need an entry — inheritance is resolved here, at the
+/// one place that consumes these values, by walking up the ancestor
+/// chain for the nearest declaration.
+///
+/// The walk costs O(depth) and runs only for inline roots that actually
+/// reach the line-splitting path, so it is off the hot path for every
+/// document that sets neither property. It bails at
+/// [`crate::MAX_DOM_DEPTH`], matching `has_forced_break_below`.
+fn resolved_line_constraints(
+    doc: &BaseDocument,
+    node_id: usize,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+) -> (usize, usize) {
+    let Some(table) = column_styles else {
+        return (ORPHANS_INITIAL, WIDOWS_INITIAL);
+    };
+    let mut orphans: Option<u32> = None;
+    let mut widows: Option<u32> = None;
+    let mut cur = Some(node_id);
+    let mut depth = 0usize;
+    while let Some(id) = cur {
+        if depth >= crate::MAX_DOM_DEPTH {
+            break;
+        }
+        if let Some(props) = table.get(&id) {
+            // Nearest declaration wins: only fill a slot still empty.
+            if orphans.is_none() {
+                orphans = props.orphans;
+            }
+            if widows.is_none() {
+                widows = props.widows;
+            }
+            if orphans.is_some() && widows.is_some() {
+                break;
+            }
+        }
+        cur = doc.get_node(id).and_then(|n| n.parent);
+        depth += 1;
+    }
+    (
+        orphans.map_or(ORPHANS_INITIAL, |v| v as usize),
+        widows.map_or(WIDOWS_INITIAL, |v| v as usize),
+    )
+}
+
+/// Height of a container's fragment on the page it is leaving
+/// (fulgur-pgbrk R3).
+///
+/// A container fragment starts at `page_start_y` and can never
+/// legitimately paint below the page's content bottom, so the slice is
+/// the accumulated cursor clamped to the remaining strip.
+///
+/// The clamp matters because `cursor_y` can legally sit past the page
+/// bottom: it carries the trailing margin of the last child placed on
+/// the page, and css-break-3 §5.2 truncates margins adjoining an
+/// unforced break to zero. Without the clamp that margin is baked into
+/// the fragment height, and `render.rs:2793` paints the container's
+/// background / border / shadow with it — down through the bottom
+/// margin and over any running footer.
+///
+/// This clamps the *container* only. A child that genuinely does not
+/// fit keeps its overflowing fragment, so unbreakable-content defects
+/// stay visible to [`find_overflowing_fragments`] rather than being
+/// masked here.
+fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) -> f32 {
+    let strip = (page_height_px - page_start_y).max(0.0);
+    (cursor_y - page_start_y).clamp(0.0, strip)
+}
+
+/// The single child-enumeration policy for every paginating walk
+/// (fulgur-pgbrk walker-convergence Phase 2): prefer Blitz's
+/// `layout_children` over the raw DOM `children` when it has been
+/// computed and is non-empty.
+///
+/// When a block container has mixed block-level and inline-level
+/// children, Stylo synthesizes anonymous block wrappers around the
+/// inline-level siblings (CSS 2.1 §9.2.1.1). Those wrappers carry
+/// their own `node_id` and Taffy layout, but they live ONLY in
+/// `layout_children` — the original `children` list still points at
+/// the underlying inline elements (e.g. a `<span
+/// display:inline-block>`, or a body containing `<label>` followed by
+/// `<fieldset>` followed by `<select><option>…</option></select>`,
+/// whose inline-level siblings get wrapped in an anonymous block
+/// visible only in `layout_children`).
+///
+/// Without this preference the walkers silently drop the inline-level
+/// group's paint: extract assigns the inner paragraph's `node_id` to
+/// the synthesized wrapper, but a raw-`children` walk never visits the
+/// wrapper, so geometry has no fragment for that node_id and
+/// `dispatch_fragment` skips the paragraph entirely (fulgur-bq6i:
+/// examples/wasm-demo lost label / legend / option text content and
+/// review_card_inline_block.html lost its "OK Approved" badge for this
+/// exact reason; fulgur-yb27 extended the same policy to the nested
+/// walk and the recursion-gate probe `subtree_requires_recursion`).
+///
+/// Returns an empty vec when `id` does not resolve to a node — every
+/// caller treats a missing node as "no children to visit", matching
+/// the previous per-site `get_node` guards.
+fn layout_children_of(doc: &BaseDocument, id: usize) -> Vec<usize> {
+    let Some(node) = doc.get_node(id) else {
+        return Vec::new();
+    };
+    let layout_borrow = node.layout_children.borrow();
+    if let Some(lc) = layout_borrow.as_deref()
+        && !lc.is_empty()
+    {
+        lc.to_vec()
+    } else {
+        node.children.clone()
+    }
+}
+
+/// The shared child skip filter for the paginating walks
+/// (fulgur-pgbrk walker-convergence Phase 2): a child is not walked
+/// when it
+///
+/// - does not resolve to a node in `doc` (dangling id), or
+/// - is a pure-whitespace text node (same convention as
+///   `multicol_layout::partition_children_into_segments`), or
+/// - is out-of-flow positioned (`position: absolute` / `fixed` —
+///   CSS 2.1 §10.6.4 / §9.6: such elements do not contribute to their
+///   containing block's normal-flow height and are handled by separate
+///   passes, `append_position_fixed_fragments` and the abs positioning
+///   pipeline in `render`).
+///
+/// Callers with a *different* out-of-flow policy must NOT use this
+/// helper: `record_subtree_fragments_at_offset` recurses into nested
+/// absolutes (only `fixed` is skipped there), so it keeps its own
+/// inline filter.
+fn is_walkable_skip(doc: &BaseDocument, id: usize) -> bool {
+    let Some(node) = doc.get_node(id) else {
+        return true;
+    };
+    if let Some(text) = node.text_data()
+        && text.content.chars().all(char::is_whitespace)
+    {
+        return true;
+    }
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
+}
+
+/// Zero-height child handling shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk
+/// walker-convergence phase 3a.
+///
+/// Zero-height **element** nodes still enter geometry so their
+/// counter / string-set / bookmark markers participate in the per-page
+/// metadata walks (Phase 2.3 fix; the fragment carries `height == 0`
+/// and does not advance the cursor — only the NodeId matters to the
+/// collectors). `break-before` / `break-after` and the CSS Page 3 §5.3
+/// implicit page-name break fire even on such elements (fulgur-p3uf
+/// Phase 3.1.5a): pseudo-only divs and dimension-less images collapse
+/// to `child_h == 0` but still need the directive honoured (see
+/// `tests/pseudo_only_break_before.rs`). Floats stay out of the
+/// page-name comparison and the `prev_used_page` update (CSS 2.1 §9.5)
+/// — they do not establish class A break points.
+///
+/// `frame.kind` decides what "advance a page" does: a nested container
+/// closes its parent fragment on the page being left through
+/// `frame.parent_slice` and rebases its Taffy origin
+/// (`page_taffy_origin` eagerly on break-before; deferred via
+/// `origin_pending_target_y` on break-after); a body frame just
+/// advances `(page, cursor_y)`. The nested walk's `suppress_page_check`
+/// gate (flex / grid / atomic-inline / orthogonal containers) is
+/// threaded in by the caller; the body walk passes `false`.
+///
+/// Returns `true` when the child is an element node and a fragment was
+/// emitted — the body walk increments its emitted count; the nested
+/// walk sets `emitted_anything`.
+fn fragment_zero_height_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    child_id: usize,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+) -> bool {
+    let layout = child.final_layout;
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    let is_float = crate::blitz_adapter::node_is_floating(child);
+    let (used_start, used_end) = cx.used_page_endpoints_of(child_id);
+    let page_name_changed = !suppress_page_check
+        && !is_float
+        && frame
+            .prev_used_page
+            .as_ref()
+            .is_some_and(|p| *p != used_start);
+    let break_before_page = matches!(
+        break_props.break_before,
+        Some(crate::draw_primitives::BreakBefore::Page)
+    ) || page_name_changed;
+
+    if break_before_page && frame.cursor_y > frame.page_start_y {
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
+        if let Some(slice) = frame.parent_slice {
+            slice.close_continuing(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The zero-height breaking child IS the first on the new
+            // page — rebase the origin eagerly.
+            frame.page_taffy_origin = resume;
+            frame.origin_pending_target_y = None;
+            frame.origin_pending_anchor = None;
+            frame.origin_pending_same_row = None;
+        }
+    }
+
+    let mut emitted_here = false;
+    if child.element_data().is_some() {
+        emitted_here = true;
+        geometry
+            .entry(child_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: frame.page,
+                x: (frame.x_in_body + layout.location.x).as_px(),
+                y: frame.cursor_y.as_px(),
+                width: child_w.as_px(),
+                height: 0.0_f32.as_px(),
+            });
+    }
+
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
+            frame.origin_pending_same_row = None;
+        }
+    }
+    if !is_float {
+        frame.prev_used_page = Some(used_end);
+    }
+    emitted_here
+}
+
+/// Multi-line inline-root handling shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk
+/// walker-convergence phase 3b.
+///
+/// Routes a multi-line inline root through [`fragment_inline_root`]:
+/// probes Parley's line metrics, applies the `break-inside: avoid`
+/// suppression (relaxed when `avoid` is unfulfillable — CSS
+/// Fragmentation 3 §4.4), takes the "push whole to next page"
+/// class A break when the paragraph can't honour widow / orphan
+/// constraints in the remaining strip, then splits at line
+/// boundaries.
+///
+/// The two call shapes differ in exactly four parameterized ways; the
+/// gates keep each difference explicit rather than silently unifying
+/// it:
+///
+/// 1. **Child top on page.** Body measures the child at the body
+///    cursor (inter-child gaps already advanced it); nested measures
+///    `page_start_y + (this_top_in_parent - page_taffy_origin)`, the
+///    Taffy-origin rebase that keeps flex / grid row siblings aligned
+///    (fulgur-kv0r). Gate: `frame.kind`.
+/// 2. **Push-whole floor.** Body's floor is fixed at 0 — a break
+///    before the leading child is always a break before body (CSS
+///    Fragmentation §3). Nested computes
+///    `allow_leading_break && !suppress_page_check` and falls back to
+///    `page_start_y` when propagation is disallowed (flex / grid /
+///    atomic-inline / orthogonal containers). Gate: the
+///    `suppress_page_check` argument, same convention as
+///    [`fragment_zero_height_child`].
+/// 3. **Nested-only parent bookkeeping (fulgur-oc51).** When the
+///    paragraph crosses pages, the nested walk emits the parent's
+///    fragment on every crossed page (via [`emit_parent_page_spans`])
+///    and marks the row co-split (`crossed_by_recursion`), so
+///    parallel flex / grid siblings restore. Body has no parent to
+///    close. Gate: `frame.kind` / `frame.parent_slice` presence.
+/// 4. **`row_state` max-end tracking.** Nested updates the row's
+///    `max_end_page` / `max_end_cursor_y` after `break-after`;
+///    body carries `row_state: None`, making the update a no-op.
+///
+/// Both shapes set `prev_used_page` (skipping floats, CSS 2.1 §9.5)
+/// and honour `break-after: page`; nested additionally closes the
+/// parent slice and defers its origin rebase via
+/// `origin_pending_target_y` (kind-gated), mirroring
+/// [`fragment_zero_height_child`].
+///
+/// Returns `Some(fragments_emitted)` when the inline split path ran
+/// (`line_metrics.len() > 1`); `None` when the child has ≤ 1 line and
+/// the caller must fall through to the block path. Body adds the count
+/// to its emitted tally; nested sets `emitted_anything`.
+fn fragment_inline_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    child_id: usize,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+) -> Option<usize> {
+    let layout = child.final_layout;
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    let all_line_metrics = collect_inline_line_metrics(child);
+    // fulgur-pgbrk R1: measure the BORDER box. Parley's metrics are
+    // content-box relative, so `last.1 - first.0` omits the box's own
+    // padding / border and under-reports it. See `inline_root_box_metrics`.
+    let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
+    let box_total_h = lead_in + lines_h + lead_out;
+    let avoid_is_fulfillable = if all_line_metrics.is_empty() {
+        true
+    } else {
+        box_total_h <= cx.page_h
+    };
+    let avoid_inside = matches!(
+        break_props.break_inside,
+        Some(crate::draw_primitives::BreakInside::Avoid)
+    );
+    let line_metrics = if avoid_inside && avoid_is_fulfillable {
+        Vec::new()
+    } else {
+        all_line_metrics
+    };
+    if line_metrics.len() <= 1 {
+        return None;
+    }
+
+    // Difference 1: child top on page (see the doc comment).
+    let mut child_top_on_page = if frame.kind == ContainerKind::Nested {
+        frame.page_start_y + (this_top_in_parent - frame.page_taffy_origin)
+    } else {
+        frame.cursor_y
+    };
+    // Difference 2: push-whole floor.
+    let overflow_floor = if frame.allow_leading_break && !suppress_page_check {
+        0.0
+    } else {
+        frame.page_start_y
+    };
+    if break_decision(child_top_on_page, box_total_h, overflow_floor, cx.page_h)
+        == BreakDecision::PushToNextPage
+    {
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
+        if let Some(slice) = frame.parent_slice {
+            // Nested only: close the parent on the outgoing page
+            // (the `cursor > start` guard skips the fresh-strip
+            // close). Body has no parent to close. The inline root
+            // moves to the next page, so the parent continues here.
+            if frame.cursor_y > frame.page_start_y {
+                slice.close_continuing(
+                    geometry,
+                    frame.row_state.as_mut(),
+                    frame.page,
+                    frame.page_start_y,
+                );
+            }
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        child_top_on_page = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            frame.page_taffy_origin = resume;
+            // Any part of the container's leading decoration that the
+            // outgoing page did not spend is still owed here, so the
+            // inline root resumes below it rather than at the strip top.
+            child_top_on_page = this_top_in_parent - resume;
+        }
+    }
+
+    let (orphans, widows) = resolved_line_constraints(cx.doc, child_id, cx.styles);
+    let input = InlineSplitInput {
+        line_metrics: &line_metrics,
+        lead_in,
+        lead_out,
+        orphans,
+        widows,
+    };
+    let placement = InlinePlacement {
+        id: child_id,
+        x: frame.x_in_body + layout.location.x,
+        width: child_w,
+        cursor_y: child_top_on_page,
+        page: frame.page,
+    };
+    let pre_page = frame.page;
+    let (new_page, new_cursor, frag_count) =
+        fragment_inline_root(geometry, cx.page_h, placement, &input);
+    match frame.kind {
+        ContainerKind::RootBody => {
+            frame.page = new_page;
+            frame.cursor_y = new_cursor;
+        }
+        ContainerKind::Nested => {
+            if new_page > pre_page {
+                // Difference 3: the paragraph filled every page it
+                // crossed, so the parent spans those pages too
+                // (fulgur-oc51 via `emit_parent_page_spans`).
+                if let Some(slice) = frame.parent_slice {
+                    emit_parent_page_spans(
+                        geometry,
+                        frame.row_state.as_mut(),
+                        &slice,
+                        pre_page,
+                        new_page,
+                        frame.page_start_y,
+                        true,
+                    );
+                }
+                frame.page = new_page;
+                frame.cursor_y = new_cursor;
+                frame.page_start_y = 0.0;
+                frame.origin_pending_target_y = Some(frame.cursor_y);
+                // Anchor the deferred rebase on THIS
+                // paragraph's own Taffy-space bottom edge
+                // (`this_top_in_parent + box_total_h`), not the next
+                // sibling's `this_top_in_parent` — otherwise the next
+                // sibling is forced flush against the paragraph's tail,
+                // discarding their natural (possibly collapsed-margin)
+                // gap. See `origin_pending_anchor`'s doc comment.
+                frame.origin_pending_anchor = Some(this_top_in_parent + box_total_h);
+                frame.origin_pending_same_row = None;
+                if let Some(ref mut rs) = frame.row_state {
+                    rs.crossed_by_recursion = true;
+                }
+            } else {
+                frame.cursor_y = frame.cursor_y.max(new_cursor);
+            }
+        }
+    }
+
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
+            frame.origin_pending_same_row = None;
+        }
+    }
+    let is_float = crate::blitz_adapter::node_is_floating(child);
+    if !is_float {
+        let (_, used_end) = cx.used_page_endpoints_of(child_id);
+        frame.prev_used_page = Some(used_end);
+    }
+    // Difference 4: row max-end tracking (`row_state` is None for
+    // body, so this is a no-op there).
+    if let Some(ref mut rs) = frame.row_state {
+        if frame.page > rs.max_end_page
+            || (frame.page == rs.max_end_page && frame.cursor_y > rs.max_end_cursor_y)
+        {
+            rs.max_end_page = frame.page;
+            rs.max_end_cursor_y = frame.cursor_y;
+        }
+    }
+    Some(frag_count)
+}
+
+/// Outcome of the shared recursion-gate helper
+/// ([`fragment_recursion_child`]). The body walk turns `Placed` into
+/// `emitted += 1`; the nested walk sets `emitted_anything` and — for
+/// `RequestBreakBefore` — hands the break up to its own caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecursionOutcome {
+    /// The gate fired and the child placed itself (possibly after one
+    /// retry); `frame` holds the post-placement page / cursor.
+    Placed,
+    /// The child's first attempt requested a break before itself and
+    /// the caller opted to propagate it (nested leading-child rule,
+    /// css-break-3 §3.1.1). The geometry table is untouched (the
+    /// `RequestBreakBefore` proof obligation) and `frame` is
+    /// unmodified.
+    RequestBreakBefore,
+}
+
+/// Recursion gate + recurse + one-shot retry shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk walker-convergence
+/// phase 3c.
+///
+/// The gate (fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5) recurses into
+/// a child whenever its subtree would split — truly oversized
+/// (grandchild overflow), in-place mid-element split, or a forced
+/// break / page-name change declared below — by composing the three
+/// pure probes [`has_forced_break_below`],
+/// [`has_page_name_change_below`] and [`subtree_requires_recursion`].
+/// `subtree_requires_recursion` evaluates the walk's own
+/// `break_decision` with the walk's own floor (walker-convergence
+/// phase 5) and returns `false` when the grandchildren all fit the
+/// available strip, so the "parent CSS height > children
+/// sum" case falls through to the caller's whole-emit path. The
+/// recursion enters from the child's current page-local position so an
+/// in-place split produces a fragment on the current page and a tail
+/// on the next (CSS Fragmentation §3).
+///
+/// When the recursion hands back [`SubtreeResult::RequestBreakBefore`]
+/// the helper retries **at most once**: it advances a page and
+/// re-enters at `cursor_y == 0`, where the callee's propagation
+/// conditions (`cursor_in > 0.0`) can no longer fire.
+///
+/// The two call shapes differ in exactly these parameterized ways; the
+/// gates keep each difference explicit rather than silently unifying
+/// it (same convention as [`fragment_inline_child`]):
+///
+/// 1. **Multicol / `column-span: all` exception.** Both walks treat a
+///    multicol container as atomic (multicol fragments itself via
+///    `multicol_layout::run_pass`; fulgur-7hf5), but the body walk
+///    honours the fulgur-916y exception: a multicol container with a
+///    `column-span: all` direct child lays that span out as a
+///    full-width block flowing between the column groups, so
+///    block-flow recursion may split it across pages. Gate:
+///    `frame.kind` (`RootBody`-only lookup).
+/// 2. **Entry cursor.** Body enters the recursion at its current
+///    cursor; nested enters at the Taffy-rebased page-local y
+///    (`page_start_y + (this_top_in_parent - page_taffy_origin)`) so a
+///    parallel flex / grid cell starts its recursion strip at the
+///    row's y rather than below a previous cell (fulgur-u0p0). Gate:
+///    `frame.kind`.
+/// 3. **Child-frame depth.** Body passes its own depth (body-direct
+///    children stay at depth 0); nested passes `depth + 1`. Preserved
+///    as-is. Gate: `frame.kind`.
+/// 4. **Leading-break propagation (nested-only).** When the first
+///    attempt returns `RequestBreakBefore`, the nested walk may hand
+///    the break further up instead of retrying — a break before a
+///    box's first child is a break before the box, recursively
+///    (css-break-3 §3.1.1). The predicate (`!emitted_anything &&
+///    cursor_in > 0.0 && propagate_leading_break`) needs the nested
+///    walk's *entry* cursor, which the frame no longer holds once the
+///    loop advances, so the nested call site passes it precomputed as
+///    `may_propagate_break`; body passes `false` (the root has no one
+///    to propagate to). The child frame's `allow_leading_break` is
+///    `frame.allow_leading_break && !suppress_page_check` — body's
+///    frame carries `true` and the body call passes `false`, so
+///    body-direct children get the literal `true` they always had.
+/// 5. **Retry advance (nested-only extras).** Before re-entering, the
+///    nested walk closes the parent slice on the outgoing page (when
+///    `cursor_y > page_start_y`, via `frame.parent_slice`) and rebases
+///    `page_taffy_origin` to the breaking child. Body has no parent
+///    to close and no origin to rebase. Gates: `frame.parent_slice`
+///    presence / `frame.kind`.
+/// 6. **Post-placement adoption.** Body adopts the returned
+///    `(page, cursor_y)` verbatim. Nested keeps the row's max bottom
+///    when the recursion stayed on-page (fulgur-u0p0), emits the
+///    fulgur-oc51 parent page spans for every crossed page (skipping
+///    the outgoing-page fragment when nothing landed there), restarts
+///    the parent's fragment at y=0 on the new page, defers the origin
+///    rebase through `origin_pending_target_y` /
+///    `origin_pending_same_row`, and marks the row
+///    `crossed_by_recursion` so same-row cells co-split. Gate:
+///    `frame.kind`.
+/// 7. **`break-after: page` / used-page-name / row max-end tail.**
+///    Nested closes the parent slice and defers the origin rebase;
+///    body advances only. The float-skipped `prev_used_page` update
+///    and the `RowState` max-end tracking are shared (no-ops for body
+///    through `parent_slice: None` / `row_state: None`).
+///
+/// `child_id` is read from `child.id` (the document arena id — the
+/// same id the call sites looked the child up by); that keeps the
+/// signature at the clippy arity ceiling alongside the phase 3a / 3b
+/// helpers.
+///
+/// Returns `None` when the gate said the subtree does not split — the
+/// caller then falls through to its strip-overflow / oversized-slice /
+/// whole-emit fallback. Returns `Some(Placed)` after a successful
+/// placement (body: `emitted += 1`; nested: `emitted_anything =
+/// true`), or `Some(RequestBreakBefore)` when the break propagates
+/// (nested-only; the caller returns `SubtreeResult::RequestBreakBefore`).
+fn fragment_recursion_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+    may_propagate_break: bool,
+) -> Option<RecursionOutcome> {
+    let child_id = child.id;
+    let layout = child.final_layout;
+    let child_h = if layout.size.height.is_finite() {
+        layout.size.height
+    } else {
+        0.0
+    };
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+
+    // The gate. `subtree_requires_recursion` probes the child with the
+    // walk's own enumeration (`layout_children_of` + `is_walkable_skip`)
+    // and the walk's own break predicate (`break_decision`) evaluated
+    // at the floor the recursion would actually use — no separate
+    // floor-blind simulator anymore (walker-convergence phase 5). It
+    // returns `false` when the children all fit the available strip.
+    let has_splittable_children = !child.children.is_empty();
+    // fulgur-7hf5: multicol containers (`column-count > 1` /
+    // `column-width: <len>`) distribute children across columns; their
+    // DOM children's flow does not match the visual flow
+    // `subtree_requires_recursion` probes. Difference 1: the
+    // fulgur-916y `column-span: all` exception is body-only.
+    let is_multicol = crate::blitz_adapter::is_multicol_container(child);
+    let multicol_span_all_exception = frame.kind == ContainerKind::RootBody
+        && child.children.iter().any(|&id| {
+            cx.doc
+                .get_node(id)
+                .is_some_and(crate::blitz_adapter::has_column_span_all)
+        });
+    // Difference 4: propagate the permission, not a bare `true` — once
+    // inside a flex / grid / atomic container the whole subtree below
+    // is pinned and must not hand breaks upward. For body frames this
+    // is `true && !false == true`, the body's historical literal. The
+    // gate evaluates its floor from the same value, so gate and walk
+    // agree on the leading-child floor by construction.
+    let allow_leading_break = frame.allow_leading_break && !suppress_page_check;
+    let available_strip = (cx.page_h - frame.cursor_y).max(0.0);
+    let needs_recursion = has_splittable_children
+        && (!is_multicol || multicol_span_all_exception)
+        && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
+            || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
+            || subtree_requires_recursion(cx, child_id, available_strip, allow_leading_break));
+    if !needs_recursion {
+        return None;
+    }
+
+    let child_x_in_body = frame.x_in_body + layout.location.x;
+    // Difference 2: entry cursor (see the doc comment).
+    let entry_cursor_y = if frame.kind == ContainerKind::Nested {
+        frame.page_start_y + (this_top_in_parent - frame.page_taffy_origin)
+    } else {
+        frame.cursor_y
+    };
+    // Difference 3: child-frame depth (see the doc comment).
+    let child_depth = if frame.kind == ContainerKind::Nested {
+        frame.depth + 1
+    } else {
+        frame.depth
+    };
+    let pre_recursion_page = frame.page;
+    let pre_recursion_cursor_y = frame.cursor_y;
+    let mut child_frame = ContainerFrame::child(
+        child_id,
+        child_x_in_body,
+        child_w,
+        frame.page,
+        entry_cursor_y,
+        allow_leading_break,
+        child_depth,
+    );
+    let mut result = fragment_block_subtree(cx, &mut child_frame, geometry);
+    if result == SubtreeResult::RequestBreakBefore {
+        // Difference 4: hand the break up instead of retrying when the
+        // nested leading-child rule says so.
+        if may_propagate_break {
+            return Some(RecursionOutcome::RequestBreakBefore);
+        }
+        // Difference 5: nested closes the parent on the outgoing page
+        // before advancing; body has no parent to close. The retrying
+        // child is placed on the next page, so the parent continues —
+        // its outgoing fragment spans the full strip.
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
+        if frame.cursor_y > frame.page_start_y {
+            if let Some(slice) = frame.parent_slice {
+                slice.close_continuing(
+                    geometry,
+                    frame.row_state.as_mut(),
+                    frame.page,
+                    frame.page_start_y,
+                );
+            }
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The retrying child is the first on the new page — rebase
+            // the Taffy origin so it lands at `page_start_y` (= 0),
+            // discarding the inter-child gap (CSS 3 Fragmentation §3),
+            // except for any unspent leading decoration of the
+            // container itself (see `resume_taffy_origin`).
+            frame.page_taffy_origin = resume;
+        }
+        // Retry at most once: entered at `cursor_y == 0`, the callee's
+        // `RequestBreakBefore` producers (which require `cursor_in >
+        // 0.0`) cannot fire again.
+        child_frame = ContainerFrame::child(
+            child_id,
+            child_x_in_body,
+            child_w,
+            frame.page,
+            0.0,
+            allow_leading_break,
+            child_depth,
+        );
+        result = fragment_block_subtree(cx, &mut child_frame, geometry);
+    }
+    let SubtreeResult::Placed {
+        page: new_page,
+        cursor_y: new_cursor,
+    } = result
+    else {
+        unreachable!("a retry entered at cursor_y == 0 always places")
+    };
+
+    // Difference 6: post-placement adoption (see the doc comment).
+    match frame.kind {
+        ContainerKind::RootBody => {
+            frame.page = new_page;
+            frame.cursor_y = new_cursor;
+        }
+        ContainerKind::Nested => {
+            frame.page = new_page;
+            // fulgur-u0p0: when the recursion stayed on the same page,
+            // keep the larger of the parent's existing cursor (the row
+            // max bottom from a previous parallel sibling) and the
+            // recursion's returned cursor; when it crossed pages the
+            // old cursor is stale.
+            frame.cursor_y = if new_page == pre_recursion_page {
+                frame.cursor_y.max(new_cursor)
+            } else {
+                new_cursor
+            };
+            // If the recursion crossed a boundary, the parent's
+            // current-page fragment must restart at y=0 on the new
+            // page.
+            if frame.page != pre_recursion_page || new_cursor < frame.page_start_y {
+                if frame.page > pre_recursion_page {
+                    // fulgur-oc51: parent fragments for every crossed
+                    // page span. Skip the outgoing-page fragment when
+                    // the parent has nothing on that page (the
+                    // recursing child is the parent's leading child
+                    // AND the recursion propagated the break up rather
+                    // than placing a slice on the outgoing page).
+                    let child_placed_on_pre_page = geometry.get(&child_id).is_some_and(|g| {
+                        g.fragments
+                            .iter()
+                            .any(|f| f.page_index == pre_recursion_page)
+                    });
+                    let parent_has_content_on_pre_page =
+                        pre_recursion_cursor_y > frame.page_start_y || child_placed_on_pre_page;
+                    if let Some(slice) = frame.parent_slice {
+                        emit_parent_page_spans(
+                            geometry,
+                            frame.row_state.as_mut(),
+                            &slice,
+                            pre_recursion_page,
+                            frame.page,
+                            frame.page_start_y,
+                            parent_has_content_on_pre_page,
+                        );
+                    }
+                }
+                frame.page_start_y = 0.0;
+                frame.origin_pending_target_y = Some(frame.cursor_y);
+                let row_top = this_top_in_parent;
+                let row_bottom = row_top + child_h;
+                let allow_same_row_rebase = cx
+                    .doc
+                    .get_node(frame.id)
+                    .is_some_and(crate::blitz_adapter::is_flex_or_grid_container_node);
+                frame.origin_pending_same_row =
+                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+                // Non-row case anchor (see
+                // `origin_pending_anchor`'s doc comment) — the recursed
+                // child's own Taffy-space bottom edge, so the next
+                // sibling's natural gap to it survives the rebase. Set
+                // unconditionally; the consumer prefers
+                // `origin_pending_same_row` when present, so this is a
+                // no-op in the flex/grid row case above.
+                frame.origin_pending_anchor = Some(this_top_in_parent + child_h);
+                // fulgur-ysms: mark that this row had a recursion-
+                // driven page cross so subsequent same-row cells know
+                // to co-split.
+                if let Some(ref mut rs) = frame.row_state {
+                    rs.crossed_by_recursion = true;
+                }
+            }
+        }
+    }
+
+    // Difference 7: `break-after: page` tail, float-skipped
+    // used-page-name update, and row max-end tracking.
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
+            frame.origin_pending_same_row = None;
+        }
+    }
+    if !crate::blitz_adapter::node_is_floating(child) {
+        let (_, used_end) = cx.used_page_endpoints_of(child_id);
+        frame.prev_used_page = Some(used_end);
+    }
+    if let Some(ref mut rs) = frame.row_state {
+        if frame.page > rs.max_end_page
+            || (frame.page == rs.max_end_page && frame.cursor_y > rs.max_end_cursor_y)
+        {
+            rs.max_end_page = frame.page;
+            rs.max_end_cursor_y = frame.cursor_y;
+        }
+    }
+    frame.emitted_anything = true;
+    Some(RecursionOutcome::Placed)
+}
+
+/// The unchanging half of the "close the parent's fragment on the page
+/// it is leaving" idiom, which appears at nine sites in
+/// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
+///
+/// Only the page and the two y values vary across those sites; the
+/// parent's identity, x and width do not, so they are captured once per
+/// call.
+///
+/// # Dedup policy
+///
+/// [`RowState::emitted_parent_pages`] exists so that N parallel flex /
+/// grid cells, each independently deciding to close the parent on the
+/// current page, emit only one parent fragment for it.
+///
+/// Eight of the nine sites consult it via [`Self::close_unforced`] —
+/// every site that closes the parent because it is **leaving** a page,
+/// whether the break was forced (`break-before` / `break-after: page`)
+/// or unforced (strip overflow). Being about to leave a page is the
+/// property the dedup keys on, and a forced break satisfies it exactly
+/// as an unforced one does.
+///
+/// Originally only the two unforced sites deduped, which was
+/// fulgur-pgbrk R8: a cell that crosses a page by recursion sets
+/// `crossed_by_recursion`, which restores a same-row sibling to the
+/// row-start page, and that sibling's forced break then closed the
+/// parent a second time on it — with a different height, so `render.rs`
+/// painted the container's decoration twice at two sizes on one page.
+/// Pinned by `forced_break_does_not_close_a_grid_parent_twice_on_one_page`.
+///
+/// [`Self::close_forced`] survives for the **one** site that is not a
+/// page departure: the function tail, which emits the parent's final
+/// fragment on a page it never leaves and so has no sibling to contend
+/// with. Deduping there would be wrong — a same-row cell that already
+/// closed an earlier page would suppress the parent's last fragment
+/// entirely.
+#[derive(Clone, Copy)]
+struct ParentSlice {
+    id: usize,
+    x_in_body: f32,
+    width: f32,
+    page_height_px: f32,
+}
+
+impl ParentSlice {
+    /// Close the parent unconditionally. Used by the forced-break sites
+    /// and by the function tail. See the dedup note on the type.
+    fn close_forced(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        page_index: u32,
+        page_start_y: f32,
+        cursor_y: f32,
+    ) {
+        geometry
+            .entry(self.id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: self.x_in_body.as_px(),
+                y: page_start_y.as_px(),
+                width: self.width.as_px(),
+                height: parent_slice_height(cursor_y, page_start_y, self.page_height_px).as_px(),
+            });
+    }
+
+    /// Close the parent at most once per page across parallel flex /
+    /// grid cells. Used by the two overflow-driven sites.
+    fn close_unforced(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        row_state: Option<&mut RowState>,
+        page_index: u32,
+        page_start_y: f32,
+        cursor_y: f32,
+    ) {
+        let should_emit = row_state
+            .map(|rs| rs.emitted_parent_pages.insert(page_index))
+            .unwrap_or(true);
+        if should_emit {
+            self.close_forced(geometry, page_index, page_start_y, cursor_y);
+        }
+    }
+
+    /// Close the parent on a page it is **leaving**, i.e. one where more
+    /// of its content follows on a later page.
+    ///
+    /// Such a fragment spans the whole remaining strip
+    /// (`page_height_px - page_start_y`), not the child cursor: the box
+    /// continues past the page bottom by definition, so its background,
+    /// side borders and shadow must run to the page edge rather than
+    /// stopping at whichever child happened to be the last to fit. The
+    /// gap between that child's bottom and the page bottom is the
+    /// container's own padding-bottom, an inter-child gap, or simply
+    /// space the next child could not use — never a place for the box to
+    /// end.
+    ///
+    /// This is the same span [`emit_parent_page_spans`] already claims
+    /// for the recursion / slicing crossings; routing the push and
+    /// forced-break closers here is what makes the two agree. Contrast
+    /// [`ParentSlice::close_forced`] / [`ParentSlice::close_unforced`],
+    /// which are for the page a container **ends** on and must stay
+    /// cursor-derived so a trailing margin adjoining an unforced break is
+    /// not baked into the height (css-break-3 §5.2 — see
+    /// [`parent_slice_height`]).
+    ///
+    /// Dedupes across parallel flex / grid cells exactly as
+    /// [`ParentSlice::close_unforced`] does.
+    fn close_continuing(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        row_state: Option<&mut RowState>,
+        page_index: u32,
+        page_start_y: f32,
+    ) {
+        let should_emit = row_state
+            .map(|rs| rs.emitted_parent_pages.insert(page_index))
+            .unwrap_or(true);
+        if !should_emit {
+            return;
+        }
+        let height = (self.page_height_px - page_start_y).max(0.0);
+        if height <= 0.0 {
+            return;
+        }
+        geometry
+            .entry(self.id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: self.x_in_body.as_px(),
+                y: page_start_y.as_px(),
+                width: self.width.as_px(),
+                height: height.as_px(),
+            });
+    }
+}
+
+/// Outcome of fragmenting one block subtree (fulgur-pgbrk R4 / R5).
+///
+/// `RequestBreakBefore` is the channel by which a box hands a break
+/// decision **up** to its container, which css-break-3 requires in two
+/// places fulgur previously dropped it:
+///
+/// - §3.1.1 — "A `break-before` value on a first in-flow child box is
+///   propagated to its container." The child's own break point does not
+///   exist (there is no gap between a container's content edge and its
+///   first child, §4.1), so the nearest legal break is the class A point
+///   before the container.
+/// - §4.4 rule 2 — a container with `break-inside: avoid` that does not
+///   fit the current strip but would fit a fresh one must move whole
+///   rather than split between its children.
+///
+/// **Invariant:** a call returning `RequestBreakBefore` has pushed
+/// nothing into the geometry table, so the caller can advance the page
+/// and re-invoke without first having to undo a partial emission. Both
+/// producers below check `emitted_anything` to guarantee it.
+///
+/// Re-invocation terminates because both producers require `cursor_in >
+/// 0.0`: after the caller advances, the subtree starts at the top of a
+/// fresh page and neither condition can fire again. A break before a box
+/// already at a page top is a no-op anyway (§3.1.1 collapses it), so this
+/// is the spec-correct stopping rule rather than a retry counter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SubtreeResult {
+    Placed { page: u32, cursor_y: f32 },
+    RequestBreakBefore,
+}
+
+/// Whether a child may break before itself on the current strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakDecision {
+    /// Place the child where the cursor is.
+    PlaceHere,
+    /// Close the parent on this page and place the child on the next.
+    PushToNextPage,
+}
+
+/// The single break decision, shared by the block strip-overflow cut, the
+/// nested inline-root push-whole, the body-direct inline push-whole,
+/// and the recursion-gate probe [`subtree_requires_recursion`]
+/// (fulgur-pgbrk Risk 1). The gate's adoption (walker-convergence
+/// phase 5) closed the divergence deferred at extraction time: the
+/// probe used to be a floor-blind simulator with its own overflow
+/// check, so its leading-child answer could disagree with the walk;
+/// now gate and walk evaluate this same predicate on the same
+/// enumeration with the same floor.
+///
+/// `floor` is the y below which a break is legal on this strip:
+///
+/// - `0.0` when an overflowing LEADING child may propagate its break up
+///   to the box's own leading edge (css-break-3 §3 — a break before a
+///   box's first child is also a break before the box). This is
+///   fulgur-pgbrk's fix; before it the gate was `page_start_y`, which a
+///   first in-flow child never exceeds, so such a child could never
+///   break and was laid out past the page bottom and discarded.
+/// - `page_start_y` inside a container that does not paginate its
+///   children independently — flex / grid (whose items are not class A
+///   break points, §4.1), atomic inline containers, orthogonal flow. See
+///   `suppress_page_check`.
+///
+/// `child_box_h` is the **border box** height (fulgur-pgbrk R1): the
+/// block path passes Taffy's `child_h`; the inline-root paths pass
+/// `lead_in + lines_h + lead_out`, because Parley's line metrics are
+/// content-box relative and omit the box's own padding and border.
+///
+/// At `child_top_on_page == floor` the answer is always `PlaceHere`: we
+/// are at the top of a fresh strip with nowhere to push to, and
+/// returning `PushToNextPage` there would advance pages forever.
+fn break_decision(
+    child_top_on_page: f32,
+    child_box_h: f32,
+    floor: f32,
+    page_height_px: f32,
+) -> BreakDecision {
+    if child_top_on_page > floor && child_top_on_page + child_box_h > page_height_px {
+        BreakDecision::PushToNextPage
+    } else {
+        BreakDecision::PlaceHere
+    }
+}
+
+/// Inputs fixed for the whole fragmentation run. The [`ContainerFrame`]
+/// carries the per-container mutable state; the immutable inputs (DOM,
+/// style side-tables, page height) travel once here so recursive calls
+/// pass references rather than re-copying arguments (see
+/// `docs/plans/2026-08-18-fulgur-single-pass-fragmentation-design.md`,
+/// "The walk: one fragment_container").
+struct FragmentationCtx<'a> {
+    doc: &'a BaseDocument,
+    /// Break-style side-table (was `column_styles` on the walk
+    /// signatures).
+    styles: Option<&'a crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&'a crate::blitz_adapter::UsedPageNameTable>,
+    running: Option<&'a crate::gcpm::running::RunningElementStore>,
+    page_h: f32,
+}
+
+impl FragmentationCtx<'_> {
+    /// fulgur-uebl: lookup helper for the per-element start / end used
+    /// page-names (CSS Page 3 §5.3). Returns `(start, end)` where each
+    /// is `None` for the unnamed/auto page or `Some(name)` for a named
+    /// page. When the document has no `page` declarations at all the
+    /// table is absent; we return `(None, None)` so the comparison `==`
+    /// always succeeds and no implicit breaks fire.
+    fn used_page_endpoints_of(&self, node_id: usize) -> (Option<String>, Option<String>) {
+        self.used_page_names
+            .and_then(|t| t.get(&node_id).cloned())
+            .unwrap_or((None, None))
+    }
+}
+
+/// Whether a container is the fragmentation root (body) or a nested
+/// descendant. `RootBody`'s one privilege is emitting its own
+/// whole-document fragment once on page 0; after that entry push, both
+/// kinds walk children by identical rules (see the design doc,
+/// "Body's asymmetries become universal").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerKind {
+    RootBody,
+    Nested,
+}
+
+/// Per-container mutable state for the fragmentation walk. The body
+/// entry (`PaginationLayoutTree::fragment_pagination_root`) builds the
+/// depth-0 frame; recursive calls build a frame per child container.
+/// No container assigns to another's frame — the `RequestBreakBefore`
+/// proof obligation (`emitted_anything` untouched-table invariant)
+/// lives on the frame.
+struct ContainerFrame {
+    id: usize,
+    x_in_body: f32,
+    width: f32,
+    page: u32,
+    cursor_y: f32,
+    page_start_y: f32,
+    page_taffy_origin: f32,
+    origin_pending_target_y: Option<f32>,
+    /// Taffy parent-relative y (`this_top_in_parent + box_h`) of the
+    /// child whose placement produced a non-flush
+    /// `origin_pending_target_y` (a recursed subtree or sliced leaf
+    /// that crossed a page mid-walk, landing its tail at a page-local
+    /// y other than 0). The deferred rebase must anchor on THIS
+    /// point, not on the next sibling's own `this_top_in_parent` —
+    /// otherwise the next sibling is forced flush against the
+    /// previous one's tail, discarding their natural (possibly
+    /// collapsed-margin) gap. `None` for the flush case
+    /// (`origin_pending_target_y == Some(page_start_y)`), where
+    /// anchoring on the next sibling's own top is correct by
+    /// construction (it IS the first child on the fresh page).
+    origin_pending_anchor: Option<f32>,
+    origin_pending_same_row: Option<(f32, f32, f32)>,
+    prev_used_page: Option<Option<String>>,
+    emitted_anything: bool,
+    allow_leading_break: bool,
+    depth: usize,
+    row_state: Option<RowState>,
+    parent_slice: Option<ParentSlice>,
+    kind: ContainerKind,
+}
+
+impl ContainerFrame {
+    /// Build the frame for a child container about to be recursed
+    /// into. `page_start_y` starts at the entry cursor (matching the
+    /// previous argument wiring); `parent_slice` is filled in by
+    /// `fragment_block_subtree` on entry.
+    fn child(
+        id: usize,
+        x_in_body: f32,
+        width: f32,
+        page: u32,
+        cursor_y: f32,
+        allow_leading_break: bool,
+        depth: usize,
+    ) -> Self {
+        ContainerFrame {
+            id,
+            x_in_body,
+            width,
+            page,
+            cursor_y,
+            page_start_y: cursor_y,
+            page_taffy_origin: 0.0,
+            origin_pending_target_y: None,
+            origin_pending_anchor: None,
+            origin_pending_same_row: None,
+            prev_used_page: None,
+            emitted_anything: false,
+            allow_leading_break,
+            depth,
+            row_state: None,
+            parent_slice: None,
+            kind: ContainerKind::Nested,
+        }
+    }
+}
+
+/// Line-splitting inputs for [`fragment_inline_root`] / [`scan_split_points`]
+/// (fulgur-pgbrk Risk 1 bundles this so the scan's argument list stays
+/// under the clippy arity threshold without an `#[allow]`).
+struct InlineSplitInput<'a> {
+    line_metrics: &'a [(f32, f32)],
+    lead_in: f32,
+    lead_out: f32,
+    orphans: usize,
+    widows: usize,
+}
+
+/// Placement of the inline root being split (geometry-free inputs of
+/// `fragment_inline_root`).
+#[derive(Debug, Clone, Copy)]
+struct InlinePlacement {
+    id: usize,
+    x: f32,
+    width: f32,
+    cursor_y: f32,
+    page: u32,
+}
+
+/// Every fragment in `table` whose bottom edge falls below the content
+/// strip, in deterministic order (fulgur-pgbrk R3).
+///
+/// Ordering is by node id then page index: `PaginationGeometryTable` is
+/// a [`BTreeMap`] and each node's `fragments` are pushed in page order,
+/// so the natural iteration order is already stable. That matters
+/// because these records reach user-visible logs, and byte-stable
+/// output is a project invariant.
+///
+/// This is the single source of truth for "did the fragmenter leave
+/// content outside the page box", consumed by the production warning in
+/// [`run_pass_inner`] and by test assertions.
+///
+/// `body_id` is excluded when supplied. Body is the one box the
+/// fragmenter never fragments: its entry records the whole document
+/// content height once, on page 0, as a document-level total rather
+/// than a per-page placement. Every other container *is* split — a
+/// wrapper spanning two pages gets one correctly clipped fragment per
+/// page — so body is the sole exception, not a general carve-out for
+/// containers.
+pub(crate) fn find_overflowing_fragments(
+    table: &PaginationGeometryTable,
+    page_height_px: f32,
+    body_id: Option<usize>,
+) -> Vec<FragmentOverflow> {
+    let mut out = Vec::new();
+    for (&node_id, geom) in table {
+        if body_id == Some(node_id) {
+            continue;
+        }
+        let last_page = geom.fragments.last().map(|f| f.page_index);
+        for f in &geom.fragments {
+            let bottom = f.y.to_f32() + f.height.to_f32();
+            if bottom > page_height_px + OVERFLOW_EPS_PX {
+                out.push(FragmentOverflow {
+                    node_id,
+                    page_index: f.page_index,
+                    overshoot_px: bottom - page_height_px,
+                    continues_on_later_page: !geom.is_repeat && Some(f.page_index) != last_page,
+                });
+            }
+        }
+    }
+    out
+}
 
 /// Taffy tree wrapper that intercepts the pagination root through
 /// `compute_child_layout` and routes it through fulgur's own
@@ -271,7 +1650,57 @@ fn run_pass_inner<'a>(
         // layout is what actually does the pagination work.
         tree.fragment_pagination_root();
     }
-    tree.take_geometry()
+    let body_id = tree.body_id;
+    let table = tree.take_geometry();
+    report_fragment_overflow(&table, page_height_px, body_id);
+    table
+}
+
+/// fulgur-pgbrk R3: surface any fragment the walk left outside the page
+/// box.
+///
+/// Production builds emit one `log::warn!` per offending fragment,
+/// matching the diagnostics convention used elsewhere in this crate
+/// (`asset.rs`, `blitz_adapter.rs`, `column_css.rs`). The `log` facade
+/// routes to whatever logger the host installed and never touches
+/// fd 1, which `crates/fulgur` must not do under any circumstance
+/// (CLAUDE.md); a consumer with no logger gets silence.
+///
+/// Test builds panic on the same condition instead, which makes the
+/// invariant blanket across every caller without per-test opt-in.
+/// Fixtures that legitimately trip it today are `#[ignore]`d with a
+/// reference to the open gap they are blocked on — the convention the
+/// `css_break3_*` block already uses — rather than allowlisted here.
+fn report_fragment_overflow(
+    table: &PaginationGeometryTable,
+    page_height_px: f32,
+    body_id: Option<usize>,
+) {
+    let overflows = find_overflowing_fragments(table, page_height_px, body_id);
+    if overflows.is_empty() {
+        return;
+    }
+
+    #[cfg(not(test))]
+    for o in &overflows {
+        log::warn!(
+            "node {}: fragment on page {} extends {:.2}px past the {:.2}px page \
+             content strip; content may be painted over the bottom margin or \
+             clipped away entirely",
+            o.node_id,
+            o.page_index,
+            o.overshoot_px,
+            page_height_px,
+        );
+    }
+
+    #[cfg(test)]
+    panic!(
+        "fulgur-pgbrk R3: {} fragment(s) placed past the {page_height_px}px page \
+         content strip (content would be painted over the bottom margin or \
+         clipped off the paper): {overflows:?}",
+        overflows.len(),
+    );
 }
 
 impl<'a> PaginationLayoutTree<'a> {
@@ -286,19 +1715,6 @@ impl<'a> PaginationLayoutTree<'a> {
             running_store: None,
             used_page_names: None,
         }
-    }
-
-    /// fulgur-uebl: lookup helper for the per-element start / end used
-    /// page-names (CSS Page 3 §5.3). Returns `(start, end)` where each
-    /// is `None` for the unnamed/auto page or `Some(name)` for a named
-    /// page. When the document has no `page` declarations at all the
-    /// table is absent; we return `(None, None)` so the comparison `==`
-    /// always succeeds and no implicit breaks fire.
-    fn used_page_endpoints_of(&self, node_id: usize) -> (Option<String>, Option<String>) {
-        self.used_page_names
-            .as_ref()
-            .and_then(|t| t.get(&node_id).cloned())
-            .unwrap_or((None, None))
     }
 
     /// Drain the accumulated per-node geometry table.
@@ -420,6 +1836,39 @@ impl<'a> PaginationLayoutTree<'a> {
         let body_w = body_layout.size.width;
         let body_x = body_layout.location.x;
 
+        // Reborrow the fixed walk inputs once; recursive calls pass the
+        // shared `FragmentationCtx` instead of re-copying arguments.
+        let cx = FragmentationCtx {
+            doc: &*self.doc,
+            styles: self.column_styles,
+            used_page_names: self.used_page_names.as_ref(),
+            running: self.running_store,
+            page_h: self.page_height_px,
+        };
+        // Body is the depth-0 container; its frame holds the same
+        // per-container mutable state the nested walker uses (see
+        // `fragment_block_subtree`). `parent_slice: None` marks "no
+        // parent to close" at the root.
+        let mut frame = ContainerFrame {
+            id: body_id,
+            x_in_body: body_x,
+            width: body_w,
+            page: 0,
+            cursor_y: 0.0,
+            page_start_y: 0.0,
+            page_taffy_origin: 0.0,
+            origin_pending_target_y: None,
+            origin_pending_anchor: None,
+            origin_pending_same_row: None,
+            prev_used_page: None,
+            emitted_anything: false,
+            allow_leading_break: true,
+            depth: 0,
+            row_state: None,
+            parent_slice: None,
+            kind: ContainerKind::RootBody,
+        };
+
         // fulgur-s67g Phase 2.3 (counter parity follow-up): record
         // body itself as a fragment on page 0. body's own
         // counter-reset / string-set / bookmark declarations must fire
@@ -436,56 +1885,26 @@ impl<'a> PaginationLayoutTree<'a> {
         // so `body` is smaller than its descendants), so per-page
         // walks pick up body's ops before descendants — matching the
         // document tree-walk order the collectors expect.
-        self.geometry
-            .entry(body_id)
-            .or_default()
-            .fragments
-            .push(Fragment {
-                page_index: 0,
-                x: body_x.as_px(),
-                y: 0.0_f32.as_px(),
-                width: body_w.as_px(),
-                height: body_layout.size.height.as_px(),
-            });
+        if matches!(frame.kind, ContainerKind::RootBody) {
+            self.geometry
+                .entry(frame.id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index: 0,
+                    x: frame.x_in_body.as_px(),
+                    y: 0.0_f32.as_px(),
+                    width: frame.width.as_px(),
+                    height: body_layout.size.height.as_px(),
+                });
+        }
 
-        // Prefer body's `layout_children` — same rationale as
-        // `record_subtree_descendants`. When a block container has
-        // mixed block-level and inline-level children, Stylo
-        // synthesizes anonymous block wrappers around the inline-
-        // level siblings (CSS 2.1 §9.2.1.1). Those wrappers carry
-        // their own `node_id` and Taffy layout, but they live ONLY
-        // in `layout_children` — `children` still points at the
-        // underlying inline elements (e.g. a body containing
-        // `<label>` followed by `<fieldset>` followed by
-        // `<select><option>...</option></select>` produces an
-        // anonymous block wrapping the `<select>` siblings, visible
-        // only in `layout_children`).
-        //
-        // Without this preference v2 silently drops the inline-level
-        // group's paint: extract assigns the inner paragraph's
-        // `node_id` to the synthesized wrapper, but the body iteration
-        // walks raw `children` and never visits the wrapper, so
-        // geometry has no fragment for that node_id and
-        // `dispatch_fragment` skips the paragraph entirely
-        // (fulgur-bq6i: examples/wasm-demo lost label / legend / option
-        // text content for this exact reason).
-        let children = self
-            .doc
-            .get_node(body_id)
-            .map(|n| {
-                let layout_borrow = n.layout_children.borrow();
-                if let Some(lc) = layout_borrow.as_deref()
-                    && !lc.is_empty()
-                {
-                    lc.to_vec()
-                } else {
-                    n.children.clone()
-                }
-            })
-            .unwrap_or_default();
+        // fulgur-bq6i / fulgur-yb27: anonymous block wrappers Stylo
+        // synthesizes around inline-level siblings live ONLY in
+        // `layout_children` (CSS 2.1 §9.2.1.1) — the shared
+        // enumeration policy is `layout_children_of`.
+        let children = layout_children_of(cx.doc, frame.id);
 
-        let mut page_index: u32 = 0;
-        let mut cursor_y: f32 = 0.0;
         let mut emitted = 0usize;
         // Tracks the bottom edge of the previously emitted in-flow child
         // in body-content-box coordinates. Used to pick up inter-child
@@ -495,40 +1914,17 @@ impl<'a> PaginationLayoutTree<'a> {
         // in body's normal-flow height (CSS 2.1 §10.6.3) so per-page
         // walks match the recorded fragment tops.
         let mut prev_bottom_y_in_body: f32 = 0.0;
-        // fulgur-uebl: tracks the used page-name of the previously
-        // placed in-flow sibling (`Some(Some(name))` named, `Some(None)`
-        // auto/unnamed, `None` no previous). When the next sibling's
-        // used page-name differs, we induce a forced break before it
-        // (CSS Page 3 §5.3, "Using Named Pages").
-        let mut prev_used_page: Option<Option<String>> = None;
 
         for child_id in children {
-            let Some(child) = self.doc.get_node(child_id) else {
+            // Shared skip: dangling id / whitespace-only text /
+            // out-of-flow (`position: absolute` / `fixed`) — see
+            // `is_walkable_skip`.
+            if is_walkable_skip(cx.doc, child_id) {
+                continue;
+            }
+            let Some(child) = cx.doc.get_node(child_id) else {
                 continue;
             };
-            // Skip pure-whitespace text nodes — same convention as
-            // multicol_layout's `partition_children_into_segments`.
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
-                continue;
-            }
-            // CSS 2.1 §10.6.4 / §9.6: out-of-flow elements
-            // (`position: absolute` / `position: fixed`) do not
-            // contribute to their containing block's normal-flow
-            // height, so the fragmenter must not advance cursors for
-            // them. Abs/fixed children are handled by separate passes
-            // (`append_position_fixed_fragments` and the abs positioning
-            // pipeline in `render`).
-            {
-                use ::style::properties::longhands::position::computed_value::T as Pos;
-                let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                    matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-                });
-                if is_out_of_flow {
-                    continue;
-                }
-            }
             // fulgur-s67g Phase 2.2: skip `position: running()` named
             // children from the body cursor. They are removed from
             // body flow and placed into `@page` margin boxes per page;
@@ -542,8 +1938,8 @@ impl<'a> PaginationLayoutTree<'a> {
             // element's source position lands — exactly what
             // `collect_running_element_states` needs to map running
             // instances to their per-page state.
-            if self
-                .running_store
+            if cx
+                .running
                 .is_some_and(|s| s.instance_for_node(child_id).is_some())
             {
                 if child.element_data().is_some() {
@@ -553,9 +1949,9 @@ impl<'a> PaginationLayoutTree<'a> {
                         .or_default()
                         .fragments
                         .push(Fragment {
-                            page_index,
-                            x: (body_x + layout.location.x).as_px(),
-                            y: cursor_y.as_px(),
+                            page_index: frame.page,
+                            x: (frame.x_in_body + layout.location.x).as_px(),
+                            y: frame.cursor_y.as_px(),
                             width: 0.0_f32.as_px(),
                             height: 0.0_f32.as_px(),
                         });
@@ -567,7 +1963,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // fulgur-2m6w: defend against a non-finite Taffy height
             // (`+inf` / `NaN`). A `NaN` height slips past the
             // `child_h > page_height_px + 1.0` slice gate (NaN compares
-            // false) into the normal path where `cursor_y += child_h`
+            // false) into the normal path where `frame.cursor_y += child_h`
             // would poison every later page advance; `+inf` would corrupt
             // `prev_bottom_y_in_body`. Treat either as zero height — the
             // node still enters geometry via the `child_h <= 0.0` branch
@@ -580,82 +1976,23 @@ impl<'a> PaginationLayoutTree<'a> {
             let child_w = if layout.size.width > 0.0 {
                 layout.size.width
             } else {
-                body_w
+                frame.width
             };
             if child_h <= 0.0 {
-                // Phase 2.3 fix: zero-height **element** nodes still
-                // need to enter geometry so their counter /
-                // string-set / bookmark markers participate in the
-                // per-page metadata walks (e.g.
-                // `<div class="reset" style="..."></div>` carrying a
-                // `counter-set` declaration). The fragment carries
-                // height 0 so it does not advance the cursor — only
-                // the NodeId matters for the per-page metadata walks.
-                // Whitespace-only text nodes are already filtered
-                // above; running and abs/fixed elements are filtered
-                // before this branch.
-                //
-                // fulgur-p3uf (Phase 3.1.5a): honour `break-before`
-                // / `break-after` on zero-height element nodes too.
-                // Bare `<img>` with no explicit dimensions and
-                // pseudo-only `<div>` (rendering only `::before`
-                // content) both arrive here with `child_h == 0` after
-                // Blitz's intrinsic-size collapse, but their
-                // `break-before: page` directive must still take
-                // effect (CSS Fragmentation §3, forced breaks apply
-                // regardless of the element's own height — see
-                // `tests/pseudo_only_break_before.rs`). An earlier
-                // fragmenter `continue`'d before reading break
-                // properties at all, silently dropping the directive.
-                let zero_break_props = self
-                    .column_styles
-                    .and_then(|t| t.get(&child_id))
-                    .cloned()
-                    .unwrap_or_default();
-                // fulgur-uebl: floats are out of normal flow for the
-                // sibling page-name comparison (CSS Page 3 / CSS 2.1
-                // §9.5). Skip the comparison and the `prev_used_page`
-                // update entirely for floated zero-height children;
-                // they do not establish class A break points and should
-                // not influence break decisions on adjacent in-flow
-                // boxes.
-                let zero_is_float = crate::blitz_adapter::node_is_floating(child);
-                let (zero_used_start, zero_used_end) = self.used_page_endpoints_of(child_id);
-                let zero_page_name_changed = !zero_is_float
-                    && prev_used_page
-                        .as_ref()
-                        .is_some_and(|p| *p != zero_used_start);
-                let zero_force_break = matches!(
-                    zero_break_props.break_before,
-                    Some(crate::draw_primitives::BreakBefore::Page)
-                ) || zero_page_name_changed;
-                if zero_force_break && cursor_y > 0.0 {
-                    page_index += 1;
-                    cursor_y = 0.0;
-                }
-                if child.element_data().is_some() {
-                    self.geometry
-                        .entry(child_id)
-                        .or_default()
-                        .fragments
-                        .push(Fragment {
-                            page_index,
-                            x: (body_x + layout.location.x).as_px(),
-                            y: cursor_y.as_px(),
-                            width: child_w.as_px(),
-                            height: 0.0_f32.as_px(),
-                        });
-                    emitted += 1;
-                }
-                if !zero_is_float {
-                    prev_used_page = Some(zero_used_end);
-                }
-                if matches!(
-                    zero_break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
+                // Shared zero-height child branch (see
+                // `fragment_zero_height_child`). Body frames advance
+                // the page only; the page-name break comparison is
+                // unrestricted here (no `suppress_page_check`).
+                if fragment_zero_height_child(
+                    &cx,
+                    &mut frame,
+                    &mut self.geometry,
+                    child,
+                    child_id,
+                    layout.location.y,
+                    false,
                 ) {
-                    page_index += 1;
-                    cursor_y = 0.0;
+                    emitted += 1;
                 }
                 continue;
             }
@@ -667,13 +2004,13 @@ impl<'a> PaginationLayoutTree<'a> {
             // gaps from sibling overlap (rare with default UA styles).
             let this_top_in_body = layout.location.y;
             let gap = (this_top_in_body - prev_bottom_y_in_body).max(0.0);
-            cursor_y += gap;
+            frame.cursor_y += gap;
 
             // fulgur-k0g0: read break-before / break-after / break-inside
             // for this child from the column-style side-table (shared with
             // multicol). Default `Auto` for nodes the table does not cover.
-            let break_props = self
-                .column_styles
+            let break_props = cx
+                .styles
                 .and_then(|t| t.get(&child_id))
                 .cloned()
                 .unwrap_or_default();
@@ -691,9 +2028,12 @@ impl<'a> PaginationLayoutTree<'a> {
             // establish class A break points, so they're skipped from
             // both the comparison and the `prev_used_page` update.
             let is_float = crate::blitz_adapter::node_is_floating(child);
-            let (used_start, used_end) = self.used_page_endpoints_of(child_id);
-            let page_name_changed =
-                !is_float && prev_used_page.as_ref().is_some_and(|p| *p != used_start);
+            let (used_start, used_end) = cx.used_page_endpoints_of(child_id);
+            let page_name_changed = !is_float
+                && frame
+                    .prev_used_page
+                    .as_ref()
+                    .is_some_and(|p| *p != used_start);
 
             // `break-before: page` forces a page boundary before the
             // child whenever there is in-flow content already placed on
@@ -703,22 +2043,16 @@ impl<'a> PaginationLayoutTree<'a> {
                 break_props.break_before,
                 Some(crate::draw_primitives::BreakBefore::Page)
             );
-            let page_filling_break_child = gap > 0.0
-                && child_h >= self.page_height_px * 0.9
-                && gap + child_h <= self.page_height_px + 0.5;
-            if (explicit_break_before || page_name_changed) && emitted > 0 && cursor_y > 0.0 {
-                page_index += 1;
-                cursor_y = if explicit_break_before && page_filling_break_child {
+            let page_filling_break_child =
+                gap > 0.0 && child_h >= cx.page_h * 0.9 && gap + child_h <= cx.page_h + 0.5;
+            if (explicit_break_before || page_name_changed) && emitted > 0 && frame.cursor_y > 0.0 {
+                frame.page += 1;
+                frame.cursor_y = if explicit_break_before && page_filling_break_child {
                     gap
                 } else {
                     0.0
                 };
             }
-
-            let avoid_inside = matches!(
-                break_props.break_inside,
-                Some(crate::draw_primitives::BreakInside::Avoid)
-            );
 
             // fulgur-p55h: if the child carries a Parley inline layout,
             // probe its line metrics and split at line boundaries —
@@ -729,169 +2063,67 @@ impl<'a> PaginationLayoutTree<'a> {
             // fulgur-k0g0: when `break-inside: avoid` is set, fall
             // through to the block path below so the paragraph emits
             // whole instead of splitting between lines.
-            let line_metrics = if avoid_inside {
-                Vec::new()
-            } else {
-                collect_inline_line_metrics(child)
-            };
-            if line_metrics.len() > 1 {
-                // fulgur-s67g Phase 2.2: if the paragraph cannot fit
-                // the remaining space on the current page strip but
-                // would fit (or at least start fresh) on a new page,
-                // advance the page boundary before calling
-                // `fragment_inline_root`. This is the "split before
-                // the child" fallback (CSS Fragmentation §4.2, class A
-                // break point) taken when the inline split path can't
-                // honour widow / orphan constraints within the strip.
-                let para_total_h = line_metrics
-                    .last()
-                    .map(|l| l.1 - line_metrics[0].0)
-                    .unwrap_or(child_h);
-                if cursor_y > 0.0 && cursor_y + para_total_h > self.page_height_px {
-                    page_index += 1;
-                    cursor_y = 0.0;
-                }
-                let para_x = layout.location.x;
-                let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
-                    &mut self.geometry,
-                    child_id,
-                    body_x + para_x,
-                    child_w,
-                    cursor_y,
-                    page_index,
-                    self.page_height_px,
-                    &line_metrics,
-                );
-                page_index = new_page_index;
-                cursor_y = new_cursor_y;
+            //
+            // fulgur-pgbrk: except when honouring it is impossible.
+            // `avoid` is a preference, not a guarantee — CSS
+            // Fragmentation 3 §4.4 requires it to be ignored when the box
+            // cannot fit in a single fragmentainer. Obeying it there does
+            // not keep the paragraph whole, it just pushes the tail past
+            // the page edge where it is discarded, so an unfulfillable
+            // `avoid` must fall back to line-level splitting.
+            //
+            // Shared inline-root branch (see `fragment_inline_child`).
+            // Body frames pass `false` for `suppress_page_check`; the
+            // push-whole floor is the fixed 0.0 (leading-edge
+            // propagation is always permitted at body level).
+            if let Some(frag_count) = fragment_inline_child(
+                &cx,
+                &mut frame,
+                &mut self.geometry,
+                child,
+                child_id,
+                this_top_in_body,
+                false,
+            ) {
                 emitted += frag_count;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
-                if !is_float {
-                    prev_used_page = Some(used_end.clone());
-                }
-                if matches!(
-                    break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
-                ) {
-                    page_index += 1;
-                    cursor_y = 0.0;
-                }
                 continue;
             }
 
             // fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5: unified
-            // recursion gate covering all three break cases —
-            //   - truly oversized (`child_h > page_h_px`) caught
-            //     here when `would_split_block_subtree` finds the
-            //     overflowing grandchild,
-            //   - in-place mid-element split (`cursor_y + child_h >
-            //     page_h_px` with `child_h <= page_h_px`),
-            //   - forced break declared anywhere in the subtree.
-            //
-            // The recursion enters from the **current** cursor (not
-            // a pre-advanced 0), so an in-place split with `cursor_y
-            // > 0` produces a within-child fragment on the current
-            // page and a tail on the next (CSS Fragmentation §3,
-            // splits at class B/C break points inside the box).
-            //
-            // `would_split_block_subtree` is a cheap simulator that
-            // walks the DOM children once with the same gap / OOF /
-            // whitespace skips `fragment_block_subtree` uses — it
-            // returns `false` when the children all fit in the
-            // available strip, so the in-place case where the
-            // parent's CSS height exceeds children's sum (e.g. a
-            // 600px div with one 30px h2) falls through to the
-            // existing whole-emit path and avoids the children-sum
-            // parent-height bug.
-            //
-            // `break-inside: avoid` is overridden when the subtree is
-            // truly oversized (CSS Fragmentation §4.2 "unforced
-            // break"), so we still fall through to splitting.
-            let child_node = self.doc.get_node(child_id);
-            let has_splittable_children = child_node.is_some_and(|n| !n.children.is_empty());
-            // fulgur-7hf5: multicol containers (`column-count > 1` /
-            // `column-width: <len>`) distribute children across
-            // columns; their DOM children's flow does not match the
-            // visual flow `would_split_block_subtree` simulates. Skip
-            // recursion for them — multicol handles its own
-            // fragmentation via `multicol_layout::run_pass`, and the
-            // outer fragmenter treats the multicol container as a
-            // single unit for break decisions.
-            //
-            // fulgur-916y: multicol containers with a `column-span:
-            // all` direct child get an exception — the span subtree
-            // is laid out by Taffy as a full-width block flowing
-            // between the column groups, so block-flow recursion via
-            // `fragment_block_subtree` can split it across pages
-            // when it overflows. Containers without span:all stay
-            // atomic.
-            let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
-            let multicol_has_span_all = is_multicol
-                && child_node.is_some_and(|n| {
-                    n.children.iter().any(|&id| {
-                        self.doc
-                            .get_node(id)
-                            .is_some_and(crate::blitz_adapter::has_column_span_all)
-                    })
-                });
-            let available_strip = (self.page_height_px - cursor_y).max(0.0);
-            let needs_recursion = has_splittable_children
-                && (!is_multicol || multicol_has_span_all)
-                && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
-                    || has_page_name_change_below(
-                        self.doc,
-                        child_id,
-                        self.used_page_names.as_ref(),
-                        0,
-                    )
-                    || would_split_block_subtree(
-                        self.doc,
-                        child_id,
-                        available_strip,
-                        self.page_height_px,
-                        0,
-                    ));
-            if needs_recursion {
-                let child_x_in_body = body_x + layout.location.x;
-                let (new_page, new_cursor) = fragment_block_subtree(
-                    &mut self.geometry,
-                    self.doc,
-                    self.column_styles,
-                    self.used_page_names.as_ref(),
-                    child_id,
-                    child_w,
-                    child_x_in_body,
-                    page_index,
-                    cursor_y,
-                    self.page_height_px,
-                    0,
-                );
-                page_index = new_page;
-                cursor_y = new_cursor;
+            // recursion gate covering all three break cases (truly
+            // oversized, in-place mid-element split, forced break
+            // below) — see `fragment_recursion_child`. Body passes
+            // `false` for `suppress_page_check` and
+            // `may_propagate_break`: the root has no parent to close
+            // and no one to hand a break up to, so a child's
+            // `RequestBreakBefore` is always resolved by the
+            // advance-and-retry inside the helper.
+            if fragment_recursion_child(
+                &cx,
+                &mut frame,
+                &mut self.geometry,
+                child,
+                this_top_in_body,
+                false,
+                false,
+            )
+            .is_some()
+            {
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
-                if !is_float {
-                    prev_used_page = Some(used_end.clone());
-                }
-                if matches!(
-                    break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
-                ) {
-                    page_index += 1;
-                    cursor_y = 0.0;
-                }
                 continue;
             }
 
             // No recursion needed — apply the existing strip-overflow
             // page advance for non-splittable / fits-fine children.
             // `break-inside: avoid` collapses to this path via
-            // `avoid_inside` above (it just suppresses the inline
-            // split branch; remaining-strip overflow handling is
-            // identical).
-            if cursor_y > 0.0 && cursor_y + child_h > self.page_height_px {
-                page_index += 1;
-                cursor_y = 0.0;
+            // `fragment_inline_child`'s `avoid` suppression (it just
+            // suppresses the inline split branch; remaining-strip
+            // overflow handling is identical).
+            if frame.cursor_y > 0.0 && frame.cursor_y + child_h > cx.page_h {
+                frame.page += 1;
+                frame.cursor_y = 0.0;
             }
 
             // Phase 4 PR 5 fix: include `layout.location.x` so the
@@ -903,7 +2135,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // every Block / Image / Paragraph and reverts to v2
             // drawing at x=0 without this. Matches the descendant
             // fragment shape on the line below.
-            let frag_x = body_x + layout.location.x;
+            let frag_x = frame.x_in_body + layout.location.x;
 
             // fulgur-sbw2: a child whose CSS-resolved height alone
             // exceeds `page_height_px` (e.g. `<div height:300vh>`)
@@ -912,164 +2144,48 @@ impl<'a> PaginationLayoutTree<'a> {
             // children fit the strip (the gate measures descendant
             // overflow, not the parent's intrinsic height), so we
             // would otherwise emit a single oversized fragment on the
-            // current page and stop. Emit one fragment per page strip
-            // with page-local y — `PaginationGeometry::is_split()`
-            // flips to `true` automatically once `fragments.len() > 1`,
-            // and render.rs picks the per-slice height accordingly.
-            // Descendants are recorded against the *first* slice only;
-            // exact mid-element pagination of nested content is still
-            // future work (see `record_subtree_descendants` notes).
-            //
-            // Tolerance: Stylo / Taffy round CSS-resolved `<length>`
-            // values to integer CSS pixels in some cases — a 220pt
-            // spacer (= 293.333… px) is reported back as `child_h =
-            // 294` while `page_height_px` is computed without that
-            // round-trip (= 293.33334). The literal `>` then trips
-            // by ~0.67 px and the spacer is wrongly sliced into two
-            // pages (gcpm_snapshot tests regress: spacer + page-break
-            // pair becomes 2 + 1 instead of 1 + 1 per section). One
-            // CSS pixel of slack absorbs the quantization without
-            // letting truly oversized content (`300vh ≈ 880 px on a
-            // 293-px strip`) slip through.
-            //
-            // Atomic children opt out: a transformed subtree paints
-            // as a single atomic box (CSS Transforms §6.1) — it must
-            // never split across pages because the rotation /
-            // skew / matrix is applied to a single shape, not
-            // per-slice. `contain: size` is NOT excluded: a
-            // `<div contain:size height:350vh>` still spans four
-            // pages visually (WPT `monolithic-overflow-022-print`),
-            // it's only the descendant content that's atomic.
+            // current page and stop. `slice_oversized_leaf` emits one
+            // fragment per page strip with page-local y — see its doc
+            // comment for the +1px oversize tolerance and the atomic
+            // transform exclusion (fulgur-pgbrk R7 shares the helper
+            // with the nested walk).
             let has_transform = child
                 .primary_styles()
                 .is_some_and(|s| !s.get_box().transform.0.is_empty());
-            if !has_transform && child_h > self.page_height_px + 1.0 {
-                let first_slice_h = (self.page_height_px - cursor_y).min(child_h);
-                self.geometry
-                    .entry(child_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: frag_x.as_px(),
-                        y: cursor_y.as_px(),
-                        width: child_w.as_px(),
-                        height: first_slice_h.as_px(),
-                    });
-                record_subtree_descendants(
+            if !has_transform && child_h > cx.page_h + 1.0 {
+                let (np, nc) = slice_oversized_leaf(
                     &mut self.geometry,
-                    self.doc,
+                    cx.doc,
                     child_id,
-                    page_index,
-                    cursor_y,
                     frag_x,
+                    child_w,
+                    child_h,
+                    frame.page,
+                    frame.cursor_y,
+                    cx.page_h,
                     0,
                 );
-                let mut remaining = child_h - first_slice_h;
-                let mut last_slice_h = first_slice_h;
-                // fulgur-ezst: a CHILDLESS block whose slicing would exceed
-                // the cap is a pathological amplifier — `<div
-                // style="height:99999999px">` is a web-only spacer/overflow
-                // idiom that prints nothing but blank pages. Collapse it to
-                // its single first slice: emit only that slice AND bound the
-                // space it occupies (resume following content on the next
-                // page) so the document does not balloon. Background / border
-                // presence does NOT gate this — nobody authors a
-                // >MAX_PAGES-tall filled band on purpose. A content-bearing
-                // block, or a childless band that fits within the cap, is not
-                // collapsed and takes the truncate-and-warn path below
-                // unchanged.
-                //
-                // fulgur-c8re (security): a replaced element (`<img>` /
-                // `<svg>`) is NOT special-cased out of this collapse —
-                // painting or not. It only reaches this branch when it is
-                // taller than `MAX_PAGES` pages (~10M px), a range no
-                // legitimate single image occupies, so clipping it to one page
-                // loses nothing real — even a *resolved* image, because a 1×1
-                // bitmap stretched with `height:99999999px` is the same
-                // amplifier as an unresolved `src`. Gating on tag name alone
-                // (the removed `is_replaced_content`) let such a node amplify a
-                // few bytes of HTML into ~`MAX_PAGES` blank pages (a validated
-                // high-severity DoS).
-                let collapse_childless = self.page_height_px > 0.0
-                    && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
-                    && !subtree_has_rendered_content(self.doc, child_id, 0);
-                if collapse_childless {
-                    // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
-                    // SPACE, not just the fragment pushes. `implied_page_count`
-                    // reads the max fragment index across ALL nodes, so if the
-                    // slice loop advanced `page_index` to `MAX_PAGES` a trailing
-                    // in-flow sibling (`<div huge></div><p>after</p>`) would be
-                    // stranded on a deep page and re-inflate the PDF to
-                    // ~`MAX_PAGES` blank pages. The first slice already emitted
-                    // above fills the current strip, so resume following content
-                    // on the next page.
-                    log::warn!(
-                        "pagination: collapsed a childless block of height \
-                         {child_h}px (slicing would exceed the {}-page limit) \
-                         to a single page (fulgur-ezst)",
-                        crate::MAX_PAGES,
-                    );
-                    page_index += 1;
-                    cursor_y = 0.0;
-                } else {
-                    // fulgur-2m6w: cap the per-page-strip slicing at
-                    // `MAX_PAGES`. `child_h` is attacker-controlled CSS
-                    // (`height` / `vh`), so without this bound a few bytes of
-                    // HTML (`<div style="height:99999999px">`) generate ~10^5
-                    // fragments — and a non-finite height would never reduce
-                    // `remaining`, looping forever. The `page_index` ceiling is
-                    // load-bearing on its own (it stops the loop even when
-                    // `remaining` is `+inf`); content past the cap is truncated.
-                    while remaining > 0.0 && page_index < crate::MAX_PAGES {
-                        page_index += 1;
-                        last_slice_h = remaining.min(self.page_height_px);
-                        self.geometry
-                            .entry(child_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index,
-                                x: frag_x.as_px(),
-                                y: 0.0_f32.as_px(),
-                                width: child_w.as_px(),
-                                height: last_slice_h.as_px(),
-                            });
-                        remaining -= last_slice_h;
-                    }
-                    if remaining > 0.0 {
-                        log::warn!(
-                            "pagination: block height {child_h}px exceeds the \
-                             {}-page limit; truncating remaining content to \
-                             bound rendering (fulgur-2m6w)",
-                            crate::MAX_PAGES,
-                        );
-                    }
-                    cursor_y = if child_h - first_slice_h > 0.0 {
-                        last_slice_h
-                    } else {
-                        cursor_y + first_slice_h
-                    };
-                }
+                frame.page = np;
+                frame.cursor_y = nc;
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
                 if !is_float {
-                    prev_used_page = Some(used_end.clone());
+                    frame.prev_used_page = Some(used_end.clone());
                 }
                 if matches!(
                     break_props.break_after,
                     Some(crate::draw_primitives::BreakAfter::Page)
                 ) {
-                    page_index += 1;
-                    cursor_y = 0.0;
+                    frame.page += 1;
+                    frame.cursor_y = 0.0;
                 }
                 continue;
             }
 
             let frag = Fragment {
-                page_index,
+                page_index: frame.page,
                 x: frag_x.as_px(),
-                y: cursor_y.as_px(),
+                y: frame.cursor_y.as_px(),
                 width: child_w.as_px(),
                 height: child_h.as_px(),
             };
@@ -1094,19 +2210,19 @@ impl<'a> PaginationLayoutTree<'a> {
             // this geometry today read only `page_index`.
             record_subtree_descendants(
                 &mut self.geometry,
-                self.doc,
+                cx.doc,
                 child_id,
-                page_index,
-                cursor_y,
+                frame.page,
+                frame.cursor_y,
                 frag_x,
                 0,
             );
 
-            cursor_y += child_h;
+            frame.cursor_y += child_h;
             emitted += 1;
             prev_bottom_y_in_body = this_top_in_body + child_h;
             if !is_float {
-                prev_used_page = Some(used_end.clone());
+                frame.prev_used_page = Some(used_end.clone());
             }
 
             // `break-after: page` forces a page boundary after the
@@ -1119,8 +2235,8 @@ impl<'a> PaginationLayoutTree<'a> {
                 break_props.break_after,
                 Some(crate::draw_primitives::BreakAfter::Page)
             ) {
-                page_index += 1;
-                cursor_y = 0.0;
+                frame.page += 1;
+                frame.cursor_y = 0.0;
             }
         }
 
@@ -1152,15 +2268,7 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return false;
-    };
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
-    for &child_id in walk_children {
+    for child_id in layout_children_of(doc, parent_id) {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -1222,33 +2330,10 @@ fn record_subtree_descendants(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return;
-    };
-    // Prefer Blitz's `layout_children` over the raw DOM `children` when
-    // it's been computed: when a block container has mixed
-    // block-level and inline-level children, Stylo synthesizes
-    // anonymous block wrappers around inline-level siblings (CSS 2.1
-    // §9.2.1.1). Those wrappers are real `Node` instances with their
-    // own `node_id` and Taffy layout, but they live ONLY in
-    // `layout_children` — the original `children` list still points
-    // at the underlying inline elements (e.g. a `<span
-    // display:inline-block>`).
-    //
-    // Without this preference v2 silently drops the inline-level
-    // span: extract assigns the inner paragraph's `node_id` to the
-    // anonymous wrapper (because Blitz's `is_inline_root()` flag sits
-    // on the wrapper), but the fragmenter — walking `children` —
-    // never visits the wrapper, so geometry has no fragment for that
-    // node_id and `dispatch_fragment` skips the paragraph entirely.
-    // (fulgur-bq6i: review_card_inline_block.html lost its
-    // "OK Approved" rounded badge for this exact reason.)
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
-    for &child_id in walk_children {
+    // fulgur-bq6i: anonymous block wrappers live only in
+    // `layout_children` — the shared enumeration policy is
+    // `layout_children_of`.
+    for child_id in layout_children_of(doc, parent_id) {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -1299,70 +2384,256 @@ fn record_subtree_descendants(
     }
 }
 
-/// fulgur-7hf5 (Phase 3.1.5c): pre-flight check for the recursion
-/// gate — true if walking `parent_id`'s direct children would cross
-/// a page boundary at `available_h`.
+/// fulgur-pgbrk R7 reachability gate for [`slice_oversized_leaf`] at the
+/// nested walk's per-child call site: true when a child is either
+/// **oversized** (taller than a full page strip on its own, e.g.
+/// `<div height:300vh>`) or **spills the current strip** (fits a fresh
+/// strip but crosses the strip boundary from wherever it currently
+/// sits — R7b, flex/grid cells and other floor-pinned children whose
+/// items are not class-A break points).
 ///
-/// Cheaper-than-real `fragment_block_subtree` simulator: same gap /
-/// OOF / whitespace skips, but no fragment emission. Returns `true`
-/// on the first overflow detected. Lets the caller decide "should I
-/// recurse here?" without paying the cost of recursion when recursion
-/// would not actually split — distinguishing "recurse and split"
-/// (within-child) from "push child whole / emit whole" (at-index or
-/// no split).
+/// Both checks share [`OVERSIZE_QUANTIZATION_TOLERANCE_PX`]
+/// deliberately: at `child_page_y == 0` (a child sitting at the top of
+/// a fresh strip) the two conditions collapse to the same shape, and
+/// using a tighter tolerance for one than the other let a box in the
+/// gap between them defeat the oversize tolerance via whichever
+/// condition had the smaller slack (Codex review, PR #719) — see
+/// `slice_oversized_leaf`'s "Oversize tolerance" doc section for the
+/// 220pt→294px Taffy-rounding case the tolerance exists to absorb.
+fn needs_leaf_slicing(child_h: f32, child_page_y: f32, page_height_px: f32) -> bool {
+    let oversized = child_h > page_height_px + OVERSIZE_QUANTIZATION_TOLERANCE_PX;
+    let spills_strip = child_page_y + child_h > page_height_px + OVERSIZE_QUANTIZATION_TOLERANCE_PX;
+    oversized || spills_strip
+}
+
+/// fulgur-sbw2 / fulgur-pgbrk R7: emit a monolithic leaf whose
+/// CSS-resolved height alone exceeds `page_height_px` (e.g.
+/// `<div height:300vh>`) as one fragment per page strip, instead of a
+/// single oversized fragment that hangs past the page bottom. Shared
+/// by the body-direct walk (`fragment_pagination_root`) and the nested
+/// walk (`fragment_block_subtree`) so monolithic content is treated
+/// uniformly at every depth — css-break-3 §4.1 permits either
+/// treatment of monolithic boxes, and fulgur slices everywhere.
 ///
-/// `available_h` is the strip height left below the parent's entry
-/// cursor on the current page. `page_h_px` lets the simulator detect
-/// grandchildren taller than a full page (which would themselves
-/// recurse and therefore split, regardless of `available_h`).
-fn would_split_block_subtree(
+/// Slice 1 lands at (`page_index`, `cursor_y`) with its height clipped
+/// to the remaining strip; slices 2..N start at `y = 0` on successive
+/// pages, each clipped to a full strip. `PaginationGeometry::is_split()`
+/// flips to `true` automatically once `fragments.len() > 1`, and
+/// render.rs picks the per-slice height accordingly. Descendants are
+/// recorded against the *first* slice only; exact mid-element
+/// pagination of nested content is still future work (see
+/// `record_subtree_descendants` notes). `depth` is the caller's
+/// recursion depth, forwarded to that recording.
+///
+/// Returns the updated `(page_index, cursor_y)`: following content
+/// resumes directly after the last slice.
+///
+/// Callers must apply the two reachability gates before invoking:
+///
+/// - **Oversize tolerance.** Stylo / Taffy round CSS-resolved
+///   `<length>` values to integer CSS pixels in some cases — a 220pt
+///   spacer (= 293.333… px) is reported back as `h = 294` while
+///   `page_height_px` is computed without that round-trip
+///   (= 293.33334). A literal `>` then trips by ~0.67 px and the
+///   spacer is wrongly sliced into two pages (gcpm_snapshot tests
+///   regress: spacer + page-break pair becomes 2 + 1 instead of 1 + 1
+///   per section). One CSS pixel of slack absorbs the quantization
+///   without letting truly oversized content (`300vh ≈ 880 px` on a
+///   293-px strip) slip through — hence `h > page_height_px + 1.0`.
+/// - **Atomic transform check.** A transformed subtree paints as a
+///   single atomic box (CSS Transforms §6.1) — it must never split
+///   across pages because the rotation / skew / matrix is applied to a
+///   single shape, not per-slice. `contain: size` is NOT excluded: a
+///   `<div contain:size height:350vh>` still spans four pages visually
+///   (WPT `monolithic-overflow-022-print`), it's only the descendant
+///   content that's atomic.
+#[allow(clippy::too_many_arguments)]
+fn slice_oversized_leaf(
+    geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
-    parent_id: usize,
-    available_h: f32,
-    page_h_px: f32,
+    id: usize,
+    x_in_body: f32,
+    w: f32,
+    h: f32,
+    mut page_index: u32,
+    cursor_y: f32,
+    page_height_px: f32,
     depth: usize,
-) -> bool {
-    if depth >= crate::MAX_DOM_DEPTH {
-        return false;
+) -> (u32, f32) {
+    let first_slice_h = (page_height_px - cursor_y).min(h);
+    geometry.entry(id).or_default().fragments.push(Fragment {
+        page_index,
+        x: x_in_body.as_px(),
+        y: cursor_y.as_px(),
+        width: w.as_px(),
+        height: first_slice_h.as_px(),
+    });
+    record_subtree_descendants(geometry, doc, id, page_index, cursor_y, x_in_body, depth);
+    let mut remaining = h - first_slice_h;
+    let mut last_slice_h = first_slice_h;
+    // fulgur-ezst: a CHILDLESS block whose slicing would exceed
+    // the cap is a pathological amplifier — `<div
+    // style="height:99999999px">` is a web-only spacer/overflow
+    // idiom that prints nothing but blank pages. Collapse it to
+    // its single first slice: emit only that slice AND bound the
+    // space it occupies (resume following content on the next
+    // page) so the document does not balloon. Background / border
+    // presence does NOT gate this — nobody authors a
+    // >MAX_PAGES-tall filled band on purpose. A content-bearing
+    // block, or a childless band that fits within the cap, is not
+    // collapsed and takes the truncate-and-warn path below
+    // unchanged.
+    //
+    // fulgur-c8re (security): a replaced element (`<img>` /
+    // `<svg>`) is NOT special-cased out of this collapse —
+    // painting or not. It only reaches this branch when it is
+    // taller than `MAX_PAGES` pages (~10M px), a range no
+    // legitimate single image occupies, so clipping it to one page
+    // loses nothing real — even a *resolved* image, because a 1×1
+    // bitmap stretched with `height:99999999px` is the same
+    // amplifier as an unresolved `src`. Gating on tag name alone
+    // (the removed `is_replaced_content`) let such a node amplify a
+    // few bytes of HTML into ~`MAX_PAGES` blank pages (a validated
+    // high-severity DoS).
+    let collapse_childless = page_height_px > 0.0
+        && (remaining / page_height_px).ceil() > crate::MAX_PAGES as f32
+        && !subtree_has_rendered_content(doc, id, 0);
+    if collapse_childless {
+        // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
+        // SPACE, not just the fragment pushes. `implied_page_count`
+        // reads the max fragment index across ALL nodes, so if the
+        // slice loop advanced `page_index` to `MAX_PAGES` a trailing
+        // in-flow sibling (`<div huge></div><p>after</p>`) would be
+        // stranded on a deep page and re-inflate the PDF to
+        // ~`MAX_PAGES` blank pages. The first slice already emitted
+        // above fills the current strip, so resume following content
+        // on the next page.
+        log::warn!(
+            "pagination: collapsed a childless block of height \
+             {h}px (slicing would exceed the {}-page limit) \
+             to a single page (fulgur-ezst)",
+            crate::MAX_PAGES,
+        );
+        (page_index + 1, 0.0)
+    } else {
+        // fulgur-2m6w: cap the per-page-strip slicing at
+        // `MAX_PAGES`. `h` is attacker-controlled CSS
+        // (`height` / `vh`), so without this bound a few bytes of
+        // HTML (`<div style="height:99999999px">`) generate ~10^5
+        // fragments — and a non-finite height would never reduce
+        // `remaining`, looping forever. The `page_index` ceiling is
+        // load-bearing on its own (it stops the loop even when
+        // `remaining` is `+inf`); content past the cap is truncated.
+        while remaining > 0.0 && page_index < crate::MAX_PAGES {
+            page_index += 1;
+            last_slice_h = remaining.min(page_height_px);
+            geometry.entry(id).or_default().fragments.push(Fragment {
+                page_index,
+                x: x_in_body.as_px(),
+                y: 0.0_f32.as_px(),
+                width: w.as_px(),
+                height: last_slice_h.as_px(),
+            });
+            remaining -= last_slice_h;
+        }
+        if remaining > 0.0 {
+            log::warn!(
+                "pagination: block height {h}px exceeds the \
+                 {}-page limit; truncating remaining content to \
+                 bound rendering (fulgur-2m6w)",
+                crate::MAX_PAGES,
+            );
+        }
+        let cursor_y = if h - first_slice_h > 0.0 {
+            last_slice_h
+        } else {
+            cursor_y + first_slice_h
+        };
+        (page_index, cursor_y)
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return false;
+}
+
+/// fulgur-7hf5 (Phase 3.1.5c) + fulgur-pgbrk walker-convergence
+/// phase 5: pre-flight check for the recursion gate — true if walking
+/// `node_id`'s direct children would cross a page boundary at
+/// `available_strip`.
+///
+/// This was `would_split_block_subtree`, a cheaper-than-real
+/// `fragment_block_subtree` simulator with its own overflow check —
+/// and it was **floor-blind**: it accumulated a cursor from 0 in
+/// available-strip space with no `overflow_floor` concept, so for a
+/// LEADING child it reported "would split" where the real walk with
+/// `allow_leading_break == false` (flex / grid / atomic-inline /
+/// orthogonal subtrees) pins the child at `page_start_y` and places
+/// it overflowing instead. That divergence (deferred during the
+/// fulgur-pgbrk Risk-1 `break_decision` extraction) cost a wasted
+/// recursion both paths eventually resolved identically.
+///
+/// The probe is now assimilated into the walk: it composes the walk's
+/// OWN child enumeration ([`layout_children_of`] +
+/// [`is_walkable_skip`], fulgur-yb27 — anonymous block wrappers Stylo
+/// synthesizes around inline-level siblings participate, CSS 2.1
+/// §9.2.1.1) with the walk's OWN break predicate ([`break_decision`])
+/// evaluated at the walk's floor: `0.0` iff `allow_leading_break` (a
+/// leading child's break may propagate to the container's own leading
+/// edge, css-break-3 §3), else `page_start_y`. Same predicate, same
+/// floor, same enumeration — the gate cannot disagree with the walk
+/// about the leading-child floor again.
+///
+/// `available_strip` is the strip height left below the container's
+/// entry cursor on the current page; the walk seeds the container
+/// frame's `page_start_y` from that cursor, so the page-local entry y
+/// is recovered as `page_h - available_strip` and child tops
+/// accumulate from it in page space. `allow_leading_break` is the
+/// would-be child frame's inherited permission
+/// (`frame.allow_leading_break && !suppress_page_check` at the call
+/// site); when it is false the walk's `propagate_leading_break` is
+/// false too, so the floor derived here is the walk's exact floor.
+/// (When the probed node ITSELF establishes a suppressed context the
+/// gate stays conservative: floor `0.0` may still report a split the
+/// pinned walk would place — the wasted-recursion direction, never an
+/// output divergence.)
+///
+/// Returns `false` when the children all fit the available strip, so
+/// the "parent CSS height > children sum" case falls through to the
+/// caller's whole-emit path. A child taller than a full page reports
+/// `true` regardless of the floor: the walk slices such a child
+/// (`slice_oversized_leaf`) after placing it, which is a split.
+/// Likewise (fulgur-pgbrk R7b) a child pinned at its floor — the
+/// suppressed-floor containers (flex / grid / atomic-inline /
+/// orthogonal) forbid the push — that spills the strip reports `true`:
+/// the walk slices it in place, and when it carries descendants the
+/// recursion must walk them so spill-shaped descendants fragment too
+/// instead of being recorded whole past the strip.
+fn subtree_requires_recursion(
+    cx: &FragmentationCtx<'_>,
+    node_id: usize,
+    available_strip: f32,
+    allow_leading_break: bool,
+) -> bool {
+    let page_h = cx.page_h;
+    let page_start_y = (page_h - available_strip).max(0.0);
+    let floor = if allow_leading_break {
+        0.0
+    } else {
+        page_start_y
     };
-    let mut cursor: f32 = 0.0;
+    // Page-local top of the child under consideration; accumulates the
+    // same inter-child gaps the walk picks up from Taffy's
+    // `layout.location.y` (collapsed margins, padding — CSS 2.1
+    // §10.6.3). Without the anon-wrapper enumeration a block whose tail
+    // anonymous wrapper would overflow is missed by the preflight, the
+    // recursion gate returns false, and the parent falls back to a
+    // single oversize fragment (fulgur-yb27).
+    let mut top: f32 = page_start_y;
     let mut prev_bottom: f32 = 0.0;
-    // fulgur-yb27: walk `layout_children` so anonymous block wrappers
-    // Stylo synthesizes around inline-level siblings (CSS 2.1
-    // §9.2.1.1) participate in the cumulative-overflow simulation.
-    // Mirrors the `fragment_block_subtree` walker switch above —
-    // without this, a block whose tail anon block wrapper would
-    // overflow is missed by the preflight, the recursion gate
-    // returns false, and the parent falls back to a single
-    // oversize fragment.
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
-    drop(layout_children_borrow);
-    for &child_id in &walk_children {
-        let Some(child) = doc.get_node(child_id) else {
+    for child_id in layout_children_of(cx.doc, node_id) {
+        if is_walkable_skip(cx.doc, child_id) {
+            continue;
+        }
+        let Some(child) = cx.doc.get_node(child_id) else {
             continue;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
-        {
-            use ::style::properties::longhands::position::computed_value::T as Pos;
-            let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_oof {
-                continue;
-            }
-        }
         let layout = child.final_layout;
         let h = layout.size.height;
         if h <= 0.0 {
@@ -1370,16 +2641,28 @@ fn would_split_block_subtree(
         }
         let this_top = layout.location.y;
         let gap = (this_top - prev_bottom).max(0.0);
-        cursor += gap;
-        if cursor + h > available_h {
+        top += gap;
+        if break_decision(top, h, floor, page_h) == BreakDecision::PushToNextPage {
             return true;
         }
-        if h > page_h_px {
-            // Grandchild itself oversized → would recurse → would
-            // split, regardless of `available_h` budget.
+        if top <= floor && top + h > page_h + OVERFLOW_EPS_PX {
+            // fulgur-pgbrk R7b: pinned at the floor and spilling the
+            // strip — the walk's spill-slice fires exactly here, which
+            // is a split; a spilling child with descendants needs the
+            // recursion so its descendants fragment per strip too.
+            // The epsilon mirrors the walk's spill predicate so gate
+            // and walk stay in agreement on the boundary.
             return true;
         }
-        cursor += h;
+        if h > page_h {
+            // Child itself oversized → the walk slices it → a split,
+            // regardless of the floor (placement precedes slicing, and
+            // `break_decision` is strict at the floor so the push
+            // branch above can never fire for a leading oversized
+            // child — no infinite page advance).
+            return true;
+        }
+        top += h;
         prev_bottom = this_top + h;
     }
     false
@@ -1618,20 +2901,109 @@ struct RowState {
     crossed_by_recursion: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fragment_block_subtree(
+/// fulgur-oc51: when a child crosses page boundaries *inside*
+/// `fragment_block_subtree` (via recursion into its subtree, or via
+/// fulgur-pgbrk R7 per-strip slicing of an oversized monolithic leaf),
+/// emit the parent's fragment for every page span crossed. Without
+/// this, only the trailing close at the end of the walk emits a parent
+/// fragment (on the *last* page), so the parent's background / borders
+/// disappear from the previous and intermediate pages.
+///
+/// The outgoing-page fragment spans `[page_start_y, page_height_px]`
+/// (the parent's content extended to the page bottom — otherwise the
+/// child would not have advanced past that page); each intermediate
+/// page is a full strip. `emit_pre_page` gates the outgoing-page
+/// fragment: the recursion branch suppresses it when the parent's
+/// leading child handed the break up without placing anything on the
+/// outgoing page (a full-strip background on an empty page would be
+/// wrong); the slicing branch always passes `true` because slice 1
+/// lands on the outgoing page by construction.
+///
+/// Emission dedupes across parallel flex / grid cells through the
+/// row's `emitted_parent_pages` set (`Option<&mut RowState>` — absent
+/// for sequential block flow, where each page is closed at most once).
+fn emit_parent_page_spans(
     geometry: &mut PaginationGeometryTable,
-    doc: &BaseDocument,
-    column_styles: Option<&crate::column_css::ColumnStyleTable>,
-    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
-    parent_id: usize,
-    parent_w: f32,
-    parent_x_in_body: f32,
-    page_in: u32,
-    cursor_in: f32,
-    page_height_px: f32,
-    depth: usize,
-) -> (u32, f32) {
+    mut row_state: Option<&mut RowState>,
+    parent_slice: &ParentSlice,
+    pre_page: u32,
+    post_page: u32,
+    page_start_y: f32,
+    emit_pre_page: bool,
+) {
+    if post_page <= pre_page {
+        return;
+    }
+    let prev_height = (parent_slice.page_height_px - page_start_y).max(0.0);
+    if emit_pre_page && prev_height > 0.0 {
+        let should_emit = row_state
+            .as_deref_mut()
+            .map(|rs| rs.emitted_parent_pages.insert(pre_page))
+            .unwrap_or(true);
+        if should_emit {
+            geometry
+                .entry(parent_slice.id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index: pre_page,
+                    x: parent_slice.x_in_body.as_px(),
+                    y: page_start_y.as_px(),
+                    width: parent_slice.width.as_px(),
+                    height: prev_height.as_px(),
+                });
+        }
+    }
+    for p in (pre_page + 1)..post_page {
+        let should_emit = row_state
+            .as_deref_mut()
+            .map(|rs| rs.emitted_parent_pages.insert(p))
+            .unwrap_or(true);
+        if should_emit {
+            geometry
+                .entry(parent_slice.id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index: p,
+                    x: parent_slice.x_in_body.as_px(),
+                    y: 0.0_f32.as_px(),
+                    width: parent_slice.width.as_px(),
+                    height: parent_slice.page_height_px.as_px(),
+                });
+        }
+    }
+}
+
+fn fragment_block_subtree(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+) -> SubtreeResult {
+    // Rebind the fixed inputs; mutable state lives on `frame`.
+    let parent_id = frame.id;
+    let parent_w = frame.width;
+    let parent_x_in_body = frame.x_in_body;
+    let page_in = frame.page;
+    let cursor_in = frame.cursor_y;
+    let depth = frame.depth;
+    // fulgur-pgbrk: `frame.allow_leading_break` answers "may an
+    // overflowing LEADING child propagate its break up to this box's own
+    // leading edge (CSS Fragmentation 3 §3 — a break before a box's first
+    // child is also a break before the box)?" True for block flow reached
+    // from the body walk; cleared for the whole subtree below any
+    // container that does not paginate its children independently —
+    // flex / grid containers (whose items are not class A break points,
+    // CSS Fragmentation 3 §3.2, and whose rows co-split in place per
+    // fulgur-ysms), atomic inline containers, and orthogonal-flow
+    // containers. Inside those, a leading child that overflows must
+    // stay put and be clipped rather than dragging a box it cannot
+    // actually move onto the next page.
+    let allow_leading_break = frame.allow_leading_break;
+    let doc = cx.doc;
+    let column_styles = cx.styles;
+    let used_page_names = cx.used_page_names;
+    let page_height_px = cx.page_h;
     if depth >= crate::MAX_DOM_DEPTH {
         // Bailed: emit a single whole-fragment for the parent at its
         // entry coordinates so geometry still has an entry for it.
@@ -1650,18 +3022,25 @@ fn fragment_block_subtree(
                 width: parent_w.as_px(),
                 height: h.as_px(),
             });
-        return (page_in, cursor_in + h);
+        return SubtreeResult::Placed {
+            page: page_in,
+            cursor_y: cursor_in + h,
+        };
     }
     let Some(parent) = doc.get_node(parent_id) else {
-        return (page_in, cursor_in);
+        return SubtreeResult::Placed {
+            page: page_in,
+            cursor_y: cursor_in,
+        };
     };
 
     let mut page_index = page_in;
     let mut cursor_y = cursor_in;
     // Y on `page_index` where the parent's current-page fragment
     // starts. We close one parent fragment and start a new one each
-    // time we cross a page boundary.
-    let mut page_start_y = cursor_in;
+    // time we cross a page boundary. The frame's `child()` helper
+    // seeds it from the entry cursor.
+    let mut page_start_y = frame.page_start_y;
     // fulgur-kv0r: parent-relative y of the first in-flow child on
     // the current page strip. Taffy's `layout.location.y` is in the
     // parent's full coordinate system (same value across page
@@ -1672,14 +3051,21 @@ fn fragment_block_subtree(
     // - grid / flex parallel siblings: same y (Taffy reports same
     //   `location.y` for cards in the same row, so the offset
     //   collapses to the row's first y).
-    let mut page_taffy_origin: f32 = 0.0;
-    let mut origin_pending_target_y: Option<f32> = None;
-    let mut origin_pending_same_row: Option<(f32, f32, f32)> = None;
+    let mut page_taffy_origin = frame.page_taffy_origin;
+    let mut origin_pending_target_y = frame.origin_pending_target_y;
+    let mut origin_pending_anchor = frame.origin_pending_anchor;
+    let mut origin_pending_same_row = frame.origin_pending_same_row;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
     // for implicit forced-break detection; see `fragment_pagination_root`
     // for the rationale and the outer-Option semantics.
-    let mut prev_used_page: Option<Option<String>> = None;
-    let mut row_state: Option<RowState> = None;
+    let mut prev_used_page = frame.prev_used_page.clone();
+    let mut row_state = frame.row_state.take();
+    // fulgur-pgbrk R4 / R5: has this call pushed anything into `geometry`
+    // yet? `SubtreeResult::RequestBreakBefore` promises the caller an
+    // untouched table, so both producers refuse to fire once this is set.
+    // Tracked explicitly rather than inferred from `cursor_y ==
+    // page_start_y`, which a zero-height child leaves true after emitting.
+    let mut emitted_anything = frame.emitted_anything;
     // fulgur-uebl: flex / grid containers establish a flex/grid
     // formatting context where children are not class A break points
     // (CSS Fragmentation 3 §3.2). The `page` property doesn't apply to
@@ -1701,53 +3087,84 @@ fn fragment_block_subtree(
     let suppress_page_check = allow_same_row_rebase
         || crate::blitz_adapter::is_atomic_inline_container_node(parent)
         || parent_is_orthogonal;
+    // fulgur-pgbrk: leading-edge break propagation is a block-flow rule.
+    // `suppress_page_check` already identifies exactly the containers whose
+    // children do not paginate independently, so reuse it as the gate and
+    // thread the result into the recursion so the restriction covers the
+    // entire subtree, not just the container's direct children.
+    let propagate_leading_break = allow_leading_break && !suppress_page_check;
+    // fulgur-pgbrk Risk 1: the parent's identity, x and width never
+    // change across this walk, so the nine "close the parent on the page
+    // it is leaving" sites capture them once here. The frame carries the
+    // same slice so the unified child-visitor (design doc,
+    // `fragment_container`) can read it through the frame.
+    frame.parent_slice = Some(ParentSlice {
+        id: parent_id,
+        x_in_body: parent_x_in_body,
+        width: parent_w,
+        page_height_px,
+    });
+    let parent_slice = frame.parent_slice.expect("parent_slice set on entry");
+
+    // fulgur-pgbrk R4 (css-break-3 §4.4 rule 2): breaking at a class A
+    // point is forbidden when a common ancestor of the adjoining
+    // siblings has `break-inside: avoid`. fulgur read `break-inside`
+    // only on inline roots, so a block wrapper's `avoid` was never
+    // consulted and the wrapper split between its children anyway.
+    //
+    // The box moves whole to the next page when it does not fit the
+    // strip it is standing on but WOULD fit a fresh one. If it fits
+    // neither, `avoid` is unfulfillable and §4.4's relaxation clause
+    // applies — honouring it would only push the tail off the page,
+    // so we fall through and split as before. This mirrors
+    // `avoid_is_fulfillable` on the inline-root path.
+    //
+    // `cursor_in > 0.0` excludes a box already at a page top: there is
+    // no earlier page to move to, and requesting one would bounce.
+    if cursor_in > 0.0
+        && propagate_leading_break
+        && column_styles
+            .and_then(|t| t.get(&parent_id))
+            .is_some_and(|p| {
+                matches!(
+                    p.break_inside,
+                    Some(crate::draw_primitives::BreakInside::Avoid)
+                )
+            })
+    {
+        let strip_here = (page_height_px - cursor_in).max(0.0);
+        // The floor here is this frame's own: the branch above already
+        // required `propagate_leading_break`, so the probe evaluates
+        // `break_decision` at floor 0.0 — the same answer the old
+        // floor-blind simulator gave on this path.
+        let splits_here =
+            subtree_requires_recursion(cx, parent_id, strip_here, propagate_leading_break);
+        let splits_on_a_fresh_page =
+            subtree_requires_recursion(cx, parent_id, page_height_px, propagate_leading_break);
+        if splits_here && !splits_on_a_fresh_page {
+            return SubtreeResult::RequestBreakBefore;
+        }
+    }
 
     // fulgur-yb27: prefer `layout_children` over raw `children` —
-    // same rationale as `record_subtree_descendants` and
-    // `fragment_pagination_root`. When a block container has mixed
-    // block-level and inline-level children, Stylo synthesizes
-    // anonymous block wrappers around the inline-level siblings (CSS
-    // 2.1 §9.2.1.1). Those wrappers carry their own Taffy layout and
-    // `node_id`, but they live ONLY in `layout_children`. Walking
-    // raw `children` would re-visit the underlying inline runs
-    // without their Taffy layout (so they'd land at the parent's
-    // origin instead of after their predecessor block) and skip the
-    // per-anon-block break decision the body-level walker honours
-    // since fulgur-bq6i.
+    // anonymous block wrappers Stylo synthesizes around inline-level
+    // siblings (CSS 2.1 §9.2.1.1) carry their own Taffy layout and
+    // `node_id` but live ONLY in `layout_children`. The shared
+    // enumeration policy is `layout_children_of`; the shared
+    // whitespace / out-of-flow skip is `is_walkable_skip`.
     //
     // Cross-page recursion correctness depends on fulgur-oc51's
     // parent-fragment push above — flipping this walk to
     // `layout_children` without that fix would lose the parent's
     // pre-recursion-page fragment in mo-006/008 (flex/grid + tall
     // monolithic + trailing inline text).
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
-    drop(layout_children_borrow);
-    for &child_id in &walk_children {
+    for child_id in layout_children_of(doc, parent_id) {
+        if is_walkable_skip(doc, child_id) {
+            continue;
+        }
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        // Whitespace-only text — same skip as `fragment_pagination_root`.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
-        // CSS 2.1 §10.6.4: out-of-flow children do not contribute to
-        // their containing block's normal-flow height.
-        {
-            use ::style::properties::longhands::position::computed_value::T as Pos;
-            let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_out_of_flow {
-                continue;
-            }
-        }
         let layout = child.final_layout;
         // fulgur-2m6w: same non-finite guard as `fragment_pagination_root`.
         // A nested child with a non-finite Taffy height (`+inf` / `NaN`, or
@@ -1825,6 +3242,7 @@ fn fragment_block_subtree(
                         page_start_y = rs.start_page_start_y;
                         page_taffy_origin = rs.start_page_taffy_origin;
                         origin_pending_target_y = None;
+                        origin_pending_anchor = None;
                         origin_pending_same_row = None;
                     }
                     // If crossed_by_recursion is false (e.g., a previous cell
@@ -1841,6 +3259,7 @@ fn fragment_block_subtree(
                     if rs.max_end_page > rs.start_page {
                         page_start_y = 0.0;
                         origin_pending_target_y = Some(rs.max_end_cursor_y);
+                        origin_pending_anchor = None;
                         origin_pending_same_row = None;
                     } else {
                         page_start_y = rs.start_page_start_y;
@@ -1868,81 +3287,65 @@ fn fragment_block_subtree(
         }
 
         if let Some(mut target_y) = origin_pending_target_y.take() {
+            let anchor = origin_pending_anchor.take();
             if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
                 && this_top_in_parent < row_bottom - 0.5
             {
                 target_y = same_row_y + (this_top_in_parent - row_top);
+                page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
+            } else if let Some(anchor) = anchor {
+                // Anchor the rebase on the point that
+                // PRODUCED `target_y` (a recursed subtree's, or sliced
+                // leaf's, own Taffy-space bottom edge —
+                // `this_top_in_parent + box_h` captured at the setting
+                // site) rather than THIS sibling's own
+                // `this_top_in_parent`. Using this sibling's own top
+                // here would force it flush against the previous
+                // sibling's tail, discarding their natural (possibly
+                // collapsed-margin) gap — see `origin_pending_anchor`'s
+                // doc comment and the margin-collapse regression this
+                // fixes.
+                page_taffy_origin = anchor - (target_y - page_start_y);
+            } else {
+                page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
             }
-            page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
         }
 
         if child_h <= 0.0 {
-            // Phase 2.3 fix: zero-height **element** nodes still
-            // need to enter geometry so their counter / string-set
-            // / bookmark markers participate in the parity walks.
-            //
-            // Zero-height children skip the inter-child gap (matching
-            // `fragment_pagination_root`'s zero-height branch where
-            // `continue` happens before the gap calc), so break-before
-            // can fire here without first folding gap into cursor_y.
-            if break_before_page && cursor_y > page_start_y {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: (cursor_y - page_start_y).as_px(),
-                    });
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                // Zero-height break-before: this child IS the first
-                // on the new page — apply origin rebase eagerly.
-                page_taffy_origin = this_top_in_parent;
-                (origin_pending_target_y, origin_pending_same_row) = (None, None);
+            // Run the shared zero-height branch (see
+            // `fragment_zero_height_child`). The helper reads /
+            // writes the frame; the in-loop locals shadow its
+            // fields, so flush them into the frame before the call
+            // and rebind them out afterwards.
+            frame.page = page_index;
+            frame.cursor_y = cursor_y;
+            frame.page_start_y = page_start_y;
+            frame.page_taffy_origin = page_taffy_origin;
+            frame.origin_pending_target_y = origin_pending_target_y;
+            frame.origin_pending_anchor = origin_pending_anchor;
+            frame.origin_pending_same_row = origin_pending_same_row;
+            frame.prev_used_page = prev_used_page.clone();
+            frame.row_state = row_state.take();
+            if fragment_zero_height_child(
+                cx,
+                frame,
+                geometry,
+                child,
+                child_id,
+                this_top_in_parent,
+                suppress_page_check,
+            ) {
+                emitted_anything = true;
             }
-            if child.element_data().is_some() {
-                geometry
-                    .entry(child_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: (parent_x_in_body + layout.location.x).as_px(),
-                        y: cursor_y.as_px(),
-                        width: child_w.as_px(),
-                        height: 0.0_f32.as_px(),
-                    });
-            }
-            // Honour `break-after: page` for zero-height elements
-            // too — same fulgur-p3uf (Phase 3.1.5a) fix as
-            // `fragment_pagination_root`'s zero-height branch.
-            if break_after_page {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: (cursor_y - page_start_y).as_px(),
-                    });
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                // Zero-height break-after: NEXT child is the first
-                // on the new page — defer origin rebase.
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
-            }
-            if !is_float {
-                prev_used_page = Some(used_end.clone());
-            }
+            page_index = frame.page;
+            cursor_y = frame.cursor_y;
+            page_start_y = frame.page_start_y;
+            page_taffy_origin = frame.page_taffy_origin;
+            origin_pending_target_y = frame.origin_pending_target_y;
+            origin_pending_anchor = frame.origin_pending_anchor;
+            origin_pending_same_row = frame.origin_pending_same_row;
+            prev_used_page = frame.prev_used_page.clone();
+            row_state = frame.row_state.take();
             continue;
         }
 
@@ -1955,6 +3358,15 @@ fn fragment_block_subtree(
         // this places them at the same page-local y; for sequential
         // block flow, it matches Taffy's stacked positions exactly.
         let mut child_page_y = page_start_y + (this_top_in_parent - page_taffy_origin);
+        // The cursor as of BEFORE this child — i.e. "has this container
+        // actually placed content on the current page strip yet?".
+        // `cursor_y` is about to be raised to this child's own top, which
+        // for the strip's leading child is the container's
+        // `border-top + padding-top` (or an uncollapsed top margin), NOT
+        // placed content. Gates that mean "content is already on this
+        // page" must read this, not the post-raise `cursor_y`, or a
+        // container's own decoration masquerades as content.
+        let content_on_this_page = cursor_y > page_start_y;
         // Update the cursor only when the child's bottom advances
         // past it. For block flow this matches cursor advancing by
         // `gap + child_h`; for grid parallel siblings the cursor
@@ -1962,32 +3374,60 @@ fn fragment_block_subtree(
         // checks see the full row height).
         cursor_y = cursor_y.max(child_page_y);
 
+        // fulgur-pgbrk R5 (css-break-3 §3.1.1): "A break-before value on
+        // a first in-flow child box is propagated to its container."
+        // Reaching here with nothing emitted means this IS the leading
+        // in-flow child, so its own break point does not exist (§4.1: no
+        // class C point without a gap) and the break belongs to the
+        // container. Hand it up rather than dropping it, which is what
+        // the `cursor_y > page_start_y` gate below did on its own.
+        //
+        // `!emitted_anything` is the whole of the leading-child test, and
+        // it is also exactly `RequestBreakBefore`'s invariant (nothing
+        // pushed into `geometry` yet). It deliberately does NOT also
+        // require `cursor_y <= page_start_y`: line 3289 has already
+        // raised `cursor_y` to `page_start_y + this_top_in_parent`, and
+        // for a leading child `this_top_in_parent` IS the container's
+        // `border-top + padding-top`. Gating on it therefore made any
+        // container with top decoration fail to propagate its own leading
+        // child's break, splitting instead and stranding a
+        // decoration-sized stub on the outgoing page.
+        //
+        // `cursor_in > 0.0` keeps this from firing when the container
+        // already starts at a page top: a break before it would be a
+        // no-op, and requesting one would bounce between caller and
+        // callee forever. It is also what terminates the caller's retry.
+        let may_propagate_break = !emitted_anything && cursor_in > 0.0 && propagate_leading_break;
+        if break_before_page && may_propagate_break {
+            return SubtreeResult::RequestBreakBefore;
+        }
+
         // Honour `break-before: page`. Leading collapse: only fires
         // when some content has already been placed on this page —
         // gated by `cursor_y > page_start_y` (mirrors body-level's
         // `cursor_y > 0.0` since body's implicit page_start is 0).
-        if break_before_page && cursor_y > page_start_y {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body.as_px(),
-                    y: page_start_y.as_px(),
-                    width: parent_w.as_px(),
-                    height: (cursor_y - page_start_y).as_px(),
-                });
+        // The breaking child lands on the next page, so the container
+        // continues and claims the full strip here.
+        if break_before_page && content_on_this_page {
+            let resume = resume_taffy_origin(
+                page_taffy_origin,
+                page_start_y,
+                page_height_px,
+                this_top_in_parent,
+            );
+            parent_slice.close_continuing(geometry, row_state.as_mut(), page_index, page_start_y);
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
             // The breaking child is the first in-flow child on the
-            // new page strip. Rebase the Taffy origin to its
-            // `this_top_in_parent` so it lands at `page_start_y` (= 0)
-            // — discarding the inter-child gap, matching CSS 3
-            // Fragmentation §3 (margins at forced breaks truncate).
-            page_taffy_origin = this_top_in_parent;
-            child_page_y = 0.0;
+            // new page strip. Rebase the Taffy origin so it lands at
+            // `page_start_y` (= 0) — discarding the inter-child gap,
+            // matching CSS 3 Fragmentation §3 (margins at forced breaks
+            // truncate). Padding and border do not truncate, so any
+            // unspent leading decoration still offsets it; see
+            // `resume_taffy_origin`.
+            page_taffy_origin = resume;
+            child_page_y = this_top_in_parent - resume;
         }
 
         // (Strip-overflow page cut moved below the recursion gate as
@@ -1999,171 +3439,316 @@ fn fragment_block_subtree(
 
         let child_x_in_body = parent_x_in_body + layout.location.x;
 
-        // fulgur-7hf5 (Phase 3.1.5c): unified recursion gate matching
-        // `fragment_pagination_root`'s body-direct branch — recurse
-        // whenever the child's subtree would split (in-place,
-        // truly-oversized, or forced-break-below). The recursion
-        // enters from the current cursor so an in-place split
-        // produces a `WithinChild`-shaped result on the current page
-        // strip and a tail on the next.
+        // fulgur-pgbrk: split a NESTED inline root at its Parley line
+        // boundaries, mirroring `fragment_pagination_root`'s body-direct
+        // branch. Previously this existed only at body level: a
+        // multi-line `<p>` (or a Stylo-synthesized anonymous block around
+        // an inline run) nested inside a recursed subtree fell through to
+        // the block path below and emitted as ONE oversized fragment, so
+        // every line past the page bottom was drawn into the margin strip
+        // and then off the paper, where it is discarded — silent content
+        // loss, the escalation in the bug report's §1c. The line-breaking
+        // machinery was correct all along, it was simply unreachable from
+        // the recursion.
         //
-        // `would_split_block_subtree` returns `false` when all the
-        // child's grandchildren fit the available strip — protects
-        // against the "parent CSS height > children sum" case where
-        // recursion would emit a parent fragment shorter than
-        // expected.
-        let available_strip = (page_height_px - cursor_y).max(0.0);
-        // fulgur-7hf5: see body-direct branch — multicol containers
-        // are atomic from the fragmenter's perspective.
-        let is_multicol = crate::blitz_adapter::is_multicol_container(child);
-        let needs_recursion = !child.children.is_empty()
-            && !is_multicol
-            && (has_forced_break_below(doc, child_id, column_styles, 0)
-                || has_page_name_change_below(doc, child_id, used_page_names, 0)
-                || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
-        if needs_recursion {
-            let pre_recursion_page = page_index;
-            let pre_recursion_cursor_y = cursor_y;
-            // fulgur-u0p0: enter recursion from `child_page_y` (the rebased
-            // page-local y of THIS child) instead of the parent's running
-            // `cursor_y`. For block flow, `child_page_y == cursor_y` after
-            // the cursor_y update above, so this is a no-op. For grid / flex
-            // parallel siblings (same Taffy `location.y` as a previous
-            // sibling on this page), `cursor_y` still holds the previous
-            // sibling's bottom — passing it would stack the parallel cell
-            // below the previous one instead of beside it. Using
-            // `child_page_y` keeps each cell's recursion strip aligned to
-            // the row's y on the current page.
-            let (np, nc) = fragment_block_subtree(
+        // `break-inside: avoid` suppresses the split, same as body level,
+        // so the paragraph stays whole and takes the block path — unless
+        // honouring it is impossible (CSS Fragmentation 3 §4.4: `avoid` is
+        // a preference and must be ignored when the box cannot fit a
+        // single fragmentainer, where obeying it would only push the tail
+        // off the page and destroy it). Mirrors the body-direct branch.
+        //
+        // Shared inline-root branch (see `fragment_inline_child`). The
+        // helper reads / writes the frame; the in-loop locals shadow its
+        // fields, so flush them into the frame before the call and rebind
+        // them out afterwards — same convention as the zero-height
+        // branch. The nested-only parent-fragment emission (fulgur-oc51)
+        // and `row_state` bookkeeping live inside the helper behind
+        // `frame.kind == ContainerKind::Nested` / `frame.parent_slice`.
+        frame.page = page_index;
+        frame.cursor_y = cursor_y;
+        frame.page_start_y = page_start_y;
+        frame.page_taffy_origin = page_taffy_origin;
+        frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_anchor = origin_pending_anchor;
+        frame.origin_pending_same_row = origin_pending_same_row;
+        frame.prev_used_page = prev_used_page.clone();
+        frame.row_state = row_state.take();
+        let inline_split = fragment_inline_child(
+            cx,
+            frame,
+            geometry,
+            child,
+            child_id,
+            this_top_in_parent,
+            suppress_page_check,
+        );
+        page_index = frame.page;
+        cursor_y = frame.cursor_y;
+        page_start_y = frame.page_start_y;
+        page_taffy_origin = frame.page_taffy_origin;
+        origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_anchor = frame.origin_pending_anchor;
+        origin_pending_same_row = frame.origin_pending_same_row;
+        prev_used_page = frame.prev_used_page.clone();
+        row_state = frame.row_state.take();
+        if inline_split.is_some() {
+            emitted_anything = true;
+            continue;
+        }
+
+        // fulgur-7hf5 (Phase 3.1.5c): unified recursion gate matching
+        // `fragment_pagination_root`'s body-direct branch — see
+        // `fragment_recursion_child`. Same flush / rebind convention
+        // as the zero-height and inline helpers above: the helper
+        // reads / writes the frame; the in-loop locals shadow its
+        // fields, so flush them into the frame before the call and
+        // rebind them out afterwards. `may_propagate_break` carries
+        // the nested leading-child rule (css-break-3 §3.1.1 — a break
+        // before a box's first child is a break before the box,
+        // recursively): the helper hands `RequestBreakBefore` back
+        // only when the child is OUR leading child and breaks may
+        // still travel up. Computed once before the `break-before`
+        // check above, since nothing between there and here can change
+        // its inputs (the branches that set `emitted_anything` all
+        // `continue`).
+        frame.page = page_index;
+        frame.cursor_y = cursor_y;
+        frame.page_start_y = page_start_y;
+        frame.page_taffy_origin = page_taffy_origin;
+        frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_anchor = origin_pending_anchor;
+        frame.origin_pending_same_row = origin_pending_same_row;
+        frame.prev_used_page = prev_used_page.clone();
+        frame.row_state = row_state.take();
+        let recursed = fragment_recursion_child(
+            cx,
+            frame,
+            geometry,
+            child,
+            this_top_in_parent,
+            suppress_page_check,
+            may_propagate_break,
+        );
+        page_index = frame.page;
+        cursor_y = frame.cursor_y;
+        page_start_y = frame.page_start_y;
+        page_taffy_origin = frame.page_taffy_origin;
+        origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_anchor = frame.origin_pending_anchor;
+        origin_pending_same_row = frame.origin_pending_same_row;
+        prev_used_page = frame.prev_used_page.clone();
+        row_state = frame.row_state.take();
+        match recursed {
+            Some(RecursionOutcome::Placed) => {
+                emitted_anything = true;
+                continue;
+            }
+            Some(RecursionOutcome::RequestBreakBefore) => {
+                return SubtreeResult::RequestBreakBefore;
+            }
+            None => {}
+        }
+
+        // No recursion — apply the strip-overflow page cut for
+        // children that don't split (non-splittable, or splittable
+        // but all grandchildren fit the available strip — the
+        // parent-CSS-height-vs-children-sum case stays here).
+        // Use `child_page_y + child_h` (the actual placement bottom)
+        // rather than `cursor_y + child_h` so a parallel sibling
+        // returning to a smaller page-local y is checked correctly.
+        //
+        // fulgur-pgbrk: the guard is `child_page_y > 0.0`, NOT
+        // `child_page_y > page_start_y`. The latter is never true for the
+        // FIRST in-flow child on a strip (its rebased `child_page_y` *is*
+        // `page_start_y`), so a parent that began mid-page could never
+        // break before its own leading child — it laid the child out past
+        // the page bottom, through the margin strip and off the paper,
+        // where the content is silently discarded. Comparing against 0
+        // instead propagates the break up to the parent's leading edge
+        // (CSS Fragmentation 3 §3: a break before a box's first child is
+        // also a break before the box), which is legal precisely because
+        // the parent has not emitted anything on this page yet. At
+        // `child_page_y == 0.0` we are already at the top of a fresh page
+        // and there is nowhere left to push to, so the gate correctly
+        // stops recursing pages and the oversized leaf overflows (the
+        // inline-root branch above is what saves multi-line content in
+        // that case).
+        let overflow_floor = if propagate_leading_break {
+            0.0
+        } else {
+            page_start_y
+        };
+        if break_decision(child_page_y, child_h, overflow_floor, page_height_px)
+            == BreakDecision::PushToNextPage
+        {
+            // css-break-3 §3.1.1 / §4.1, the unforced twin of the
+            // `break-before` propagation above: pushing our LEADING child
+            // to the next page is a break at the class B point between
+            // this container's content edge and that child. Taking it
+            // leaves the container's `border-top + padding-top` behind on
+            // the outgoing page — legal only if that decoration actually
+            // fits there. When nothing has been emitted yet it does not:
+            // the container has no content on this page, so the only
+            // thing the stub would paint is decoration for content that
+            // has moved away. Hand the break up so the caller re-places
+            // the whole container on the next page (which is already what
+            // a childless or inline-root container does at this shape).
+            //
+            // Safe with respect to `RequestBreakBefore`'s invariant:
+            // `may_propagate_break` requires `!emitted_anything`, so
+            // `geometry` is untouched. Terminating: the caller re-enters
+            // at `cursor_in == 0.0`, which the predicate excludes.
+            if may_propagate_break {
+                return SubtreeResult::RequestBreakBefore;
+            }
+            // Only claim a fragment on the page we are leaving when the
+            // parent actually placed content there. When the break is
+            // propagated from the parent's leading edge (nothing emitted
+            // yet, `cursor_y == page_start_y`) the parent does not appear
+            // on the outgoing page at all, and a zero-height fragment
+            // would additionally flip `is_split()` on and corrupt
+            // downstream slicing.
+            let resume = resume_taffy_origin(
+                page_taffy_origin,
+                page_start_y,
+                page_height_px,
+                this_top_in_parent,
+            );
+            if cursor_y > page_start_y {
+                parent_slice.close_continuing(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                );
+            }
+            page_index += 1;
+            cursor_y = 0.0;
+            page_start_y = 0.0;
+            // Forced to a fresh page: rebase the Taffy origin so the
+            // current child lands at the top of the new strip, below
+            // whatever leading decoration of this container the
+            // outgoing page did not spend (see `resume_taffy_origin`).
+            // Sequential siblings then continue from this point.
+            page_taffy_origin = resume;
+            child_page_y = this_top_in_parent - resume;
+        }
+
+        // fulgur-pgbrk R7: slice a child the walk cannot place whole,
+        // uniform with the body-direct walk (fulgur-sbw2). Two shapes
+        // reach this branch, both handled identically by
+        // `slice_oversized_leaf` (whose doc comment carries the +1px
+        // oversize tolerance and the atomic-transform exclusion — the
+        // SAME gates the body-direct branch applies):
+        //
+        // 1. **Oversized**: a monolithic leaf whose own height exceeds
+        //    the fragmentainer (childless, or whose grandchildren all
+        //    fit — either way the recursion gate above said "no break
+        //    points below"). css-break-3 §4.1 permits either treatment
+        //    of monolithic content; fulgur slices everywhere so the
+        //    geometry never lands outside the page box. A nested
+        //    `overflow: hidden` box is monolithic identically.
+        // 2. **Strip spill (R7b)**: a child that fits a fresh strip
+        //    but crosses the current strip boundary at a floor that
+        //    forbids the push — flex / grid cells, atomic-inline and
+        //    orthogonal children, whose items are not class A break
+        //    points (§2.1 / §4.1) and whose leading child is pinned at
+        //    the row's entry cursor by the suppressed floor. Per §2.1
+        //    each cell / item is a parallel fragmentation flow, and
+        //    §4.1 lets a layout model add break points; since width is
+        //    page-invariant the slice is exact. Each crossed strip
+        //    gets one fragment clipped to it at the box's computed
+        //    content offsets — the RowState co-split machinery then
+        //    starts the same-row sibling at the identical cursor, so
+        //    parallel cells clip in lockstep and
+        //    `find_overflowing_fragments` has nothing left to catch.
+        //
+        // In both shapes the whole-emit fallback below is unreachable:
+        // geometry that would hang past the strip is sliced instead
+        // of overflowing the page box.
+        let has_transform = child
+            .primary_styles()
+            .is_some_and(|s| !s.get_box().transform.0.is_empty());
+        if !has_transform && needs_leaf_slicing(child_h, child_page_y, page_height_px) {
+            emitted_anything = true;
+            let pre_slice_page = page_index;
+            let (np, nc) = slice_oversized_leaf(
                 geometry,
                 doc,
-                column_styles,
-                used_page_names,
                 child_id,
-                child_w,
                 child_x_in_body,
+                child_w,
+                child_h,
                 page_index,
                 child_page_y,
                 page_height_px,
                 depth + 1,
             );
             page_index = np;
-            // fulgur-u0p0: when the recursion stayed on the same page,
-            // keep the larger of the parent's existing `cursor_y` (row max
-            // bottom from a previous parallel sibling) and the recursion's
-            // returned `nc`. When the recursion crossed pages, the previous
-            // page's `cursor_y` is stale — adopt `nc` directly.
-            cursor_y = if np == pre_recursion_page {
+            // fulgur-u0p0: when the slicing stayed on the same page
+            // (only reachable at the `MAX_PAGES` ceiling), keep the
+            // larger of the parent's existing `cursor_y` (row max
+            // bottom from a previous parallel sibling) and the slicer's
+            // returned cursor. When it crossed pages, the old page's
+            // `cursor_y` is stale — adopt the returned one directly.
+            cursor_y = if np == pre_slice_page {
                 cursor_y.max(nc)
             } else {
                 nc
             };
-            // If the recursion crossed a boundary, the parent's
-            // current-page fragment must restart at y=0 on the new
-            // page. Defensive `nc < page_start_y` guards against
-            // backward cursor returns (impossible in normal flow).
-            if page_index != pre_recursion_page || nc < page_start_y {
-                // fulgur-oc51: emit parent fragments for every
-                // page span the recursion crossed. Without this,
-                // only the trailing close at the end of this
-                // function emits a parent fragment (on the *last*
-                // page), so the parent's background / borders
-                // disappear from the previous and intermediate
-                // pages. Pre-recursion overflow close (no-
-                // recursion branch, line ~1713) covers the
-                // analogous case for non-recursive children, but
-                // there is no equivalent push when the page
-                // advance happens *inside* the recursion.
-                //
-                // The parent's content extended to the page
-                // bottom on every previous page (otherwise the
-                // recursion would not have advanced past that
-                // page), so the previous-page fragment spans
-                // `[page_start_y, page_height_px]` and any
-                // intermediate page is a full strip.
-                if page_index > pre_recursion_page {
-                    // Match the no-recursion strip-overflow shape
-                    // (line ~1713): the parent fragment's height is
-                    // its accumulated logical content on the
-                    // previous page, treated as if the splitting
-                    // child had been laid out in full (without
-                    // fragmentation). The renderer clips the
-                    // overflow visually. Using the visible page
-                    // strip (`page_height_px - page_start_y`)
-                    // instead would stop short of the page's
-                    // margin-area paint that adjacent passing tests
-                    // (mo-006/008) expect.
-                    let logical_height = (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
-                    let prev_height = logical_height.max((page_height_px - page_start_y).max(0.0));
-                    if prev_height > 0.0 {
-                        let should_emit = row_state
-                            .as_mut()
-                            .map(|rs| rs.emitted_parent_pages.insert(pre_recursion_page))
-                            .unwrap_or(true);
-                        if should_emit {
-                            geometry
-                                .entry(parent_id)
-                                .or_default()
-                                .fragments
-                                .push(Fragment {
-                                    page_index: pre_recursion_page,
-                                    x: parent_x_in_body.as_px(),
-                                    y: page_start_y.as_px(),
-                                    width: parent_w.as_px(),
-                                    height: prev_height.as_px(),
-                                });
-                        }
-                    }
-                    for p in (pre_recursion_page + 1)..page_index {
-                        let should_emit = row_state
-                            .as_mut()
-                            .map(|rs| rs.emitted_parent_pages.insert(p))
-                            .unwrap_or(true);
-                        if should_emit {
-                            geometry
-                                .entry(parent_id)
-                                .or_default()
-                                .fragments
-                                .push(Fragment {
-                                    page_index: p,
-                                    x: parent_x_in_body.as_px(),
-                                    y: 0.0_f32.as_px(),
-                                    width: parent_w.as_px(),
-                                    height: page_height_px.as_px(),
-                                });
-                        }
-                    }
-                }
-                page_start_y = 0.0;
-                origin_pending_target_y = Some(cursor_y);
-                let row_top = this_top_in_parent;
-                let row_bottom = row_top + child_h;
-                origin_pending_same_row =
-                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
-                // fulgur-ysms: mark that this row had a recursion-driven page
-                // cross so subsequent same-row cells know to co-split.
-                if let Some(ref mut rs) = row_state {
-                    rs.crossed_by_recursion = true;
-                }
+            // fulgur-oc51: the child crossed pages, so the parent's
+            // fragment must exist on every crossed page — otherwise its
+            // background / borders vanish from every page but the last.
+            // Slice 1 lands on the outgoing page by construction, so
+            // the pre-page emission is unconditional here.
+            emit_parent_page_spans(
+                geometry,
+                row_state.as_mut(),
+                &parent_slice,
+                pre_slice_page,
+                page_index,
+                page_start_y,
+                true,
+            );
+            page_start_y = 0.0;
+            origin_pending_target_y = Some(cursor_y);
+            let row_top = this_top_in_parent;
+            let row_bottom = row_top + child_h;
+            origin_pending_same_row = allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+            // Non-row anchor (see
+            // `origin_pending_anchor`'s doc comment) — this sliced
+            // leaf's own Taffy-space bottom edge, so the next sibling's
+            // natural gap to it survives the rebase. Set
+            // unconditionally; the consumer prefers
+            // `origin_pending_same_row` when present, so this is a
+            // no-op in the flex/grid row case above.
+            origin_pending_anchor = Some(this_top_in_parent + child_h);
+            // fulgur-ysms: mark the row crossed so subsequent same-row
+            // cells co-split from the row-start state (uniform with the
+            // recursion branch's handling).
+            if let Some(ref mut rs) = row_state {
+                rs.crossed_by_recursion = true;
             }
 
-            // Honour `break-after: page` after recursion.
+            // Honour `break-after: page` after the slicing (mirrors the
+            // whole-emit tail below).
             if break_after_page {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: (cursor_y - page_start_y).as_px(),
-                    });
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+                (
+                    origin_pending_target_y,
+                    origin_pending_anchor,
+                    origin_pending_same_row,
+                ) = (Some(page_start_y), None, None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -2179,46 +3764,11 @@ fn fragment_block_subtree(
             continue;
         }
 
-        // No recursion — apply the strip-overflow page cut for
-        // children that don't split (non-splittable, or splittable
-        // but all grandchildren fit the available strip — the
-        // parent-CSS-height-vs-children-sum case stays here).
-        // Use `child_page_y + child_h` (the actual placement bottom)
-        // rather than `cursor_y + child_h` so a parallel sibling
-        // returning to a smaller page-local y is checked correctly.
-        if child_page_y > page_start_y && child_page_y + child_h > page_height_px {
-            let should_emit = row_state
-                .as_mut()
-                .map(|rs| rs.emitted_parent_pages.insert(page_index))
-                .unwrap_or(true);
-            if should_emit {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: (cursor_y - page_start_y).as_px(),
-                    });
-            }
-            page_index += 1;
-            cursor_y = 0.0;
-            page_start_y = 0.0;
-            // Forced to a fresh page: rebase the Taffy origin so the
-            // current child lands at page_start_y (= 0) on the new
-            // page. Sequential siblings then continue from this point.
-            page_taffy_origin = this_top_in_parent;
-            child_page_y = 0.0;
-        }
-
-        // Child fits the strip (or is an atomic oversized leaf that
-        // simply overflows below the page bottom — with a single
-        // in-flow child there is no valid interior split point, so
-        // the leaf emits whole). Emit its fragment and recurse into
-        // descendants on the same page.
+        // Child fits the strip (or — before fulgur-pgbrk R7 — was an
+        // atomic oversized leaf emitted whole; now only transform-atomic
+        // or sub-tolerance overshoot reaches whole-emit). Emit its
+        // fragment and recurse into descendants on the same page.
+        emitted_anything = true;
         geometry
             .entry(child_id)
             .or_default()
@@ -2249,21 +3799,21 @@ fn fragment_block_subtree(
         // Honour `break-after: page` after the child fragment lands
         // (and the descendant walk records same-page entries).
         if break_after_page {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body.as_px(),
-                    y: page_start_y.as_px(),
-                    width: parent_w.as_px(),
-                    height: (cursor_y - page_start_y).as_px(),
-                });
+            parent_slice.close_unforced(
+                geometry,
+                row_state.as_mut(),
+                page_index,
+                page_start_y,
+                cursor_y,
+            );
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
-            (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+            (
+                origin_pending_target_y,
+                origin_pending_anchor,
+                origin_pending_same_row,
+            ) = (Some(page_start_y), None, None);
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
@@ -2288,6 +3838,26 @@ fn fragment_block_subtree(
         }
     }
 
+    // css-break-3 §5.4 (`box-decoration-break: slice`): the container's
+    // own trailing decoration belongs to its LAST fragment. `cursor_y`
+    // tracks child content only — children are laid out inside the
+    // padding box — so without this the box's `padding-bottom +
+    // border-bottom` is dropped from every fragmented container, and
+    // `render.rs` closes the border box at the last child's edge.
+    //
+    // Folded into `cursor_y` rather than into the emitted height alone
+    // so the returned cursor describes the box's real bottom: the
+    // caller places the next sibling from it (`fragment_recursion_child`
+    // adopts `new_cursor` verbatim), and the non-recursed sibling path
+    // it has to agree with advances by Taffy's full border-box `child_h`.
+    //
+    // The leading decoration needs no equivalent: children sit
+    // `lead_in` below the container's own top, so the first fragment —
+    // measured from `page_start_y` to the first child's bottom —
+    // already contains it.
+    let (lead_in, lead_out) = box_decoration(parent);
+    cursor_y += lead_out;
+
     // Close the parent's fragment for the final page span. Always
     // emit at least one fragment so the parent is represented in
     // geometry — `collect_counter_states` and friends look up nodes
@@ -2296,19 +3866,21 @@ fn fragment_block_subtree(
     // `render.rs`. Height may be 0 when every child was skipped
     // (whitespace / OOF / running) — that's intentional and
     // matches `fragment_pagination_root`'s zero-height-element path.
-    geometry
-        .entry(parent_id)
-        .or_default()
-        .fragments
-        .push(Fragment {
-            page_index,
-            x: parent_x_in_body.as_px(),
-            y: page_start_y.as_px(),
-            width: parent_w.as_px(),
-            height: (cursor_y - page_start_y).as_px(),
-        });
+    parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
 
-    (page_index, cursor_y)
+    // Publish the split, for the same reason the inline path does: a
+    // consumer partitioning this box's content across its fragments has
+    // to know which part of the first and last fragment is decoration
+    // rather than content.
+    if let Some(entry) = geometry.get_mut(&parent_id) {
+        entry.content_lead_in = lead_in.as_px();
+        entry.content_lead_out = lead_out.as_px();
+    }
+
+    SubtreeResult::Placed {
+        page: page_index,
+        cursor_y,
+    }
 }
 
 /// fulgur-p55h: read per-line `(min_coord, max_coord)` pairs from a
@@ -2335,6 +3907,100 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
             (m.min_coord, m.max_coord)
         })
         .collect()
+}
+
+/// Border-box metrics for an inline root (fulgur-pgbrk R1).
+///
+/// Returns `(lead_in, lines_h, lead_out)`, all in CSS px:
+///
+/// - `lead_in` — `border-top + padding-top`, the decoration above the
+///   first line box.
+/// - `lines_h` — the line-box extent, `last.max_coord - first.min_coord`.
+/// - `lead_out` — `padding-bottom + border-bottom`, below the last line box.
+///
+/// The two decoration edges must come from Taffy, not from the line
+/// metrics: Parley lays an inline root out in **content-box** coordinates,
+/// so a `<p>` with `border-top: 7px; padding: 150px 0 90px` reports
+/// `line_metrics[0].0 == 0.0` while `final_layout` reports
+/// `border.top = 7`, `padding.top = 150`, `padding.bottom = 90`. Measuring
+/// the box as `last.1 - first.0` therefore under-reports it by
+/// `lead_in + lead_out` — the R1 defect: the push-whole decision never
+/// fires, and the tail runs off the paper.
+///
+/// Non-finite Taffy values are sanitized to `0.0` — same convention as
+/// the child-height sanitization in `fragment_block_subtree`.
+fn inline_root_box_metrics(node: &blitz_dom::Node, line_metrics: &[(f32, f32)]) -> (f32, f32, f32) {
+    let (lead_in, lead_out) = box_decoration(node);
+    let lines_h = match (line_metrics.first(), line_metrics.last()) {
+        (Some(first), Some(last)) => (last.1 - first.0).max(0.0),
+        _ => 0.0,
+    };
+    (lead_in, lines_h, lead_out)
+}
+
+/// Where a container's continuation resumes, in the container's own
+/// Taffy coordinate space — the value to install as `page_taffy_origin`
+/// after advancing a page, so that the child being placed lands at
+/// `page_start_y + (child_top - origin)`.
+///
+/// Two things compete for the new strip's top:
+///
+/// - `cut` — the box-local y at which the outgoing page ended. The
+///   container's outgoing fragment spans its whole remaining strip (see
+///   [`ParentSlice::close_continuing`]), so everything above `cut` is
+///   already painted and must not be painted again.
+/// - `child_top` — the child's own box-local top.
+///
+/// Taking the **earlier** of the two is what makes both cases right:
+///
+/// - `child_top >= cut` (the ordinary split, between or inside
+///   children): the child was pushed whole from below the cut, so the
+///   gap collapses and it lands flush at the strip top. This is the
+///   long-standing behaviour, `origin = child_top`.
+/// - `child_top < cut` (the container's own `border-top + padding-top`
+///   straddled the boundary): the leading decoration is only partly
+///   spent, and the remainder is still owed on the continuation. The
+///   child is inset by exactly what is left, `child_top - cut`, instead
+///   of being slammed against the strip top and silently swallowing it.
+///
+/// Without the second case a container cut inside its own decoration
+/// loses the unspent part from every fragment, so its border box does
+/// not add up across pages.
+fn resume_taffy_origin(
+    page_taffy_origin: f32,
+    page_start_y: f32,
+    page_height_px: f32,
+    child_top: f32,
+) -> f32 {
+    let cut = page_taffy_origin + (page_height_px - page_start_y).max(0.0);
+    child_top.min(cut)
+}
+
+/// A box's own block-axis decoration, in CSS px:
+/// `(border-top + padding-top, padding-bottom + border-bottom)`.
+///
+/// This is the part of a border box that belongs to the box itself
+/// rather than to any child, and the part that
+/// `box-decoration-break: slice` (CSS Fragmentation 3 §5.4, the initial
+/// value) assigns to the FIRST and LAST fragment respectively. Both
+/// come from Taffy rather than from any content measurement — see
+/// [`inline_root_box_metrics`] for why that distinction bites on the
+/// inline path.
+///
+/// Shared by the inline-root splitter and by
+/// [`fragment_block_subtree`]'s tail, so the two paths cannot drift on
+/// what a box's decoration is. Non-finite Taffy values are sanitized to
+/// `0.0`, matching the child-height sanitization in
+/// `fragment_block_subtree`.
+fn box_decoration(node: &blitz_dom::Node) -> (f32, f32) {
+    fn finite(v: f32) -> f32 {
+        if v.is_finite() { v.max(0.0) } else { 0.0 }
+    }
+    let layout = &node.final_layout;
+    (
+        finite(layout.border.top) + finite(layout.padding.top),
+        finite(layout.padding.bottom) + finite(layout.border.bottom),
+    )
 }
 
 /// fulgur-p55h: split a multi-line inline root across page boundaries
@@ -2375,89 +4041,205 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// Edge case: if the very first line on a fresh page is taller than
 /// the page strip, the line is emitted as an oversized fragment (no
 /// further mid-line split) — same fallback as the block branch.
-#[allow(clippy::too_many_arguments)]
+///
+/// fulgur-pgbrk R1: `lead_in` / `lead_out` are the box's own decoration
+/// (see [`inline_root_box_metrics`]). Emitted fragments describe the
+/// **border box**, so `lead_in` is added to the first fragment and
+/// `lead_out` to the last, per `box-decoration-break: slice`
+/// (CSS Fragmentation 3 §5.4). Both are recorded on the geometry entry
+/// so line-partitioning consumers can subtract them back out.
+/// fulgur-pgbrk Risk 1: the split inputs travel as one
+/// [`InlineSplitInput`] and the placement as one [`InlinePlacement`],
+/// so the signature no longer needs a clippy arity exemption.
 fn fragment_inline_root(
     geometry: &mut PaginationGeometryTable,
-    child_id: usize,
-    paragraph_x: f32,
-    width: f32,
+    page_height_px: f32,
+    placement: InlinePlacement,
+    input: &InlineSplitInput<'_>,
+) -> (u32, f32, usize) {
+    if input.line_metrics.is_empty() {
+        return (placement.page, placement.cursor_y, 0);
+    }
+
+    // Pass 1: honour the orphans / widows minimums.
+    let plan = scan_split_points(input, placement.cursor_y, placement.page, page_height_px);
+
+    // css-break-3 §4.4 relaxation: "If that still does not lead to
+    // sufficient break points ... the UA may break anywhere in order to
+    // avoid losing content off the edge." A constrained scan that could
+    // not find a legal split keeps accumulating lines into one fragment,
+    // which then hangs past the fragmentainer — into the bottom margin
+    // and off the paper, where the glyphs are discarded. Re-scan with
+    // the restrictions dropped to 1/1 (break between any two line
+    // boxes) rather than lose the content.
+    //
+    // Relaxing to 1 rather than 0 keeps the "a fragment holds at least
+    // one line" invariant, so no empty fragment can be emitted.
+    let plan = if plan
+        .iter()
+        .any(|f| f.y + f.height > page_height_px + OVERFLOW_EPS_PX)
+    {
+        let relaxed = InlineSplitInput {
+            line_metrics: input.line_metrics,
+            lead_in: input.lead_in,
+            lead_out: input.lead_out,
+            orphans: 1,
+            widows: 1,
+        };
+        scan_split_points(&relaxed, placement.cursor_y, placement.page, page_height_px)
+    } else {
+        plan
+    };
+
+    let emitted = plan.len();
+    let last = *plan.last().expect("scan always emits a final fragment");
+    let entry = geometry.entry(placement.id).or_default();
+    for f in &plan {
+        entry.fragments.push(Fragment {
+            page_index: f.page_index,
+            x: placement.x.as_px(),
+            y: f.y.as_px(),
+            width: placement.width.as_px(),
+            height: f.height.as_px(),
+        });
+    }
+    entry.content_lead_in = input.lead_in.as_px();
+    entry.content_lead_out = input.lead_out.as_px();
+
+    (last.page_index, last.y + last.height, emitted)
+}
+
+/// One planned fragment of an inline root, in paragraph-local space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InlineFragmentPlan {
+    page_index: u32,
+    /// Top of the fragment on its own page.
+    y: f32,
+    /// Border-box height of this slice (see [`fragment_inline_root`]).
+    height: f32,
+}
+
+/// Walk `line_metrics` and decide where the inline root splits, without
+/// touching the geometry table (fulgur-pgbrk R2).
+///
+/// Splitting a candidate point is legal only when it leaves at least
+/// `orphans` lines in the fragment being closed and at least `widows`
+/// lines in the remainder (css-break-3 §4.4 rule 3). When neither holds,
+/// the split is skipped and lines keep accumulating into the current
+/// fragment — which is why a constrained scan can return a plan that
+/// overflows the fragmentainer, and why [`fragment_inline_root`] re-runs
+/// it with the constraints relaxed when that happens.
+///
+/// Returning a plan rather than pushing fragments directly is what makes
+/// the second pass possible at all: the first pass must be discardable.
+fn scan_split_points(
+    input: &InlineSplitInput<'_>,
     initial_cursor_y: f32,
     initial_page_index: u32,
     page_height_px: f32,
-    line_metrics: &[(f32, f32)],
-) -> (u32, f32, usize) {
-    /// CSS 3 Fragmentation default for `orphans`.
-    const ORPHANS_MIN: usize = 2;
-    /// CSS 3 Fragmentation default for `widows`.
-    const WIDOWS_MIN: usize = 2;
-
+) -> Vec<InlineFragmentPlan> {
+    let line_metrics = input.line_metrics;
+    let lead_in = input.lead_in;
+    let lead_out = input.lead_out;
+    let orphans = input.orphans;
+    let widows = input.widows;
+    let mut plan = Vec::new();
     if line_metrics.is_empty() {
-        return (initial_page_index, initial_cursor_y, 0);
+        return plan;
     }
 
     let mut page_index = initial_page_index;
     let mut paragraph_top_in_body = initial_cursor_y;
     let mut fragment_start_idx: usize = 0;
-    let mut emitted = 0usize;
     let total_lines = line_metrics.len();
 
     for (i, &(_line_top_local, line_bottom_local)) in line_metrics.iter().enumerate() {
         let frag_top_local = line_metrics[fragment_start_idx].0;
-        let projected_bottom_in_body = paragraph_top_in_body + (line_bottom_local - frag_top_local);
+        // Only the first fragment carries the leading decoration
+        // (`box-decoration-break: slice`), so only it starts its lines
+        // `lead_in` below its own top edge.
+        let frag_lead_in = if fragment_start_idx == 0 {
+            lead_in
+        } else {
+            0.0
+        };
+        // The trailing decoration (`padding-bottom` / `border-bottom`)
+        // is added unconditionally to whichever fragment ends up last
+        // (see the `frag_lead_out` push after this loop). If line `i`
+        // is the paragraph's last line, closing the fragment here makes
+        // it that final fragment, so the fit check must include
+        // `lead_out` too — otherwise a fragment whose lines fit exactly
+        // but whose trailing decoration doesn't can sail past
+        // `page_height_px` unnoticed, and the relaxed re-scan below
+        // hits the identical blind spot (fulgur-pgbrk R7 follow-up,
+        // Codex review PR #719).
+        let frag_lead_out = if i == total_lines - 1 { lead_out } else { 0.0 };
+        let projected_bottom_in_body = paragraph_top_in_body
+            + frag_lead_in
+            + (line_bottom_local - frag_top_local)
+            + frag_lead_out;
 
         if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
-            // fulgur-s67g Phase 2.1: honour widow / orphan minimums.
             let first_size = i - fragment_start_idx;
             let remaining_size = total_lines - i;
-            if first_size < ORPHANS_MIN || remaining_size < WIDOWS_MIN {
-                // Cannot split here without violating widow/orphan.
-                // Skip — keep accumulating into the current fragment.
-                // If no future split point honours both constraints,
-                // the loop falls through to "emit final fragment"
-                // below and the paragraph emits as a single oversized
-                // fragment (CSS Fragmentation §4.4: widows/orphans
-                // constraints are treated as preferences that can be
-                // relaxed to avoid unfulfillable breaks).
-                continue;
-            }
 
-            // Lines [fragment_start_idx, i) fit on the current page.
-            // Emit them as one fragment, advance to the next page, and
-            // start the next fragment at line i.
-            let prev_line_bottom = line_metrics[i - 1].1;
-            let frag_h = prev_line_bottom - frag_top_local;
-            let frag = Fragment {
-                page_index,
-                x: paragraph_x.as_px(),
-                y: paragraph_top_in_body.as_px(),
-                width: width.as_px(),
-                height: frag_h.as_px(),
+            // `i` is the natural split: the last line that fits. It may
+            // not be a legal one.
+            let split_at = if remaining_size < widows {
+                // The tail would be short of `widows`, and splitting
+                // LATER only makes the tail shorter — so back up to the
+                // latest split that leaves exactly `widows` lines. This
+                // is the only direction that can satisfy widows, and
+                // lines `[start, j)` are a subset of `[start, i)`, which
+                // already fits, so the earlier fragment fits too.
+                let j = total_lines.saturating_sub(widows);
+                if j > fragment_start_idx && j - fragment_start_idx >= orphans {
+                    j
+                } else {
+                    // Backing up far enough would starve `orphans`.
+                    // Both minimums cannot hold at once; keep
+                    // accumulating and let the caller relax and re-scan.
+                    continue;
+                }
+            } else if first_size < orphans {
+                // Too few lines to leave behind. Splitting earlier makes
+                // that worse and splitting later overflows, so there is
+                // no legal point here.
+                continue;
+            } else {
+                i
             };
-            geometry.entry(child_id).or_default().fragments.push(frag);
-            emitted += 1;
+
+            // Lines [fragment_start_idx, split_at) fit on the current page.
+            let prev_line_bottom = line_metrics[split_at - 1].1;
+            plan.push(InlineFragmentPlan {
+                page_index,
+                y: paragraph_top_in_body,
+                height: frag_lead_in + (prev_line_bottom - frag_top_local),
+            });
 
             page_index += 1;
             paragraph_top_in_body = 0.0;
-            fragment_start_idx = i;
+            fragment_start_idx = split_at;
         }
     }
 
-    // Final fragment covers lines [fragment_start_idx, end).
+    // Final fragment covers lines [fragment_start_idx, end), plus the
+    // box's trailing decoration (`box-decoration-break: slice`).
     let frag_top_local = line_metrics[fragment_start_idx].0;
     let last_bottom_local = line_metrics.last().expect("non-empty checked above").1;
-    let frag_h = last_bottom_local - frag_top_local;
-    let frag = Fragment {
-        page_index,
-        x: paragraph_x.as_px(),
-        y: paragraph_top_in_body.as_px(),
-        width: width.as_px(),
-        height: frag_h.as_px(),
+    let frag_lead_in = if fragment_start_idx == 0 {
+        lead_in
+    } else {
+        0.0
     };
-    geometry.entry(child_id).or_default().fragments.push(frag);
-    emitted += 1;
+    plan.push(InlineFragmentPlan {
+        page_index,
+        y: paragraph_top_in_body,
+        height: frag_lead_in + (last_bottom_local - frag_top_local) + lead_out,
+    });
 
-    let cursor_y = paragraph_top_in_body + frag_h;
-    (page_index, cursor_y, emitted)
+    plan
 }
 
 /// Per-page state for a named string emitted by `string-set:`.
@@ -2820,8 +4602,6 @@ fn record_fixed_subtree_descendants(
     pages: u32,
     emitted: &mut usize,
 ) {
-    use ::style::properties::longhands::position::computed_value::T as Pos;
-
     #[allow(clippy::too_many_arguments)]
     fn walk(
         geometry: &mut PaginationGeometryTable,
@@ -2869,31 +4649,17 @@ fn record_fixed_subtree_descendants(
             *emitted += 1;
         }
 
-        let children: Vec<usize> = {
-            let layout_borrow = node.layout_children.borrow();
-            if let Some(lc) = layout_borrow.as_deref()
-                && !lc.is_empty()
-            {
-                lc.to_vec()
-            } else {
-                node.children.clone()
-            }
-        };
+        let children: Vec<usize> = layout_children_of(doc, node_id);
         for child_id in children {
+            // Shared skip: dangling id / out-of-flow (handled by their
+            // own passes) / whitespace-only text — see
+            // `is_walkable_skip`.
+            if is_walkable_skip(doc, child_id) {
+                continue;
+            }
             let Some(child) = doc.get_node(child_id) else {
                 continue;
             };
-            let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_oof {
-                continue;
-            }
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
-                continue;
-            }
             let child_offset = (
                 offset_in_subtree.0 + child.final_layout.location.x,
                 offset_in_subtree.1 + child.final_layout.location.y,
@@ -2911,34 +4677,13 @@ fn record_fixed_subtree_descendants(
         }
     }
 
-    let Some(root) = doc.get_node(fixed_root_id) else {
-        return;
-    };
-    let children: Vec<usize> = {
-        let layout_borrow = root.layout_children.borrow();
-        if let Some(lc) = layout_borrow.as_deref()
-            && !lc.is_empty()
-        {
-            lc.to_vec()
-        } else {
-            root.children.clone()
+    for child_id in layout_children_of(doc, fixed_root_id) {
+        if is_walkable_skip(doc, child_id) {
+            continue;
         }
-    };
-    for child_id in children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        let is_oof = child
-            .primary_styles()
-            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed));
-        if is_oof {
-            continue;
-        }
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
         let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
         walk(
             geometry,
@@ -3060,6 +4805,7 @@ pub fn append_position_absolute_body_direct_fragments(
             pages,
             !body_has_in_flow_content,
             &mut emitted,
+            running_store,
         );
     }
 
@@ -3087,6 +4833,7 @@ fn record_subtree_fragments_at_offset(
     total_pages: u32,
     may_extend_pages: bool,
     emitted: &mut usize,
+    running_store: Option<&crate::gcpm::running::RunningElementStore>,
 ) {
     #[allow(clippy::too_many_arguments)]
     fn walk(
@@ -3116,6 +4863,7 @@ fn record_subtree_fragments_at_offset(
         cb_size: (f32, f32),
         depth: usize,
         emitted: &mut usize,
+        running_store: Option<&crate::gcpm::running::RunningElementStore>,
     ) {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
@@ -3123,20 +4871,12 @@ fn record_subtree_fragments_at_offset(
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
-        // Prefer `layout_children` so anonymous block wrappers Stylo
-        // synthesizes around mixed inline/block content are visited
-        // (CSS 2.1 §9.2.1.1 — see `fragment_pagination_root` for the
-        // same idiom).
-        let children: Vec<usize> = {
-            let layout_borrow = node.layout_children.borrow();
-            if let Some(lc) = layout_borrow.as_deref()
-                && !lc.is_empty()
-            {
-                lc.to_vec()
-            } else {
-                node.children.clone()
-            }
-        };
+        // fulgur-yb27: anonymous block wrappers live only in
+        // `layout_children` — the shared enumeration policy is
+        // `layout_children_of`. (The skip filter below intentionally
+        // does NOT use `is_walkable_skip`: nested absolutes are
+        // recursed into here, only `fixed` is skipped.)
+        let children: Vec<usize> = layout_children_of(doc, node_id);
         // The containing block for THIS node's out-of-flow children is
         // `node` itself when `node` is positioned (non-static), otherwise the
         // inherited nearest-positioned ancestor (`cb_anchor`/`cb_size`). A
@@ -3347,6 +5087,47 @@ fn record_subtree_fragments_at_offset(
             let Some(child) = doc.get_node(child_id) else {
                 continue;
             };
+            // fulgur: `position: running(name)` children are rewritten to
+            // `display: none` by `gcpm::parser::parse_gcpm`'s cleaned_css
+            // (they are removed from normal flow and repainted only via
+            // their `@page` margin box). A `display: none` node collapses
+            // to a zero-size Taffy box, so the generic below (height-gated
+            // on `h_for_paging > 0.0`) never records a geometry entry for
+            // it — unlike `fragment_pagination_root`'s in-flow body walk,
+            // which has the equivalent carve-out at the cursor level. Without
+            // this check here, a running element nested inside a
+            // `position: absolute` / body-direct-abs subtree never lands in
+            // `geometry`, so `collect_running_element_states` can't find its
+            // NodeId and the margin box it should populate renders empty
+            // (fulgur `--css` + hidden-ancestor running-element bug).
+            // Mirror the main walk: record a zero-size marker at the
+            // running child's current subtree position and skip recursing
+            // into it (it has no flow content of its own to lay out).
+            if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
+                if child.element_data().is_some() && page_h_px > 0.0 {
+                    let child_y_for_paging =
+                        root_xy_for_paging.1 + offset_in_subtree.1 + child.final_layout.location.y;
+                    let page_index = (child_y_for_paging / page_h_px).max(0.0).floor() as u32;
+                    let page_index = page_index.min(total_pages.saturating_sub(1));
+                    let stored_x =
+                        root_xy_for_paging.0 + offset_in_subtree.0 + child.final_layout.location.x
+                            - body_offset.0;
+                    let stored_y =
+                        child_y_for_paging - (page_index as f32) * page_h_px - body_offset.1;
+                    geometry
+                        .entry(child_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: stored_x.as_px(),
+                            y: stored_y.as_px(),
+                            width: 0.0_f32.as_px(),
+                            height: 0.0_f32.as_px(),
+                        });
+                }
+                continue;
+            }
             // Out-of-flow descendants:
             //   - `position: fixed` is a repeat element handled by
             //     `append_position_fixed_fragments`; skip it here so it
@@ -3420,6 +5201,7 @@ fn record_subtree_fragments_at_offset(
                             child_cb_size,
                             depth + 1,
                             emitted,
+                            running_store,
                         );
                         continue;
                     }
@@ -3453,6 +5235,7 @@ fn record_subtree_fragments_at_offset(
                 child_cb_size,
                 depth + 1,
                 emitted,
+                running_store,
             );
             if has_contain_size(child) {
                 monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
@@ -3480,6 +5263,7 @@ fn record_subtree_fragments_at_offset(
         (0.0, 0.0),
         0,
         emitted,
+        running_store,
     );
 }
 
@@ -3982,19 +5766,30 @@ mod tests {
         );
 
         let mut geom = PaginationGeometryTable::new();
-        let (page_out, cursor_out) = fragment_block_subtree(
-            &mut geom,
-            &doc, // &BaseDocument via deref coercion
-            None, // column_styles
-            None, // used_page_names
+        let cx = FragmentationCtx {
+            doc: &doc, // &BaseDocument via deref coercion
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 800.0,
+        };
+        let mut frame = ContainerFrame::child(
             parent_id,
-            600.0,                // parent_w
             0.0,                  // parent_x_in_body
+            600.0,                // parent_w
             0,                    // page_in
             0.0,                  // cursor_in
-            800.0,                // page_height_px
+            true,                 // allow_leading_break
             crate::MAX_DOM_DEPTH, // depth → trips the guard immediately
         );
+        let result = fragment_block_subtree(&cx, &mut frame, &mut geom);
+        let SubtreeResult::Placed {
+            page: page_out,
+            cursor_y: cursor_out,
+        } = result
+        else {
+            panic!("the depth bail always places, never requests a break")
+        };
 
         // The bail pushes exactly ONE whole fragment for parent_id at its
         // entry coordinates, then returns (page_in, cursor_in + height).
@@ -4243,6 +6038,148 @@ mod tests {
         ));
     }
 
+    /// Codex review (PR #719): a nested child at the top of a fresh
+    /// strip (`child_page_y == 0`) whose height exceeds the strip by
+    /// the documented 220pt→294px Taffy-rounding delta (~0.67px) sits
+    /// inside `oversized`'s 1px tolerance and must NOT be sliced — even
+    /// though it was previously only 0.5px (`OVERFLOW_EPS_PX`) inside
+    /// `spills_strip`'s tolerance, which would wrongly trigger slicing
+    /// and produce a spurious sliver page for an exact-fit box.
+    #[test]
+    fn needs_leaf_slicing_respects_oversize_tolerance_at_a_fresh_strip_top() {
+        let page_height_px = 293.33334_f32;
+        let child_h = 294.0_f32; // ~0.67px over — the documented rounding case
+        assert!(
+            !super::needs_leaf_slicing(child_h, 0.0, page_height_px),
+            "a box inside the 1px Taffy-rounding tolerance must not be sliced, \
+             even sitting at a fresh strip's top edge"
+        );
+    }
+
+    /// The same tolerance must still catch a genuinely oversized child
+    /// (e.g. `300vh` on a 293px strip) at a fresh strip's top.
+    #[test]
+    fn needs_leaf_slicing_still_catches_true_oversize() {
+        let page_height_px = 293.33334_f32;
+        let child_h = 880.0_f32;
+        assert!(super::needs_leaf_slicing(child_h, 0.0, page_height_px));
+    }
+
+    /// A child that fits its own height but crosses the strip boundary
+    /// because it sits mid-strip (`child_page_y > 0`, the R7b flex/grid
+    /// case) must still be sliced.
+    #[test]
+    fn needs_leaf_slicing_catches_mid_strip_spill() {
+        let page_height_px = 800.0_f32;
+        assert!(super::needs_leaf_slicing(400.0, 500.0, page_height_px));
+    }
+
+    /// fulgur-pgbrk R7: `slice_oversized_leaf` slice arithmetic — an
+    /// exact multiple of the strip height must emit one fragment per
+    /// page with NO trailing zero-height sliver, and the returned
+    /// cursor sits at the filled strip's bottom edge.
+    #[test]
+    fn slice_oversized_leaf_exact_fit_no_sliver() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        // 1600px on an 800px strip from cursor 0: two full slices.
+        let (page, cursor) = super::slice_oversized_leaf(
+            &mut geom, &doc, probe, 0.0, 600.0, 1600.0, 0, 0.0, 800.0, 0,
+        );
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 2, "exact fit slices, no sliver: {frags:?}");
+        assert_eq!(
+            frags.iter().map(|f| f.page_index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        for f in frags {
+            assert!(
+                (f.height.to_f32() - 800.0).abs() < 0.01,
+                "full strip: {f:?}"
+            );
+        }
+        assert_eq!(page, 1);
+        assert!(
+            (cursor - 800.0).abs() < 0.01,
+            "resume after a full strip, not past it: {cursor}"
+        );
+    }
+
+    /// fulgur-pgbrk R7: `slice_oversized_leaf` one-past-boundary — a
+    /// box one px taller than the strip emits a second one-px slice on
+    /// the next page, and following content resumes after that sliver.
+    #[test]
+    fn slice_oversized_leaf_one_past_boundary() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        let (page, cursor) = super::slice_oversized_leaf(
+            &mut geom, &doc, probe, 0.0, 600.0, 801.0, 0, 0.0, 800.0, 0,
+        );
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 2, "sliver slice: {frags:?}");
+        assert!(
+            (frags[1].height.to_f32() - 1.0).abs() < 0.01,
+            "second slice is the 1px remainder: {frags:?}"
+        );
+        assert_eq!(page, 1);
+        assert!(
+            (cursor - 1.0).abs() < 0.01,
+            "resume after the sliver: {cursor}"
+        );
+    }
+
+    /// fulgur-2m6w: `slice_oversized_leaf` caps the per-strip slicing at
+    /// `MAX_PAGES` even when the box is taller — content past the cap is
+    /// truncated (a content-BEARING box, so the childless collapse below
+    /// does not fire).
+    #[test]
+    fn slice_oversized_leaf_max_pages_cap() {
+        let html = r#"<html><body><div id="p"><div id="c">content</div></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        // Clearly past `MAX_PAGES` strips even after the first slice —
+        // mirrors the `height: 99999999px` fixtures used by the ezst
+        // integration tests (a bare `MAX_PAGES + 1` strips would, after
+        // slice 1, leave exactly `MAX_PAGES` strips of remainder and
+        // the childless collapse's `ceil > MAX_PAGES` gate would not
+        // fire).
+        let huge = 9_999_999.0_f32;
+        let (page, _) =
+            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(page, crate::MAX_PAGES, "capped at MAX_PAGES");
+        assert_eq!(
+            frags.len() as u32,
+            crate::MAX_PAGES + 1,
+            "first slice plus MAX_PAGES loop slices, then truncated: {} fragments",
+            frags.len()
+        );
+    }
+
+    /// fulgur-ezst: `slice_oversized_leaf` collapses a CHILDLESS box
+    /// whose slicing would exceed `MAX_PAGES` to its single first slice
+    /// and resumes following content on the next page (cursor 0).
+    #[test]
+    fn slice_oversized_leaf_childless_collapse() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        let huge = 9_999_999.0_f32;
+        let (page, cursor) =
+            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 1, "collapsed to the first slice: {frags:?}");
+        assert_eq!(page, 1, "only one page consumed");
+        assert!((frags[0].height.to_f32() - 800.0).abs() < 0.01);
+        assert!((cursor).abs() < 0.01, "following content starts at y=0");
+    }
+
     /// fulgur-c8re (security): a pathologically tall CHILDLESS replaced
     /// element (`<img>` / `<svg>`) that paints nothing must collapse like any
     /// blank spacer. "Paints nothing" covers the common offline-first case of
@@ -4354,6 +6291,62 @@ mod tests {
         );
     }
 
+    /// Regression for the margin-collapse-after-fragmentation-break bug
+    /// (see `FULGUR_MARGIN_COLLAPSE_BUG.md` at the repo root): the
+    /// sibling immediately following a child whose *own* recursion
+    /// crossed a page boundary lost its collapsed margin against that
+    /// child entirely, landing flush against its tail instead.
+    ///
+    /// Shape: `section` (recursed into from body, since its content
+    /// spans two pages) contains `a` (250px, fills most of page 1),
+    /// `c` (a div with a single 100px child `c_inner`, `margin: 20px 0`
+    /// — too tall for the 30px left on page 1, so `c` itself is
+    /// recursed into and its content lands wholly on page 2), and `d`
+    /// (50px, `margin-top: 20px`).
+    ///
+    /// `c`'s and `d`'s margins collapse to a single 20px gap (CSS 2.1
+    /// §8.3.1) — neither margin is at a fragmentation break (`c`'s own
+    /// leading margin was already truncated when `c_inner` was placed
+    /// at page 2's top; the break is not between `c` and `d`). `d`
+    /// must land at `c_inner`'s bottom (100px, page-local) + the 20px
+    /// gap = 120px. Pre-fix, the deferred origin rebase anchored on
+    /// `d`'s own Taffy-space top instead of `c`'s, forcing `d` flush
+    /// against `c_inner` at y=100 — losing the margin.
+    #[test]
+    fn recursed_child_crossing_page_preserves_next_sibling_collapsed_margin() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 200px;">
+                <div id="a" style="height: 250px; width: 200px"></div>
+                <div id="c" style="width: 200px; margin-top: 20px; margin-bottom: 20px">
+                  <div id="c_inner" style="height: 100px; width: 200px"></div>
+                </div>
+                <div id="d" style="height: 50px; width: 200px; margin-top: 20px"></div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 300.0);
+        let d_id = find_by_id(doc.deref_mut(), "d").expect("div#d");
+        let d_frag = table
+            .get(&d_id)
+            .expect("div#d must appear in geometry")
+            .fragments
+            .first()
+            .expect("div#d must have a fragment");
+        assert_eq!(
+            d_frag.page_index, 1,
+            "div#d should land on page 1 (0-indexed), following c's page-2 tail",
+        );
+        let d_y = d_frag.y.to_f32();
+        assert!(
+            (d_y - 120.0).abs() < 0.5,
+            "div#d must sit 20px below c_inner's 100px-tall page-2 fragment \
+             (y=120), preserving the collapsed c/d margin; got y={d_y} \
+             (pre-fix: y=100, flush against c_inner with the margin dropped)",
+        );
+    }
+
     /// fulgur-c8re (security, Codex P1 on PR #575): the replaced-element
     /// collapse must bound trailing content too. A non-painting tall image
     /// (`<img src="missing.png" height:99999999px>`) followed by a `<p>` must
@@ -4406,35 +6399,60 @@ mod tests {
         }
     }
 
-    /// fulgur-i5a: `overflow: hidden` is a pure visual effect that must
-    /// not affect pagination. A 50px-tall parent containing a 1200px-tall
-    /// child stays single-page even though the child would otherwise
-    /// extend past the 800px page strip. The clip is applied at draw
-    /// time (`render.rs` push/pop_clip_path), and pagination follows the
-    /// parent's layout box, not the child's overflowing intrinsic height.
+    /// fulgur-i5a + fulgur-pgbrk R7: `overflow: hidden` boxes are
+    /// monolithic — the clip is applied at draw time (`render.rs`
+    /// push/pop_clip_path), so pagination treats an overflowing child
+    /// as unsplittable. A monolithic child taller than the
+    /// fragmentainer is nonetheless sliced per strip, uniform with the
+    /// body-direct path (fulgur-sbw2) and the nested walk
+    /// (fulgur-pgbrk R7): one fragment per page, each inside its strip.
     #[test]
-    fn overflow_hidden_does_not_split_oversize_child() {
+    fn overflow_hidden_oversize_child_is_sliced_per_strip() {
         let html = r#"
             <html><body>
-              <div style="height: 50px; overflow: hidden">
-                <div style="height: 1200px"></div>
+              <div id="outer" style="height: 50px; overflow: hidden">
+                <div id="inner" style="height: 1200px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
+        let outer = find_by_id(&doc, "outer").expect("div#outer");
+        let inner = find_by_id(&doc, "inner").expect("div#inner");
         let table = run_pass(&mut doc, 800.0);
 
-        // body + outer (50px clip) + inner (1200px overflowing child)
-        // = 3 entries; every entry has a single fragment on page 0.
-        assert_eq!(table.len(), 3, "expected body + outer + inner = 3 entries");
-        for (id, geom) in &table {
-            assert_eq!(
-                geom.fragments.len(),
-                1,
-                "node {id} should not split under overflow:hidden parent"
+        // The 1200px monolithic child on an 800px strip: two slices
+        // (800 + 400) on consecutive pages instead of one overflowing
+        // fragment on page 0.
+        let inner_frags = &table.get(&inner).expect("inner in geometry").fragments;
+        assert_eq!(
+            inner_frags.len(),
+            2,
+            "monolithic oversize child is sliced per strip; frags={inner_frags:?}"
+        );
+        let pages: Vec<u32> = inner_frags.iter().map(|f| f.page_index).collect();
+        assert_eq!(
+            pages,
+            vec![0, 1],
+            "consecutive pages; frags={inner_frags:?}"
+        );
+        let total: f32 = inner_frags.iter().map(|f| f.height.to_f32()).sum();
+        assert!(
+            (total - 1200.0).abs() <= 0.5,
+            "the slices reconstruct the box height exactly; frags={inner_frags:?}"
+        );
+        for f in inner_frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 800.5,
+                "no slice may extend past the strip; frags={inner_frags:?}"
             );
-            assert_eq!(geom.fragments[0].page_index, 0);
         }
+        // The clipped parent still participates in geometry on every
+        // page its child crossed (fulgur-oc51).
+        let outer_frags = &table.get(&outer).expect("outer in geometry").fragments;
+        assert!(
+            outer_frags.iter().any(|f| f.page_index == 0),
+            "the overflow:hidden parent keeps a page-0 fragment; frags={outer_frags:?}"
+        );
     }
 
     /// Phase 4 prerequisite repro: confirm `string-set` carry semantic
@@ -4575,6 +6593,96 @@ h2 { string-set: chapter-title content(text); }
             entry.instance_ids,
             vec![store.instance_for_node(node_id).unwrap()]
         );
+    }
+
+    /// Regression for the `--css` + hidden-ancestor running-element bug
+    /// (FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md): `gcpm::parser::parse_gcpm`
+    /// rewrites `position: running(name)` to `display: none` in its
+    /// `cleaned_css` output (the real DOM copy must not also paint in
+    /// normal flow — only its `@page` margin-box copy should). When the
+    /// running element is nested inside a `position: absolute` ancestor
+    /// (the common "absolute + invisible wrapper" header/footer idiom),
+    /// its now-zero-size Taffy box used to fall through
+    /// `record_subtree_fragments_at_offset`'s height gate
+    /// (`h_for_paging > 0.0`) with no running-element carve-out — unlike
+    /// `fragment_pagination_root`'s in-flow body walk, which records a
+    /// zero-height marker for running children unconditionally. The
+    /// element's NodeId never reached `geometry`, so
+    /// `collect_running_element_states` silently produced nothing and the
+    /// margin box rendered empty.
+    #[test]
+    fn running_element_nested_in_absolute_subtree_lands_in_geometry_when_display_none() {
+        use crate::blitz_adapter;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        let css = r#"
+            @page { @top-center { content: element(top-center); } }
+            .absolute { position: absolute; }
+            .invisible { visibility: hidden; }
+            #top-center { position: running(top-center); }
+        "#;
+        let gcpm = parse_gcpm(css);
+        assert!(
+            gcpm.cleaned_css.contains("display: none"),
+            "sanity: parse_gcpm must rewrite position:running to display:none \
+             in cleaned_css; got {:?}",
+            gcpm.cleaned_css
+        );
+
+        let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="absolute invisible">
+    <div id="top-center">HEADER</div>
+  </div>
+  <p>Body content.</p>
+</body></html>"#;
+
+        let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut doc = blitz_adapter::parse(html, 600.0, &fonts);
+        let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+
+        // Mirrors `Engine::layout_to_drawables`: cleaned_css (the
+        // display:none rewrite) is injected via `InjectCssPass` — this is
+        // exactly what happens for AssetBundle / `--css`-sourced CSS.
+        let inject = blitz_adapter::InjectCssPass {
+            css: gcpm.cleaned_css.clone(),
+        };
+        blitz_adapter::apply_single_pass(&inject, &mut doc, &pass_ctx);
+
+        let running_pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+        blitz_adapter::apply_single_pass(&running_pass, &mut doc, &pass_ctx);
+        let store = running_pass.into_running_store();
+
+        blitz_adapter::resolve(&mut doc);
+
+        let mut geometry = PaginationGeometryTable::new();
+        append_position_absolute_body_direct_fragments(
+            &mut geometry,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            Some(&store),
+        );
+
+        let found = geometry
+            .keys()
+            .any(|&node_id| store.instance_for_node(node_id).is_some());
+        assert!(
+            found,
+            "running element nested in a position:absolute subtree must land \
+             in geometry even when display:none collapses its layout box; \
+             geometry keys={:?}",
+            geometry.keys().collect::<Vec<_>>()
+        );
+
+        let states = collect_running_element_states(&geometry, &store);
+        let entry = states[0]
+            .get("top-center")
+            .expect("top-center running instance must be recorded for page 0");
+        assert_eq!(entry.instance_ids.len(), 1);
     }
 
     /// fulgur-6tco: synthesize a geometry table + string_set_by_node
@@ -5399,6 +7507,7 @@ h2 { string-set: chapter-title content(text); }
             3,
             true,
             &mut 0,
+            None,
         );
 
         let pages: Vec<u32> = geom
@@ -6091,31 +8200,202 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(super::implied_page_count(&geom), 3);
     }
 
-    /// fulgur-s67g Phase 2.1: a 3-line paragraph that overflows the
-    /// page strip after line 2 cannot split between line 2 and the
-    /// final line — the second fragment would have only 1 line, below
-    /// the widows = 2 minimum. Spike emits the paragraph whole.
+    /// fulgur-pgbrk R6: `orphans` / `widows` are inherited, but the
+    /// column-style side-table records only elements the author wrote a
+    /// declaration on, so the value is resolved by walking up.
     #[test]
-    fn widow_minimum_blocks_single_line_tail_fragment() {
+    fn resolved_line_constraints_inherits_from_an_ancestor() {
+        let html = r#"
+            <html><body style="widows:4; orphans:3">
+              <div><p id="probe">x</p></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let (orphans, widows) =
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table));
+        assert_eq!((orphans, widows), (3, 4));
+    }
+
+    #[test]
+    fn resolved_line_constraints_prefers_the_nearest_declaration() {
+        let html = r#"
+            <html><body style="widows:4">
+              <div style="widows:6"><p id="probe" style="orphans:5">x</p></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let (orphans, widows) =
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table));
+        assert_eq!(orphans, 5, "declared on the element itself");
+        assert_eq!(widows, 6, "nearest ancestor wins over <body>");
+    }
+
+    #[test]
+    fn resolved_line_constraints_falls_back_to_the_css_initial_values() {
+        let html = r#"<html><body><p id="probe">x</p></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        assert_eq!(
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table)),
+            (2, 2)
+        );
+        assert_eq!(
+            super::resolved_line_constraints(doc.deref_mut(), probe, None),
+            (2, 2),
+            "no table at all still yields the initial values"
+        );
+    }
+
+    /// Codex review (PR #719): four 100px lines on a 250px strip with a
+    /// 100px `lead_out` (`padding-bottom` / `border-bottom`). The lines
+    /// alone fit the last fragment (200px), but the scan's overflow
+    /// predicate only compared line bottoms — never `lead_out` — so it
+    /// never split before the trailing line, and the unconditional
+    /// `+ lead_out` push after the loop produced a 300px final fragment
+    /// on a 250px strip: exactly what `find_overflowing_fragments`
+    /// panics on in test builds. The fix folds `lead_out` into the fit
+    /// check for the paragraph's last line, so the split lands one line
+    /// earlier and every fragment (200 / 100 / 200) fits the strip.
+    #[test]
+    fn scan_accounts_for_lead_out_on_the_final_fragment() {
+        let lines: Vec<(f32, f32)> = (0..4)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 100.0,
+            orphans: 1,
+            widows: 1,
+        };
+        let plan = super::scan_split_points(&input, 0.0, 0, 250.0);
+        for f in &plan {
+            assert!(
+                f.height <= 250.0 + 0.01,
+                "fragment overflows the strip once lead_out is counted; plan={plan:?}"
+            );
+        }
+        let last = plan.last().expect("scan always emits a final fragment");
+        assert!(
+            (last.height - 200.0).abs() < 0.01,
+            "final fragment should be 1 line (100) + lead_out (100); plan={plan:?}"
+        );
+    }
+
+    /// fulgur-pgbrk R6: the widow minimum is the one constraint that can
+    /// only be satisfied by splitting EARLIER than the natural overflow
+    /// point, so `scan_split_points` has to back up rather than skip.
+    #[test]
+    fn scan_backs_the_split_up_to_honour_a_large_widows_value() {
+        // Six 100px lines, 450px strip. The natural split is after line
+        // 4 (bottom 500 > 450), which leaves a 2-line tail. widows=4
+        // forces the split back to line 2, leaving 4 lines in the tail.
+        let lines: Vec<(f32, f32)> = (0..6)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 2,
+            widows: 4,
+        };
+        let plan = super::scan_split_points(&input, 0.0, 0, 450.0);
+        assert_eq!(plan.len(), 2, "plan={plan:?}");
+        assert!(
+            (plan[0].height - 200.0).abs() < 0.01,
+            "head keeps 2 lines; plan={plan:?}"
+        );
+        assert!(
+            (plan[1].height - 400.0).abs() < 0.01,
+            "tail keeps the 4 lines widows demands; plan={plan:?}"
+        );
+        for f in &plan {
+            assert!(f.y + f.height <= 450.5, "plan={plan:?}");
+        }
+    }
+
+    #[test]
+    fn scan_will_not_back_up_past_the_orphan_minimum() {
+        // Same six lines, but orphans=3 and widows=5 cannot both hold:
+        // leaving 5 in the tail leaves only 1 in the head. The scan
+        // refuses the split rather than violating orphans, so the plan
+        // overflows — which is exactly the signal `fragment_inline_root`
+        // uses to relax and re-scan.
+        let lines: Vec<(f32, f32)> = (0..6)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 3,
+            widows: 5,
+        };
+        let plan = super::scan_split_points(&input, 0.0, 0, 450.0);
+        assert_eq!(plan.len(), 1, "no legal split; plan={plan:?}");
+        assert!(
+            plan[0].height > 450.0,
+            "the unsplit plan overflows, triggering relaxation; plan={plan:?}"
+        );
+    }
+
+    /// fulgur-pgbrk R2: a 3-line paragraph whose only natural split
+    /// leaves a 1-line tail violates widows = 2, so the constrained scan
+    /// finds no legal split and returns a 225px plan on a 200px strip.
+    ///
+    /// css-break-3 §4.4's closing clause requires the restriction to be
+    /// dropped rather than letting the tail escape the fragmentainer, so
+    /// the relaxed re-scan splits 2/1 anyway.
+    ///
+    /// Until fulgur-pgbrk R2 this test asserted the opposite — one
+    /// oversized fragment — and so pinned the content-loss defect.
+    #[test]
+    fn widow_minimum_is_relaxed_rather_than_losing_the_tail_line() {
         let mut geom = PaginationGeometryTable::new();
         // Each line 75px; cumulative bottoms at 75, 150, 225.
-        // Page strip = 200, so naturally we'd split at line 2 (bottom
-        // 225 > 200), leaving 1 line in the tail — widow violated.
+        // Page strip = 200, so the natural split is at line 2 (bottom
+        // 225 > 200), leaving 1 line in the tail — widows violated.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
-        let (new_page, new_cursor, emitted) = super::fragment_inline_root(
-            &mut geom, /*child_id=*/ 1, /*paragraph_x=*/ 0.0, /*width=*/ 100.0,
-            /*initial_cursor_y=*/ 0.0, /*initial_page_index=*/ 0,
-            /*page_height_px=*/ 200.0, &lines,
-        );
-        assert_eq!(emitted, 1, "widow violation → single oversized fragment");
-        assert_eq!(new_page, 0);
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
+        let (new_page, new_cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        assert_eq!(emitted, 2, "relaxation splits 2/1 rather than overflowing");
+        assert_eq!(new_page, 1);
         assert!(
-            (new_cursor - 225.0).abs() < 0.01,
-            "cursor advances by full paragraph height, got {new_cursor}",
+            (new_cursor - 75.0).abs() < 0.01,
+            "cursor is the 1-line tail on page 1, got {new_cursor}",
         );
         let frags = &geom.get(&1).unwrap().fragments;
-        assert_eq!(frags.len(), 1);
+        assert_eq!(frags.len(), 2);
         assert_eq!(frags[0].page_index, 0);
+        assert!((frags[0].height.to_f32() - 150.0).abs() < 0.01);
+        assert_eq!(frags[1].page_index, 1);
+        assert!((frags[1].height.to_f32() - 75.0).abs() < 0.01);
+        for f in frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 200.5,
+                "no fragment escapes the strip; frags={frags:?}"
+            );
+        }
     }
 
     /// fulgur-s67g Phase 2.1: a 4-line paragraph splittable at line 2
@@ -6128,8 +8408,22 @@ h2 { string-set: chapter-title content(text); }
         // Page strip = 200 → natural split at line 2 (bottom 225 > 200).
         // first_size = 2 ≥ orphans, remaining_size = 2 ≥ widows. Split OK.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0), (225.0, 300.0)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
         let (new_page, new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines);
+            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
         assert_eq!(emitted, 2, "valid split → 2 fragments");
         assert_eq!(new_page, 1);
         let frags = &geom.get(&1).unwrap().fragments;
@@ -6144,25 +8438,200 @@ h2 { string-set: chapter-title content(text); }
         assert!((new_cursor - 150.0).abs() < 0.01);
     }
 
-    /// fulgur-s67g Phase 2.1: orphan violation. A 3-line paragraph
-    /// with overflow at line 1 (only line 0 fits) would put just 1
-    /// line in the first fragment — below orphans = 2. No split; emit
-    /// whole.
+    /// fulgur-pgbrk R2: orphan violation. A 3-line paragraph on a strip
+    /// that fits only one line would put 1 line in the head fragment,
+    /// below orphans = 2, and no later split point satisfies both
+    /// minimums either — so the constrained scan returns a 225px plan on
+    /// a 100px strip.
+    ///
+    /// Relaxation (css-break-3 §4.4) then slices it one line per page.
+    ///
+    /// Until fulgur-pgbrk R2 this test asserted the opposite — one
+    /// oversized fragment — and so pinned the content-loss defect.
     #[test]
-    fn orphan_minimum_blocks_single_line_head_fragment() {
+    fn orphan_minimum_is_relaxed_rather_than_losing_the_tail_lines() {
         let mut geom = PaginationGeometryTable::new();
         // Lines 75px; bottoms at 75, 150, 225.
-        // Page strip = 100 → natural split at line 1 (bottom 150 > 100).
-        // first_size = 1 < orphans=2. Don't split.
+        // Page strip = 100 → natural split at line 1 (bottom 150 > 100),
+        // where first_size = 1 < orphans = 2.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
         let (new_page, _new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 100.0, &lines);
-        assert_eq!(emitted, 1, "orphan violation → single oversized fragment");
-        assert_eq!(new_page, 0);
+            super::fragment_inline_root(&mut geom, 100.0, placement, &input);
+        assert_eq!(emitted, 3, "relaxation slices one line per page");
+        assert_eq!(new_page, 2);
         let frags = &geom.get(&1).unwrap().fragments;
-        assert_eq!(frags.len(), 1);
-        assert_eq!(frags[0].page_index, 0);
-        assert!((frags[0].height.to_f32() - 225.0).abs() < 0.01);
+        assert_eq!(frags.len(), 3);
+        let pages: Vec<u32> = frags.iter().map(|f| f.page_index).collect();
+        assert_eq!(pages, vec![0, 1, 2]);
+        for f in frags {
+            assert!((f.height.to_f32() - 75.0).abs() < 0.01, "frags={frags:?}");
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 100.5,
+                "no fragment escapes the strip; frags={frags:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R1: an unsplit inline root's single fragment covers
+    /// the whole border box — both decoration edges included.
+    #[test]
+    fn inline_root_single_fragment_carries_both_decoration_edges() {
+        let mut geom = PaginationGeometryTable::new();
+        let lines = vec![(0.0, 75.0), (75.0, 150.0)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 20.0,
+            lead_out: 10.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
+        let (_page, cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 500.0, placement, &input);
+        assert_eq!(emitted, 1);
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert!(
+            (frags[0].height.to_f32() - 180.0).abs() < 0.01,
+            "lead_in 20 + lines 150 + lead_out 10 = 180; got {:?}",
+            frags[0].height
+        );
+        assert!(
+            (cursor - 180.0).abs() < 0.01,
+            "cursor must advance past the trailing decoration, got {cursor}"
+        );
+    }
+
+    /// fulgur-pgbrk R1 + css-break-3 §5.4 (`box-decoration-break: slice`):
+    /// across a split, the leading decoration belongs to the first
+    /// fragment and the trailing decoration to the last — never both to
+    /// both, and never to the middle.
+    #[test]
+    fn inline_root_split_slices_decoration_between_first_and_last_fragment() {
+        let mut geom = PaginationGeometryTable::new();
+        // Lines 75px; bottoms at 75, 150, 225, 300. Strip 200.
+        // With lead_in=20 the first two lines project to 170 (fits) and
+        // the third to 245 (overflows) → split after line 1.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0), (225.0, 300.0)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 20.0,
+            lead_out: 10.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
+        let (page, cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        assert_eq!(emitted, 2);
+        assert_eq!(page, 1);
+        let entry = geom.get(&1).unwrap();
+        let frags = &entry.fragments;
+        assert!(
+            (frags[0].height.to_f32() - 170.0).abs() < 0.01,
+            "first fragment = lead_in 20 + 2 lines 150, no lead_out; got {:?}",
+            frags[0].height
+        );
+        assert!(
+            (frags[1].height.to_f32() - 160.0).abs() < 0.01,
+            "last fragment = 2 lines 150 + lead_out 10, no lead_in; got {:?}",
+            frags[1].height
+        );
+        assert!((cursor - 160.0).abs() < 0.01, "got {cursor}");
+        // Neither fragment may leave the strip — the whole point of
+        // measuring the border box.
+        for f in frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 200.5,
+                "fragment escapes the 200px strip: {f:?}"
+            );
+        }
+        // The leads are published so `render::paragraph_lines_for_page`
+        // can subtract them back out before partitioning line boxes.
+        assert!((entry.content_lead_in.to_f32() - 20.0).abs() < 0.01);
+        assert!((entry.content_lead_out.to_f32() - 10.0).abs() < 0.01);
+    }
+
+    /// fulgur-pgbrk R1: the whole point — a paragraph whose *decoration*
+    /// is what pushes it past the strip must break, not overflow.
+    ///
+    /// Reproduces the downstream bug report's padded shape: a `<p>` with
+    /// `padding: 150px 0` nested two `<div>`s deep, whose line boxes
+    /// alone fit the remaining strip but whose border box does not.
+    /// Before the fix the geometry recorded `y=100, height=160` for a
+    /// 460px-tall box, the overflow check never fired, and the tail was
+    /// painted off the paper and discarded.
+    #[test]
+    fn padded_inline_root_breaks_on_its_border_box_not_its_line_boxes() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:100px"></div>
+              <div><div>
+                <p id="probe" style="margin:0;padding:150px 0;line-height:20px;font-size:14px">
+                  alpha bravo charlie delta echo foxtrot golf hotel india
+                  juliett kilo lima mike november oscar papa quebec romeo
+                  sierra tango uniform victor whiskey xray yankee zulu
+                </p>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = run_pass(doc.deref_mut(), 400.0);
+        let entry = table.get(&probe).expect("probe geometry");
+
+        assert!(
+            (entry.content_lead_in.to_f32() - 150.0).abs() < 0.01,
+            "padding-top must be read from Taffy — Parley's line metrics are \
+             content-box relative and report 0.0 here; got {:?}",
+            entry.content_lead_in
+        );
+        assert!(
+            (entry.content_lead_out.to_f32() - 150.0).abs() < 0.01,
+            "got {:?}",
+            entry.content_lead_out
+        );
+        assert_eq!(
+            entry.fragments.first().map(|f| f.page_index),
+            Some(1),
+            "the box is 460px tall on a 400px strip starting at y=100, so it \
+             must move to a fresh page rather than overflow; frags={:?}",
+            entry.fragments
+        );
+        // The blanket R3 guard in `run_pass_inner` is blind to this shape
+        // until the fragment describes the border box, so assert it here
+        // explicitly as well.
+        for f in &entry.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "fragment escapes the 400px strip: {f:?}"
+            );
+        }
     }
 
     #[test]
@@ -6433,187 +8902,294 @@ h2 { string-set: chapter-title content(text); }
     fn grid_row_leaf_cells_cosplit_across_page_boundary() {
         // 2-col grid, each leaf cell 60px tall.
         // spacer 80px pushes grid to y=80 on a 100px page.
-        // pre-fix: cell 2 pushed to page 1 at y=0 (whole cell).
-        // post-fix: both cells split — page 0 y=80..100 (20px),
-        //           page 1 y=0..40 (40px).
+        // Cells are not class A break points (css-break-3 §4.1): the
+        // row co-splits internally — each cell emits one fragment per
+        // crossed strip, clipped to it: page 0 at y=80 (20px clipped
+        // at the strip bottom), page 1 at y=0 (40px remainder).
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 80px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
-                <div style="height: 60px; width: 100px"></div>
-                <div style="height: 60px; width: 100px"></div>
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
-        let mut frags: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
-        assert_eq!(
-            on_page0.len(),
-            2,
-            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
-        );
-        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+        // Parallel-row alignment: both cells' page-0 slices share the
+        // same entry y.
+        let y1 = geom.get(&c1).unwrap().fragments[0].y.to_f32();
+        let y2 = geom.get(&c2).unwrap().fragments[0].y.to_f32();
         assert!(
-            (ys[0] - ys[1]).abs() < 0.5,
-            "page-0 fragments must share the same y (parallel row); ys={ys:?}"
+            (y1 - y2).abs() < 0.5,
+            "page-0 slices must share the same y (parallel row); y1={y1}, y2={y2}"
         );
     }
 
     #[test]
     fn flex_row_leaf_cells_cosplit_across_page_boundary() {
+        // Same clipped-co-split shape as the grid variant above, on a
+        // flex container.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 80px"></div>
               <div style="display: flex; width: 200px;">
-                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
-                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div id="c1" style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px; flex: 0 0 100px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        let mut frags: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
-        assert_eq!(
-            on_page0.len(),
-            2,
-            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
-        );
-        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+        let y1 = geom.get(&c1).unwrap().fragments[0].y.to_f32();
+        let y2 = geom.get(&c2).unwrap().fragments[0].y.to_f32();
         assert!(
-            (ys[0] - ys[1]).abs() < 0.5,
-            "page-0 fragments must share the same y; ys={ys:?}"
+            (y1 - y2).abs() < 0.5,
+            "page-0 slices must share the same y (parallel row); y1={y1}, y2={y2}"
         );
     }
 
     #[test]
     fn grid_row_recursive_cells_cosplit_across_page_boundary() {
-        // 2-col grid, each cell has 2 inner divs (40px each) = 80px total.
-        // spacer 70px, page_height 100px → grid starts at y=70.
-        // Row bottom = 70 + 80 = 150 > 100 → crosses page boundary.
+        // 2-col grid; each cell has 2 inner divs (40px each) = 80px.
+        // spacer 70px, 100px page → grid row starts at y=70, crossing
+        // the boundary (70 + 80 = 150 > 100).
         //
-        // pre-fix: cell 2 recursion starts at page 1 cursor=0 (because
-        //   cell 1's recursion advanced page_index to 1) → both inner
-        //   divs of cell 2 land entirely on page 1.
-        // post-fix: both cells start recursion at page 0 cursor=70 →
-        //   first inner div (40px) splits at page boundary, landing
-        //   partly on page 0 (y=70..100) and partly on page 1 (y=0..10).
-        //   Specifically: both columns' first inner divs must appear on page 0.
+        // The first inner div of EACH column fragments internally:
+        // page 0 at y=70 (30px clipped at the strip bottom) and page 1
+        // at y=0 (10px remainder). The second inner div continues at
+        // page 1 y=10 whole. Originally the sentinel pinned presence:
+        // the RIGHT column's first inner div must appear on page 0
+        // (pre-slicing the recursion jumped straight to page 1); now
+        // it also pins the clipped slice geometry.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 70px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
                 <div style="width: 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="a1" style="height: 40px; width: 100px"></div>
+                  <div id="a2" style="height: 40px; width: 100px"></div>
                 </div>
                 <div style="width: 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="b1" style="height: 40px; width: 100px"></div>
+                  <div id="b2" style="height: 40px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let ids = ["a1", "a2", "b1", "b2"]
+            .iter()
+            .map(|s| (find_by_id(doc.deref_mut(), s).expect(s), *s))
+            .collect::<Vec<_>>();
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        // inner divs: 40px tall, 100px wide
-        let mut inner: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        // Each column has 2 inner divs (40px each).
-        // After the fix, both columns' FIRST inner div must appear on page 0
-        // (at y≈70, since the grid row starts there).
-        // Pre-fix: only cell 1's first inner div is on page 0; cell 2's
-        // recursion starts from page 1 so its inner divs are at y=0,40 on page 1.
-        let _first_divs_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
-            .collect();
-        // The critical assertion: the RIGHT column's first inner div must also
-        // appear on page 0 (at x=100, y≈70). Pre-fix: cell 2's recursion starts
-        // from page 1, so its inner divs land at x=100 only on page 1.
-        let right_col_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
-            .collect();
-        assert!(
-            !right_col_page0.is_empty(),
-            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
-        );
+        for (id, name) in &ids {
+            let first = name.ends_with('1');
+            let slices: &[(u32, f32, f32)] = if first {
+                // First inner div of each column co-splits in place.
+                &[(0, 70.0, 30.0), (1, 0.0, 10.0)]
+            } else {
+                // Second inner div continues on page 1 at y=10.
+                &[(1, 10.0, 40.0)]
+            };
+            assert_cell_slices(&geom, *id, name, 100.0, 40.0, slices);
+        }
     }
 
     #[test]
     fn flex_row_recursive_cells_cosplit_across_page_boundary() {
+        // Same clipped-co-split shape as the grid variant above, on a
+        // flex container.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 70px"></div>
               <div style="display: flex; width: 200px;">
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="a1" style="height: 40px; width: 100px"></div>
+                  <div id="a2" style="height: 40px; width: 100px"></div>
                 </div>
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="b1" style="height: 40px; width: 100px"></div>
+                  <div id="b2" style="height: 40px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let ids = ["a1", "a2", "b1", "b2"]
+            .iter()
+            .map(|s| (find_by_id(doc.deref_mut(), s).expect(s), *s))
+            .collect::<Vec<_>>();
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        let mut inner: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (id, name) in &ids {
+            let first = name.ends_with('1');
+            let slices: &[(u32, f32, f32)] = if first {
+                &[(0, 70.0, 30.0), (1, 0.0, 10.0)]
+            } else {
+                &[(1, 10.0, 40.0)]
+            };
+            assert_cell_slices(&geom, *id, name, 100.0, 40.0, slices);
+        }
+    }
 
-        let right_col_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
-            .collect();
-        assert!(
-            !right_col_page0.is_empty(),
-            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
+    // ── per-cell clip arithmetic (fulgur-pgbrk R7b) ──────────────────
+
+    /// fulgur-pgbrk R7b: two-page row — a row entering the strip at
+    /// y=80 clips each cell to the remaining 20px and carries the 40px
+    /// remainder to the next page's top.
+    #[test]
+    fn row_cells_clip_per_strip_two_page_row() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R7b: three-page row. A row crossing three strips
+    /// necessarily has cells taller than one strip — the oversized
+    /// branch and the spill branch go through the same
+    /// `slice_oversized_leaf` arithmetic, and this pins it: each cell
+    /// clips 20px on page 0, a full 100px strip on page 1, and the
+    /// 60px remainder on page 2.
+    #[test]
+    fn row_cells_clip_per_strip_three_page_row() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 180px; width: 100px"></div>
+                <div id="c2" style="height: 180px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                180.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 100.0), (2, 0.0, 60.0)],
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R7b: exact-fit boundary — a row whose bottom edge
+    /// lands exactly on the strip boundary emits no slice at all; each
+    /// cell keeps its single 60px fragment.
+    #[test]
+    fn row_cells_clip_per_strip_exact_fit_is_not_sliced() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 40px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(&geom, id, name, 100.0, 60.0, &[(0, 40.0, 60.0)]);
+        }
+    }
+
+    /// fulgur-pgbrk R7b: unequal cell heights — each cell clips its own
+    /// extent: the 60px cell leaves a 40px remainder; the 90px cell
+    /// leaves a 70px one. The row's size is the max across cells.
+    #[test]
+    fn row_cells_clip_per_strip_unequal_cell_heights() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 90px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        assert_cell_slices(
+            &geom,
+            c1,
+            "c1",
+            100.0,
+            60.0,
+            &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+        );
+        assert_cell_slices(
+            &geom,
+            c2,
+            "c2",
+            100.0,
+            90.0,
+            &[(0, 80.0, 20.0), (1, 0.0, 70.0)],
         );
     }
 
@@ -6771,6 +9347,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             false,
             &mut 0,
+            None,
         );
         assert!(
             !geom.contains_key(&fixed_id),
@@ -6808,6 +9385,7 @@ h2 { string-set: chapter-title content(text); }
             1,
             false,
             &mut 0,
+            None,
         );
         assert!(
             geom.contains_key(&nested_id),
@@ -7091,6 +9669,1423 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    // ---------------------------------------------------------------
+    // fulgur-pgbrk: page-fragmentation defects reported against 0.40.0
+    // (FULGUR_PAGINATION_BUG.md).
+    //
+    // Two independent defects, both in `fragment_block_subtree`:
+    //   1. the strip-overflow cut was gated on `child_page_y >
+    //      page_start_y`, which is never true for a parent's LEADING
+    //      child, so a box that began mid-page could not break before
+    //      its own first child;
+    //   2. nested inline roots were never split at line boundaries
+    //      (body-direct ones were), so a tall nested `<p>` emitted as
+    //      one oversized fragment.
+    //
+    // Both ended the same way: content laid out past the page bottom,
+    // through the margin strip, off the paper, and silently discarded.
+    // ---------------------------------------------------------------
+
+    /// Every fragment must begin inside the page strip. A fragment whose
+    /// top edge is already below `page_height_px` is content that renders
+    /// into the margin strip or off the paper, where it is lost.
+    /// Thin wrapper over [`super::find_overflowing_fragments`] so there
+    /// is one overflow predicate (fulgur-pgbrk R3).
+    ///
+    /// Note this is *stricter* than the original helper, which tested
+    /// `y > page_h` (the fragment starts below the strip). The shared
+    /// predicate tests `y + height > page_h` — a fragment that starts
+    /// inside the strip but ends below it is content painted outside
+    /// the page box too.
+    ///
+    /// `doc` is taken so body can be excluded exactly as the production
+    /// check in `run_pass_inner` does — body's entry is a
+    /// document-level total, not a per-page placement (see
+    /// `find_overflowing_fragments`).
+    fn assert_no_fragment_starts_below_page(
+        table: &PaginationGeometryTable,
+        doc: &BaseDocument,
+        page_h: f32,
+    ) {
+        let escaped = super::find_overflowing_fragments(table, page_h, super::find_body_id(doc));
+        assert!(
+            escaped.is_empty(),
+            "fragments extending below the {page_h}px page strip (content would be \
+             painted over the bottom margin or clipped off the paper): {escaped:?}"
+        );
+    }
+
+    /// Build a one-node table for the predicate unit tests below.
+    fn table_of(entries: &[(usize, u32, f32, f32)]) -> PaginationGeometryTable {
+        let mut t = PaginationGeometryTable::new();
+        for &(id, page_index, y, height) in entries {
+            t.entry(id).or_default().fragments.push(Fragment {
+                page_index,
+                x: 0.0_f32.as_px(),
+                y: y.as_px(),
+                width: 100.0_f32.as_px(),
+                height: height.as_px(),
+            });
+        }
+        t
+    }
+
+    /// fulgur-pgbrk R7b: pin one flex / grid cell's per-strip clipped
+    /// fragments — the "per-cell internal fragmentation" the
+    /// spill-slice branch of `fragment_block_subtree` performs
+    /// (css-break-3 §2.1 parallel fragmentation flows). Each
+    /// `(page, y, height)` entry of `slices` is one expected fragment:
+    /// the first slice sits at the cell's entry cursor, every later
+    /// slice at the page top, heights clipped at the strip boundary.
+    /// Also asserts no fragment extends past `page_h` and that the
+    /// slice heights reconstruct the cell's full extent `full_h`.
+    #[track_caller]
+    fn assert_cell_slices(
+        geom: &PaginationGeometryTable,
+        node: usize,
+        name: &str,
+        page_h: f32,
+        full_h: f32,
+        slices: &[(u32, f32, f32)],
+    ) {
+        let frags = &geom
+            .get(&node)
+            .unwrap_or_else(|| panic!("{name} must be in geometry"))
+            .fragments;
+        assert_eq!(
+            frags.len(),
+            slices.len(),
+            "{name}: one fragment per crossed strip; frags={frags:?}"
+        );
+        let mut total = 0.0_f32;
+        for (i, f) in frags.iter().enumerate() {
+            let (page, y, h) = slices[i];
+            total += f.height.to_f32();
+            assert_eq!(
+                f.page_index, page,
+                "{name}: slice {i} must sit on page {page}; frags={frags:?}"
+            );
+            assert!(
+                (f.y.to_f32() - y).abs() < 0.5,
+                "{name}: slice {i} y={y} (entry cursor first, page top after); frags={frags:?}"
+            );
+            assert!(
+                (f.height.to_f32() - h).abs() < 0.5,
+                "{name}: slice {i} clips to {h}px at the strip boundary; frags={frags:?}"
+            );
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= page_h + 0.5,
+                "{name}: no fragment may extend past the {page_h}px strip; frags={frags:?}"
+            );
+        }
+        assert!(
+            (total - full_h).abs() < 0.5,
+            "{name}: slice heights reconstruct the cell's {full_h}px exactly; frags={frags:?}"
+        );
+    }
+
+    #[test]
+    fn find_overflowing_fragments_reports_nothing_for_an_empty_table() {
+        let t = PaginationGeometryTable::new();
+        assert!(super::find_overflowing_fragments(&t, 400.0, None).is_empty());
+    }
+
+    #[test]
+    fn find_overflowing_fragments_ignores_a_fragment_ending_exactly_at_the_strip() {
+        let t = table_of(&[(1, 0, 100.0, 300.0)]);
+        assert!(super::find_overflowing_fragments(&t, 400.0, None).is_empty());
+    }
+
+    #[test]
+    fn find_overflowing_fragments_honours_the_half_pixel_epsilon() {
+        // 0.4px over is within tolerance; 0.6px over is not.
+        let under = table_of(&[(1, 0, 100.0, 300.4)]);
+        assert!(super::find_overflowing_fragments(&under, 400.0, None).is_empty());
+        let over = table_of(&[(1, 0, 100.0, 300.6)]);
+        assert_eq!(
+            super::find_overflowing_fragments(&over, 400.0, None).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn find_overflowing_fragments_catches_a_fragment_starting_below_the_strip() {
+        // The case the original `assert_no_fragment_starts_below_page`
+        // tested: y alone is already past the page bottom.
+        let t = table_of(&[(1, 0, 500.0, 10.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, None);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].overshoot_px - 110.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn find_overflowing_fragments_reports_overshoot_not_height() {
+        let t = table_of(&[(1, 0, 380.0, 100.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, None);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].overshoot_px - 80.0).abs() < 0.01,
+            "overshoot is bottom - strip, not the fragment height; got {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn find_overflowing_fragments_excludes_only_the_given_body_id() {
+        let t = table_of(&[(3, 0, 0.0, 900.0), (5, 0, 0.0, 900.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, Some(3));
+        assert_eq!(out.len(), 1, "body is skipped, its sibling is not");
+        assert_eq!(out[0].node_id, 5);
+    }
+
+    #[test]
+    fn find_overflowing_fragments_is_ordered_by_node_then_page() {
+        let t = table_of(&[(9, 1, 0.0, 900.0), (9, 0, 0.0, 900.0), (2, 0, 0.0, 900.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, None);
+        let seen: Vec<(usize, u32)> = out.iter().map(|o| (o.node_id, o.page_index)).collect();
+        assert_eq!(seen, vec![(2, 0), (9, 1), (9, 0)]);
+    }
+
+    #[test]
+    fn find_overflowing_fragments_flags_a_continuing_slice() {
+        // Two fragments: the page-0 one is a slice (the node continues
+        // on page 1), so its overflow is a height bookkeeping bug.
+        let t = table_of(&[(7, 0, 200.0, 400.0), (7, 1, 0.0, 300.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, None);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].continues_on_later_page,
+            "an overflowing non-final fragment continues later; got {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn find_overflowing_fragments_does_not_flag_a_final_fragment_as_continuing() {
+        let t = table_of(&[(7, 0, 0.0, 900.0)]);
+        let out = super::find_overflowing_fragments(&t, 400.0, None);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].continues_on_later_page,
+            "a sole fragment has nowhere to continue; got {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn parent_slice_height_clamps_a_trailing_margin_to_the_strip() {
+        // css-break-3 §5.2: the margin below the last child on the page
+        // is truncated at the break rather than painted past it.
+        assert!((super::parent_slice_height(408.0, 0.0, 400.0) - 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parent_slice_height_accounts_for_a_mid_page_start() {
+        // A parent starting at y=200 on a 400px page can claim at most
+        // the remaining 200px strip.
+        assert!((super::parent_slice_height(600.0, 200.0, 400.0) - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parent_slice_height_passes_through_content_inside_the_strip() {
+        assert!((super::parent_slice_height(300.0, 100.0, 400.0) - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parent_slice_height_never_goes_negative() {
+        // Defensive: a backward cursor must not produce a negative
+        // height, which would corrupt downstream slicing.
+        assert!(super::parent_slice_height(50.0, 100.0, 400.0).abs() < 0.01);
+        assert!(super::parent_slice_height(100.0, 500.0, 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn break_decision_pushes_a_child_that_overflows_below_the_floor() {
+        // Child starts at 200 on a 400 strip and is 300 tall: bottom 500.
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PushToNextPage
+        );
+    }
+
+    #[test]
+    fn break_decision_places_a_child_that_fits() {
+        assert_eq!(
+            super::break_decision(200.0, 100.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_floor_decides_a_leading_child() {
+        // A leading child sits exactly at its container's page start.
+        // With leading-edge propagation permitted the floor is 0, so the
+        // break is legal; with the container pinning its children the
+        // floor is page_start_y and the child stays put and overflows
+        // (fulgur-pgbrk).
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PushToNextPage
+        );
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 200.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_is_strict_at_the_floor() {
+        // `child_top > floor`, not `>=`.
+        assert_eq!(
+            super::break_decision(0.0, 500.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_places_a_child_ending_exactly_on_the_page_bottom() {
+        // `child_top + h > page_height_px`, not `>=` — a child whose
+        // bottom lands exactly on the boundary fits.
+        assert_eq!(
+            super::break_decision(100.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_keeps_an_oversized_child_at_the_page_top() {
+        // Nothing to push to. This is the gate that stops the
+        // leading-child floor from becoming an infinite page advance.
+        assert_eq!(
+            super::break_decision(0.0, 900.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    /// Walker-convergence phase 5 + fulgur-pgbrk R7b: the recursion
+    /// gate is floor-aware. A leading child PINNED at the
+    /// `page_start_y` floor (`allow_leading_break == false` — flex /
+    /// grid / atomic-inline / orthogonal subtrees) that SPILLS the
+    /// strip now reports "recurse": the walk spill-slices it in place
+    /// (pre-R7b it fell back to the whole-emit path and the overflow
+    /// guard caught it, so "no recursion" used to be pinned here). A
+    /// pinned child that FITS still reports "no recursion".
+    #[test]
+    fn subtree_requires_recursion_pins_leading_child_at_page_start_floor() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="spill">
+                <div style="height: 300px"></div>
+              </div>
+              <div id="fit">
+                <div style="height: 150px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let spill = find_by_id(&doc, "spill").expect("spill div should exist");
+        let fit = find_by_id(&doc, "fit").expect("fit div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        // 300px child pinned at the 200px floor spills (500 > 400.5)
+        // — the walk slices it, which is a split.
+        assert!(
+            super::subtree_requires_recursion(&cx, spill, 200.0, false),
+            "pinned child spilling the strip must trigger recursion — the walk slices it"
+        );
+        // 150px child pinned at the same floor fits (350 <= 400).
+        assert!(
+            !super::subtree_requires_recursion(&cx, fit, 200.0, false),
+            "pinned child that fits the strip must not trigger recursion"
+        );
+    }
+
+    /// Same geometry as the pinned case, but with leading-break
+    /// propagation permitted (`allow_leading_break == true`) the floor
+    /// is 0.0: the leading child's break propagates to the container's
+    /// own leading edge (css-break-3 §3), so the gate must answer
+    /// "recurse".
+    #[test]
+    fn subtree_requires_recursion_recurses_leading_child_at_zero_floor() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="probe">
+                <div style="height: 300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, true),
+            "leading child overflowing below floor 0.0 must trigger \
+             recursion — the walk pushes/splits it"
+        );
+    }
+
+    /// An oversized (taller-than-a-page) leading child sitting exactly
+    /// on the `page_start_y` floor: `break_decision` is strict at the
+    /// floor, so the push branch can never fire there — no infinite
+    /// page advance — yet the gate must still answer "recurse" because
+    /// the walk slices the child (`slice_oversized_leaf`), which is a
+    /// split. Pinning both sides keeps the gate's terminating decision
+    /// from regressing to the floor-blind push interpretation.
+    #[test]
+    fn subtree_requires_recursion_oversized_child_at_floor_decides_slice_not_loop() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="probe">
+                <div style="height: 900px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        // The paired walk predicate at the floor: PlaceHere, strictly —
+        // a child on the floor has nowhere to push to.
+        assert_eq!(
+            super::break_decision(200.0, 900.0, 200.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+        // available_strip 200 of a 400px page ⟹ page_start_y = 200,
+        // so the oversized leading child sits exactly on the floor.
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, false),
+            "oversized leading child at the floor must still recurse — \
+             the walk slices it in place rather than advancing pages \
+             forever"
+        );
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, true),
+            "oversized leading child below floor 0.0 must recurse — \
+             pushed, then sliced on the next strip"
+        );
+    }
+
+    #[test]
+    fn leading_child_of_mid_page_block_breaks_instead_of_overflowing() {
+        // The reported shape: a filler fills page 0 exactly, then a
+        // wrapper whose FIRST child is the content. Pre-fix the inner
+        // paragraph was placed at y=1448 on a 1420px page — 28px below
+        // the page bottom — and everything past the paper edge vanished.
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:1420px"></div>
+              <div>
+                <div>
+                  <div id="probe" style="height:200px"></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 925.0);
+        let table = run_pass(&mut doc, 1420.0);
+        assert_no_fragment_starts_below_page(&table, &doc, 1420.0);
+
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let frags = &table
+            .get(&probe)
+            .expect("probe must have geometry")
+            .fragments;
+        assert!(
+            frags.iter().all(|f| f.page_index >= 1),
+            "the leading child must be pushed to page 1, not overflowed off page 0; got {frags:?}"
+        );
+    }
+
+    #[test]
+    fn nested_inline_root_splits_at_line_boundaries() {
+        // A multi-line paragraph nested two levels deep, starting near
+        // the bottom of the strip. Pre-fix `fragment_block_subtree` had
+        // no inline path at all, so this emitted ONE fragment and every
+        // line past the page bottom was destroyed. It must now split
+        // across pages like a body-direct paragraph does.
+        // Long enough to exceed a whole 1420px strip on its own, so the
+        // split is required even after the leading-edge break moves the
+        // wrapper to a fresh page.
+        let text = "word ".repeat(4000);
+        let html = format!(
+            r#"<html><body style="margin:0">
+                 <div style="height:1200px"></div>
+                 <div><div><p id="probe" style="margin:0">{text}</p></div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let table = run_pass(&mut doc, 1420.0);
+        assert_no_fragment_starts_below_page(&table, &doc, 1420.0);
+
+        let probe = find_by_id(&doc, "probe").expect("probe paragraph should exist");
+        let geom = table.get(&probe).expect("probe must have geometry");
+        assert!(
+            geom.is_split(),
+            "a nested paragraph taller than the remaining strip must be split across \
+             pages, not emitted whole; fragments={:?}",
+            geom.fragments
+        );
+        // Every slice must fit the strip it sits on.
+        for f in &geom.fragments {
+            let bottom = f.y.to_f32() + f.height.to_f32();
+            assert!(
+                bottom <= 1420.0 + 0.5,
+                "paragraph slice runs past the page bottom: {f:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk gap 1: the leading-break permission must be threaded
+    /// through the RECURSION, not just applied to a container's direct
+    /// children. `leading_break_is_not_propagated_out_of_a_grid_row` uses
+    /// childless cells, so a literal `true` at the `depth + 1` call site
+    /// would still satisfy it. Here each grid cell wraps its leading child
+    /// one level deeper, so the permission has to survive two recursion
+    /// hops to keep the row co-splitting in place.
+    #[test]
+    fn leading_break_permission_is_threaded_through_recursion() {
+        // 100px page, grid row starts at y=80, leading child is 60px tall
+        // (80 + 60 = 140 > 100). With the permission correctly cleared for
+        // the whole subtree the row overflows in place; if it leaked back
+        // to `true` the wrapper would break and the cells would jump to
+        // page 1.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div style="width: 100px">
+                  <div><div id="lead1" style="height: 60px; width: 100px"></div></div>
+                </div>
+                <div style="width: 100px">
+                  <div><div id="lead2" style="height: 60px; width: 100px"></div></div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let lead1 = find_by_id(doc.deref_mut(), "lead1").expect("div#lead1");
+        let lead2 = find_by_id(doc.deref_mut(), "lead2").expect("div#lead2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+
+        for (id, name) in [(lead1, "lead1"), (lead2, "lead2")] {
+            let frags = &geom
+                .get(&id)
+                .unwrap_or_else(|| panic!("{name} must be in geometry"))
+                .fragments;
+            assert!(
+                frags.iter().any(|f| f.page_index == 0),
+                "{name} must stay on page 0 and co-split in place — the leading-break \
+                 permission leaked through the recursion into a grid subtree; frags={frags:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk gap 6: the gate reads `suppress_page_check`, which has
+    /// three independent sources. Grid is covered above; this pins the
+    /// flex and atomic-inline (`inline-block`) sources so a narrowing of
+    /// the condition to grid-only is caught.
+    #[test]
+    fn leading_break_is_not_propagated_out_of_flex_or_inline_block() {
+        for (label, container_style) in [
+            ("flex", "display: flex; width: 200px"),
+            ("inline-block", "display: inline-block; width: 200px"),
+        ] {
+            let html = format!(
+                r#"<html><body style="margin: 0; padding: 0">
+                     <div style="height: 80px"></div>
+                     <div style="{container_style}">
+                       <div style="width: 100px">
+                         <div><div id="lead" style="height: 60px; width: 100px"></div></div>
+                       </div>
+                     </div>
+                   </body></html>"#
+            );
+            let mut doc = parse(&html, 400.0);
+            let lead = find_by_id(doc.deref_mut(), "lead").expect("div#lead");
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            let geom =
+                super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+            let frags = &geom.get(&lead).expect("lead must be in geometry").fragments;
+            assert!(
+                frags.iter().any(|f| f.page_index == 0),
+                "{label}: leading child must stay on page 0 (container is not a class A \
+                 break point); frags={frags:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk gap 3: the new inline branch mirrors fulgur-oc51's
+    /// parent bookkeeping so a wrapper's background / borders do not
+    /// vanish from the pages its paragraph crosses. Without those ~60
+    /// lines the wrapper would only be recorded on the LAST page.
+    #[test]
+    fn nested_inline_split_emits_parent_fragment_on_every_crossed_page() {
+        // `wrap` is the paragraph's direct parent, so the inline branch's
+        // own bookkeeping (not the recursion branch's) is what records it.
+        let text = "word ".repeat(4000);
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div><div id="wrap" style="background:#eee"><p style="margin:0">{text}</p></div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("div#wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+
+        let last_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .expect("some geometry");
+        assert!(
+            last_page >= 3,
+            "fixture must span 4+ pages to exercise intermediate pages; last_page={last_page}"
+        );
+
+        let wrap_frags = &geom.get(&wrap).expect("wrap must be in geometry").fragments;
+        for p in 0..=last_page {
+            assert!(
+                wrap_frags.iter().any(|f| f.page_index == p),
+                "wrapper must have a fragment on every page its paragraph crosses \
+                 (missing page {p}); frags={wrap_frags:?}"
+            );
+        }
+        // Intermediate pages are full strips.
+        for p in 1..last_page {
+            let f = wrap_frags
+                .iter()
+                .find(|f| f.page_index == p)
+                .expect("checked above");
+            assert!(
+                (f.height.to_f32() - 400.0).abs() < 0.5,
+                "intermediate wrapper fragment on page {p} must span the full strip; got {f:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk gap 4: when the break is propagated from a box's
+    /// leading edge the box places nothing on the page it leaves, so it
+    /// must not claim a fragment there. A zero-height fragment would also
+    /// flip `is_split()` on and corrupt downstream paragraph slicing.
+    #[test]
+    fn propagated_leading_break_claims_no_fragment_on_the_outgoing_page() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:1420px"></div>
+              <div id="outer"><div id="wrap">
+                <div id="probe" style="height:200px"></div>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 925.0);
+        let outer = find_by_id(doc.deref_mut(), "outer").expect("div#outer");
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("div#wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 1420.0_f32.as_px(), &table);
+
+        for (id, name) in [(outer, "outer"), (wrap, "wrap")] {
+            let g = geom
+                .get(&id)
+                .unwrap_or_else(|| panic!("{name} must be in geometry"));
+            assert!(
+                !g.fragments.iter().any(|f| f.page_index == 0),
+                "{name} places nothing on page 0 — it must not claim a fragment there \
+                 (it would paint an empty box); frags={:?}",
+                g.fragments
+            );
+            assert!(
+                !g.is_split(),
+                "{name} must not read as split — a stray zero-height fragment corrupts \
+                 downstream slicing; frags={:?}",
+                g.fragments
+            );
+        }
+    }
+
+    /// The inverse of the guard above: a child that genuinely STARTS on
+    /// the page and then splits must still leave the parent's fragment on
+    /// that page (the mo-006/008 behaviour the guard deliberately keeps).
+    #[test]
+    fn split_child_that_starts_on_the_page_still_emits_parent_fragment() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:200px"></div>
+              <div id="outer"><div id="wrap">
+                <div style="height:100px"></div>
+                <div style="height:300px"></div>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("div#wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let frags = &geom.get(&wrap).expect("wrap must be in geometry").fragments;
+        assert!(
+            frags.iter().any(|f| f.page_index == 0),
+            "wrap placed its first child on page 0, so it must keep a fragment there; \
+             frags={frags:?}"
+        );
+    }
+
+    /// fulgur-pgbrk gap 2: `break-inside: avoid` on a NESTED inline root.
+    /// The new branch reads it to suppress the line split; the existing
+    /// `break_inside_avoid_suppresses_inline_split` is body-direct and
+    /// non-splitting, so it never reaches this code.
+    ///
+    /// Fulfillable case: the paragraph fits a whole strip, so `avoid` is
+    /// honoured — it moves whole to the next page rather than splitting.
+    #[test]
+    fn nested_avoid_inside_moves_paragraph_whole_when_it_fits_a_page() {
+        let text = "word ".repeat(400); // ~307px, fits the 400px strip
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div style="height:200px"></div>
+                 <div><div><p id="probe" style="margin:0; break-inside:avoid">{text}</p></div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("p#probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let g = geom.get(&probe).expect("probe must be in geometry");
+        assert!(
+            !g.is_split(),
+            "break-inside: avoid must keep the paragraph whole; frags={:?}",
+            g.fragments
+        );
+        assert_eq!(
+            g.fragments[0].page_index, 1,
+            "the whole paragraph moves to the next page; frags={:?}",
+            g.fragments
+        );
+        assert!(
+            g.fragments[0].y.to_f32() + g.fragments[0].height.to_f32() <= 400.5,
+            "the moved paragraph must fit its strip; frags={:?}",
+            g.fragments
+        );
+    }
+
+    /// Unfulfillable case: the paragraph is taller than a whole strip, so
+    /// no placement can honour `avoid`. CSS Fragmentation 3 §4.4 requires
+    /// it to be ignored — obeying it would only push the tail off the page
+    /// and destroy it, which is the very failure this work fixes.
+    #[test]
+    fn nested_avoid_inside_is_relaxed_when_paragraph_exceeds_a_whole_page() {
+        let text = "word ".repeat(4000); // ~3072px on a 400px strip
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div style="height:200px"></div>
+                 <div><div><p id="probe" style="margin:0; break-inside:avoid">{text}</p></div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("p#probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let g = geom.get(&probe).expect("probe must be in geometry");
+        assert!(
+            g.is_split(),
+            "an unfulfillable `avoid` must be relaxed to line-level splitting rather \
+             than destroying the tail; frags={:?}",
+            g.fragments
+        );
+        for f in &g.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "every slice must fit its strip; frag={f:?}"
+            );
+        }
+    }
+
+    /// fulgur-pgbrk gap 5: `break-after: page` handled inside the new
+    /// nested inline branch. The existing coverage is body-direct.
+    #[test]
+    fn nested_inline_root_honours_break_after_page() {
+        let text = "word ".repeat(200);
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div><div>
+                   <p id="probe" style="margin:0; break-after:page">{text}</p>
+                   <div id="after" style="height:50px"></div>
+                 </div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("p#probe");
+        let after = find_by_id(doc.deref_mut(), "after").expect("div#after");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let last_probe_page = geom
+            .get(&probe)
+            .expect("probe")
+            .fragments
+            .iter()
+            .map(|f| f.page_index)
+            .max()
+            .expect("probe fragment");
+        let after_page = geom.get(&after).expect("after").fragments[0].page_index;
+        assert!(
+            after_page > last_probe_page,
+            "break-after: page on a nested inline root must push the following sibling \
+             onto a later page; probe_last={last_probe_page} after={after_page}"
+        );
+    }
+
+    /// fulgur-pgbrk gap 7: a nested multi-line paragraph inside a grid row
+    /// drives `row_state` (`emitted_parent_pages`, `max_end_*`,
+    /// `crossed_by_recursion`) from brand-new code. Guard against the row
+    /// bookkeeping desynchronising — no duplicate parent fragments, and
+    /// nothing recorded below the strip.
+    #[test]
+    fn nested_inline_split_inside_a_grid_row_keeps_row_state_consistent() {
+        let text = "word ".repeat(600);
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div style="display:grid; grid-template-columns:400px 400px; width:800px">
+                   <div id="cellA" style="width:400px"><p style="margin:0">{text}</p></div>
+                   <div id="cellB" style="width:400px"><p style="margin:0">{text}</p></div>
+                 </div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let cell_a = find_by_id(doc.deref_mut(), "cellA").expect("cellA");
+        let cell_b = find_by_id(doc.deref_mut(), "cellB").expect("cellB");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+
+        for (id, name) in [(cell_a, "cellA"), (cell_b, "cellB")] {
+            let frags = &geom.get(&id).expect(name).fragments;
+            let mut pages: Vec<u32> = frags.iter().map(|f| f.page_index).collect();
+            pages.sort_unstable();
+            let before = pages.len();
+            pages.dedup();
+            assert_eq!(
+                before,
+                pages.len(),
+                "{name} must not receive duplicate fragments for the same page; frags={frags:?}"
+            );
+        }
+        for (id, geo) in &geom {
+            for f in &geo.fragments {
+                assert!(
+                    f.y.to_f32() <= 400.5,
+                    "node {id} has a fragment starting below the strip: {f:?}"
+                );
+            }
+        }
+    }
+
+    /// fulgur-pgbrk gap 8: the new branch carries an `if !is_float` guard
+    /// on `prev_used_page`; both existing float tests are body-direct. A
+    /// nested floated inline root must not corrupt the walk.
+    #[test]
+    fn nested_floated_inline_root_does_not_break_the_walk() {
+        let text = "word ".repeat(300);
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <div><div>
+                   <p id="probe" style="margin:0; float:left; width:400px">{text}</p>
+                   <div id="after" style="height:50px"></div>
+                 </div></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 925.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("p#probe");
+        let after = find_by_id(doc.deref_mut(), "after").expect("div#after");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        assert!(geom.contains_key(&probe), "floated probe must be recorded");
+        assert!(
+            geom.contains_key(&after),
+            "the following sibling must survive"
+        );
+        for (id, geo) in &geom {
+            for f in &geo.fragments {
+                assert!(
+                    f.y.to_f32() <= 400.5,
+                    "node {id} has a fragment starting below the strip: {f:?}"
+                );
+            }
+        }
+    }
+
+    /// fulgur-pgbrk gap 9 / R7: an oversized UNBREAKABLE leaf that is a
+    /// parent's leading child at the top of a fresh page. There is
+    /// nowhere to push it and no interior break point.
+    ///
+    /// css-break-3 §4.1 allows a UA either to overflow such a box or to
+    /// slice it per fragmentainer. fulgur slices in BOTH the body-direct
+    /// path (fulgur-sbw2) and the nested path (fulgur-pgbrk R7) so the
+    /// two walks agree and no fragment lands outside the page box.
+    ///
+    /// It must also keep pinning that the `child_page_y > 0.0` floor is
+    /// never "fixed" into an infinite page-advance loop: every slice
+    /// after the first starts at the top of its page, and the count is
+    /// bounded by the box height.
+    #[test]
+    fn oversized_unbreakable_leading_leaf_at_page_top_is_sliced_per_strip() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div id="outer"><div id="wrap">
+                <div id="probe" style="height:900px"></div>
+                <div style="height:50px"></div>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("div#probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        // 900px of content on a 400px strip: three slices (400 + 400 +
+        // 100), one per fragmentainer, instead of one 900px fragment
+        // hanging 500px outside the page box.
+        assert_eq!(
+            frags.len(),
+            3,
+            "a childless oversized leaf is sliced per strip; frags={frags:?}"
+        );
+        let pages: Vec<u32> = frags.iter().map(|f| f.page_index).collect();
+        assert_eq!(pages, vec![0, 1, 2], "consecutive pages; frags={frags:?}");
+        assert!(
+            frags[0].y.to_f32() <= 0.5,
+            "the first slice starts at the top of the strip; frags={frags:?}"
+        );
+        for f in &frags[1..] {
+            assert!(
+                f.y.to_f32() <= 0.5,
+                "every later slice starts at the top of its page — the leading-child \
+                 floor must not turn into an infinite page advance; frags={frags:?}"
+            );
+        }
+        let total: f32 = frags.iter().map(|f| f.height.to_f32()).sum();
+        assert!(
+            (total - 900.0).abs() <= 0.5,
+            "the slices reconstruct the box height exactly; frags={frags:?}"
+        );
+        for f in frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "no slice may extend past the strip; frags={frags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_break_is_not_propagated_out_of_a_grid_row() {
+        // Counterpart to the fix: flex / grid items are not class A
+        // break points (CSS Fragmentation 3 §3.2) and their rows
+        // co-split internally (fulgur-ysms, now clipped per strip by
+        // fulgur-pgbrk R7b). The leading-edge break must therefore
+        // stop at a grid container rather than dragging a row that
+        // cannot move onto the next page. Both cells stay on page 0
+        // — as clipped slices — instead of jumping to page 1.
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:80px"></div>
+              <div style="display:grid; grid-template-columns:100px 100px; width:200px;">
+                <div id="c1" style="height:60px; width:100px"></div>
+                <div id="c2" style="height:60px; width:100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R8: a forced break on a flex / grid cell must not
+    /// close the parent on a page a sibling cell already closed.
+    ///
+    /// `row_state.emitted_parent_pages` exists so that N parallel
+    /// flex / grid cells, each independently deciding to close the
+    /// parent on the current page, emit only one parent fragment for
+    /// it. Originally only the two unforced (overflow-driven) emission
+    /// sites consulted it; the six forced `break-before` /
+    /// `break-after: page` sites did not, and the parent came out twice
+    /// on page 0 with DIFFERENT heights — `400` from the recursion's
+    /// full-strip close and `60` from the forced break.
+    ///
+    /// That was not cosmetic: `render.rs` reads `frag.height` for
+    /// background / border / box-shadow painting whenever `is_split()`,
+    /// so the container's decoration was painted twice at two different
+    /// sizes on one page, and every fragment-counting walk
+    /// (`paragraph_lines_for_page`, `find_overflowing_fragments`) saw a
+    /// phantom third fragment.
+    ///
+    /// The dedup is a property of "the parent is leaving this page",
+    /// which is equally true of a forced and an unforced break, so all
+    /// six forced sites now take [`ParentSlice::close_unforced`]. The
+    /// function tail is deliberately excluded: it closes the parent's
+    /// FINAL fragment, on a page the parent never leaves, so it has no
+    /// sibling to contend with.
+    #[test]
+    fn forced_break_does_not_close_a_grid_parent_twice_on_one_page() {
+        // Cell 1 crosses a page via RECURSION, which is what sets
+        // `crossed_by_recursion` and therefore what makes the same-row
+        // rebase at `:2033` restore `page_index` to the row start for
+        // cell 2. A forced break alone does not set that flag, so two
+        // cells that merely both carry `break-after: page` end up on
+        // consecutive pages and never contend for one.
+        //
+        // Cell 1's recursion emits the parent's page-0 fragment through
+        // the DEDUPED path; cell 2 is then restored to page 0 and its
+        // `break-after: page` emits through a NON-deduped site.
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div id="grid" style="display:grid; grid-template-columns:100px 100px; width:200px;">
+                <div style="width:100px">
+                  <div style="height:250px"></div>
+                  <div style="height:250px"></div>
+                </div>
+                <div style="height:60px; width:100px; break-after:page"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let frags = &geom.get(&grid).expect("grid").fragments;
+        let mut seen: BTreeMap<u32, usize> = BTreeMap::new();
+        for f in frags {
+            *seen.entry(f.page_index).or_default() += 1;
+        }
+        let dupes: Vec<(u32, usize)> = seen
+            .iter()
+            .filter(|&(_, &n)| n > 1)
+            .map(|(&p, &n)| (p, n))
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "the parent must be closed at most once per page; \
+             duplicated pages={dupes:?}, frags={frags:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // CSS Fragmentation Module Level 3 conformance map
+    // (https://www.w3.org/TR/css-break-3/)
+    //
+    // One test per normative rule that governs page wrapping. Rules
+    // fulgur does not implement yet are `#[ignore]`d with the spec
+    // citation — they FAIL when run with `--ignored`, which is the
+    // point: each is a pinned, runnable statement of the remaining
+    // conformance gap. Remove the `#[ignore]` when implementing the
+    // rule.
+    //
+    // Rules covered elsewhere (no duplicate here):
+    // - §4.4 rule 3 (orphans/widows defaults at a feasible split) —
+    //   `widow_orphan_minimum_allows_balanced_split` and neighbours.
+    // - §4.4 relaxation of `break-inside: avoid` on an unfulfillable
+    //   box — `nested_avoid_inside_is_relaxed_when_paragraph_exceeds_
+    //   a_whole_page`.
+    // - §4.1 flex/grid items are not class A break points —
+    //   `leading_break_is_not_propagated_out_of_a_grid_row`.
+    // - §5.4 box-decoration-break (slice vs clone at fragment edges)
+    //   is a paint-level rule invisible to the geometry table; it
+    //   needs a VRT fixture, not a unit test here.
+    // ---------------------------------------------------------------
+
+    /// css-break-3 §4.1 class A: an unforced break is allowed between
+    /// sibling in-flow block-level boxes. The overflowing second
+    /// sibling moves whole to the next page.
+    #[test]
+    fn css_break3_class_a_unforced_break_between_siblings() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div id="a" style="height:300px"></div>
+              <div id="b" style="height:200px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 400.0);
+        let a = find_by_id(&doc, "a").expect("div#a");
+        let b = find_by_id(&doc, "b").expect("div#b");
+        assert_eq!(table.get(&a).expect("a").fragments[0].page_index, 0);
+        let bf = &table.get(&b).expect("b").fragments[0];
+        assert_eq!(bf.page_index, 1, "b breaks at the class A point before it");
+        assert!(bf.y.to_f32() <= 0.5, "b starts at the top of page 1");
+    }
+
+    /// css-break-3 §4.1 class C: a break point between a container's
+    /// content edge and its first child exists ONLY when there is a
+    /// non-zero gap. With no gap, the nearest possible break point is
+    /// the class A point BEFORE the container — so an overflowing
+    /// leading child must move its whole ancestor chain, never lay out
+    /// past the page bottom. This is the normative basis for the
+    /// fulgur-pgbrk leading-edge propagation fix.
+    #[test]
+    fn css_break3_no_class_c_point_without_gap_breaks_before_container() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:350px"></div>
+              <div id="outer"><div id="wrap">
+                <div id="probe" style="height:100px"></div>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 400.0);
+        for name in ["outer", "wrap", "probe"] {
+            let id = find_by_id(&doc, name).expect(name);
+            let frags = &table.get(&id).expect(name).fragments;
+            assert!(
+                frags.iter().all(|f| f.page_index == 1),
+                "{name} must move entirely to page 1 (no class C point without a gap); \
+                 frags={frags:?}"
+            );
+        }
+        let probe = find_by_id(&doc, "probe").expect("probe");
+        assert!(
+            table.get(&probe).expect("probe").fragments[0].y.to_f32() <= 0.5,
+            "probe lands at the top of page 1"
+        );
+    }
+
+    /// css-break-3 §4.1 class B: an unforced break is allowed between
+    /// line boxes inside a block container. A paragraph taller than a
+    /// whole page splits at line edges and every slice stays inside
+    /// its strip.
+    #[test]
+    fn css_break3_class_b_break_between_line_boxes() {
+        let text = "word ".repeat(2000);
+        let html = format!(
+            r#"<html><body style="margin:0; padding:0">
+                 <p id="probe" style="margin:0">{text}</p>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 600.0);
+        let table = run_pass(&mut doc, 400.0);
+        let probe = find_by_id(&doc, "probe").expect("p#probe");
+        let g = table.get(&probe).expect("probe");
+        assert!(g.is_split(), "class B splitting must engage");
+        for f in &g.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "every line-box slice stays inside its strip; frag={f:?}"
+            );
+        }
+    }
+
+    /// css-break-3 §4.1 monolithic content: a childless fixed-height
+    /// box has no interior break points; the spec permits the UA to
+    /// "fragment such boxes by slicing the element's graphical
+    /// representation". Body-direct, fulgur takes the slicing option
+    /// (fulgur-sbw2): one fragment per page strip, each inside its
+    /// strip, and following content continues after the last slice.
+    /// The nested walk (fulgur-pgbrk R7) slices identically — pinned
+    /// by `oversized_unbreakable_leading_leaf_at_page_top_is_sliced_
+    /// per_strip`.
+    #[test]
+    fn css_break3_monolithic_body_direct_box_is_sliced_per_strip() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div id="mono" style="height:900px"></div>
+              <div id="after" style="height:100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 400.0);
+        let mono = find_by_id(&doc, "mono").expect("mono");
+        let after = find_by_id(&doc, "after").expect("after");
+        let mono_frags = &table.get(&mono).expect("mono").fragments;
+        assert_eq!(
+            mono_frags.len(),
+            3,
+            "900px monolithic box on 400px strips slices into 3 fragments; \
+             frags={mono_frags:?}"
+        );
+        for f in mono_frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "each slice stays inside its strip; frag={f:?}"
+            );
+        }
+        let after_frag = &table.get(&after).expect("after").fragments[0];
+        assert_eq!(
+            after_frag.page_index, 2,
+            "the following sibling continues after the last slice; frag={after_frag:?}"
+        );
+    }
+
+    /// css-break-3 §5.2: "When an unforced break occurs before or
+    /// after a block-level box, any margins adjoining the break are
+    /// truncated to zero." The pushed sibling's top margin must not
+    /// reappear at the top of the new page.
+    #[test]
+    fn css_break3_s52_margin_adjoining_unforced_break_is_truncated() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:300px"></div>
+              <div id="b" style="height:200px; margin-top:50px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 400.0);
+        let b = find_by_id(&doc, "b").expect("div#b");
+        let bf = &table.get(&b).expect("b").fragments[0];
+        assert_eq!(bf.page_index, 1);
+        assert!(
+            bf.y.to_f32() <= 0.5,
+            "the 50px top margin adjoining the unforced break must be truncated; \
+             frag={bf:?}"
+        );
+    }
+
+    /// css-break-3 §3.1 (child→parent break propagation): "A
+    /// break-before value on a first in-flow child box is propagated
+    /// to its container." A forced `break-before: page` on a nested
+    /// wrapper's first child must therefore break before the WRAPPER
+    /// when content already sits on the page.
+    ///
+    /// Implemented by fulgur-pgbrk R5. The nested walk used to suppress
+    /// a leading child's break-before whenever the parent had placed
+    /// nothing on the current page (the `cursor_y > page_start_y` gate)
+    /// and never handed the forced value up, so the break was dropped
+    /// entirely. `fragment_block_subtree` now returns
+    /// `SubtreeResult::RequestBreakBefore` in that case and the caller
+    /// advances a page and re-enters.
+    #[test]
+    fn css_break3_s31_forced_break_on_first_child_propagates_to_container() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:100px"></div>
+              <div id="wrap">
+                <div id="probe" style="break-before:page; height:100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert!(
+            frags.iter().all(|f| f.page_index >= 1),
+            "break-before on a first in-flow child propagates to its container, \
+             which breaks to page 1; frags={frags:?}"
+        );
+    }
+
+    /// css-break-3 §4.4 rule 2: breaking at a class A point is not
+    /// allowed when a common ancestor of the adjoining siblings has
+    /// `break-inside: avoid`. The wrapper must instead move whole to
+    /// the next page (its own class A point).
+    ///
+    /// fulgur-pgbrk R4, css-break-3 §4.4 relaxation: `break-inside:
+    /// avoid` is a preference, not a guarantee. A wrapper taller than a
+    /// whole page cannot be honoured by moving it — there is no page it
+    /// fits — so obeying `avoid` would only push its tail off the paper
+    /// and destroy it. The restriction is dropped and the wrapper splits.
+    #[test]
+    fn block_break_inside_avoid_is_relaxed_when_the_box_exceeds_a_page() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:100px"></div>
+              <div id="wrap" style="break-inside:avoid">
+                <div style="height:300px"></div>
+                <div style="height:300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        // 600px of content on a 400px page: no page can hold it whole.
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let g = geom.get(&wrap).expect("wrap");
+        assert!(
+            g.is_split(),
+            "an unfulfillable avoid is relaxed rather than losing the tail; frags={:?}",
+            g.fragments
+        );
+        // The load-bearing assertion. Splitting alone does not
+        // distinguish the relaxation from a broken guard: an R4 that
+        // requested a break unconditionally would push the wrapper to
+        // page 1, where `cursor_in == 0` disables the request, and it
+        // would split there instead — still split, still inside the
+        // strip. Staying on page 0 is what proves the box was never
+        // pushed, because moving it cannot help.
+        assert_eq!(
+            g.fragments.first().map(|f| f.page_index),
+            Some(0),
+            "a box that fits no page is not moved; frags={:?}",
+            g.fragments
+        );
+        for f in &g.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "no fragment escapes the strip; frags={:?}",
+                g.fragments
+            );
+        }
+    }
+
+    /// Implemented by fulgur-pgbrk R4. fulgur used to read
+    /// `break-inside` only on inline roots, so a block wrapper's `avoid`
+    /// was never consulted and the wrapper split between its children —
+    /// the "no-op: break-inside / page-break-inside: avoid" row in
+    /// FULGUR_PAGINATION_BUG.md §1.
+    ///
+    /// The wrapper now hands a `SubtreeResult::RequestBreakBefore` up
+    /// when it does not fit the strip it stands on but would fit a fresh
+    /// page. If it fits neither, `avoid` is unfulfillable and §4.4's
+    /// relaxation clause applies — see
+    /// `block_break_inside_avoid_is_relaxed_when_the_box_exceeds_a_page`.
+    #[test]
+    fn css_break3_s44_rule2_ancestor_break_inside_avoid_forbids_class_a_break() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:250px"></div>
+              <div id="wrap" style="break-inside:avoid">
+                <div id="c1" style="height:100px"></div>
+                <div id="c2" style="height:100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let g = geom.get(&wrap).expect("wrap");
+        assert!(
+            !g.is_split(),
+            "break-inside:avoid on the wrapper forbids the class A break between \
+             its children; frags={:?}",
+            g.fragments
+        );
+        assert!(
+            g.fragments.iter().all(|f| f.page_index == 1),
+            "the wrapper moves whole to page 1 instead; frags={:?}",
+            g.fragments
+        );
+    }
+
+    /// css-break-3 §4.4 relaxation: "If that still does not lead to
+    /// sufficient break points ... the UA may break anywhere in order
+    /// to avoid losing content off the edge." When the only
+    /// widows/orphans-clean split does not exist, rule 3 must be
+    /// RELAXED (split anyway, or split earlier) — never resolved by
+    /// letting lines escape the fragmentainer.
+    ///
+    /// Implemented by fulgur-pgbrk R2: the constrained scan in
+    /// `scan_split_points` only ever moves a split LATER (it accumulates
+    /// lines forward), so a paragraph whose natural split violates
+    /// widows used to emit one oversized fragment whose tail lines
+    /// landed past the page bottom — in the margin strip or off the
+    /// paper. `fragment_inline_root` now re-runs the scan with the
+    /// minimums dropped to 1/1 whenever the constrained plan escapes the
+    /// fragmentainer.
+    ///
+    /// See also `widow_minimum_is_relaxed_rather_than_losing_the_tail_line`
+    /// and `orphan_minimum_is_relaxed_rather_than_losing_the_tail_lines`,
+    /// which pin the resulting fragment geometry rather than just the
+    /// no-escape invariant.
+    #[test]
+    fn css_break3_s44_widow_relaxation_prevents_lines_escaping_the_strip() {
+        let mut geom = PaginationGeometryTable::new();
+        // Lines 75px; bottoms at 75, 150, 225. Page strip = 200. The
+        // natural split (after line 2) violates widows=2; the orphan-
+        // clean alternative does not exist. Relaxation requires
+        // splitting anyway rather than emitting a 225px fragment on a
+        // 200px strip.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 2,
+            widows: 2,
+        };
+        let placement = InlinePlacement {
+            id: 1,
+            x: 0.0,
+            width: 100.0,
+            cursor_y: 0.0,
+            page: 0,
+        };
+        super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        for f in &geom.get(&1).unwrap().fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 200.5,
+                "no fragment may extend past the fragmentainer once break \
+                 restrictions are relaxed; frag={f:?}"
+            );
+        }
+    }
+
+    /// css-break-3 §4.4 rule 3: `orphans` / `widows` take author-
+    /// specified values; fulgur hardcodes the initial value 2 for both
+    /// and never reads the CSS properties.
+    ///
+    /// Implemented by fulgur-pgbrk R6. With `widows: 4`, a 6-line
+    /// paragraph on a page fitting 4 lines splits 2/4 (the tail keeps 4
+    /// lines) rather than 4/2. `<br>`-forced lines with a fixed
+    /// `line-height` make the line count and heights font-independent.
+    ///
+    /// Honouring the value needs `scan_split_points` to back the split
+    /// UP from the natural overflow point — the widow minimum is the one
+    /// constraint that can only be satisfied by splitting earlier.
+    #[test]
+    fn css_break3_s44_rule3_author_widows_value_shifts_the_split() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <p id="probe" style="margin:0; line-height:100px; widows:4">
+                a<br>b<br>c<br>d<br>e<br>f
+              </p>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        // 450px strip fits 4 of the 100px lines. Default widows=2
+        // splits 4/2 (tail ≈ 200px); honouring widows:4 requires 2/4
+        // (tail ≈ 400px).
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 450.0_f32.as_px(), &table);
+        let g = geom.get(&probe).expect("probe");
+        assert!(g.is_split(), "fixture must actually cross pages");
+        let last = g.fragments.last().unwrap();
+        assert!(
+            last.height.to_f32() >= 350.0,
+            "widows:4 must leave 4 lines (≈400px) in the tail fragment; \
+             frags={:?}",
+            g.fragments
+        );
+    }
+
     // ── PaginationGeometry::is_split ──────────────────────────────────────────
 
     #[test]
@@ -7288,5 +11283,310 @@ h2 { string-set: chapter-title content(text); }
         let states = collect_counter_states(&geom, &ops);
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
+    }
+
+    /// Sum of a node's fragment heights, for the border-box conservation
+    /// checks below.
+    fn total_h(entry: &PaginationGeometry) -> f32 {
+        entry.fragments.iter().map(|f| f.height.to_f32()).sum()
+    }
+
+    /// css-break-3 §3.1.1: a `break-before` on a box's first in-flow child
+    /// is a break before the box. R5 (`cd24af40`) implemented this, but
+    /// gated it on `cursor_y <= page_start_y` — and `cursor_y` has already
+    /// been raised to `page_start_y + this_top_in_parent`, which for a
+    /// leading child IS the container's `border-top + padding-top`. So any
+    /// top decoration on the container defeated its own propagation and
+    /// stranded a decoration-sized stub on the outgoing page.
+    ///
+    /// Pinned as a pair: the only difference between the two documents is
+    /// the container's leading decoration, and both must move whole.
+    #[test]
+    fn leading_forced_break_propagates_through_container_top_decoration() {
+        for (label, deco) in [
+            ("bare", "padding:0; border:0"),
+            ("padded", "padding:20px; border:5px solid #000"),
+        ] {
+            let html = format!(
+                r#"
+                <html><body style="margin:0">
+                  <div style="height:200px"></div>
+                  <div id="probe" style="{deco}">
+                    <p style="margin:0; height:20px; break-before:page">one</p>
+                    <p style="margin:0; height:20px">two</p>
+                  </div>
+                </body></html>
+            "#
+            );
+            let mut doc = parse(&html, 360.0);
+            let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+            let box_h = doc
+                .get_node(probe)
+                .expect("probe node")
+                .final_layout
+                .size
+                .height;
+            let styles = blitz_adapter::extract_column_style_table(&doc);
+            let table =
+                super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+            let entry = table.get(&probe).expect("probe geometry");
+            assert_eq!(
+                entry.fragments.len(),
+                1,
+                "[{label}] the break belongs before the box, so it moves whole \
+                 rather than stranding a {}px decoration stub; frags={:?}",
+                entry
+                    .fragments
+                    .first()
+                    .map(|f| f.height.to_f32())
+                    .unwrap_or(0.0),
+                entry.fragments,
+            );
+            assert_eq!(
+                entry.fragments[0].page_index, 1,
+                "[{label}] frags={:?}",
+                entry.fragments
+            );
+            // A box that moved whole keeps its entire border box —
+            // including the trailing decoration that `cursor_y` (child
+            // content only) does not cover.
+            assert!(
+                (total_h(entry) - box_h).abs() < 0.51,
+                "[{label}] expected the full {box_h}px border box; got {}px, \
+                 frags={:?}",
+                total_h(entry),
+                entry.fragments,
+            );
+        }
+    }
+
+    /// The same rule for an *unforced* break. The container's leading child
+    /// overflows the strip only because the container's own padding pushed
+    /// it there, so the break belongs before the container (css-break-3
+    /// §3 / §4.1 — a class B break is only usable if the leading
+    /// decoration it leaves behind actually fits).
+    #[test]
+    fn leading_overflow_propagates_instead_of_stranding_decoration() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:250px"></div>
+              <div id="probe" style="padding:20px; border:5px solid #000">
+                <p style="margin:0; height:14px">hello</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let box_h = doc
+            .get_node(probe)
+            .expect("probe node")
+            .final_layout
+            .size
+            .height;
+        let table = run_pass(doc.deref_mut(), 260.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert_eq!(
+            entry.fragments.len(),
+            1,
+            "only 10px of the box's 25px leading decoration fits the strip, \
+             so the class B break before its first child is unusable and the \
+             box must move whole; frags={:?}",
+            entry.fragments
+        );
+        assert!(
+            (total_h(entry) - box_h).abs() < 0.51,
+            "expected the full {box_h}px border box; got {}px, frags={:?}",
+            total_h(entry),
+            entry.fragments,
+        );
+    }
+
+    /// A container cut *inside its own leading decoration*: the unspent
+    /// remainder is still owed on the continuation, so the box's border
+    /// box adds up across pages and its content is inset by what is
+    /// left rather than slammed against the strip top.
+    ///
+    /// Uses a grid cell because that is where the case survives — in
+    /// block flow a container whose leading decoration does not fit now
+    /// moves whole instead (`propagate_leading_break`), while inside a
+    /// grid propagation is forbidden and the cell must cut in place.
+    /// The cell's `padding-top` is 4px and only 2px of it fit, so the
+    /// paragraph resumes 2px down.
+    #[test]
+    fn container_cut_inside_its_leading_decoration_owes_the_remainder() {
+        // Fixed-height children rather than text, so the row pitch is an
+        // exact 23px (4 + 14 + 4 + 1) and does not move with font
+        // metrics. Rows then start at 0, 23, ... 253; a 255px strip cuts
+        // 2px into row 12's 4px padding-top.
+        let cells: String = (1..=12)
+            .map(|r| {
+                format!(
+                    "<div class=c id=\"c{r}\"><div class=k id=\"k{r}\"></div></div>\
+                     <div class=c><div class=k></div></div>"
+                )
+            })
+            .collect();
+        let html = format!(
+            r#"
+            <html><body style="margin:0">
+              <style>
+                .g {{ display:grid; grid-template-columns:1fr 1fr }}
+                .c {{ padding:4px; border-bottom:1px solid #000 }}
+                .k {{ height:14px }}
+              </style>
+              <div class="g">{cells}</div>
+            </body></html>
+        "#
+        );
+        let mut doc = parse(&html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "c12").expect("c12");
+        let box_h = doc
+            .get_node(probe)
+            .expect("probe node")
+            .final_layout
+            .size
+            .height;
+        let table = run_pass(doc.deref_mut(), 255.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert_eq!(
+            entry.fragments.len(),
+            2,
+            "the last row straddles the boundary; frags={:?}",
+            entry.fragments
+        );
+        let consumed_on_page_0 = entry.fragments[0].height.to_f32();
+        assert!(
+            consumed_on_page_0 < 4.0,
+            "the cut must land INSIDE the 4px padding-top for this test to \
+             exercise anything; got {consumed_on_page_0}px, frags={:?}",
+            entry.fragments
+        );
+        assert!(
+            (total_h(entry) - box_h).abs() < 0.51,
+            "the two fragments must partition the {box_h}px border box; got \
+             {}px, frags={:?}",
+            total_h(entry),
+            entry.fragments,
+        );
+        // …and the content inside resumes below the unspent padding
+        // rather than flush against the strip top.
+        let inner = find_by_id(doc.deref_mut(), "k12").expect("k12");
+        let inner_frag = table
+            .get(&inner)
+            .and_then(|g| g.fragments.iter().find(|f| f.page_index == 1))
+            .expect("inner child on page 1");
+        let expected_inset = 4.0 - consumed_on_page_0;
+        assert!(
+            (inner_frag.y.to_f32() - expected_inset).abs() < 0.51,
+            "content must resume {expected_inset}px down (the unspent \
+             padding-top), got y={}",
+            inner_frag.y.to_f32()
+        );
+    }
+
+    /// A forced break on the leading child of a *grid cell*, where
+    /// leading-edge propagation is forbidden (`suppress_page_check` —
+    /// css-break-3 §3.2, grid items are not class A break points).
+    ///
+    /// Deliberate behaviour change, pinned because it is a trade between
+    /// two imperfect outputs and neither had coverage. The break used to
+    /// be honoured locally, at the cell's own content edge: cell 1's
+    /// content went to page 2 while its parallel sibling stayed on page
+    /// 1, **tearing the row in half across the page boundary** — the same
+    /// class of defect as a straddling grid row whose cells fragment
+    /// independently. Now the break collapses instead and the row stays
+    /// intact on one page.
+    ///
+    /// Neither is what CSS asks for. The break should propagate out
+    /// through the grid to the class A point before the grid container,
+    /// moving the whole grid. That needs row-level agreement in
+    /// `RowState`, which is a separate piece of work; until then, keeping
+    /// the row together is the less damaging of the two available
+    /// answers.
+    #[test]
+    fn forced_break_inside_a_grid_cell_collapses_rather_than_tearing_the_row() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:200px"></div>
+              <div style="display:grid; grid-template-columns:1fr 1fr">
+                <div id="a" style="padding:10px; border:2px solid #000">
+                  <p style="margin:0; height:20px; break-before:page">a</p>
+                </div>
+                <div id="b" style="padding:10px; border:2px solid #000">
+                  <p style="margin:0; height:20px">b</p>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let b = find_by_id(doc.deref_mut(), "b").expect("b");
+        let styles = blitz_adapter::extract_column_style_table(&doc);
+        let table = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+        let pages_of = |id: usize| -> Vec<u32> {
+            table
+                .get(&id)
+                .map(|e| e.fragments.iter().map(|f| f.page_index).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            pages_of(a),
+            pages_of(b),
+            "parallel cells of one row must not land on different pages; \
+             a={:?} b={:?}",
+            table.get(&a).map(|e| &e.fragments),
+            table.get(&b).map(|e| &e.fragments),
+        );
+    }
+
+    /// A container that genuinely continues onto a later page must claim
+    /// the whole remaining strip on the page it is leaving, not stop at
+    /// the last child that fit. `emit_parent_page_spans` already spans the
+    /// full strip for the recursion / slicing crossings; the push and
+    /// forced-break closers used the child cursor instead, so a container
+    /// with padding-bottom (or simply a gap below its last fitting child)
+    /// had its background and side borders stop short of the page bottom.
+    #[test]
+    fn continuing_container_claims_the_full_strip_on_the_page_it_leaves() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:200px"></div>
+              <div id="probe" style="padding:20px; border:5px solid #000">
+                <p style="margin:0; height:20px">one</p>
+                <p style="margin:0; height:20px">two</p>
+                <p style="margin:0; height:20px">three</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = run_pass(doc.deref_mut(), 260.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert!(
+            entry.fragments.len() >= 2,
+            "the box is 110px starting at y=200 on a 260px strip, so it splits; \
+             frags={:?}",
+            entry.fragments
+        );
+        let first = &entry.fragments[0];
+        assert!(
+            (first.y.to_f32() + first.height.to_f32() - 260.0).abs() < 0.51,
+            "the outgoing fragment must reach the strip bottom at 260px, not \
+             stop at the last child that fit; got y={} h={}, frags={:?}",
+            first.y.to_f32(),
+            first.height.to_f32(),
+            entry.fragments,
+        );
+        // …and the continuation carries the box's trailing decoration:
+        // two 20px children pushed here, plus 20px padding-bottom and
+        // the 5px border-bottom.
+        let last = entry.fragments.last().expect("last fragment");
+        assert!(
+            (last.height.to_f32() - 65.0).abs() < 0.51,
+            "the final fragment must close the border box — 2 x 20px content \
+             + 20px padding-bottom + 5px border-bottom; got {}px, frags={:?}",
+            last.height.to_f32(),
+            entry.fragments,
+        );
     }
 }

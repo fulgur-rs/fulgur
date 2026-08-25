@@ -1257,7 +1257,16 @@ pub(crate) fn compute_overflow_clip_path(
 /// `background.rs` has a private equivalent (`build_rect_path`); we keep a
 /// local copy here rather than making that one `pub(crate)` because overflow
 /// clipping is conceptually independent of background drawing.
-fn build_overflow_rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {
+///
+/// Also reused by `render.rs` to clip a multi-page monolithic leaf's
+/// slice (`slice_oversized_leaf`, fulgur-pgbrk R7) — a plain rect clip
+/// unrelated to `compute_overflow_clip_path`'s `overflow` style checks.
+pub(crate) fn build_overflow_rect_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<krilla::geom::Path> {
     let mut pb = krilla::geom::PathBuilder::new();
     pb.move_to(x, y);
     pb.line_to(x + w, y);

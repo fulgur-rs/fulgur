@@ -178,7 +178,9 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     // <link>-loaded CSS that contains @page / running / counter rules
     // must produce a PDF identical in structure to the same CSS passed
     // via --css. Specifically the running header div should NOT appear
-    // as body content.
+    // as body content — it must be extracted into the margin box and
+    // suppressed at its source position (verified via `RUNNINGHEADERTEXT`
+    // occurring exactly once below), not rendered a second time inline.
     let dir = tempdir().unwrap();
     let css_path = dir.path().join("style.css");
     std::fs::write(
@@ -191,10 +193,13 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     )
     .unwrap();
 
+    // Single-token sentinel: see the comment on
+    // `test_render_html_css_flag_running_element_with_hidden_ancestor` for
+    // why (avoids a `-raw` pdftotext line-wrap space-drop quirk).
     let html = r#"<!DOCTYPE html>
 <html><head><link rel="stylesheet" href="style.css"></head>
 <body>
-<div class="pageHeader">RUNNING HEADER TEXT</div>
+<div class="pageHeader">RUNNINGHEADERTEXT</div>
 <h1>Body Heading</h1>
 <p>Body paragraph.</p>
 </body></html>"#;
@@ -202,13 +207,174 @@ fn test_render_html_link_stylesheet_with_gcpm() {
     let engine = Engine::builder().base_path(dir.path()).build();
     let pdf = engine.render(html).expect("render");
 
-    // Crude check: the PDF should have at least one page and not be
-    // empty. A more thorough comparison would require pdf parsing in
-    // tests, which we skip; the PR's verification step renders the
-    // header-footer example and visually compares against the
-    // --css output.
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert_eq!(
+        text.matches("RUNNINGHEADERTEXT").count(),
+        1,
+        "running element sourced from a <link>-loaded stylesheet must be \
+         suppressed at its source position (display:none) and appear only \
+         via its @page margin-box copy, not twice; got: {text:?}"
+    );
+}
+
+/// Regression: the same duplication bug as
+/// `test_render_html_link_stylesheet_with_gcpm`, but for a running element
+/// declared in an inline `<style>` tag instead of a `<link>`-loaded
+/// stylesheet. `Engine::layout_to_drawables` used to snapshot
+/// `css_to_inject` from `gcpm.cleaned_css` *before* folding in
+/// `extract_gcpm_from_inline_styles`'s context, so the `display: none`
+/// rewrite `parse_gcpm` performs for `position: running(name)` never
+/// reached the DOM for inline-`<style>`-sourced CSS — only AssetBundle /
+/// `--css`-sourced CSS got the rewrite injected. Without a hidden-ancestor
+/// wrapper to mask it, the running element's "real" copy rendered inline
+/// in normal flow *and* its extracted copy rendered in the margin box.
+#[test]
+fn test_render_html_inline_style_running_element_not_duplicated() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+@page { @top-center { content: element(pageHeader); } }
+.pageHeader { position: running(pageHeader); }
+</style></head>
+<body>
+<div class="pageHeader">RUNNINGHEADERTEXT</div>
+<p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder().build().render(html).expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert_eq!(
+        text.matches("RUNNINGHEADERTEXT").count(),
+        1,
+        "running element sourced from an inline <style> tag must be \
+         suppressed at its source position (display:none) and appear only \
+         via its @page margin-box copy, not twice; got: {text:?}"
+    );
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
+}
+
+/// Folding an inline `<style>`'s `cleaned_css` into `css_to_inject` must not
+/// move that stylesheet to the end of the cascade.
+///
+/// `parse_gcpm` preserves all non-GCPM CSS verbatim in `cleaned_css`, so the
+/// fold-in re-injects the *entire* inline stylesheet — not just the
+/// `display: none` rewrite it exists to deliver — as the last child of
+/// `<head>` (`InjectCssPass` → `inject_style_node`, which appends). Any
+/// `<link>` that followed the `<style>` in source order then loses ties it
+/// should win.
+///
+/// Here `<style>` comes first and hides `.probe`; the later `<link>` shows
+/// it. Equal specificity, so source order decides and the `<link>` must win.
+#[test]
+fn inline_style_before_link_keeps_cascade_order() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("style.css"), ".probe { display: block; }").unwrap();
+
+    let html = r#"<!DOCTYPE html>
+<html><head>
+<style>.probe { display: none; }</style>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<p class="probe">PROBEWORD</p>
+<p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
+    assert!(
+        text.contains("PROBEWORD"),
+        "the <link> follows the inline <style> in source order and so wins \
+         the specificity tie — `.probe` must be visible. Its absence means \
+         the inline stylesheet was re-injected after the <link>, reordering \
+         the cascade; got: {text:?}"
+    );
+}
+
+/// Regression for FULGUR_CSS_FLAG_RUNNING_ELEMENT_BUG.md: a
+/// `position: running(name)` element with a `visibility: hidden` ancestor,
+/// styled via `AssetBundle` CSS (the `--css` CLI flag's delivery
+/// mechanism), must still populate its `@page` margin box.
+///
+/// `gcpm::parser::parse_gcpm` rewrites `position: running()` to
+/// `display: none` in its `cleaned_css` output (the real DOM copy must not
+/// also paint in normal flow). That collapses the element's Taffy layout
+/// box to zero size; when the element is nested inside a
+/// `position: absolute` ancestor — the idiomatic "absolute + invisible
+/// wrapper" header/footer pattern used to keep the "real" copy out of
+/// normal flow — the zero-size box used to fall out of
+/// `PaginationGeometryTable` entirely (missing running-element carve-out
+/// in `pagination_layout::record_subtree_fragments_at_offset`), so the
+/// margin box silently rendered empty with no error. The identical CSS
+/// inlined into a `<style>` tag happened to work by accident (see the bug
+/// report), which is why this regression needs the AssetBundle delivery
+/// path specifically.
+#[test]
+fn test_render_html_css_flag_running_element_with_hidden_ancestor() {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        @page { margin: 100px 50px; @top-center { content: element(top-center); } }
+        .absolute { position: absolute; }
+        .invisible { visibility: hidden; }
+        #top-center { position: running(top-center); }
+        "#,
+    );
+    // Single-token sentinels: `-raw` pdftotext extraction can drop the
+    // inter-word space at a soft line-wrap boundary inside the (narrow)
+    // margin box, which is a pdftotext quirk unrelated to what this test
+    // is checking — a single word sides-steps it entirely.
+    let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="absolute invisible">
+    <div id="top-center">PAGEHEADERSENTINEL</div>
+  </div>
+  <p>BODYCONTENTSENTINEL</p>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .assets(assets)
+        .build()
+        .render(html)
+        .expect("render");
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("PAGEHEADERSENTINEL"),
+        "running element's margin-box copy must render despite the hidden \
+         ancestor when CSS is delivered via AssetBundle (--css); got: {text:?}"
+    );
+    assert!(
+        text.contains("BODYCONTENTSENTINEL"),
+        "body content must still render; got: {text:?}"
+    );
 }
 
 #[test]
@@ -5605,6 +5771,98 @@ fn layout_single_pass_returns_drawables_and_geometry() {
     );
 }
 
+/// `render::fragment_consumed_pt` / `draw_replaced_sliced` do not strip
+/// `content_lead_in` / `content_lead_out` out of their slice math, on the
+/// grounds that geometries on that path never carry them (CodeRabbit
+/// review, PR #719). This pins both halves of that argument end-to-end.
+///
+/// A padded, bordered, page-crossing `<svg>` is sliced by
+/// `slice_oversized_leaf`, which records no decoration — so subtracting
+/// the leads there would be a no-op. A padded paragraph split at line
+/// boundaries *does* carry them, but is not a replaced element, so it
+/// takes `paragraph_lines_for_page` (which does strip them) instead. If a
+/// future change makes those populations overlap, this test fails.
+#[test]
+fn sliced_replaced_element_records_no_content_leads() {
+    let sliced_svg = r#"<!DOCTYPE html>
+<html><head><style>
+@page { size: 400px 300px; margin: 0; }
+body { margin: 0; }
+svg { display: block; width: 100px; height: 900px; padding: 50px 0; border-top: 10px solid black; }
+</style></head>
+<body><svg xmlns="http://www.w3.org/2000/svg"><rect width="100" height="900" fill="red"/></svg></body></html>"#;
+
+    let out = Engine::builder()
+        .build()
+        .layout(sliced_svg)
+        .expect("layout");
+    let sliced: Vec<_> = out
+        .geometry
+        .iter()
+        .filter(|(_, g)| g.is_split())
+        .filter(|(id, _)| {
+            out.drawables.svgs.contains_key(id) || out.drawables.images.contains_key(id)
+        })
+        .collect();
+    assert!(
+        !sliced.is_empty(),
+        "fixture must actually slice a replaced element across pages"
+    );
+    for (id, g) in sliced {
+        assert_eq!(
+            (g.content_lead_in, g.content_lead_out),
+            (fulgur::units::Px::ZERO, fulgur::units::Px::ZERO),
+            "node {id}: slice_oversized_leaf must record no decoration, or \
+             draw_replaced_sliced's slice math needs to strip it; got \
+             lead_in={:?} lead_out={:?}",
+            g.content_lead_in,
+            g.content_lead_out
+        );
+    }
+
+    // The converse: a line-split padded paragraph carries the leads, and
+    // is not a replaced element.
+    let words = |p: &str| {
+        (0..80)
+            .map(|i| format!("{p}{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let split_para = format!(
+        r#"<!DOCTYPE html>
+<html><head><style>
+@page {{ size: 400px 300px; margin: 0; }}
+body {{ margin: 0; }}
+p {{ padding: 60px 0; border-top: 12px solid black; font-size: 20px; line-height: 1.5; }}
+</style></head>
+<body><p>{} {}</p></body></html>"#,
+        words("word"),
+        words("tail")
+    );
+
+    let out = Engine::builder()
+        .build()
+        .layout(&split_para)
+        .expect("layout");
+    let decorated: Vec<_> = out
+        .geometry
+        .iter()
+        .filter(|(_, g)| g.is_split() && g.content_lead_in > fulgur::units::Px::ZERO)
+        .collect();
+    assert!(
+        !decorated.is_empty(),
+        "fixture must actually split a padded inline root across pages"
+    );
+    for (id, _) in decorated {
+        assert!(
+            !out.drawables.svgs.contains_key(id) && !out.drawables.images.contains_key(id),
+            "node {id} carries content leads AND is a replaced element — the \
+             two populations must stay disjoint, or draw_replaced_sliced's \
+             slice math needs to strip the leads"
+        );
+    }
+}
+
 /// Smoke: public `Engine::layout()` 2-pass path. A `target-counter()` in
 /// `::after` forces `needs_pass_two`, so `layout()` falls through the early
 /// return and re-lays out with the pass-1 `AnchorMap`. Covers the else-arm
@@ -5822,6 +6080,79 @@ fn test_tagged_hidden_heading_omits_title_attribute() {
             "hidden heading text leaked into tagged PDF for {body:?}"
         );
     }
+}
+
+/// Codex review (PR #719): `slice_oversized_leaf` (fulgur-pgbrk R7) now
+/// gives an oversized NESTED `<img>` one fragment per crossed page, but
+/// `dispatch_fragment` calls the image draw helpers once per fragment and
+/// — before the fix in `draw_replaced_sliced` — each call painted the
+/// FULL image at the same content-box origin: every page repeated the
+/// image's top, and the lower portion never appeared anywhere.
+///
+/// A 700px-tall image nested inside a `<div>` (so it takes the nested
+/// walk, `fragment_block_subtree`, not the body-direct path) on a
+/// 300px-strip page must span 3 pages. Each page's `Do` draws the image
+/// at a distinct vertical offset (`inner_y - consumed`, `consumed`
+/// growing by the previous slice's height each page) — repeated
+/// identical `y` values across pages is exactly the redraw-duplicate
+/// regression this test pins.
+#[test]
+fn nested_oversized_image_slices_do_not_repeat_across_pages() {
+    // A tiny real PNG (AssetBundle, not a data: URI — inspect.rs's XObject
+    // scan needs an image krilla actually embeds as a page-resource
+    // XObject to find it).
+    let img = image::RgbImage::from_fn(4, 4, |_, _| image::Rgb([255u8, 0, 0]));
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )
+    .expect("encode png");
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("nested.png", png_bytes);
+
+    let html = r#"<!DOCTYPE html>
+<style>
+  @page { size: 400px 300px; margin: 0; }
+  body { margin: 0; }
+</style>
+<body>
+  <div><img src="nested.png" style="display:block;width:100px;height:700px;"></div>
+</body>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_oversized_image.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let result = fulgur::inspect::inspect(&path).expect("inspect");
+
+    assert!(
+        result.pages >= 3,
+        "a 700px image on a 300px strip should span 3 pages, got {}",
+        result.pages
+    );
+    assert!(
+        result.images.len() as u32 >= result.pages,
+        "expected at least one image draw per page the fragment spans; images={:?}",
+        result.images
+    );
+
+    let mut ys: Vec<f32> = result.images.iter().map(|i| i.y).collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut unique_ys = ys.clone();
+    unique_ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert_eq!(
+        unique_ys.len(),
+        ys.len(),
+        "every page's image slice must draw at a distinct vertical offset — \
+         repeated identical y values mean the image is being redrawn from its \
+         top on every page instead of cropped/offset per fragment; ys={ys:?}"
+    );
 }
 
 #[test]
@@ -6497,4 +6828,154 @@ fn render_unaffected_by_at_page_only_margin_without_builder_override() {
         .render(html)
         .expect("no builder override means Config::validate must not reject @page-only CSS");
     assert!(!pdf.is_empty());
+}
+
+/// fulgur-pgbrk: end-to-end guard for the page-fragmentation defects
+/// reported against 0.40.0 (FULGUR_PAGINATION_BUG.md).
+///
+/// Two shapes used to destroy content, both because `fragment_block_subtree`
+/// had exactly one break opportunity — immediately before a child that has a
+/// placed preceding sibling:
+///
+/// 1. a block that must break but is the FIRST in-flow child of its parent
+///    was never broken at all (the break was not propagated to the parent's
+///    leading edge), and
+/// 2. a multi-line paragraph nested inside a recursed subtree was never split
+///    at line boundaries the way a body-direct one is.
+///
+/// Either way the content was laid out past the content area, through the
+/// bottom page margin and off the paper, where it is silently discarded —
+/// exit code 0, no diagnostic, a whole page of text gone from the middle of
+/// the document.
+///
+/// The filler height is swept because the original loss was *non-monotonic*:
+/// words vanished at some filler heights and were all present again a few
+/// pixels later, so a single-height check proves nothing.
+///
+/// ## Why this test hard-requires poppler
+///
+/// Most `extract_pdf_text` callers here skip when `pdftotext` is missing.
+/// This one must not, and it cannot fall back to `fulgur::inspect` either:
+/// the lost glyphs ARE still emitted into the content stream, just painted
+/// outside the page box, so `inspect` (which parses the raw stream) counts
+/// them and reports byte-identical output for a broken and a correct render.
+/// Only a MediaBox-respecting extractor sees the difference. Measured on the
+/// unfixed code: `inspect` reports 3614 glyphs either way, while `pdftotext`
+/// finds 147 of 300 probe words gone. A silent skip here would therefore be
+/// a green test that asserts nothing about the defect it exists to catch.
+///
+/// A lib-side test is required on top of the VRT reftests because the
+/// coverage job excludes `fulgur-vrt` (CLAUDE.md).
+#[test]
+fn leading_child_that_must_break_does_not_lose_content() {
+    const N: usize = 300;
+    let words: String = (0..N).map(|i| format!("W{i:04} ")).collect();
+
+    // 1190x1690px page with a 190/80px vertical margin leaves a 1420px
+    // content strip, so a filler at/near 1420px lands the probe's first
+    // line exactly on the page boundary — the reported trigger geometry.
+    for filler in [0u32, 1200, 1380, 1400, 1410, 1415, 1420, 1425, 1430] {
+        let html = format!(
+            r#"<!DOCTYPE html>
+<style>
+  @page {{ size: 1190px 1690px; margin: 190px 40px 80px 40px; }}
+  body {{ margin: 0; font-size: 20px; line-height: 1.4; }}
+</style>
+<body>
+  <div style="height:{filler}px"></div>
+  <div>HEAD<div><p>{words}</p><p>TAIL</p></div></div>
+</body>"#
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        assert!(!pdf.is_empty());
+
+        let text = extract_pdf_text(&pdf).expect(
+            "this test needs `pdftotext` (poppler-utils) — it is the only extractor that \
+             respects the page box, and skipping would make it assert nothing about the \
+             content loss it guards. CI preinstalls poppler-utils; on macOS: brew install poppler",
+        );
+        let missing: Vec<String> = (0..N)
+            .map(|i| format!("W{i:04}"))
+            .filter(|w| !text.contains(w.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "filler={filler}px: {} of {N} probe words are absent from the PDF — content \
+             laid out past the page edge is being discarded; first missing: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
+        assert!(
+            text.contains("TAIL"),
+            "filler={filler}px: the trailing sibling must survive too"
+        );
+    }
+}
+
+/// fulgur-pgbrk R1: the same sweep with the probe paragraph carrying its
+/// own `padding`, which the fragmenter used to exclude from every break
+/// decision.
+///
+/// Parley lays an inline root out in content-box coordinates, so the
+/// paragraph's `padding` / `border` appear nowhere in its line metrics.
+/// Measuring the box as `last_line.max_coord - first_line.min_coord`
+/// therefore under-reported it by `border+padding` top and bottom: the
+/// push-whole test never fired, and the tail ran through the bottom
+/// margin and off the paper. Measured on the unfixed code at the
+/// downstream-reported geometry: 10 of 120 probe words gone, exit 0.
+///
+/// Hard-requires poppler for the reason given on
+/// `leading_child_that_must_break_does_not_lose_content` — the lost
+/// glyphs are in the content stream either way, just painted outside the
+/// page box.
+#[test]
+fn padded_leading_child_that_must_break_does_not_lose_content() {
+    // A SHORT probe is essential. The defect needs a paragraph whose
+    // line boxes fit the remaining strip while its border box does not
+    // — a page-tall probe takes the line-splitting path instead and
+    // never exercises the under-measurement.
+    const N: usize = 30;
+    let words: String = (0..N).map(|i| format!("W{i:04} ")).collect();
+
+    // 1420px content strip. The probe's ~2 lines are ~56px; its border
+    // box adds 6px border-top + 120/90px padding = ~272px total. Sweep
+    // the filler across the band where the lines fit but the box does
+    // not (1420 - filler between those two numbers), plus controls at
+    // either end.
+    for filler in [0u32, 1160, 1200, 1250, 1300, 1350, 1430] {
+        let html = format!(
+            r#"<!DOCTYPE html>
+<style>
+  @page {{ size: 1190px 1690px; margin: 190px 40px 80px 40px; }}
+  body {{ margin: 0; font-size: 20px; line-height: 1.4; }}
+  p.padded {{ margin: 0; padding: 120px 0 90px; border-top: 6px solid #333; }}
+</style>
+<body>
+  <div style="height:{filler}px"></div>
+  <div>HEAD<div><p class="padded">{words}</p><p>TAIL</p></div></div>
+</body>"#
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        assert!(!pdf.is_empty());
+
+        let text = extract_pdf_text(&pdf).expect(
+            "this test needs `pdftotext` (poppler-utils) — see \
+             leading_child_that_must_break_does_not_lose_content for why it must not skip",
+        );
+        let missing: Vec<String> = (0..N)
+            .map(|i| format!("W{i:04}"))
+            .filter(|w| !text.contains(w.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "filler={filler}px: {} of {N} probe words are absent — the paragraph's own \
+             padding / border is being left out of the break measurement; first missing: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
+        assert!(
+            text.contains("TAIL"),
+            "filler={filler}px: the trailing sibling must survive too"
+        );
+    }
 }

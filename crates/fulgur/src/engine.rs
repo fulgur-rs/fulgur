@@ -181,7 +181,13 @@ impl Engine {
         let combined_css = crate::blitz_adapter::rewrite_marker_content_url(&combined_css);
 
         let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
-        let css_to_inject = gcpm.cleaned_css.clone();
+        // `css_to_inject` drives `InjectCssPass` below, which writes a
+        // plain, unconditional `<style>` into the document — there is no
+        // way to attach a `media` attribute to it. AssetBundle / `--css`
+        // CSS has no media scoping to begin with, so snapshotting it here
+        // (before the `<link>` fold below) is correct and required: unlike
+        // `<link>`-sourced CSS, it's fine for this to be unconditional.
+        let mut css_to_inject = gcpm.cleaned_css.clone();
 
         let fonts = self.fonts();
 
@@ -191,14 +197,24 @@ impl Engine {
         // stylesheets, which we fold into the AssetBundle-derived
         // context below.
         //
-        // `cleaned_css` is folded too: it is consumed by `render.rs` as
-        // the sole stylesheet for the margin-box mini-documents (see
-        // `render_to_pdf_with_gcpm` and `strip_display_none`). Without
-        // it, declarations like `.pageHeader { font-size: 8px; }`
-        // defined in a `<link>`-loaded stylesheet would never reach
-        // the margin-box renderer, so headers/footers would appear in
-        // default browser styles even though their content resolved
-        // correctly.
+        // `cleaned_css` is folded into `gcpm.cleaned_css` too — but
+        // deliberately NOT into `css_to_inject` above. `gcpm.cleaned_css`
+        // is consumed by `render.rs` as the sole stylesheet for the
+        // margin-box mini-documents (see `render_to_pdf_with_gcpm` and
+        // `strip_display_none`), where declarations like
+        // `.pageHeader { font-size: 8px; }` defined in a `<link>`-loaded
+        // stylesheet need to reach the margin-box renderer. But
+        // `<link>`-sourced CSS is *also* independently served straight to
+        // Blitz's native cascade — cleaned and already media-aware — by
+        // `net::FulgurNetProvider::fetch` (it runs `parse_gcpm` per fetched
+        // stylesheet and hands Blitz the cleaned text, respecting whatever
+        // `media` rewrite `apply_link_media_rewrites` applied). Folding
+        // `link_gcpm.cleaned_css` into `css_to_inject` here as well would
+        // inject it a second time via `InjectCssPass`, which writes an
+        // unconditional `<style>` with no media attribute — bypassing
+        // `<link media="print">` exclusion on screen renders (regression
+        // caught by `link_media_attribute.rs`'s
+        // `link_media_print_does_not_apply_on_screen`).
         let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             &html,
             self.config.content_width().as_pt().in_px().to_f32(),
@@ -214,7 +230,48 @@ impl Engine {
         // DOM to collect any `@page`, margin-box, running-element, and
         // counter constructs declared inline so they are honored
         // alongside the AssetBundle / link-loaded contexts (fulgur-mq5).
+        //
+        // Unlike `<link>`, inline `<style>` has no interception point
+        // equivalent to `net::FulgurNetProvider::fetch` — it goes through
+        // Blitz's native HTML parser untouched. `InjectCssPass` /
+        // `css_to_inject` is therefore the ONLY place that can apply
+        // `parse_gcpm`'s `display: none` rewrite for
+        // `position: running(name)` declared inline. Omitting it used to
+        // mean the rewrite never reached the DOM for
+        // inline-`<style>`-sourced running elements — the "real" copy
+        // rendered a second time alongside its `@page` margin-box copy
+        // (fulgur-css-flag-running, follow-up to the --css +
+        // hidden-ancestor running-element fix).
+        //
+        // Inject ONLY the generated `display: none` rules, not
+        // `inline_gcpm.cleaned_css`. `parse_gcpm` preserves all non-GCPM
+        // CSS verbatim in `cleaned_css`, so folding the whole string in
+        // re-injects the author's entire inline stylesheet as the last
+        // child of `<head>`, so a `<link>` that followed the `<style>` in
+        // source order loses specificity ties it should win. Regression
+        // coverage:
+        // `render_smoke.rs::inline_style_before_link_keeps_cascade_order`.
+        //
+        // It would also strip any `<style media="...">` scoping, since
+        // `InjectCssPass` writes a plain `<style>` with no media
+        // attribute. That one is currently moot — blitz-dom 0.2.4 ignores
+        // `media` on inline `<style>` just as it does on `<link>` (which
+        // is why `LinkMediaRewritePass` exists), so the author's own copy
+        // is unscoped too. Injecting only the generated rules keeps this
+        // path from becoming a second thing to fix if inline `media`
+        // support lands.
+        //
+        // Concatenation mirrors `GcpmContext::extend_from`'s
+        // newline-joining.
         let inline_gcpm = crate::blitz_adapter::extract_gcpm_from_inline_styles(&doc);
+        let inline_running_css =
+            crate::blitz_adapter::build_running_display_none_css(&inline_gcpm.running_mappings);
+        if !inline_running_css.is_empty() {
+            if !css_to_inject.is_empty() {
+                css_to_inject.push('\n');
+            }
+            css_to_inject.push_str(&inline_running_css);
+        }
         gcpm.extend_from(inline_gcpm);
 
         // Cache the predicate once gcpm is fully populated. It feeds three
@@ -1627,6 +1684,7 @@ mod tests {
                 crate::pagination_layout::PaginationGeometry {
                     fragments: vec![frag_on_page(page_index)],
                     is_repeat: false,
+                    ..Default::default()
                 },
             );
         }
@@ -1744,6 +1802,7 @@ mod tests {
             crate::pagination_layout::PaginationGeometry {
                 fragments: vec![frag_on_page(2)],
                 is_repeat: false,
+                ..Default::default()
             },
         );
         let map = build_implicit_href_map(&doc, &geometry);

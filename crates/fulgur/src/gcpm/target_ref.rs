@@ -447,6 +447,7 @@ mod tests {
                     },
                 ],
                 is_repeat: false,
+                ..Default::default()
             },
         );
         assert_eq!(page_for_node(&table, 42), Some(3)); // page_index 2 -> 1-based page 3
@@ -467,6 +468,7 @@ mod tests {
             PaginationGeometry {
                 fragments: vec![],
                 is_repeat: false,
+                ..Default::default()
             },
         );
         assert_eq!(page_for_node(&table, 7), None);
