@@ -1183,3 +1183,52 @@ fn probe_painted_zero_height_cell_keeps_its_table_page() {
         );
     }
 }
+
+/// A styled wrapper whose empty continuation lands on a page the table no
+/// longer occupies: geometry must not keep the orphan behind.
+const STYLED_WRAPPER_TRAILING_BREAK: &str = r#"<!doctype html>
+<html><head><style>
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #wrap { background: rgb(3,3,3); border: 1px solid rgb(4,4,4); }
+  #last { break-after: page; }
+</style></head><body>
+  <table id="t">
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><section id="wrap">
+        <div class="m"></div>
+        <div class="m" id="last"></div>
+      </section></td></tr>
+    </tbody>
+  </table>
+  <div class="m" id="after"></div>
+</body></html>"#;
+
+#[test]
+fn probe_discarded_page_keeps_no_descendant_orphans() {
+    let engine = engine_200x100();
+    let layout = engine
+        .layout(STYLED_WRAPPER_TRAILING_BREAK)
+        .expect("layout");
+    let table = table_fragments(&layout, "t");
+    let wrap = block_fragments(&layout, "wrap");
+    println!("[orphan] table = {table:?}  wrap = {wrap:?}");
+    assert!(!table.is_empty(), "table must record geometry");
+
+    // A descendant fragment on a page the table does not occupy has nothing to
+    // sit in: `draw_block_inner_paint` paints a zero-height split fragment at
+    // its full `layout_size`, so a styled wrapper would still show there.
+    let table_pages: std::collections::BTreeSet<u32> = table.iter().map(|(p, _, _)| *p).collect();
+    let orphans: Vec<_> = wrap
+        .iter()
+        .filter(|(page, _, _)| !table_pages.contains(page))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "descendant fragments {orphans:?} remain on pages the table left: \
+         table={table:?}, wrap={wrap:?}"
+    );
+}

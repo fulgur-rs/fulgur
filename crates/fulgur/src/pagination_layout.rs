@@ -2202,6 +2202,14 @@ fn fragment_repeating_table(
                     .or_insert(table_top);
             }
         } else {
+            // Drop the continuations that live only on pages the table just
+            // gave up. `draw_block_inner_paint` paints a zero-height fragment
+            // of a split block at its full `layout_size`, so a styled cell or
+            // wrapper left behind would still show — at the offset of a header
+            // that is no longer there, possibly over the following sibling.
+            source
+                .fragments
+                .retain(|fragment| body_content_pages.contains(&fragment.page_index));
             for fragment in &mut source.fragments {
                 fragment.y = (fragment.y.to_f32() + header.band_height_px).as_px();
             }

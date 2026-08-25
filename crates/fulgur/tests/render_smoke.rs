@@ -6561,3 +6561,37 @@ fn table_page_with_only_a_painted_zero_height_box_still_renders() {
         .expect("painted zero-height continuation should render");
     assert!(!pdf.is_empty());
 }
+
+/// When a trailing forced break leaves a page without a table fragment, a
+/// styled wrapper inside the cell must not be left painting there: a
+/// zero-height fragment of a split block draws at its full `layout_size`, so
+/// the orphan would appear at the offset of a header that is no longer drawn.
+#[test]
+fn table_discarded_page_leaves_no_styled_wrapper_behind() {
+    let html = r#"<!doctype html>
+<html><head><style>
+  @page { size: 200px 100px; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  table { margin: 0; border-spacing: 0; width: 100px; }
+  th, td { box-sizing: border-box; padding: 0; }
+  .m { height: 30px; background: rgb(6,6,6); }
+  #wrap { background: rgb(3,3,3); border: 1px solid rgb(4,4,4); }
+  #last { break-after: page; }
+</style></head><body>
+  <table>
+    <thead><tr><th>H</th></tr></thead>
+    <tbody>
+      <tr><td><section id="wrap">
+        <div class="m"></div>
+        <div class="m" id="last"></div>
+      </section></td></tr>
+    </tbody>
+  </table>
+  <div class="m" id="after"></div>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("styled wrapper with a trailing forced break should render");
+    assert!(!pdf.is_empty());
+}
