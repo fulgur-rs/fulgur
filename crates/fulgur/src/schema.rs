@@ -1134,8 +1134,8 @@ mod tests {
         assert!(schema["properties"].get("header.html").is_none());
     }
 
-    /// Multiple ignorable statement types (include, extends) all land in the
-    /// catch-all arm and leave surrounding variable collection intact.
+    /// Multiple `include` statements all land in the catch-all arm of
+    /// `collect_from_stmt` and leave surrounding variable collection intact.
     #[test]
     fn multiple_ignored_stmts_do_not_break_collection() {
         let schema = extract_schema(
