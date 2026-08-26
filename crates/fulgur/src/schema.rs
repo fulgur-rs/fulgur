@@ -1116,4 +1116,88 @@ mod tests {
         assert_eq!(schema["properties"]["value"]["type"], "string");
         assert_eq!(schema["properties"]["divisor"]["type"], "string");
     }
+
+    // ── collect_from_stmt catch-all `_ => {}` (Include, Extends, etc.) ───────
+
+    /// `{% include %}` hits the catch-all arm in `collect_from_stmt`.
+    /// Variables in surrounding statements must still be collected.
+    #[test]
+    fn include_stmt_does_not_discard_surrounding_variables() {
+        let schema = extract_schema(
+            r#"{{ header_title }}{% include "header.html" %}{{ page_body }}"#,
+            "test.html",
+        )
+        .unwrap();
+        assert_eq!(schema["properties"]["header_title"]["type"], "string");
+        assert_eq!(schema["properties"]["page_body"]["type"], "string");
+        // The include target name is a constant, not a variable.
+        assert!(schema["properties"].get("header.html").is_none());
+    }
+
+    /// Multiple `include` statements all land in the catch-all arm of
+    /// `collect_from_stmt` and leave surrounding variable collection intact.
+    #[test]
+    fn multiple_ignored_stmts_do_not_break_collection() {
+        let schema = extract_schema(
+            r#"{% include "head.html" %}{{ page_title }}{% include "foot.html" %}"#,
+            "test.html",
+        )
+        .unwrap();
+        assert_eq!(schema["properties"]["page_title"]["type"], "string");
+    }
+
+    // ── collect_from_expr: guarded GetAttr arm (filter output attribute) ─────
+
+    /// `(items | first).name`: the base of the GetAttr is a Filter, so
+    /// `resolve_expr_path` returns `None` for the outer GetAttr, triggering
+    /// the guarded arm that recurses into the base expression.
+    #[test]
+    fn getattr_on_filter_output_collects_base_variable() {
+        let schema = extract_schema("{{ (items | first).name }}", "test.html").unwrap();
+        // `items` must be collected — it is the base of the filter.
+        assert!(!schema["properties"]["items"].is_null());
+    }
+
+    /// `(call_result()).attr` — call result attribute access also makes
+    /// `resolve_expr_path` return `None` for the outer GetAttr.
+    #[test]
+    fn getattr_on_call_result_collects_call_base_variable() {
+        // `get_item()` is a function call; the outer `.title` triggers the
+        // guarded GetAttr arm which recurses into the call expression.
+        let schema = extract_schema("{{ get_item().title }}", "test.html").unwrap();
+        // `get_item` is a Var inside the Call; it should be collected.
+        assert!(!schema["properties"]["get_item"].is_null());
+    }
+
+    // ── resolve_expr_path: built-in `self` variable name ────────────────────
+
+    /// `self` is a Jinja built-in; `resolve_expr_path` skips it by name so it
+    /// never appears as a top-level schema property.
+    #[test]
+    fn self_builtin_is_not_collected_as_schema_variable() {
+        let schema = extract_schema("{{ self.title }}", "test.html").unwrap();
+        assert!(
+            schema["properties"]["self"].is_null(),
+            "`self` must not appear as a schema property"
+        );
+    }
+
+    // ── extract_schema_with_data: template variable absent from data ─────────
+
+    /// A template variable that is NOT present in the sample data object must
+    /// be omitted from the generated schema.  This exercises the
+    /// `if let Some(val) = data_map.get(key)` branch that returns `None`.
+    #[test]
+    fn schema_with_data_absent_template_var_is_omitted() {
+        // data has only "title"; the template also uses "author".
+        // For "author", data_map.get("author") returns None → that branch fires.
+        let data = json!({"title": "My Page"});
+        let schema =
+            extract_schema_with_data("{{ title }} by {{ author }}", "test.html", &data).unwrap();
+        assert_eq!(
+            schema["properties"],
+            json!({"title": {"type": "string"}}),
+            "`author` (absent from data) must not appear in the schema"
+        );
+    }
 }
