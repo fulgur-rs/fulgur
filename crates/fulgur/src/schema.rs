@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(schema["properties"]["header_title"]["type"], "string");
         assert_eq!(schema["properties"]["page_body"]["type"], "string");
         // The include target name is a constant, not a variable.
-        assert!(schema["properties"].get("header_title").is_some());
+        assert!(schema["properties"].get("header.html").is_none());
     }
 
     /// Multiple ignorable statement types (include, extends) all land in the
