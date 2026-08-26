@@ -64,6 +64,7 @@
 use crate::units::F32Units;
 use blitz_dom::BaseDocument;
 use std::collections::{BTreeMap, BTreeSet};
+use style::values::specified::box_::DisplayInside;
 use taffy::{
     AvailableSpace, CacheTree, LayoutPartialTree, NodeId, RoundTree, Size, TraversePartialTree,
     TraverseTree,
@@ -108,6 +109,12 @@ pub struct Fragment {
 #[derive(Clone, Debug, Default)]
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
+    /// Producers: `append_position_fixed_fragments` (`position: fixed`)
+    /// and `append_repeated_header_fragments` (a repeating
+    /// `table-header-group` and every descendant of its cells, which
+    /// includes multicol containers — see `fulgur-naj7.12`). Consumers
+    /// must treat the fragments as copies of the whole node, never as
+    /// slices of it.
     pub is_repeat: bool,
 }
 
@@ -487,6 +494,7 @@ impl<'a> PaginationLayoutTree<'a> {
         let mut page_index: u32 = 0;
         let mut cursor_y: f32 = 0.0;
         let mut emitted = 0usize;
+        let mut remaining_repeat_budget = crate::MAX_SUBTREE_PAGE_FRAGMENTS;
         // Tracks the bottom edge of the previously emitted in-flow child
         // in body-content-box coordinates. Used to pick up inter-child
         // gaps (collapsed margins, padding) that Blitz baked into each
@@ -508,9 +516,7 @@ impl<'a> PaginationLayoutTree<'a> {
             };
             // Skip pure-whitespace text nodes — same convention as
             // multicol_layout's `partition_children_into_segments`.
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             // CSS 2.1 §10.6.4 / §9.6: out-of-flow elements
@@ -865,6 +871,8 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y,
                     self.page_height_px,
                     0,
+                    false,
+                    &mut remaining_repeat_budget,
                 );
                 page_index = new_page;
                 cursor_y = new_cursor;
@@ -1349,9 +1357,7 @@ fn would_split_block_subtree(
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         {
@@ -1395,6 +1401,49 @@ fn would_split_block_subtree(
 /// `fragment_pagination_root` and `fragment_block_subtree` to decide
 /// whether a body-direct (or nested) child needs to be entered for
 /// break recursion even when it fits the current page strip whole.
+/// True when the header band can be recorded once and cloned onto every
+/// continuation page.
+///
+/// [`record_header_template`] snapshots the band's coordinates directly rather
+/// than running it through the fragmenter, so a forced break or a page-name
+/// change inside a header cell has nothing to act on and is silently dropped
+/// (fulgur-naj7.7: `break-after: page` on a `<div>` inside a `<th>` rendered
+/// one page where two are required). A band that fragments is also not a band
+/// — "repeat this strip on each page" and "this strip itself spans pages" are
+/// contradictory requests.
+///
+/// Rather than drop the author's break, decline to repeat: the caller falls
+/// through to [`fragment_block_subtree_inner`], which honours breaks normally.
+/// The table then paginates without a repeated header.
+fn header_band_is_repeatable(
+    doc: &BaseDocument,
+    header: &RepeatingTableHeader,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
+    depth: usize,
+) -> bool {
+    for &cell_id in &header.header_cell_ids {
+        // The break may sit on the header cell itself as well as below it.
+        if let Some(props) = column_styles.and_then(|t| t.get(&cell_id))
+            && (matches!(
+                props.break_before,
+                Some(crate::draw_primitives::BreakBefore::Page)
+            ) || matches!(
+                props.break_after,
+                Some(crate::draw_primitives::BreakAfter::Page)
+            ))
+        {
+            return false;
+        }
+        if has_forced_break_below(doc, cell_id, column_styles, depth)
+            || has_page_name_change_below(doc, cell_id, used_page_names, depth)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn has_forced_break_below(
     doc: &BaseDocument,
     node_id: usize,
@@ -1408,6 +1457,17 @@ fn has_forced_break_below(
         return false;
     };
     for &child_id in &node.children {
+        // A break declared inside an out-of-flow subtree is never honoured —
+        // the fragmenter skips absolute / fixed / floated children entirely —
+        // so it is not evidence that this subtree fragments. Counting it made
+        // `header_band_is_repeatable` decline a perfectly repeatable header
+        // over a declaration with no effect.
+        if doc
+            .get_node(child_id)
+            .is_some_and(crate::blitz_adapter::is_out_of_flow_node)
+        {
+            continue;
+        }
         if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
             && (matches!(
                 props.break_before,
@@ -1482,9 +1542,7 @@ fn has_page_name_change_below(
         // Skip whitespace-only text and out-of-flow children — same
         // filters as the fragmenter loop, so the predicate matches
         // exactly what `fragment_block_subtree` would compare.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         if child.element_data().is_none() {
@@ -1602,6 +1660,8 @@ struct RowState {
     start_cursor_y: f32,
     start_page_start_y: f32,
     start_page_taffy_origin: f32,
+    start_initial_page_occupied: bool,
+    started_on_occupied_strip: bool,
     max_end_page: u32,
     max_end_cursor_y: f32,
     /// Taffy `location.y` of the first cell in this row (reserved for future use).
@@ -1618,6 +1678,220 @@ struct RowState {
     crossed_by_recursion: bool,
 }
 
+#[derive(Debug)]
+struct RepeatingTableHeader {
+    table_id: usize,
+    header_cell_ids: Vec<usize>,
+    body_cell_ids: Vec<usize>,
+    body_origin_px: f32,
+    band_height_px: f32,
+    /// Smallest leading fragmentable unit of the first body row. The band
+    /// alone fitting is not enough to start the table on a page — if not even
+    /// this clears the band, the page carries only a repeated header.
+    first_body_lead_px: f32,
+}
+
+fn collect_repeating_table_cells(
+    doc: &BaseDocument,
+    node_id: usize,
+    in_header: bool,
+    depth: usize,
+    header_claimed: &mut bool,
+    header_cell_ids: &mut Vec<usize>,
+    body_cell_ids: &mut Vec<usize>,
+) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    let Some(display) = node.primary_styles().map(|s| s.clone_display().inside()) else {
+        return;
+    };
+    let next_in_header = match display {
+        // css-tables-3: "If a table owns multiple `display: table-header-group`
+        // boxes, only the first is treated as a header; the others are treated
+        // as if they had `display: table-row-group`."
+        //
+        // Promoting every header group made the band span from the table's top
+        // down to the *last* one, so a header group placed after a `tbody`
+        // produced a band taller than the rows above it and blew the page box
+        // (fulgur-naj7.5). Children are visited in document order, so the first
+        // group to reach this arm is the one the spec designates.
+        DisplayInside::TableHeaderGroup => {
+            if *header_claimed {
+                false
+            } else {
+                *header_claimed = true;
+                true
+            }
+        }
+        DisplayInside::TableRowGroup
+        | DisplayInside::TableFooterGroup
+        | DisplayInside::TableRow
+        | DisplayInside::Contents => in_header,
+        DisplayInside::TableCell => {
+            if in_header {
+                header_cell_ids.push(node_id);
+            } else {
+                body_cell_ids.push(node_id);
+            }
+            return;
+        }
+        DisplayInside::Table => return,
+        _ => return,
+    };
+    for &child_id in &node.children {
+        collect_repeating_table_cells(
+            doc,
+            child_id,
+            next_in_header,
+            depth + 1,
+            header_claimed,
+            header_cell_ids,
+            body_cell_ids,
+        );
+    }
+}
+
+fn repeating_table_header(
+    doc: &BaseDocument,
+    table_id: usize,
+    child_depth: usize,
+) -> Option<RepeatingTableHeader> {
+    if child_depth >= crate::MAX_DOM_DEPTH {
+        return None;
+    }
+    let table = doc.get_node(table_id)?;
+    let display = table.primary_styles().map(|s| s.clone_display().inside())?;
+    if display != DisplayInside::Table {
+        return None;
+    }
+
+    let mut header_cell_ids = Vec::new();
+    let mut body_cell_ids = Vec::new();
+    // Threaded across siblings so only the first `table-header-group` in
+    // document order becomes the header — see `collect_repeating_table_cells`.
+    let mut header_claimed = false;
+    for &child_id in &table.children {
+        collect_repeating_table_cells(
+            doc,
+            child_id,
+            false,
+            child_depth,
+            &mut header_claimed,
+            &mut header_cell_ids,
+            &mut body_cell_ids,
+        );
+    }
+    if header_cell_ids.is_empty() || body_cell_ids.is_empty() {
+        return None;
+    }
+
+    let header_top_px = header_cell_ids
+        .iter()
+        .filter_map(|&id| doc.get_node(id).map(|n| n.final_layout.location.y))
+        .reduce(f32::min)?;
+    let header_bottom_px = header_cell_ids
+        .iter()
+        .filter_map(|&id| {
+            doc.get_node(id)
+                .map(|n| n.final_layout.location.y + n.final_layout.size.height)
+        })
+        .reduce(f32::max)?;
+    let body_origin_px = body_cell_ids
+        .iter()
+        .filter_map(|&id| doc.get_node(id).map(|n| n.final_layout.location.y))
+        .reduce(f32::min)?;
+    if !header_top_px.is_finite() || !header_bottom_px.is_finite() || !body_origin_px.is_finite() {
+        return None;
+    }
+
+    // `band_height_px` below measures the strip from the table's top edge down
+    // to where the body starts, which is only the header's own box when the
+    // header actually sits at the top of the table.
+    //
+    // CSS 2.1 §17.5.1 says a `table-header-group` is "always displayed before
+    // all other rows and row groups" regardless of its source position, but
+    // that reordering happens in layout and the upstream engine does not
+    // implement it — a header group written after a `tbody` keeps its
+    // in-flow offset here. Reserving a band that spans the rows above it
+    // then produces a fragment taller than the page box (fulgur-naj7.5:
+    // measured [(0, h=120), (1, h=100), (2, h=100)] on a 100px page).
+    //
+    // Since fulgur consumes layout rather than producing it, it cannot honour
+    // the reordering on its own. Decline to repeat instead of emitting broken
+    // geometry; the table still paginates, just without a repeated header.
+    if header_top_px > body_origin_px {
+        return None;
+    }
+
+    let band_height_px = header_bottom_px.max(body_origin_px);
+    if band_height_px <= 0.0 {
+        return None;
+    }
+
+    // Cells sharing the body's top edge form the first body row. What has to
+    // clear the band is not the whole row but its smallest leading
+    // fragmentable unit — a cell whose content splits can put its first block
+    // on this page and carry the rest over, which is useful output rather than
+    // an orphaned header. Take each first-row cell's leading child (its own
+    // box when it has no children) and keep the smallest: if even that does
+    // not fit, no body content can land here.
+    let first_body_lead_px = body_cell_ids
+        .iter()
+        .filter_map(|&id| doc.get_node(id))
+        .filter(|cell| (cell.final_layout.location.y - body_origin_px).abs() < 0.5)
+        .map(|cell| {
+            // Count real boxes, not raw children. Blitz keeps whitespace-only
+            // text nodes between formatted elements, so indented markup gives
+            // `[ws, div, ws, div, ws]` — testing `children.len()` there passes
+            // the multi-child branch and then measures the leading whitespace
+            // node at height 0, which silently defeated the orphan check on
+            // any normally-formatted document.
+            let boxes: Vec<_> = cell
+                .children
+                .iter()
+                .filter_map(|&child| doc.get_node(child))
+                .filter(|child| {
+                    // Same filters the body fragmenter applies: whitespace
+                    // formatting nodes carry no content, and out-of-flow boxes
+                    // do not hold the row open, so neither can be the leading
+                    // unit that has to fit under the band.
+                    !crate::blitz_adapter::is_whitespace_only_text_node(child)
+                        && !crate::blitz_adapter::is_out_of_flow_node(child)
+                        && child.final_layout.size.height > 0.0
+                })
+                .collect();
+
+            // Only a cell with several boxes has a leading unit smaller than
+            // itself: the first can stay on this page while the rest move on.
+            // A cell holding one box — or bare text, which Blitz wraps in a
+            // single anonymous box — places all or nothing, and its height is
+            // usually set on the cell anyway (fulgur-naj7.6: a text-only
+            // `td { height: 30px }` otherwise measured one ~16px line).
+            let Some(lead) = boxes.first().filter(|_| boxes.len() >= 2) else {
+                return cell.final_layout.size.height;
+            };
+
+            // The leading unit's *bottom*, not its height: padding-top and any
+            // gap above it also have to fit before the row places content.
+            lead.final_layout.location.y + lead.final_layout.size.height
+        })
+        .reduce(f32::min)
+        .unwrap_or(0.0);
+
+    Some(RepeatingTableHeader {
+        table_id,
+        header_cell_ids,
+        body_cell_ids,
+        body_origin_px,
+        band_height_px,
+        first_body_lead_px,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fragment_block_subtree(
     geometry: &mut PaginationGeometryTable,
@@ -1631,6 +1905,388 @@ fn fragment_block_subtree(
     cursor_in: f32,
     page_height_px: f32,
     depth: usize,
+    initial_page_occupied: bool,
+    remaining_repeat_budget: &mut usize,
+) -> (u32, f32) {
+    if depth < crate::MAX_DOM_DEPTH
+        && let Some(header) = repeating_table_header(doc, parent_id, depth + 1)
+        && header_band_is_repeatable(doc, &header, column_styles, used_page_names, depth + 1)
+    {
+        return fragment_repeating_table(
+            geometry,
+            doc,
+            column_styles,
+            used_page_names,
+            &header,
+            parent_w,
+            parent_x_in_body,
+            page_in,
+            cursor_in,
+            page_height_px,
+            depth,
+            initial_page_occupied,
+            remaining_repeat_budget,
+        );
+    }
+    fragment_block_subtree_inner(
+        geometry,
+        doc,
+        column_styles,
+        used_page_names,
+        parent_id,
+        parent_w,
+        parent_x_in_body,
+        page_in,
+        cursor_in,
+        page_height_px,
+        depth,
+        None,
+        0.0,
+        false,
+        initial_page_occupied,
+        remaining_repeat_budget,
+    )
+}
+
+fn fragmented_descendant_page_extent(
+    geometry: &PaginationGeometryTable,
+    doc: &BaseDocument,
+    node_id: usize,
+    page_index: u32,
+    page_start_y: f32,
+    depth: usize,
+) -> f32 {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return 0.0;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return 0.0;
+    };
+    let layout_children = node.layout_children.borrow();
+    let children = layout_children
+        .as_deref()
+        .filter(|children| !children.is_empty())
+        .unwrap_or(&node.children);
+    children.iter().fold(0.0_f32, |extent, &child_id| {
+        let child_extent = geometry
+            .get(&child_id)
+            .into_iter()
+            .flat_map(|entry| &entry.fragments)
+            .filter(|fragment| fragment.page_index == page_index)
+            .map(|fragment| fragment.y.to_f32() + fragment.height.to_f32() - page_start_y)
+            .fold(0.0_f32, f32::max);
+        extent
+            .max(child_extent)
+            .max(fragmented_descendant_page_extent(
+                geometry,
+                doc,
+                child_id,
+                page_index,
+                page_start_y,
+                depth + 1,
+            ))
+    })
+}
+
+fn record_header_template(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    header: &RepeatingTableHeader,
+    page_index: u32,
+    table_x: f32,
+    table_y: f32,
+    depth: usize,
+) {
+    for &cell_id in &header.header_cell_ids {
+        let Some(cell) = doc.get_node(cell_id) else {
+            continue;
+        };
+        let layout = cell.final_layout;
+        let cell_x = table_x + layout.location.x;
+        let cell_y = table_y + layout.location.y;
+        geometry
+            .entry(cell_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: cell_x.as_px(),
+                y: cell_y.as_px(),
+                width: layout.size.width.as_px(),
+                height: layout.size.height.as_px(),
+            });
+        record_subtree_descendants(
+            geometry,
+            doc,
+            cell_id,
+            page_index,
+            cell_y,
+            cell_x,
+            depth + 1,
+        );
+    }
+}
+
+fn append_repeated_header_fragments(
+    geometry: &mut PaginationGeometryTable,
+    template: &PaginationGeometryTable,
+    table_pages: &[(u32, f32)],
+    first_table_top: f32,
+    remaining_repeat_budget: &mut usize,
+) {
+    let repeats = table_pages.len() > 1;
+    for (&node_id, source) in template {
+        let target = geometry.entry(node_id).or_default();
+        target.is_repeat |= source.is_repeat || repeats;
+        target.fragments.extend(source.fragments.iter().cloned());
+    }
+    if !repeats {
+        return;
+    }
+
+    let fragments_per_header = template.values().map(|g| g.fragments.len()).sum::<usize>();
+    for &(page_index, table_top) in &table_pages[1..] {
+        if *remaining_repeat_budget < fragments_per_header {
+            log::warn!(
+                "repeating table header fragment budget exhausted; skipping remaining pages"
+            );
+            return;
+        }
+        for (&node_id, source) in template {
+            let target = geometry.entry(node_id).or_default();
+            target
+                .fragments
+                .extend(source.fragments.iter().map(|fragment| {
+                    let mut repeated = fragment.clone();
+                    repeated.page_index = page_index;
+                    repeated.y = (table_top + fragment.y.to_f32() - first_table_top).as_px();
+                    repeated
+                }));
+        }
+        *remaining_repeat_budget -= fragments_per_header;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fragment_repeating_table(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
+    header: &RepeatingTableHeader,
+    parent_w: f32,
+    parent_x_in_body: f32,
+    page_in: u32,
+    cursor_in: f32,
+    page_height_px: f32,
+    depth: usize,
+    initial_page_occupied: bool,
+    remaining_repeat_budget: &mut usize,
+) -> (u32, f32) {
+    if header.band_height_px >= page_height_px {
+        log::warn!(
+            "repeating table header band ({:.2}px) is not smaller than the page ({page_height_px:.2}px); using whole-table fallback",
+            header.band_height_px
+        );
+        return fragment_block_subtree_inner(
+            geometry,
+            doc,
+            column_styles,
+            used_page_names,
+            header.table_id,
+            parent_w,
+            parent_x_in_body,
+            page_in,
+            cursor_in,
+            page_height_px,
+            depth,
+            None,
+            0.0,
+            false,
+            initial_page_occupied,
+            remaining_repeat_budget,
+        );
+    }
+
+    // Starting the table here requires room for the band AND at least one body
+    // row. Testing the band alone produced a page holding nothing but a
+    // repeated header, with every body row pushed to the next page
+    // (fulgur-naj7.6: measured table = [(0, y=60, h=20), (1, y=0, h=80)] with
+    // both rows on page 1). An orphaned header row is never useful output, and
+    // css-tables-3 likewise bounds repetition to cases where it does not eat
+    // the page.
+    let first_row_reserve = header.band_height_px + header.first_body_lead_px;
+    let band_overflows = cursor_in + header.band_height_px > page_height_px;
+    // The band fits but its first body row does not: starting here would emit
+    // a header with nothing under it. Only worth moving if the pair actually
+    // fits on an empty page — an oversized first row has to start somewhere,
+    // and pushing it would just leave a blank page behind.
+    let orphaned_header = !band_overflows
+        && cursor_in + first_row_reserve > page_height_px
+        && first_row_reserve <= page_height_px;
+    let (first_page, first_table_top) = if band_overflows || orphaned_header {
+        (page_in + 1, 0.0)
+    } else {
+        (page_in, cursor_in)
+    };
+    let mut header_template = PaginationGeometryTable::new();
+    record_header_template(
+        &mut header_template,
+        doc,
+        header,
+        first_page,
+        parent_x_in_body,
+        first_table_top,
+        depth,
+    );
+
+    let body_page_height = page_height_px - header.band_height_px;
+    let mut body_geometry = PaginationGeometryTable::new();
+    let (body_end_page, body_end_cursor) = fragment_block_subtree_inner(
+        &mut body_geometry,
+        doc,
+        column_styles,
+        used_page_names,
+        header.table_id,
+        parent_w,
+        parent_x_in_body,
+        first_page,
+        first_table_top,
+        body_page_height,
+        depth,
+        Some(&header.body_cell_ids),
+        header.body_origin_px,
+        true,
+        first_table_top > 0.0,
+        remaining_repeat_budget,
+    );
+
+    // Pages that actually carry body content. A forced break after the last
+    // body block advances the fragmenter and closes the table with a
+    // zero-height fragment on the following page; adding the band to that would
+    // promote it into a real page holding nothing but a cloned header, and
+    // shift everything after the table down by the phantom band.
+    let body_content_pages: std::collections::BTreeSet<u32> = body_geometry
+        .iter()
+        .filter(|(node_id, _)| **node_id != header.table_id)
+        .flat_map(|(_, geom)| {
+            // Distinguish a box placed on this page from the empty
+            // continuation the fragmenter opens to close a node that started
+            // earlier. A zero-height fragment counts as content only when the
+            // node has nothing on an earlier page — then it was placed here
+            // and can still paint (border, background, box-shadow). Node
+            // identity is the wrong axis for this: cells and their wrappers
+            // both produce continuations, and both can also be genuinely
+            // placed zero-height boxes.
+            let first_page = geom
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .min();
+            geom.fragments
+                .iter()
+                .filter(move |fragment| {
+                    fragment.height > crate::units::Px::ZERO
+                        || Some(fragment.page_index) == first_page
+                })
+                .map(|fragment| fragment.page_index)
+        })
+        .collect();
+
+    let mut table_pages = BTreeMap::<u32, f32>::new();
+    for (node_id, mut source) in body_geometry {
+        source.fragments.sort_by_key(|fragment| fragment.page_index);
+        if node_id == header.table_id {
+            // Keep a zero-height slice only where body content shares the page
+            // (the occupied-strip case); drop it when the table has nothing
+            // left to show there.
+            source.fragments.retain(|fragment| {
+                fragment.height > crate::units::Px::ZERO
+                    || body_content_pages.contains(&fragment.page_index)
+            });
+            for fragment in &mut source.fragments {
+                fragment.height = (fragment.height.to_f32() + header.band_height_px).as_px();
+                let table_top = fragment.y.to_f32();
+                table_pages
+                    .entry(fragment.page_index)
+                    .and_modify(|top| *top = top.min(table_top))
+                    .or_insert(table_top);
+            }
+        } else {
+            // Drop the continuations that live only on pages the table just
+            // gave up. `draw_block_inner_paint` paints a zero-height fragment
+            // of a split block at its full `layout_size`, so a styled cell or
+            // wrapper left behind would still show — at the offset of a header
+            // that is no longer there, possibly over the following sibling.
+            source
+                .fragments
+                .retain(|fragment| body_content_pages.contains(&fragment.page_index));
+            for fragment in &mut source.fragments {
+                fragment.y = (fragment.y.to_f32() + header.band_height_px).as_px();
+            }
+        }
+        let target = geometry.entry(node_id).or_default();
+        target.is_repeat |= source.is_repeat;
+        target.fragments.extend(source.fragments);
+    }
+
+    table_pages.entry(first_page).or_insert_with(|| {
+        geometry
+            .entry(header.table_id)
+            .or_default()
+            .fragments
+            .insert(
+                0,
+                Fragment {
+                    page_index: first_page,
+                    x: parent_x_in_body.as_px(),
+                    y: first_table_top.as_px(),
+                    width: parent_w.as_px(),
+                    height: header.band_height_px.as_px(),
+                },
+            );
+        first_table_top
+    });
+    let table_pages = table_pages.into_iter().collect::<Vec<_>>();
+    append_repeated_header_fragments(
+        geometry,
+        &header_template,
+        &table_pages,
+        first_table_top,
+        remaining_repeat_budget,
+    );
+
+    // The band only occupies space on pages that kept a table fragment. A
+    // trailing forced break can leave the end page with none (see the `retain`
+    // above), and adding the band here would push the table's next sibling down
+    // by a header that was never drawn.
+    let end_page_carries_band = table_pages.iter().any(|&(page, _)| page == body_end_page);
+    let end_cursor = if end_page_carries_band {
+        body_end_cursor + header.band_height_px
+    } else {
+        body_end_cursor
+    };
+    (body_end_page, end_cursor)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fragment_block_subtree_inner(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+    used_page_names: Option<&crate::blitz_adapter::UsedPageNameTable>,
+    parent_id: usize,
+    parent_w: f32,
+    parent_x_in_body: f32,
+    page_in: u32,
+    cursor_in: f32,
+    page_height_px: f32,
+    depth: usize,
+    children_override: Option<&[usize]>,
+    initial_taffy_origin: f32,
+    co_split_rows: bool,
+    mut initial_page_occupied: bool,
+    remaining_repeat_budget: &mut usize,
 ) -> (u32, f32) {
     if depth >= crate::MAX_DOM_DEPTH {
         // Bailed: emit a single whole-fragment for the parent at its
@@ -1672,7 +2328,7 @@ fn fragment_block_subtree(
     // - grid / flex parallel siblings: same y (Taffy reports same
     //   `location.y` for cards in the same row, so the offset
     //   collapses to the row's first y).
-    let mut page_taffy_origin: f32 = 0.0;
+    let mut page_taffy_origin = initial_taffy_origin;
     let mut origin_pending_target_y: Option<f32> = None;
     let mut origin_pending_same_row: Option<(f32, f32, f32)> = None;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
@@ -1697,7 +2353,8 @@ fn fragment_block_subtree(
         .parent
         .and_then(|gp_id| doc.get_node(gp_id))
         .is_some_and(|gp| crate::blitz_adapter::is_orthogonal_to_parent(gp, parent));
-    let allow_same_row_rebase = crate::blitz_adapter::is_flex_or_grid_container_node(parent);
+    let allow_same_row_rebase =
+        co_split_rows || crate::blitz_adapter::is_flex_or_grid_container_node(parent);
     let suppress_page_check = allow_same_row_rebase
         || crate::blitz_adapter::is_atomic_inline_container_node(parent)
         || parent_is_orthogonal;
@@ -1720,21 +2377,20 @@ fn fragment_block_subtree(
     // `layout_children` without that fix would lose the parent's
     // pre-recursion-page fragment in mo-006/008 (flex/grid + tall
     // monolithic + trailing inline text).
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
-    drop(layout_children_borrow);
+    let walk_children = children_override.map(Vec::from).unwrap_or_else(|| {
+        let layout_children_borrow = parent.layout_children.borrow();
+        layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(Vec::from)
+            .unwrap_or_else(|| parent.children.clone())
+    });
     for &child_id in &walk_children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
         // Whitespace-only text — same skip as `fragment_pagination_root`.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         // CSS 2.1 §10.6.4: out-of-flow children do not contribute to
@@ -1824,6 +2480,7 @@ fn fragment_block_subtree(
                         cursor_y = rs.start_cursor_y;
                         page_start_y = rs.start_page_start_y;
                         page_taffy_origin = rs.start_page_taffy_origin;
+                        initial_page_occupied = rs.start_initial_page_occupied;
                         origin_pending_target_y = None;
                         origin_pending_same_row = None;
                     }
@@ -1855,6 +2512,8 @@ fn fragment_block_subtree(
                     start_cursor_y: cursor_y,
                     start_page_start_y: page_start_y,
                     start_page_taffy_origin: page_taffy_origin,
+                    start_initial_page_occupied: initial_page_occupied,
+                    started_on_occupied_strip: initial_page_occupied,
                     max_end_page: page_index,
                     max_end_cursor_y: cursor_y,
                     _row_top: this_top_in_parent,
@@ -2022,6 +2681,10 @@ fn fragment_block_subtree(
                 || has_page_name_change_below(doc, child_id, used_page_names, 0)
                 || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
         if needs_recursion {
+            let occupied_before_recursion = initial_page_occupied;
+            let row_started_on_occupied_strip = row_state
+                .as_ref()
+                .is_some_and(|rs| rs.started_on_occupied_strip && rs.start_page == page_index);
             let pre_recursion_page = page_index;
             let pre_recursion_cursor_y = cursor_y;
             // fulgur-u0p0: enter recursion from `child_page_y` (the rebased
@@ -2046,7 +2709,34 @@ fn fragment_block_subtree(
                 child_page_y,
                 page_height_px,
                 depth + 1,
+                initial_page_occupied,
+                remaining_repeat_budget,
             );
+            let occupied_page_extent = if occupied_before_recursion || row_started_on_occupied_strip
+            {
+                fragmented_descendant_page_extent(
+                    geometry,
+                    doc,
+                    child_id,
+                    pre_recursion_page,
+                    page_start_y,
+                    depth + 1,
+                )
+                .max(0.0)
+            } else {
+                0.0
+            };
+            // `start_initial_page_occupied` records whether the page was
+            // already occupied when the ROW began, and every cell of that row
+            // restores from it (see the `allow_same_row_rebase` branch). It is
+            // a per-row constant, so a child consuming the strip must not
+            // clear it: doing so left the row's second and later cells
+            // believing they started on an empty page, skipping the
+            // occupied-strip page-break check and painting past the page
+            // bottom (fulgur-naj7.3: measured right-tall = [(0, y=80, h=30)],
+            // bottom 110 on a 100px page, while the row's left cell had
+            // already moved to page 1).
+            initial_page_occupied = false;
             page_index = np;
             // fulgur-u0p0: when the recursion stayed on the same page,
             // keep the larger of the parent's existing `cursor_y` (row max
@@ -2093,8 +2783,14 @@ fn fragment_block_subtree(
                     // instead would stop short of the page's
                     // margin-area paint that adjacent passing tests
                     // (mo-006/008) expect.
-                    let logical_height = (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
-                    let prev_height = logical_height.max((page_height_px - page_start_y).max(0.0));
+                    let prev_height = if occupied_before_recursion || row_started_on_occupied_strip
+                    {
+                        occupied_page_extent
+                    } else {
+                        let logical_height =
+                            (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
+                        logical_height.max((page_height_px - page_start_y).max(0.0))
+                    };
                     if prev_height > 0.0 {
                         let should_emit = row_state
                             .as_mut()
@@ -2112,6 +2808,14 @@ fn fragment_block_subtree(
                                     width: parent_w.as_px(),
                                     height: prev_height.as_px(),
                                 });
+                        } else if let Some(fragment) = geometry
+                            .entry(parent_id)
+                            .or_default()
+                            .fragments
+                            .iter_mut()
+                            .find(|fragment| fragment.page_index == pre_recursion_page)
+                        {
+                            fragment.height = fragment.height.to_f32().max(prev_height).as_px();
                         }
                     }
                     for p in (pre_recursion_page + 1)..page_index {
@@ -2186,7 +2890,9 @@ fn fragment_block_subtree(
         // Use `child_page_y + child_h` (the actual placement bottom)
         // rather than `cursor_y + child_h` so a parallel sibling
         // returning to a smaller page-local y is checked correctly.
-        if child_page_y > page_start_y && child_page_y + child_h > page_height_px {
+        if (child_page_y > page_start_y || (initial_page_occupied && page_index == page_in))
+            && child_page_y + child_h > page_height_px
+        {
             let should_emit = row_state
                 .as_mut()
                 .map(|rs| rs.emitted_parent_pages.insert(page_index))
@@ -2213,6 +2919,7 @@ fn fragment_block_subtree(
             page_taffy_origin = this_top_in_parent;
             child_page_y = 0.0;
         }
+        initial_page_occupied = false;
 
         // Child fits the strip (or is an atomic oversized leaf that
         // simply overflows below the page bottom — with a single
@@ -2889,9 +3596,7 @@ fn record_fixed_subtree_descendants(
             if is_oof {
                 continue;
             }
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             let child_offset = (
@@ -2934,9 +3639,7 @@ fn record_fixed_subtree_descendants(
         if is_oof {
             continue;
         }
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
         let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
@@ -3007,9 +3710,7 @@ pub fn append_position_absolute_body_direct_fragments(
         let Some(child) = doc.get_node(child_id) else {
             return false;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
+        if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             return false;
         }
         if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
@@ -3428,9 +4129,7 @@ fn record_subtree_fragments_at_offset(
                 }
             }
             // Skip whitespace-only text (matches fragmenter).
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
+            if crate::blitz_adapter::is_whitespace_only_text_node(child) {
                 continue;
             }
             let child_offset = (
@@ -3982,6 +4681,7 @@ mod tests {
         );
 
         let mut geom = PaginationGeometryTable::new();
+        let mut remaining_repeat_budget = crate::MAX_SUBTREE_PAGE_FRAGMENTS;
         let (page_out, cursor_out) = fragment_block_subtree(
             &mut geom,
             &doc, // &BaseDocument via deref coercion
@@ -3994,6 +4694,8 @@ mod tests {
             0.0,                  // cursor_in
             800.0,                // page_height_px
             crate::MAX_DOM_DEPTH, // depth → trips the guard immediately
+            false,
+            &mut remaining_repeat_budget,
         );
 
         // The bail pushes exactly ONE whole fragment for parent_id at its
@@ -4028,6 +4730,53 @@ mod tests {
             (cursor_out - node_h).abs() < 1.0,
             "cursor advances by the node height: {cursor_out} vs {node_h}"
         );
+        assert_eq!(remaining_repeat_budget, crate::MAX_SUBTREE_PAGE_FRAGMENTS);
+    }
+
+    #[test]
+    fn table_at_depth_limit_uses_whole_fragment_fallback() {
+        let doc = parse(
+            r#"
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  table { margin: 0; border-spacing: 0; }
+                  th, td { box-sizing: border-box; height: 20px; padding: 0; }
+                </style></head><body>
+                  <table id="t">
+                    <thead><tr><th id="h">Header</th></tr></thead>
+                    <tbody><tr><td>Body</td></tr></tbody>
+                  </table>
+                </body></html>
+            "#,
+            200.0,
+        );
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let table_height = doc.get_node(table_id).unwrap().final_layout.size.height;
+        let mut geometry = PaginationGeometryTable::new();
+        let mut remaining_repeat_budget = crate::MAX_SUBTREE_PAGE_FRAGMENTS;
+
+        let (page_out, cursor_out) = fragment_block_subtree(
+            &mut geometry,
+            &doc,
+            None,
+            None,
+            table_id,
+            200.0,
+            0.0,
+            0,
+            0.0,
+            100.0,
+            crate::MAX_DOM_DEPTH,
+            false,
+            &mut remaining_repeat_budget,
+        );
+
+        assert_eq!(page_out, 0);
+        assert!((cursor_out - table_height).abs() < 0.5);
+        assert_eq!(geometry[&table_id].fragments.len(), 1);
+        assert!(!geometry.contains_key(&header_id));
+        assert_eq!(remaining_repeat_budget, crate::MAX_SUBTREE_PAGE_FRAGMENTS);
     }
 
     #[test]
@@ -4098,6 +4847,910 @@ mod tests {
             None
         }
         walk(doc, doc.root_element().id, id)
+    }
+
+    /// css-tables-3: "If a table owns multiple `display: table-header-group`
+    /// boxes, only the first is treated as a header; the others are treated as
+    /// if they had `display: table-row-group`."
+    ///
+    /// Supersedes `repeating_table_metadata_uses_computed_display_and_full_band`
+    /// (PR #710), which asserted that `tbody.repeat` — the *second* header
+    /// group here — also contributed a header cell.
+    #[test]
+    fn repeating_table_metadata_uses_only_the_first_header_group() {
+        let doc = parse(
+            r#"
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  table { border-spacing: 0 6px; width: 120px; }
+                  th, td { box-sizing: border-box; height: 20px; padding: 0; }
+                  tbody.repeat { display: table-header-group; }
+                </style></head><body>
+                  <table id="t">
+                    <thead>
+                      <tr><th id="h1">H1</th></tr>
+                      <tr><th id="h1b">H1b</th></tr>
+                    </thead>
+                    <tbody class="repeat"><tr><td id="h2">H2</td></tr></tbody>
+                    <tbody><tr><td id="b1">B1</td></tr></tbody>
+                    <tfoot><tr><td id="foot">Foot</td></tr></tfoot>
+                  </table>
+                </body></html>
+            "#,
+            200.0,
+        );
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let h1 = find_by_id(&doc, "h1").unwrap();
+        let h1b = find_by_id(&doc, "h1b").unwrap();
+        let h2 = find_by_id(&doc, "h2").unwrap();
+        let b1 = find_by_id(&doc, "b1").unwrap();
+        let foot = find_by_id(&doc, "foot").unwrap();
+        // The body now starts at the demoted second header group, not at `b1`.
+        let body_y = doc.get_node(h2).unwrap().final_layout.location.y;
+
+        let metadata = repeating_table_header(&doc, table_id, 1).unwrap();
+
+        assert_eq!(metadata.table_id, table_id);
+        // Only `<thead>`'s cells are headers; `tbody.repeat` is demoted.
+        assert_eq!(metadata.header_cell_ids, vec![h1, h1b]);
+        assert!(metadata.body_cell_ids.contains(&h2));
+        assert!(metadata.body_cell_ids.contains(&b1));
+        assert!(metadata.body_cell_ids.contains(&foot));
+        assert!((metadata.body_origin_px - body_y).abs() < 0.5);
+        assert!((metadata.band_height_px - body_y).abs() < 0.5);
+    }
+
+    #[test]
+    fn repeating_table_metadata_honors_table_row_group_opt_out() {
+        let doc = parse(
+            r#"
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  table { border-spacing: 0; }
+                  thead { display: table-row-group; }
+                  th, td { height: 20px; padding: 0; }
+                </style></head><body>
+                  <table id="t">
+                    <thead><tr><th>Header</th></tr></thead>
+                    <tbody><tr><td>Body</td></tr></tbody>
+                  </table>
+                </body></html>
+            "#,
+            200.0,
+        );
+        let table_id = find_by_id(&doc, "t").unwrap();
+
+        assert!(repeating_table_header(&doc, table_id, 1).is_none());
+    }
+
+    #[test]
+    fn repeating_table_metadata_rejects_non_table_parent() {
+        let doc = parse(
+            r#"
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  .header { display: table-header-group; }
+                  .row { display: table-row; }
+                  .cell { display: table-cell; height: 20px; }
+                </style></head><body>
+                  <div id="not-table">
+                    <div class="header"><div class="row"><div class="cell">Header</div></div></div>
+                    <div class="row"><div class="cell">Body</div></div>
+                  </div>
+                </body></html>
+            "#,
+            200.0,
+        );
+        let parent_id = find_by_id(&doc, "not-table").unwrap();
+
+        assert!(repeating_table_header(&doc, parent_id, 1).is_none());
+    }
+
+    #[test]
+    fn repeating_table_metadata_honors_caller_depth() {
+        let doc = parse(
+            r#"
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  table { border-spacing: 0; }
+                  th, td { height: 20px; padding: 0; }
+                </style></head><body>
+                  <table id="t">
+                    <thead><tr><th>Header</th></tr></thead>
+                    <tbody><tr><td>Body</td></tr></tbody>
+                  </table>
+                </body></html>
+            "#,
+            200.0,
+        );
+        let table_id = find_by_id(&doc, "t").unwrap();
+
+        assert!(repeating_table_header(&doc, table_id, crate::MAX_DOM_DEPTH).is_none());
+    }
+
+    #[test]
+    fn table_header_repeats_and_reserves_body_space() {
+        let html = r#"
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { border-spacing: 0 6px; width: 100px; }
+              th, td { box-sizing: border-box; height: 30px; padding: 0; }
+            </style></head><body>
+              <table id="table">
+                <thead><tr><th id="header"><div id="header-block">HEADER</div></th></tr></thead>
+                <tbody>
+                  <tr><td id="row-1">1</td></tr>
+                  <tr><td id="row-2">2</td></tr>
+                  <tr><td id="row-3">3</td></tr>
+                  <tr><td id="row-4">4</td></tr>
+                  <tr><td id="row-5">5</td></tr>
+                </tbody>
+              </table>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "table").unwrap();
+        let header_id = find_by_id(&doc, "header").unwrap();
+        let header_block_id = find_by_id(&doc, "header-block").unwrap();
+        let first_row_id = find_by_id(&doc, "row-1").unwrap();
+        let last_row_id = find_by_id(&doc, "row-5").unwrap();
+        let body_origin = doc.get_node(first_row_id).unwrap().final_layout.location.y;
+
+        let geometry = run_pass(&mut doc, 90.0);
+        let table_pages: Vec<u32> = geometry[&table_id]
+            .fragments
+            .iter()
+            .map(|f| f.page_index)
+            .collect();
+        let header = &geometry[&header_id];
+        let header_pages: Vec<u32> = header.fragments.iter().map(|f| f.page_index).collect();
+        let header_block = &geometry[&header_block_id];
+
+        assert!(
+            header.is_repeat,
+            "header geometry must represent full redraws"
+        );
+        assert_eq!(
+            header_pages, table_pages,
+            "header must cover every table page"
+        );
+        assert!(
+            header_block.is_repeat,
+            "header descendants must redraw in full"
+        );
+        assert_eq!(
+            header_block
+                .fragments
+                .iter()
+                .map(|f| f.page_index)
+                .collect::<Vec<_>>(),
+            table_pages,
+            "header descendants must cover every table page"
+        );
+        assert!(geometry[&last_row_id].fragments.last().unwrap().page_index > 0);
+
+        for (&node_id, node_geometry) in &geometry {
+            if node_id == header_id || node_id == table_id {
+                continue;
+            }
+            for fragment in node_geometry.fragments.iter().filter(|f| f.page_index > 0) {
+                if [
+                    first_row_id,
+                    find_by_id(&doc, "row-2").unwrap(),
+                    find_by_id(&doc, "row-3").unwrap(),
+                    find_by_id(&doc, "row-4").unwrap(),
+                    last_row_id,
+                ]
+                .contains(&node_id)
+                {
+                    let table_top = geometry[&table_id]
+                        .fragments
+                        .iter()
+                        .find(|f| f.page_index == fragment.page_index)
+                        .unwrap()
+                        .y
+                        .to_f32();
+                    assert!(
+                        fragment.y.to_f32() + 0.5 >= table_top + body_origin,
+                        "body node {node_id} overlaps repeated header: {fragment:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_header_row_group_opt_out_does_not_repeat() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              thead { display: table-row-group; }
+              th, td { box-sizing: border-box; height: 30px; padding: 0; }
+            </style></head><body>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead><tbody>
+                <tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr>
+                <tr><td>4</td></tr><tr><td id="last">5</td></tr>
+              </tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let last_id = find_by_id(&doc, "last").unwrap();
+
+        let geometry = run_pass(&mut doc, 90.0);
+        let header = &geometry[&header_id];
+
+        assert!(!header.is_repeat);
+        assert_eq!(header.fragments.len(), 1);
+        assert!(geometry[&table_id].fragments.len() > 1);
+        assert!(geometry[&last_id].fragments.last().unwrap().page_index > 0);
+    }
+
+    #[test]
+    fn repeated_header_reservation_can_increase_page_count() {
+        fn pages(extra_css: &str) -> u32 {
+            let html = r#"<!doctype html>
+                <html><head><style>
+                  html, body { margin: 0; padding: 0; }
+                  table { margin: 0; border-spacing: 0; width: 100px; }
+                  th, td { box-sizing: border-box; height: 30px; padding: 0; }
+                  /* extra css */
+                </style></head><body>
+                  <table><thead><tr><th>Header</th></tr></thead><tbody>
+                    <tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr>
+                    <tr><td>4</td></tr><tr><td>5</td></tr>
+                  </tbody></table>
+                </body></html>"#
+                .replace("/* extra css */", extra_css);
+            let mut doc = parse(&html, 200.0);
+            implied_page_count(&run_pass(&mut doc, 90.0))
+        }
+
+        let repeated = pages("");
+        let opt_out = pages("thead { display: table-row-group; }");
+
+        assert_eq!(repeated, 3);
+        assert_eq!(opt_out, 2);
+        assert!(repeated > opt_out);
+    }
+
+    /// Supersedes `non_thead_and_multiple_header_groups_repeat_full_band`
+    /// (PR #710), which asserted that *every* `table-header-group` repeats.
+    /// css-tables-3 gives that status to the first one only; `tbody.repeat`
+    /// below is the second and must paginate as ordinary body content.
+    #[test]
+    fn only_the_first_header_group_repeats_per_css_tables_3() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; height: 20px; padding: 0; }
+              tbody.repeat { display: table-header-group; }
+            </style></head><body>
+              <table id="t">
+                <thead><tr><th id="h1">H1</th></tr></thead>
+                <tbody class="repeat"><tr><td id="h2">H2</td></tr></tbody>
+                <tbody>
+                  <tr><td id="b1">1</td></tr><tr><td>2</td></tr>
+                  <tr><td>3</td></tr><tr><td id="b4">4</td></tr><tr><td>5</td></tr>
+                </tbody>
+              </table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let h1_id = find_by_id(&doc, "h1").unwrap();
+        let h2_id = find_by_id(&doc, "h2").unwrap();
+        let b4_id = find_by_id(&doc, "b4").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let table_pages = geometry[&table_id]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.page_index)
+            .collect::<Vec<_>>();
+
+        assert!(geometry[&h1_id].is_repeat, "the first header group repeats");
+        assert_eq!(
+            geometry[&h1_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            table_pages
+        );
+        assert!(
+            !geometry[&h2_id].is_repeat,
+            "the second header group is demoted to table-row-group and must not repeat"
+        );
+        let continuation = geometry[&b4_id]
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.page_index > table_pages[0])
+            .collect::<Vec<_>>();
+        assert!(!continuation.is_empty());
+        // The reserved band is one 20px header row (`<thead>`), not two:
+        // the demoted `tbody.repeat` paginates as body content now, so
+        // continuation rows clear 20px rather than the former 40px.
+        assert!(
+            continuation
+                .iter()
+                .all(|fragment| fragment.y.to_f32() >= 19.5)
+        );
+    }
+
+    #[test]
+    fn multiple_rows_in_one_header_group_repeat_full_band() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; height: 20px; padding: 0; }
+            </style></head><body>
+              <table id="t">
+                <thead>
+                  <tr><th id="h1">H1</th></tr>
+                  <tr><th id="h2">H2</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>1</td></tr><tr><td>2</td></tr>
+                  <tr><td>3</td></tr><tr><td id="b4">4</td></tr>
+                </tbody>
+              </table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let h1_id = find_by_id(&doc, "h1").unwrap();
+        let h2_id = find_by_id(&doc, "h2").unwrap();
+        let b4_id = find_by_id(&doc, "b4").unwrap();
+
+        let geometry = run_pass(&mut doc, 80.0);
+        let table_pages = geometry[&table_id]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.page_index)
+            .collect::<Vec<_>>();
+
+        for header_id in [h1_id, h2_id] {
+            assert!(geometry[&header_id].is_repeat);
+            assert_eq!(
+                geometry[&header_id]
+                    .fragments
+                    .iter()
+                    .map(|fragment| fragment.page_index)
+                    .collect::<Vec<_>>(),
+                table_pages
+            );
+        }
+        let continuation = geometry[&b4_id]
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.page_index > table_pages[0])
+            .collect::<Vec<_>>();
+        assert!(!continuation.is_empty());
+        assert!(
+            continuation
+                .iter()
+                .all(|fragment| fragment.y.to_f32() >= 39.5)
+        );
+    }
+
+    #[test]
+    fn single_page_table_does_not_create_repeat_geometry() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; height: 20px; padding: 0; }
+            </style></head><body>
+              <table><thead><tr><th id="h">Header</th></tr></thead>
+                <tbody><tr><td>Body</td></tr></tbody>
+              </table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let header_id = find_by_id(&doc, "h").unwrap();
+
+        let geometry = run_pass(&mut doc, 800.0);
+        let header = &geometry[&header_id];
+
+        assert!(!header.is_repeat);
+        assert_eq!(header.fragments.len(), 1);
+    }
+
+    #[test]
+    fn over_page_height_table_header_uses_generic_bounded_fallback() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 120px; }
+              td { height: 20px; }
+            </style></head><body>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead>
+                <tbody><tr><td id="body-cell">Body</td></tr></tbody>
+              </table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let body_id = find_by_id(&doc, "body-cell").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+
+        assert!(!geometry[&header_id].is_repeat);
+        assert_eq!(implied_page_count(&geometry), 2);
+        assert_eq!(geometry[&table_id].fragments.len(), 2);
+        assert!(!geometry[&body_id].fragments.is_empty());
+        assert_eq!(geometry[&body_id].fragments.last().unwrap().page_index, 1);
+    }
+
+    #[test]
+    fn nested_multipage_table_keeps_inner_repeat_geometry() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; }
+              #outer { width: 300px; }
+              #outer > thead > tr > th { box-sizing: border-box; height: 20px; padding: 0; }
+              #outer > tbody > tr > td { box-sizing: border-box; height: 180px; padding: 0; }
+              #inner { width: 300px; }
+              #inner th, #inner td { box-sizing: border-box; height: 20px; padding: 0; }
+            </style></head><body>
+              <table id="outer">
+                <thead><tr><th id="outer-h">Outer</th></tr></thead>
+                <tbody><tr><td><table id="inner">
+                  <thead><tr><th id="inner-h">Inner</th></tr></thead><tbody>
+                    <tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr>
+                    <tr><td>4</td></tr><tr><td>5</td></tr><tr><td>6</td></tr>
+                    <tr><td>7</td></tr><tr><td>8</td></tr>
+                  </tbody>
+                </table></td></tr></tbody>
+              </table>
+            </body></html>"#;
+        let mut doc = parse(html, 300.0);
+        let outer_id = find_by_id(&doc, "outer").unwrap();
+        let outer_header_id = find_by_id(&doc, "outer-h").unwrap();
+        let inner_id = find_by_id(&doc, "inner").unwrap();
+        let inner_header_id = find_by_id(&doc, "inner-h").unwrap();
+
+        let geometry = run_pass(&mut doc, 80.0);
+        let outer_pages = geometry[&outer_id]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.page_index)
+            .collect::<Vec<_>>();
+        let inner_pages = geometry[&inner_id]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.page_index)
+            .collect::<Vec<_>>();
+
+        assert!(outer_pages.len() > 1);
+        assert!(inner_pages.len() > 1);
+        assert!(geometry[&outer_header_id].is_repeat);
+        assert!(geometry[&inner_header_id].is_repeat);
+        assert_eq!(
+            geometry[&outer_header_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            outer_pages
+        );
+        assert_eq!(
+            geometry[&inner_header_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            inner_pages
+        );
+
+        for (inner_table, inner_header) in geometry[&inner_id]
+            .fragments
+            .iter()
+            .zip(&geometry[&inner_header_id].fragments)
+        {
+            let outer_table = geometry[&outer_id]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.page_index == inner_table.page_index)
+                .unwrap();
+            let outer_header = geometry[&outer_header_id]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.page_index == inner_table.page_index)
+                .unwrap();
+            assert!(
+                (outer_header.y.to_f32() - outer_table.y.to_f32()).abs() < 0.5,
+                "outer header must stay at the table top"
+            );
+            assert!(
+                (inner_table.y.to_f32() - outer_table.y.to_f32() - 20.0).abs() < 0.5,
+                "inner table must stay below the outer header band"
+            );
+            assert!(
+                (inner_header.y.to_f32() - inner_table.y.to_f32()).abs() < 0.5,
+                "inner header must stay at the inner table top"
+            );
+        }
+    }
+
+    #[test]
+    fn table_cells_in_one_row_co_split_from_same_cursor() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; table-layout: fixed; width: 200px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 20px; }
+              td { height: 120px; }
+              #left > div { height: 30px; }
+              #right > div { height: 20px; }
+            </style></head><body>
+              <table><thead><tr><th colspan="2">Header</th></tr></thead><tbody><tr>
+                <td id="left"><div>1</div><div>2</div><div>3</div><div>4</div></td>
+                <td id="right"><div>R</div></td>
+              </tr></tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let left_id = find_by_id(&doc, "left").unwrap();
+        let right_id = find_by_id(&doc, "right").unwrap();
+
+        let geometry = run_pass(&mut doc, 70.0);
+        let left = &geometry[&left_id].fragments;
+        let right = &geometry[&right_id].fragments;
+
+        assert!(left.len() > 1);
+        assert_eq!(right[0].page_index, left[0].page_index);
+        assert!((right[0].y.to_f32() - left[0].y.to_f32()).abs() < 0.5);
+    }
+
+    #[test]
+    fn table_starting_mid_page_uses_remaining_first_page_capacity() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 20px; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; height: 20px; padding: 0; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead><tbody>
+                <tr><td id="row1">1</td></tr><tr><td>2</td></tr>
+                <tr><td id="row3">3</td></tr><tr><td>4</td></tr>
+              </tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let row1_id = find_by_id(&doc, "row1").unwrap();
+        let row3_id = find_by_id(&doc, "row3").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let headers = &geometry[&header_id].fragments;
+
+        assert!((headers[0].y.to_f32() - 20.0).abs() < 0.5);
+        assert_eq!(geometry[&row1_id].fragments[0].page_index, 0);
+        assert_eq!(headers[1].page_index, 1);
+        assert!(headers[1].y.to_f32().abs() < 0.5);
+        let later = geometry[&row3_id].fragments.last().unwrap();
+        let table_top = geometry[&table_id]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.page_index == later.page_index)
+            .unwrap()
+            .y
+            .to_f32();
+        assert!(later.y.to_f32() >= table_top + 19.5);
+    }
+
+    /// Supersedes `table_moves_first_body_row_when_only_header_fits_remaining_space`
+    /// (PR #710), which expected the header on pages `[0, 1]` — page 0 carrying
+    /// the header with no row under it. The whole table now starts on page 1
+    /// instead (fulgur-naj7.6).
+    #[test]
+    fn table_starts_on_next_page_when_only_the_header_would_fit() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 60px; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 20px; }
+              td, td > div { height: 30px; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead><tbody>
+                <tr><td><div id="row1">1</div></td></tr>
+              </tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let row_id = find_by_id(&doc, "row1").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let row = &geometry[&row_id].fragments[0];
+
+        assert_eq!(row.page_index, 1);
+        assert!((row.y.to_f32() - 20.0).abs() < 0.5);
+        assert!(row.y.to_f32() + row.height.to_f32() <= 100.0);
+        // No orphaned header on page 0 — the table begins on page 1.
+        assert_eq!(
+            geometry[&header_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(
+            geometry[&table_id]
+                .fragments
+                .iter()
+                .all(|fragment| fragment.y.to_f32() + fragment.height.to_f32() <= 100.0),
+            "table fragments must stay within the page: {:?}",
+            geometry[&table_id].fragments
+        );
+    }
+
+    #[test]
+    fn table_does_not_insert_header_only_page_for_oversized_first_row_at_page_top() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 20px; }
+              #row1 { height: 90px; }
+              #row2 { height: 20px; }
+            </style></head><body>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead><tbody>
+                <tr><td id="row1">1</td></tr>
+                <tr><td id="row2">2</td></tr>
+              </tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+        let row1_id = find_by_id(&doc, "row1").unwrap();
+        let row2_id = find_by_id(&doc, "row2").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let row1 = &geometry[&row1_id].fragments[0];
+        let row2 = &geometry[&row2_id].fragments[0];
+
+        assert_eq!(row1.page_index, 0);
+        assert!((row1.y.to_f32() - 20.0).abs() < 0.5);
+        assert_eq!(row2.page_index, 1);
+        assert!((row2.y.to_f32() - 20.0).abs() < 0.5);
+        assert_eq!(
+            geometry[&header_id]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.page_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let first_table = geometry[&table_id]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.page_index == 0)
+            .unwrap();
+        assert!(
+            first_table.height.to_f32() > 20.5,
+            "first page must include the oversized body row, not a header-only band: {first_table:?}"
+        );
+    }
+
+    #[test]
+    fn table_moves_all_nested_cells_in_first_body_row_from_occupied_strip() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 60px; }
+              table { margin: 0; border-spacing: 0; table-layout: fixed; width: 100px; }
+              th, td { box-sizing: border-box; height: 30px; padding: 0; }
+              th { height: 20px; }
+              td > div { height: 30px; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table><thead><tr><th colspan="2">Header</th></tr></thead><tbody><tr>
+                <td><div id="left">L</div></td><td><div id="right">R</div></td>
+              </tr></tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let left_id = find_by_id(&doc, "left").unwrap();
+        let right_id = find_by_id(&doc, "right").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let left = &geometry[&left_id].fragments[0];
+        let right = &geometry[&right_id].fragments[0];
+
+        assert_eq!(left.page_index, 1);
+        assert_eq!(right.page_index, 1);
+        assert!((left.y.to_f32() - 20.0).abs() < 0.5);
+        assert!((right.y.to_f32() - left.y.to_f32()).abs() < 0.5);
+    }
+
+    #[test]
+    fn table_keeps_nested_body_extent_that_fits_below_mid_page_header() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 60px; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 20px; }
+              #short { height: 10px; }
+              #tall { height: 30px; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table id="t"><thead><tr><th>Header</th></tr></thead><tbody><tr><td>
+                <div id="short">short</div><div id="tall">tall</div>
+              </td></tr></tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let short_id = find_by_id(&doc, "short").unwrap();
+        let tall_id = find_by_id(&doc, "tall").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        assert_eq!(geometry[&short_id].fragments[0].page_index, 0);
+        assert_eq!(geometry[&tall_id].fragments[0].page_index, 1);
+        let first_table = geometry[&table_id]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.page_index == 0)
+            .unwrap();
+        assert!((first_table.height.to_f32() - 30.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn table_uses_max_partial_extent_across_first_body_row_cells() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 60px; }
+              table { margin: 0; border-spacing: 0; table-layout: fixed; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              th { height: 20px; }
+              #left-short { height: 5px; }
+              #right-short { height: 15px; }
+              .tall { height: 30px; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table id="t"><thead><tr><th colspan="2">Header</th></tr></thead><tbody><tr>
+                <td><div id="left-short"></div><div class="tall"></div></td>
+                <td><div id="right-short"></div><div class="tall"></div></td>
+              </tr></tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let first_table = geometry[&table_id]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.page_index == 0)
+            .unwrap();
+
+        assert!(
+            (first_table.height.to_f32() - 35.0).abs() < 0.5,
+            "expected header plus max partial row extent: {first_table:?}"
+        );
+    }
+
+    #[test]
+    fn nested_oversized_header_fallback_honors_occupied_outer_strip() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 60px; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; padding: 0; }
+              #outer-header { height: 20px; }
+              #inner-header { height: 80px; }
+              #inner-body { height: 30px; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table><thead><tr><th id="outer-header">Outer</th></tr></thead><tbody><tr><td>
+                <table id="inner"><thead><tr><th id="inner-header">Inner</th></tr></thead>
+                  <tbody><tr><td id="inner-body">Body</td></tr></tbody></table>
+              </td></tr></tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let inner_id = find_by_id(&doc, "inner").unwrap();
+        let inner_header_id = find_by_id(&doc, "inner-header").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        assert_eq!(geometry[&inner_header_id].fragments[0].page_index, 1);
+        assert!(
+            geometry[&inner_id]
+                .fragments
+                .iter()
+                .filter(|fragment| fragment.page_index == 0)
+                .all(|fragment| fragment.height.to_f32() <= 0.0)
+        );
+    }
+
+    #[test]
+    fn table_moves_to_fresh_page_when_header_does_not_fit() {
+        let html = r#"<!doctype html>
+            <html><head><style>
+              html, body { margin: 0; padding: 0; }
+              #lead { height: 90px; }
+              table { margin: 0; border-spacing: 0; width: 100px; }
+              th, td { box-sizing: border-box; height: 20px; padding: 0; }
+            </style></head><body>
+              <div id="lead"></div>
+              <table id="t"><thead><tr><th id="h">Header</th></tr></thead><tbody>
+                <tr><td>1</td></tr><tr><td>2</td></tr>
+                <tr><td>3</td></tr><tr><td>4</td></tr>
+              </tbody></table>
+            </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let table_id = find_by_id(&doc, "t").unwrap();
+        let header_id = find_by_id(&doc, "h").unwrap();
+
+        let geometry = run_pass(&mut doc, 100.0);
+        let table = &geometry[&table_id].fragments[0];
+        let header = &geometry[&header_id].fragments[0];
+
+        assert_eq!(table.page_index, 1);
+        assert!(table.y.to_f32().abs() < 0.5);
+        assert_eq!(header.page_index, 1);
+        assert!(header.y.to_f32().abs() < 0.5);
+    }
+
+    #[test]
+    fn repeated_header_clone_budget_is_shared_and_page_atomic() {
+        let mut template = PaginationGeometryTable::new();
+        template.entry(7).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 10.0_f32.as_px(),
+            width: 50.0_f32.as_px(),
+            height: 20.0_f32.as_px(),
+        });
+        template.entry(8).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 12.0_f32.as_px(),
+            width: 30.0_f32.as_px(),
+            height: 10.0_f32.as_px(),
+        });
+        let table_pages = [(0, 10.0), (1, 0.0)];
+        let mut first = PaginationGeometryTable::new();
+        let mut second = PaginationGeometryTable::new();
+        let mut remaining_repeat_budget = 3;
+
+        append_repeated_header_fragments(
+            &mut first,
+            &template,
+            &table_pages,
+            10.0,
+            &mut remaining_repeat_budget,
+        );
+        append_repeated_header_fragments(
+            &mut second,
+            &template,
+            &table_pages,
+            10.0,
+            &mut remaining_repeat_budget,
+        );
+
+        for node_id in [7, 8] {
+            assert!(first[&node_id].is_repeat);
+            assert_eq!(first[&node_id].fragments.len(), 2);
+            assert_eq!(first[&node_id].fragments[1].page_index, 1);
+            assert!(second[&node_id].is_repeat);
+            assert_eq!(second[&node_id].fragments.len(), 1);
+            assert_eq!(second[&node_id].fragments[0].page_index, 0);
+        }
+        assert_eq!(remaining_repeat_budget, 1);
     }
 
     /// fulgur-ezst: a tiny input with a pathologically tall CSS height on a

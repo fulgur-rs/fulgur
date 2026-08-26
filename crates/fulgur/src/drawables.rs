@@ -213,9 +213,7 @@ pub struct SvgEntry {
 /// `BlockEntry` / `ParagraphEntry` keyed by the cell's own NodeId
 /// and paints through the standard per-NodeId dispatch.
 ///
-/// Multi-page header repetition (`<thead>` cloned on continuation
-/// pages) is **not** modelled in PR 5; single-page tables byte-eq
-/// already, multi-page tables follow in a later PR.
+/// Multi-page header repetition is represented by pagination geometry.
 #[derive(Debug, Clone)]
 pub struct TableEntry {
     pub style: crate::draw_primitives::BlockStyle,

@@ -936,6 +936,23 @@ fn is_vertical_writing_mode(
     !matches!(mode, W::HorizontalTb)
 }
 
+/// True when `node` is a text node holding nothing but whitespace.
+///
+/// The fragmenter skips these: markup formatting puts them between block
+/// children, where they carry no content and have no box of their own. Keeping
+/// the `text_data()` call here rather than at each call site keeps the Blitz
+/// API surface inside this adapter.
+pub fn is_whitespace_only_text_node(node: &Node) -> bool {
+    node.text_data()
+        .is_some_and(|text| text.content.chars().all(char::is_whitespace))
+}
+
+/// True when `node` is taken out of normal flow (absolutely positioned, fixed,
+/// or floated) and so does not contribute to its parent's in-flow height.
+pub fn is_out_of_flow_node(node: &Node) -> bool {
+    child_is_out_of_flow(node)
+}
+
 fn child_is_out_of_flow(node: &Node) -> bool {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles().is_some_and(|s| {
