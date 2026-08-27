@@ -1133,4 +1133,160 @@ mod tests {
             "solid background-color should not produce a gradient stop count"
         );
     }
+
+    // ── map_extent: legacy Contain / Cover keyword aliases ────────────────────
+    //
+    // CSS Images Level 3 defines `contain` and `cover` as legacy aliases for
+    // `closest-side` and `farthest-corner` respectively. Stylo retains both
+    // aliases for backwards-compatibility and maps them to distinct
+    // `ShapeExtent::Contain` / `ShapeExtent::Cover` enum variants that
+    // `map_extent` must translate to the correct `RadialExtent`.
+
+    /// `radial-gradient(contain …)` exercises `ShapeExtent::Contain →
+    /// RadialExtent::ClosestSide` in `map_extent`.
+    #[test]
+    fn radial_gradient_legacy_contain_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(contain at center, red, blue)"),
+            "legacy_contain",
+        );
+    }
+
+    /// `radial-gradient(cover …)` exercises `ShapeExtent::Cover →
+    /// RadialExtent::FarthestCorner` in `map_extent`.
+    #[test]
+    fn radial_gradient_legacy_cover_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(cover at center, red, blue)"),
+            "legacy_cover",
+        );
+    }
+
+    // ── resolve_color_stops: length-typed interpolation hint ─────────────────
+    //
+    // Interpolation hints can have a `<length>` position (e.g. `20px`) in
+    // addition to the more common `<percentage>`. This exercises the
+    // `lp.to_length()` branch of the hint resolver inside `resolve_color_stops`,
+    // producing a `GradientStopPosition::LengthPx` entry.
+
+    /// A linear-gradient whose mid-point hint is specified as a pixel length
+    /// (e.g. `red, 20px, blue`) exercises the `to_length()` branch for
+    /// interpolation-hint positions.
+    #[test]
+    fn linear_gradient_length_typed_interpolation_hint() {
+        assert_pdf(
+            &render_bg("linear-gradient(red, 20px, blue)"),
+            "length_hint",
+        );
+    }
+
+    // ── CSS Color Level 4: non-default interpolation method ──────────────────
+    //
+    // `linear-gradient(in oklch, …)` etc. use a non-sRGB interpolation space
+    // unsupported by Phase 1. fulgur bails early and drops the gradient layer
+    // so the element still renders correctly without a gradient.
+    // (If Stylo does not yet parse the `in <colorspace>` syntax, the CSS is
+    // treated as a parse error and the background defaults to `none` — either
+    // way the output is a valid PDF with no panic.)
+
+    /// Non-default color interpolation method in a linear-gradient drops the
+    /// gradient layer without panicking.
+    #[test]
+    fn linear_gradient_non_default_interpolation_drops_layer() {
+        assert_pdf(
+            &render_bg("linear-gradient(in oklch, red, blue)"),
+            "non_default_interp_linear",
+        );
+    }
+
+    /// Non-default color interpolation method in a radial-gradient drops the
+    /// gradient layer without panicking.
+    #[test]
+    fn radial_gradient_non_default_interpolation_drops_layer() {
+        assert_pdf(
+            &render_bg("radial-gradient(in oklch, circle, red, blue)"),
+            "non_default_interp_radial",
+        );
+    }
+
+    /// Non-default color interpolation method in a conic-gradient drops the
+    /// gradient layer without panicking.
+    #[test]
+    fn conic_gradient_non_default_interpolation_drops_layer() {
+        assert_pdf(
+            &render_bg("conic-gradient(in oklch, red, blue)"),
+            "non_default_interp_conic",
+        );
+    }
+
+    // ── resolve_color_stops / conic: too-few-stops guard ─────────────────────
+    //
+    // A gradient with fewer than 2 colour stops is CSS-invalid but may still
+    // reach fulgur if Stylo is lenient. The `out.len() < 2` / `stops.len() < 2`
+    // guards ensure the layer is dropped rather than panicking.
+
+    /// A degenerate linear-gradient with only one colour stop must not panic.
+    #[test]
+    fn linear_gradient_degenerate_single_stop_does_not_panic() {
+        assert_pdf(&render_bg("linear-gradient(red)"), "single_stop_linear");
+    }
+
+    /// A degenerate conic-gradient with only one colour stop must not panic.
+    #[test]
+    fn conic_gradient_degenerate_single_stop_does_not_panic() {
+        assert_pdf(&render_bg("conic-gradient(red)"), "single_stop_conic");
+    }
+
+    // ── gradient_stop_count helper: Raster / Svg layers return None ───────────
+    //
+    // `BgImageContent::Raster` and `::Svg` layers have no gradient stops.
+    // When the background layers include a raster image, the `_ => None` arm
+    // of the inner `find_map` must be taken (returning `None` from the helper).
+    // This test inlines the same match logic as `first_gradient_stop_count`
+    // so it can supply an `AssetBundle` (which the shared helper does not accept).
+
+    /// A raster URL background produces a `BgImageContent::Raster` layer whose
+    /// `_ => None` arm is taken by the gradient-stop-count match, yielding `None`.
+    #[test]
+    fn gradient_stop_count_helper_returns_none_for_raster_layer() {
+        use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+
+        // Confirm the raster layer was created so the _ => None arm is actually reached.
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "expected BgImageContent::Raster layer from url(dot.png)"
+        );
+
+        // The gradient-stop-count match must return None for raster layers (the _ arm).
+        let count = drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        });
+        assert!(
+            count.is_none(),
+            "raster background layer must not produce a gradient stop count"
+        );
+    }
 }
