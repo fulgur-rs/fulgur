@@ -1006,13 +1006,11 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    /// Return the stop count of the first gradient background layer found in
-    /// `html`'s converted block styles, or `None` if there is no gradient.
-    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+    /// Walk `drawables`' block styles for the first gradient background layer and
+    /// return its stop count, or `None` if no gradient layer is found.
+    /// The `_ => None` arm is taken for `Raster` and `Svg` layers.
+    fn gradient_stop_count_in_drawables(drawables: &crate::drawables::Drawables) -> Option<usize> {
         use crate::draw_primitives::BgImageContent;
-        let drawables = Engine::builder()
-            .build()
-            .build_drawables_for_testing_no_gcpm(html);
         drawables.block_styles.values().find_map(|block| {
             block
                 .style
@@ -1025,6 +1023,15 @@ mod tests {
                     _ => None,
                 })
         })
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        gradient_stop_count_in_drawables(&drawables)
     }
 
     /// Security regression: an unbounded `column-stop` list must not be
@@ -1141,25 +1148,29 @@ mod tests {
     // aliases for backwards-compatibility and maps them to distinct
     // `ShapeExtent::Contain` / `ShapeExtent::Cover` enum variants that
     // `map_extent` must translate to the correct `RadialExtent`.
+    //
+    // The CSS `radial-gradient(contain …)` syntax may be rejected by the current
+    // Stylo parser before reaching `map_extent`, so these tests call `map_extent`
+    // directly to assert the alias mapping rather than going through CSS rendering.
 
-    /// `radial-gradient(contain …)` exercises `ShapeExtent::Contain →
-    /// RadialExtent::ClosestSide` in `map_extent`.
+    /// `ShapeExtent::Contain` is the CSS Images §3.6.1 alias for `closest-side`;
+    /// `map_extent` must translate it to `RadialExtent::ClosestSide`.
     #[test]
-    fn radial_gradient_legacy_contain_extent() {
-        assert_pdf(
-            &render_bg("radial-gradient(contain at center, red, blue)"),
-            "legacy_contain",
-        );
+    fn map_extent_contain_alias_maps_to_closest_side() {
+        use super::map_extent;
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(map_extent(ShapeExtent::Contain), RadialExtent::ClosestSide);
     }
 
-    /// `radial-gradient(cover …)` exercises `ShapeExtent::Cover →
-    /// RadialExtent::FarthestCorner` in `map_extent`.
+    /// `ShapeExtent::Cover` is the CSS Images §3.6.1 alias for `farthest-corner`;
+    /// `map_extent` must translate it to `RadialExtent::FarthestCorner`.
     #[test]
-    fn radial_gradient_legacy_cover_extent() {
-        assert_pdf(
-            &render_bg("radial-gradient(cover at center, red, blue)"),
-            "legacy_cover",
-        );
+    fn map_extent_cover_alias_maps_to_farthest_corner() {
+        use super::map_extent;
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(map_extent(ShapeExtent::Cover), RadialExtent::FarthestCorner);
     }
 
     // ── resolve_color_stops: length-typed interpolation hint ─────────────────
@@ -1241,12 +1252,12 @@ mod tests {
     //
     // `BgImageContent::Raster` and `::Svg` layers have no gradient stops.
     // When the background layers include a raster image, the `_ => None` arm
-    // of the inner `find_map` must be taken (returning `None` from the helper).
-    // This test inlines the same match logic as `first_gradient_stop_count`
-    // so it can supply an `AssetBundle` (which the shared helper does not accept).
+    // inside `gradient_stop_count_in_drawables` must be taken (yielding `None`).
+    // This test uses `gradient_stop_count_in_drawables` directly so that a
+    // regression in the helper is caught here rather than a duplicated match.
 
-    /// A raster URL background produces a `BgImageContent::Raster` layer whose
-    /// `_ => None` arm is taken by the gradient-stop-count match, yielding `None`.
+    /// A raster URL background must cause `gradient_stop_count_in_drawables` to
+    /// return `None` (the `_ => None` arm for `BgImageContent::Raster`).
     #[test]
     fn gradient_stop_count_helper_returns_none_for_raster_layer() {
         use crate::draw_primitives::BgImageContent;
@@ -1271,19 +1282,8 @@ mod tests {
             "expected BgImageContent::Raster layer from url(dot.png)"
         );
 
-        // The gradient-stop-count match must return None for raster layers (the _ arm).
-        let count = drawables.block_styles.values().find_map(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .find_map(|layer| match &layer.content {
-                    BgImageContent::LinearGradient { stops, .. }
-                    | BgImageContent::RadialGradient { stops, .. }
-                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                    _ => None,
-                })
-        });
+        // Use the shared helper — a regression in its `_ => None` arm will fail here.
+        let count = gradient_stop_count_in_drawables(&drawables);
         assert!(
             count.is_none(),
             "raster background layer must not produce a gradient stop count"
