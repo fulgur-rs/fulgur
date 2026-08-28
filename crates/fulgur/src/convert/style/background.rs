@@ -1133,4 +1133,76 @@ mod tests {
             "solid background-color should not produce a gradient stop count"
         );
     }
+
+    // ── Image::Url with bundle present but asset missing ─────────────────────
+
+    /// `Image::Url` → AssetBundle is set but does not contain the requested
+    /// asset → `get_image` returns `None` → layer dropped silently.
+    ///
+    /// This covers the `a.get_image(src)?` short-circuit path when the bundle
+    /// is present but the image name was never registered.
+    #[test]
+    fn bg_image_url_missing_from_bundle_skips_layer() {
+        let bundle = AssetBundle::default(); // empty — "missing.png" not registered
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(missing.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render with bundle present but image absent");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── calc() gradient center positions ─────────────────────────────────────
+
+    /// `radial-gradient(… at calc(50% + 10px) …)` produces a computed
+    /// `LengthPercentage` that is neither a pure percentage nor a pure length.
+    /// `try_convert_lp_to_bg` returns `None` for such values, causing the
+    /// gradient layer to be dropped (element still renders without the
+    /// background image).
+    #[test]
+    fn radial_gradient_calc_center_position_drops_layer() {
+        let pdf = render_bg("radial-gradient(circle at calc(50% + 10px) 50%,red,blue)");
+        assert_pdf(&pdf, "radial_calc_center");
+    }
+
+    /// Same for `conic-gradient(… at calc(…) …)`: `try_convert_lp_to_bg`
+    /// returns `None` for a mixed-unit calc, so the layer is dropped.
+    #[test]
+    fn conic_gradient_calc_center_position_drops_layer() {
+        let pdf = render_bg("conic-gradient(at calc(50% + 10px) 50%,red,blue)");
+        assert_pdf(&pdf, "conic_calc_center");
+    }
+
+    // ── non-default color interpolation method ───────────────────────────────
+
+    /// A gradient that specifies a non-default color interpolation space
+    /// (`in hsl`) sets the `HAS_DEFAULT_COLOR_INTERPOLATION_METHOD` flag to
+    /// false; `resolve_linear_gradient` bails early and returns `None` so the
+    /// layer is dropped. Element still renders (no background image, but valid
+    /// PDF).
+    #[test]
+    fn linear_gradient_non_default_interpolation_drops_layer() {
+        // `in hsl` is a non-default color-interpolation-method (CSS Color 4).
+        // If Stylo supports this syntax the flag will be absent and the layer
+        // is dropped by fulgur's bail-out. If Stylo doesn't support it yet the
+        // gradient is also silently ignored. Either way the result must be a
+        // valid PDF.
+        let pdf = render_bg("linear-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "linear_nondefault_interp");
+    }
+
+    /// Same for radial-gradient with a non-default interpolation method.
+    #[test]
+    fn radial_gradient_non_default_interpolation_drops_layer() {
+        let pdf = render_bg("radial-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "radial_nondefault_interp");
+    }
+
+    /// Same for conic-gradient with a non-default interpolation method.
+    #[test]
+    fn conic_gradient_non_default_interpolation_drops_layer() {
+        let pdf = render_bg("conic-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "conic_nondefault_interp");
+    }
 }
