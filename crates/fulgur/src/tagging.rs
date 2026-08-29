@@ -592,4 +592,146 @@ mod tests {
         assert_eq!(classify_element("a"), None);
         assert_eq!(classify_element("link"), None);
     }
+
+    // --- PdfTag::PartialEq inequality tests ---
+    //
+    // The existing tests only compare same-variant values (e.g. `assert_eq!(tag.clone(), tag)`).
+    // Cross-variant comparisons exercise the `_ => false` catch-all arm that the
+    // `#[derive(PartialEq)]` macro generates, and field-inequality cases exercise the
+    // false-branch of each per-field sub-comparison.
+
+    #[test]
+    fn pdf_tag_partial_eq_different_unit_variants_are_unequal() {
+        assert_ne!(PdfTag::P, PdfTag::Div);
+        assert_ne!(PdfTag::P, PdfTag::Span);
+        assert_ne!(PdfTag::Div, PdfTag::Span);
+        assert_ne!(PdfTag::Li, PdfTag::Lbl);
+        assert_ne!(PdfTag::Lbl, PdfTag::LBody);
+        assert_ne!(PdfTag::Td, PdfTag::Tr);
+        assert_ne!(PdfTag::THead, PdfTag::TBody);
+        assert_ne!(PdfTag::TBody, PdfTag::TFoot);
+        assert_ne!(PdfTag::Table, PdfTag::Tr);
+        assert_ne!(PdfTag::Link, PdfTag::Span);
+        assert_ne!(PdfTag::Figure, PdfTag::Div);
+    }
+
+    #[test]
+    fn pdf_tag_partial_eq_heading_level_inequality() {
+        // Same variant, different field value → must be unequal.
+        assert_ne!(PdfTag::H { level: 1 }, PdfTag::H { level: 2 });
+        assert_ne!(PdfTag::H { level: 3 }, PdfTag::H { level: 4 });
+        assert_ne!(PdfTag::H { level: 1 }, PdfTag::H { level: 6 });
+    }
+
+    #[test]
+    fn pdf_tag_partial_eq_heading_vs_unit_variant() {
+        assert_ne!(PdfTag::H { level: 1 }, PdfTag::P);
+        assert_ne!(PdfTag::H { level: 2 }, PdfTag::Div);
+    }
+
+    #[test]
+    fn pdf_tag_partial_eq_list_numbering_inequality() {
+        assert_ne!(
+            PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Disc
+            },
+            PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Decimal
+            }
+        );
+    }
+
+    #[test]
+    fn pdf_tag_partial_eq_th_scope_inequality() {
+        use krilla::tagging::TableHeaderScope;
+        assert_ne!(
+            PdfTag::Th {
+                scope: TableHeaderScope::Row
+            },
+            PdfTag::Th {
+                scope: TableHeaderScope::Column
+            }
+        );
+        assert_ne!(
+            PdfTag::Th {
+                scope: TableHeaderScope::Both
+            },
+            PdfTag::Th {
+                scope: TableHeaderScope::Row
+            }
+        );
+    }
+
+    #[test]
+    fn pdf_tag_partial_eq_field_variants_vs_unit_variants() {
+        assert_ne!(
+            PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Disc
+            },
+            PdfTag::Li
+        );
+        assert_ne!(
+            PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Both
+            },
+            PdfTag::Td
+        );
+    }
+
+    /// Table-driven exhaustive cross-variant inequality check for all 14 unit variants.
+    ///
+    /// This exercises every discriminant pair in the derived `PartialEq` match —
+    /// specifically the `_ => false` catch-all arm for differing variants — for
+    /// every combination of unit `PdfTag` variants.
+    #[test]
+    fn pdf_tag_partial_eq_all_unit_pairs_are_unequal_across_types() {
+        let all_units = [
+            PdfTag::P,
+            PdfTag::Div,
+            PdfTag::Span,
+            PdfTag::Figure,
+            PdfTag::Lbl,
+            PdfTag::LBody,
+            PdfTag::Li,
+            PdfTag::Table,
+            PdfTag::THead,
+            PdfTag::TBody,
+            PdfTag::TFoot,
+            PdfTag::Tr,
+            PdfTag::Td,
+            PdfTag::Link,
+        ];
+        for (i, a) in all_units.iter().enumerate() {
+            for (j, b) in all_units.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b, "variant at index {i} must equal itself");
+                } else {
+                    assert_ne!(a, b, "variants at indices {i} and {j} must not be equal");
+                }
+            }
+        }
+    }
+
+    // --- classify_element out-of-range heading levels ---
+
+    #[test]
+    fn classify_element_heading_levels_out_of_range_return_none() {
+        // Only h1–h6 map to PdfTag::H. h0, h7, h8, … must return None
+        // so unknown heading-like idents don't silently produce a H tag.
+        assert_eq!(classify_element("h0"), None);
+        assert_eq!(classify_element("h7"), None);
+        assert_eq!(classify_element("h9"), None);
+    }
+
+    // --- classify_element does not match case-insensitively ---
+
+    #[test]
+    fn classify_element_requires_lowercase_input() {
+        // HTML local names are always lowercase after parsing, but the function
+        // accepts `&str` and must not match uppercase forms.
+        assert_eq!(classify_element("P"), None);
+        assert_eq!(classify_element("DIV"), None);
+        assert_eq!(classify_element("Span"), None);
+        assert_eq!(classify_element("H1"), None);
+    }
 }
