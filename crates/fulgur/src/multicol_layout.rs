@@ -3689,4 +3689,18 @@ mod tests {
             a.location.y
         );
     }
+
+    // ── resolve_column_layout: fits_count else branch ────────────────────────
+
+    /// When `width + gap <= 0.0` the inner `fits_count` closure falls back to
+    /// returning 1 rather than dividing by zero. This requires a negative gap
+    /// which CSS does not produce, but the function accepts any `f32`.
+    #[test]
+    fn resolve_width_with_negative_gap_larger_than_width_falls_back_to_one() {
+        // gap = -10.0, column-width hint = 5.0 → denom = 5 + (-10) = -5 ≤ 0 → else → 1
+        let (n, w) = resolve_column_layout(200.0, None, Some(5.0), -10.0);
+        assert_eq!(n, 1, "denom ≤ 0 must not produce more than one column");
+        // col_w with n=1 and gap=-10: (200 - (-10)*(1-1)) / 1 = 200 → max(0) = 200
+        assert!(w >= 0.0, "column width must not be negative: {w}");
+    }
 }
