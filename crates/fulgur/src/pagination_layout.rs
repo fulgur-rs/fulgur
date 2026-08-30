@@ -8942,4 +8942,247 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
     }
+
+    // ── fragment_inline_root: additional branch coverage ────────────────────
+
+    /// Empty `line_metrics` must trigger the early-return guard at the top
+    /// of `fragment_inline_root` and return the input coordinates unchanged
+    /// with zero emitted fragments.
+    #[test]
+    fn fragment_inline_root_empty_line_metrics_returns_early() {
+        let mut geom = PaginationGeometryTable::new();
+        let (new_page, new_cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 42.0, 3, 800.0, &[]);
+        assert_eq!(emitted, 0, "empty metrics → no fragments emitted");
+        assert_eq!(new_page, 3, "page unchanged");
+        assert!(
+            (new_cursor - 42.0).abs() < 0.01,
+            "cursor unchanged: {new_cursor}"
+        );
+        assert!(
+            geom.is_empty(),
+            "empty metrics must not create a geometry entry"
+        );
+    }
+
+    /// A paragraph starting partway down a page (non-zero `initial_cursor_y`)
+    /// must account for the existing offset when deciding where the page
+    /// boundary falls.  This tests that `projected_bottom_in_body` is
+    /// computed as `initial_cursor_y + (line_bottom_local - frag_top_local)`.
+    #[test]
+    fn fragment_inline_root_nonzero_initial_cursor_y_splits_correctly() {
+        // Paragraph starts at y=50 on a 80px page.
+        // 4 lines of 25px each → line bottoms at 25, 50, 75, 100 (para-local).
+        // projected bottoms = 50 + cumulative = 75, 100, 125, 150.
+        // At i=1 overflow: first_size=1 < ORPHANS_MIN=2 → skip.
+        // At i=2 overflow: first_size=2, remaining_size=2 → VALID split.
+        let lines = vec![(0.0_f32, 25.0), (25.0, 50.0), (50.0, 75.0), (75.0, 100.0)];
+        let mut geom = PaginationGeometryTable::new();
+        let (new_page, new_cursor, emitted) = super::fragment_inline_root(
+            &mut geom, 1, 5.0, 100.0, /*initial_cursor_y=*/ 50.0,
+            /*initial_page_index=*/ 0, /*page_height_px=*/ 80.0, &lines,
+        );
+        assert_eq!(emitted, 2, "expected split into 2 fragments");
+        assert_eq!(new_page, 1, "second fragment lands on page 1");
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].page_index, 0);
+        // First fragment: lines 0-1, height = line_metrics[1].1 - line_metrics[0].0 = 50.
+        assert!(
+            (frags[0].height.to_f32() - 50.0).abs() < 0.01,
+            "first fragment height: {}",
+            frags[0].height.to_f32()
+        );
+        // First fragment starts at cursor y=50 (initial_cursor_y).
+        assert!(
+            (frags[0].y.to_f32() - 50.0).abs() < 0.01,
+            "first fragment y: {}",
+            frags[0].y.to_f32()
+        );
+        assert_eq!(frags[1].page_index, 1);
+        // After the page break cursor resets to 0 for the second fragment.
+        assert!(
+            (frags[1].y.to_f32()).abs() < 0.01,
+            "second fragment y (after reset): {}",
+            frags[1].y.to_f32()
+        );
+        // cursor_y on page 1 = 0 + (line_metrics[3].1 - line_metrics[2].0) = 50.
+        assert!(
+            (new_cursor - 50.0).abs() < 0.01,
+            "cursor_y on new page: {new_cursor}"
+        );
+    }
+
+    /// A paragraph that spans three pages must emit three fragments.
+    /// Exercises the loop body more than once (each earlier emission
+    /// resets `paragraph_top_in_body` and `fragment_start_idx`).
+    #[test]
+    fn fragment_inline_root_three_page_span_emits_three_fragments() {
+        // 6 lines of 50px each → line tops 0, 50, 100, 150, 200, 250;
+        // bottoms 50, 100, 150, 200, 250, 300.
+        // page_height_px=100.
+        // Split 1 at i=2: first_size=2 ≥ 2, remaining_size=4 ≥ 2 → OK.
+        // Split 2 at i=4: first_size=2 ≥ 2, remaining_size=2 ≥ 2 → OK.
+        // Final fragment: lines 4-5.
+        let lines: Vec<(f32, f32)> = (0..6)
+            .map(|i| (i as f32 * 50.0, i as f32 * 50.0 + 50.0))
+            .collect();
+        let mut geom = PaginationGeometryTable::new();
+        let (new_page, new_cursor, emitted) =
+            super::fragment_inline_root(&mut geom, 7, 0.0, 200.0, 0.0, 0, 100.0, &lines);
+        assert_eq!(
+            emitted, 3,
+            "six lines at 50px on a 100px page → 3 fragments"
+        );
+        assert_eq!(new_page, 2, "last fragment lands on page 2");
+        assert!((new_cursor - 100.0).abs() < 0.01, "cursor: {new_cursor}");
+        let frags = &geom.get(&7).unwrap().fragments;
+        assert_eq!(frags.len(), 3);
+        assert_eq!(frags[0].page_index, 0);
+        assert_eq!(frags[1].page_index, 1);
+        assert_eq!(frags[2].page_index, 2);
+        for (idx, frag) in frags.iter().enumerate() {
+            let h = frag.height.to_f32();
+            assert!(
+                (h - 100.0).abs() < 0.01,
+                "fragment {idx} height should be 100px, got {h}"
+            );
+        }
+    }
+
+    /// A paragraph starting on a non-zero `initial_page_index` must record
+    /// its first fragment on that page and advance from it correctly.
+    #[test]
+    fn fragment_inline_root_nonzero_initial_page_index() {
+        // 4 lines of 60px; page_height_px=100; initial_page_index=2.
+        // At i=1: projected=120>100. first_size=1<2(orphans) → skip.
+        // At i=2: projected=180>100. first_size=2, remaining_size=2 → emit on page 2.
+        // At i=3: frag_top=120. projected=0+(240-120)=120>100. first_size=1 → skip.
+        // Final: 2 lines on page 3.
+        let lines: Vec<(f32, f32)> = (0..4)
+            .map(|i| (i as f32 * 60.0, i as f32 * 60.0 + 60.0))
+            .collect();
+        let mut geom = PaginationGeometryTable::new();
+        let (new_page, _new_cursor, emitted) = super::fragment_inline_root(
+            &mut geom, 99, 0.0, 100.0, 0.0, /*initial_page_index=*/ 2, 100.0, &lines,
+        );
+        assert_eq!(emitted, 2, "4 lines → 2 fragments");
+        let frags = &geom.get(&99).unwrap().fragments;
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].page_index, 2, "first fragment on initial page");
+        assert_eq!(frags[1].page_index, 3, "second fragment on next page");
+        assert_eq!(new_page, 3);
+    }
+
+    // ── StringSetPageState / PageRunningState derived-trait coverage ─────────
+
+    #[test]
+    fn string_set_page_state_default_has_none_fields() {
+        let s = StringSetPageState::default();
+        assert!(s.start.is_none());
+        assert!(s.first.is_none());
+        assert!(s.last.is_none());
+    }
+
+    #[test]
+    fn string_set_page_state_clone_and_eq() {
+        let s = StringSetPageState {
+            start: Some("x".into()),
+            first: Some("y".into()),
+            last: Some("z".into()),
+        };
+        let c = s.clone();
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn string_set_page_state_debug_contains_field_names() {
+        let s = StringSetPageState {
+            start: None,
+            first: Some("hello".into()),
+            last: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("StringSetPageState"), "got: {dbg}");
+        assert!(dbg.contains("hello"), "first value should appear: {dbg}");
+    }
+
+    #[test]
+    fn page_running_state_default_has_empty_instance_ids() {
+        let s = PageRunningState::default();
+        assert!(s.instance_ids.is_empty());
+    }
+
+    #[test]
+    fn page_running_state_clone_preserves_ids() {
+        let mut s = PageRunningState::default();
+        s.instance_ids.push(3);
+        s.instance_ids.push(7);
+        let c = s.clone();
+        assert_eq!(c.instance_ids, vec![3, 7]);
+    }
+
+    #[test]
+    fn page_running_state_debug_contains_struct_name() {
+        let s = PageRunningState {
+            instance_ids: vec![1, 2],
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("PageRunningState"), "got: {dbg}");
+        assert!(dbg.contains('1'), "instance id should appear: {dbg}");
+    }
+
+    // ── Fragment / PaginationGeometry derived-trait coverage ─────────────────
+
+    #[test]
+    fn fragment_clone_and_eq() {
+        let f = Fragment {
+            page_index: 5,
+            x: 10.0_f32.as_px(),
+            y: 20.0_f32.as_px(),
+            width: 30.0_f32.as_px(),
+            height: 40.0_f32.as_px(),
+        };
+        let c = f.clone();
+        assert_eq!(f, c);
+    }
+
+    #[test]
+    fn fragment_debug_contains_page_index() {
+        let f = Fragment {
+            page_index: 9,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 1.0_f32.as_px(),
+            height: 1.0_f32.as_px(),
+        };
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("Fragment"), "got: {dbg}");
+        assert!(dbg.contains('9'), "page_index should appear: {dbg}");
+    }
+
+    #[test]
+    fn pagination_geometry_clone_preserves_is_repeat_and_fragments() {
+        let mut g = PaginationGeometry {
+            is_repeat: true,
+            ..Default::default()
+        };
+        g.fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 50.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let c = g.clone();
+        assert!(c.is_repeat);
+        assert_eq!(c.fragments.len(), 1);
+    }
+
+    #[test]
+    fn pagination_geometry_debug_contains_struct_name() {
+        let g = PaginationGeometry::default();
+        let dbg = format!("{g:?}");
+        assert!(dbg.contains("PaginationGeometry"), "got: {dbg}");
+    }
 }
