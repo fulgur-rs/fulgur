@@ -14,6 +14,11 @@ pub struct RenderedTest {
 
 /// List `<stem>-<n>.png` files directly inside `work_dir`, sorted.
 ///
+/// `<n>` must be a non-empty run of ASCII digits — a debug artifact a human
+/// drops in `work_dir` with a similar prefix (e.g. `<stem>-preview.png`)
+/// must not be swept up: `remove_stale_pngs` would delete it, and
+/// `render_test` would decode it as a page and corrupt the page count.
+///
 /// Propagates `ReadDir` entry errors instead of silently dropping them: a
 /// dropped entry would under-count pages, and both callers rely on an
 /// accurate count — `remove_stale_pngs` to avoid leaving a stale file behind
@@ -32,7 +37,12 @@ fn list_page_pngs(work_dir: &Path, stem: &str) -> Result<Vec<PathBuf>> {
         let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with(&needle) && name.ends_with(".png") {
+        if let Some(page_number) = name
+            .strip_prefix(&needle)
+            .and_then(|suffix| suffix.strip_suffix(".png"))
+            && !page_number.is_empty()
+            && page_number.bytes().all(|byte| byte.is_ascii_digit())
+        {
             matches.push(p);
         }
     }
@@ -159,12 +169,15 @@ mod tests {
     fn removes_only_matching_stale_pngs() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path();
-        for name in ["page-1.png", "page-10.png"] {
+        // Includes a zero-padded index (pdftocairo pads to the width of the
+        // max page number once a test has 10+ pages).
+        for name in ["page-1.png", "page-10.png", "page-01.png"] {
             std::fs::write(dir.join(name), b"stale").unwrap();
         }
-        // Non-matching: wrong stem, wrong extension, and the exact prefix
-        // without the `-` separator (`page.png` is not `page-<n>.png`).
-        for name in ["other-1.png", "page-1.txt", "page.png"] {
+        // Non-matching: wrong stem, wrong extension, the exact prefix without
+        // the `-` separator (`page.png` is not `page-<n>.png`), and a
+        // non-numeric suffix (a human-dropped debug artifact, not a page).
+        for name in ["other-1.png", "page-1.txt", "page.png", "page-preview.png"] {
             std::fs::write(dir.join(name), b"keep").unwrap();
         }
 
@@ -172,9 +185,11 @@ mod tests {
 
         assert!(!dir.join("page-1.png").exists());
         assert!(!dir.join("page-10.png").exists());
+        assert!(!dir.join("page-01.png").exists());
         assert!(dir.join("other-1.png").exists());
         assert!(dir.join("page-1.txt").exists());
         assert!(dir.join("page.png").exists());
+        assert!(dir.join("page-preview.png").exists());
     }
 
     #[test]
