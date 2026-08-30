@@ -12,21 +12,32 @@ pub struct RenderedTest {
     pub pdf_path: PathBuf,
 }
 
-/// The `<stem>-` search prefix identifying pdftocairo's paginated output:
-/// `<stem>-<n>.png`.
-fn page_png_needle(stem: &str) -> String {
-    format!("{stem}-")
-}
-
-/// Match a filename against a needle produced by [`page_png_needle`].
+/// List `<stem>-<n>.png` files directly inside `work_dir`, sorted.
 ///
-/// Shared between `remove_stale_pngs` (deleting leftovers from a prior run)
-/// and `render_test`'s enumeration of this run's output, so a future change
-/// to the naming scheme is a one-line edit instead of two independent ones.
-/// Each call site still computes and error-handles its own `stem` — they
-/// disagree on how to react to a prefix with no file name (see call sites).
-fn is_page_png(name: &str, needle: &str) -> bool {
-    name.starts_with(needle) && name.ends_with(".png")
+/// Propagates `ReadDir` entry errors instead of silently dropping them: a
+/// dropped entry would under-count pages, and both callers rely on an
+/// accurate count — `remove_stale_pngs` to avoid leaving a stale file behind
+/// uncounted, `render_test` to avoid reporting success on a truncated page
+/// set.
+///
+/// Shared between the two callers so the naming scheme lives in exactly one
+/// place. Each caller still derives its own `stem` from `prefix.file_name()`
+/// with its own error policy — see call sites.
+fn list_page_pngs(work_dir: &Path, stem: &str) -> Result<Vec<PathBuf>> {
+    let needle = format!("{stem}-");
+    let mut matches = Vec::new();
+    for entry in
+        std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
+        let p = entry.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.starts_with(&needle) && name.ends_with(".png") {
+            matches.push(p);
+        }
+    }
+    matches.sort();
+    Ok(matches)
 }
 
 /// Delete `<prefix>-*.png` files left in `work_dir` by a previous run.
@@ -35,29 +46,17 @@ fn is_page_png(name: &str, needle: &str) -> bool {
 /// into the current page count and skew diff results, so we must fail loud
 /// rather than silently continue with stale data. The one tolerated failure
 /// is `NotFound`: the directory listing is a snapshot, so an entry can
-/// legitimately disappear between `read_dir` and `remove_file`.
+/// legitimately disappear between listing and removal.
 ///
-/// Scoping (which files are stale) and acting (deleting them) are separate
-/// passes: the scope check can never run interleaved with, or after,
-/// removal side effects.
+/// Scoping (which files are stale, via [`list_page_pngs`]) and acting
+/// (deleting them) are separate passes: the scope check can never run
+/// interleaved with, or after, removal side effects.
 fn remove_stale_pngs(work_dir: &Path, prefix: &Path) -> Result<()> {
     let stem = prefix
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let needle = page_png_needle(&stem);
-    let mut stale = Vec::new();
-    for entry in
-        std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
-    {
-        let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
-        let p = entry.path();
-        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if is_page_png(name, &needle) {
-            stale.push(p);
-        }
-    }
-    for p in stale {
+    for p in list_page_pngs(work_dir, &stem)? {
         if let Err(e) = std::fs::remove_file(&p)
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -133,17 +132,7 @@ pub fn render_test(
         .ok_or_else(|| anyhow::anyhow!("bad prefix"))?
         .to_string_lossy()
         .into_owned();
-    let needle = page_png_needle(&stem);
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(work_dir)
-        .with_context(|| format!("read dir {}", work_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            is_page_png(name, &needle)
-        })
-        .collect();
-    entries.sort();
+    let entries = list_page_pngs(work_dir, &stem)?;
 
     if entries.is_empty() {
         bail!("pdftocairo produced no PNGs in {}", work_dir.display());
