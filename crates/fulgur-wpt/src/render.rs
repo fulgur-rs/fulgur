@@ -12,6 +12,23 @@ pub struct RenderedTest {
     pub pdf_path: PathBuf,
 }
 
+/// The `<stem>-` search prefix identifying pdftocairo's paginated output:
+/// `<stem>-<n>.png`.
+fn page_png_needle(stem: &str) -> String {
+    format!("{stem}-")
+}
+
+/// Match a filename against a needle produced by [`page_png_needle`].
+///
+/// Shared between `remove_stale_pngs` (deleting leftovers from a prior run)
+/// and `render_test`'s enumeration of this run's output, so a future change
+/// to the naming scheme is a one-line edit instead of two independent ones.
+/// Each call site still computes and error-handles its own `stem` — they
+/// disagree on how to react to a prefix with no file name (see call sites).
+fn is_page_png(name: &str, needle: &str) -> bool {
+    name.starts_with(needle) && name.ends_with(".png")
+}
+
 /// Delete `<prefix>-*.png` files left in `work_dir` by a previous run.
 ///
 /// Propagates cleanup failures — a leftover PNG from a prior run would mix
@@ -19,21 +36,29 @@ pub struct RenderedTest {
 /// rather than silently continue with stale data. The one tolerated failure
 /// is `NotFound`: the directory listing is a snapshot, so an entry can
 /// legitimately disappear between `read_dir` and `remove_file`.
+///
+/// Scoping (which files are stale) and acting (deleting them) are separate
+/// passes: the scope check can never run interleaved with, or after,
+/// removal side effects.
 fn remove_stale_pngs(work_dir: &Path, prefix: &Path) -> Result<()> {
     let stem = prefix
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let stale_needle = format!("{stem}-");
+    let needle = page_png_needle(&stem);
+    let mut stale = Vec::new();
     for entry in
         std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
     {
         let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with(&stale_needle)
-            && name.ends_with(".png")
-            && let Err(e) = std::fs::remove_file(&p)
+        if is_page_png(name, &needle) {
+            stale.push(p);
+        }
+    }
+    for p in stale {
+        if let Err(e) = std::fs::remove_file(&p)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
@@ -108,14 +133,14 @@ pub fn render_test(
         .ok_or_else(|| anyhow::anyhow!("bad prefix"))?
         .to_string_lossy()
         .into_owned();
-    let needle = format!("{stem}-");
+    let needle = page_png_needle(&stem);
     let mut entries: Vec<PathBuf> = std::fs::read_dir(work_dir)
         .with_context(|| format!("read dir {}", work_dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            name.starts_with(&needle) && name.ends_with(".png")
+            is_page_png(name, &needle)
         })
         .collect();
     entries.sort();
