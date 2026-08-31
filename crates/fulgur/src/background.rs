@@ -6228,9 +6228,11 @@ mod render_smoke_tests {
     #[test]
     fn repeating_radial_gradient_tiling_pattern() {
         // draw_radial_grid クロージャ → draw_gradient_tiling_pattern (lines 710-716) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
         let pdf = render(
             r#"<!doctype html><html><body>
-            <div style="width:120px;height:80px;background:repeating-radial-gradient(circle 20px,red,blue 20px)"></div>
+            <div style="width:120px;height:80px;background:repeating-radial-gradient(circle 20px,red,blue 20px);background-size:30px 30px"></div>
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
@@ -6239,9 +6241,11 @@ mod render_smoke_tests {
     #[test]
     fn repeating_conic_gradient_tiling_pattern() {
         // draw_conic_grid クロージャ → draw_gradient_tiling_pattern (lines 760-773) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
         let pdf = render(
             r#"<!doctype html><html><body>
-            <div style="width:120px;height:80px;background:repeating-conic-gradient(red 0deg,blue 30deg)"></div>
+            <div style="width:120px;height:80px;background:repeating-conic-gradient(red 0deg,blue 30deg);background-size:40px 40px"></div>
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
