@@ -6180,3 +6180,88 @@ mod tile_position_tests {
         assert_eq!(out.last().unwrap().offset, krilla::num::NormalizedF32::ONE);
     }
 }
+
+#[cfg(test)]
+mod render_smoke_tests {
+    fn render(html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    #[test]
+    fn background_color_with_border_radius() {
+        // draw_background_color の border-radius ブランチ (lines 521-526) を踏む:
+        // has_radius() == true → build_rounded_rect_path が呼ばれる経路。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background-color:red;border-radius:10px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn box_shadow_with_border_radius() {
+        // draw_single_box_shadow (lines 101-106) と
+        // build_shadow_evenodd_clip (lines 59-65) の border-radius ブランチを踏む。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;box-shadow:4px 4px 0px rgba(0,0,0,0.5);border-radius:8px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn linear_gradient_with_border_radius() {
+        // draw_background_layer の border-radius クリップ経路 (lines 561-566) を踏む。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:linear-gradient(red,blue);border-radius:8px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn repeating_radial_gradient_tiling_pattern() {
+        // draw_radial_grid クロージャ → draw_gradient_tiling_pattern (lines 710-716) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:repeating-radial-gradient(circle 20px,red,blue 20px);background-size:30px 30px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn repeating_conic_gradient_tiling_pattern() {
+        // draw_conic_grid クロージャ → draw_gradient_tiling_pattern (lines 760-773) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:repeating-conic-gradient(red 0deg,blue 30deg);background-size:40px 40px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn background_and_box_shadow_combined_with_border_radius() {
+        // 3 つの border-radius 経路を同時に踏む:
+        // draw_background_color (lines 521-526), draw_single_box_shadow (lines 101-106),
+        // build_shadow_evenodd_clip (lines 59-65)。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background-color:cornflowerblue;
+                        box-shadow:2px 2px 4px rgba(0,0,0,0.4);border-radius:16px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+}
