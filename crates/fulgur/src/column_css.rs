@@ -2425,4 +2425,83 @@ mod tests {
             "percentage width must drop the declaration"
         );
     }
+
+    // -------- parse_break_before_value: uncovered keyword arms --------
+
+    /// `left`, `right`, `recto`, `verso` in `break-before` collapse to
+    /// `BreakBefore::Page` — same treatment as in `break-after`. The existing
+    /// tests only cover `always`, `page`, and `auto`; this exercises the
+    /// remaining match-arm values.
+    #[test]
+    fn parse_break_before_left_and_right_collapse_to_page() {
+        let p1 = parse_declaration_block("break-before: left");
+        let p2 = parse_declaration_block("break-before: right");
+        assert_eq!(p1.break_before, Some(BreakBefore::Page), "left");
+        assert_eq!(p2.break_before, Some(BreakBefore::Page), "right");
+    }
+
+    #[test]
+    fn parse_break_before_recto_and_verso_collapse_to_page() {
+        let p1 = parse_declaration_block("break-before: recto");
+        let p2 = parse_declaration_block("break-before: verso");
+        assert_eq!(p1.break_before, Some(BreakBefore::Page), "recto");
+        assert_eq!(p2.break_before, Some(BreakBefore::Page), "verso");
+    }
+
+    /// An unrecognised `break-before` value drops the declaration silently,
+    /// leaving siblings unaffected. Exercises the `_` catch-all error arm.
+    #[test]
+    fn parse_break_before_invalid_is_silently_dropped() {
+        let props = parse_declaration_block("break-before: banana");
+        assert_eq!(
+            props.break_before, None,
+            "invalid ident must drop the declaration"
+        );
+    }
+
+    // -------- parse_column_fill_value: error arm --------
+
+    /// An unrecognised `column-fill` value drops the declaration silently.
+    /// Exercises the `else { Err(...) }` branch of `parse_column_fill_value`.
+    #[test]
+    fn parse_column_fill_invalid_is_silently_dropped() {
+        let props = parse_declaration_block("column-fill: spread;");
+        assert_eq!(
+            props.fill, None,
+            "unknown column-fill keyword must drop the declaration"
+        );
+    }
+
+    // -------- parse_page_value: multi-byte UTF-8 char-boundary truncation --------
+
+    /// A page name whose UTF-8 byte length exceeds `MAX_PAGE_NAME_BYTES` is
+    /// truncated at a valid char boundary. This test uses 254 ASCII bytes
+    /// followed by the 3-byte Unicode character '€' (U+20AC) so that the
+    /// natural truncation point (byte 256) falls inside the multi-byte
+    /// sequence. The `while !s.is_char_boundary(end)` loop in
+    /// `parse_page_value` steps back until it reaches the start of '€'
+    /// (byte 254), yielding a truncated name of exactly 254 ASCII bytes.
+    #[test]
+    fn parse_page_name_multibyte_utf8_truncated_at_char_boundary() {
+        // "a" × 254 + "€" + "x" = 254 + 3 + 1 = 258 bytes → exceeds MAX_PAGE_NAME_BYTES (256).
+        // '€' occupies bytes 254–256 (inclusive). Truncation steps back to 254.
+        let long = "a".repeat(254) + "€x";
+        assert!(
+            long.len() > crate::MAX_PAGE_NAME_BYTES,
+            "precondition: name must exceed the cap"
+        );
+        let css = format!("page: {long};");
+        let props = parse_declaration_block(&css);
+        // '€' straddles bytes 254–256; the loop backs up to 254, keeping only the "a" prefix.
+        let expected = "a".repeat(254);
+        match props.page {
+            Some(PageName::Named(s)) => {
+                assert_eq!(
+                    s, expected,
+                    "truncation must preserve the maximal valid ASCII prefix"
+                );
+            }
+            other => panic!("expected Named page, got {other:?}"),
+        }
+    }
 }
