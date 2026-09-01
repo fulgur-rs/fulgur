@@ -2492,17 +2492,13 @@ mod tests {
         );
         let css = format!("page: {long};");
         let props = parse_declaration_block(&css);
+        // '€' straddles bytes 254–256; the loop backs up to 254, keeping only the "a" prefix.
+        let expected = "a".repeat(254);
         match props.page {
             Some(PageName::Named(s)) => {
-                assert!(
-                    s.len() <= crate::MAX_PAGE_NAME_BYTES,
-                    "truncated name must not exceed the cap, got {} bytes",
-                    s.len()
-                );
-                // Must end on a valid char boundary (all chars intact).
-                assert!(
-                    s.is_empty() || s.chars().last().is_some(),
-                    "truncated string must be valid UTF-8"
+                assert_eq!(
+                    s, expected,
+                    "truncation must preserve the maximal valid ASCII prefix"
                 );
             }
             other => panic!("expected Named page, got {other:?}"),
