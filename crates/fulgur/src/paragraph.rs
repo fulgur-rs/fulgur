@@ -2355,3 +2355,193 @@ mod render_smoke_tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 }
+
+// Tests for private draw helpers that are easier to verify by calling them
+// directly than by driving the full Engine pipeline.  All tests in this module
+// use a minimal Krilla surface so they run fast and in-process.
+#[cfg(test)]
+mod draw_decoration_direct_tests {
+    use super::*;
+    use crate::draw_primitives::Canvas;
+    use crate::image::ImageFormat;
+    use crate::units::F32Units;
+    use std::sync::Arc;
+
+    // Helpers ────────────────────────────────────────────────────────────────
+
+    /// Run `f` with a throwaway Krilla canvas (non-tagged, 200×200 pt page).
+    /// Returns the serialized PDF bytes so callers can assert the document
+    /// is non-empty, confirming the canvas pipeline completed successfully.
+    fn with_canvas<F: FnOnce(&mut Canvas<'_, '_>)>(f: F) -> Vec<u8> {
+        let mut doc = krilla::Document::new();
+        let settings = krilla::page::PageSettings::from_wh(200.0, 200.0).expect("valid page size");
+        {
+            let mut page = doc.start_page_with(settings);
+            let mut surface = page.surface();
+            let mut canvas = Canvas {
+                surface: &mut surface,
+                bookmark_collector: None,
+                link_collector: None,
+                tag_collector: None,
+                link_run_node_id: None,
+                in_marked_content: false,
+            };
+            f(&mut canvas);
+        }
+        doc.finish().expect("document serialization must succeed")
+    }
+
+    /// Construct a minimal 10×10 pt `InlineImage` using the 1×1 red PNG fixture.
+    /// Pass `visible: false` to exercise the invisible-image skip path.
+    fn make_test_image(visible: bool) -> InlineImage {
+        InlineImage {
+            data: Arc::new(super::tests::TEST_PNG.to_vec()),
+            format: ImageFormat::Png,
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            vertical_align: VerticalAlign::Baseline,
+            opacity: 1.0,
+            visible,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+        }
+    }
+
+    /// Construct a minimal 30×20 pt `InlineBoxItem`.
+    /// Pass `visible: false` to exercise the invisible-inline-box skip path.
+    fn make_test_inline_box(visible: bool) -> InlineBoxItem {
+        InlineBoxItem {
+            node_id: None,
+            width: 30.0_f32.as_pt(),
+            height: 20.0_f32.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+            opacity: 1.0,
+            visible,
+        }
+    }
+
+    // ── draw_decoration_line: Wavy + tiny thickness ──────────────────────────
+
+    /// Covers lines 471-483: when the computed `half` (= `thickness * 2.0`) is
+    /// less than 0.01, the wavy oscillation loop would run forever, so the guard
+    /// falls back to a plain straight line.  A thickness of 0.001 gives
+    /// `half = 0.002 < 0.01`.
+    #[test]
+    fn wavy_tiny_thickness_falls_back_to_straight_line() {
+        let pdf = with_canvas(|canvas| {
+            draw_decoration_line(
+                canvas,
+                0.0,
+                5.0,
+                50.0,
+                0.001, // thickness → half = 0.001 * 4.0 / 2.0 = 0.002 < 0.01
+                [0, 0, 0, 255],
+                TextDecorationStyle::Wavy,
+            );
+        });
+        assert!(!pdf.is_empty());
+    }
+
+    /// Edge case: thickness exactly at the boundary (half == 0.01).  This should
+    /// *not* trigger the guard (condition is strictly `< 0.01`) and therefore
+    /// enters the normal wavy loop.
+    #[test]
+    fn wavy_boundary_thickness_enters_normal_loop() {
+        let pdf = with_canvas(|canvas| {
+            // half = 0.005 * 4.0 / 2.0 = 0.01 → NOT < 0.01 → normal wavy loop
+            draw_decoration_line(
+                canvas,
+                0.0,
+                5.0,
+                50.0,
+                0.005,
+                [0, 0, 0, 255],
+                TextDecorationStyle::Wavy,
+            );
+        });
+        assert!(!pdf.is_empty());
+    }
+
+    // ── draw_line_decorations: span-merging continue ─────────────────────────
+
+    /// Covers line 561: when two consecutive runs share the same decoration and
+    /// their gap is zero, `draw_line_decorations` extends the existing
+    /// `DecorationSpan` instead of creating a new one (the `continue` branch).
+    ///
+    /// run1: x_offset = 0pt, glyph advance = 5.0, font_size = 10pt → width = 50pt
+    /// run2: x_offset = 50pt (exactly at run1's end) → gap = 0pt < 0.5pt → extend
+    #[test]
+    fn draw_line_decorations_adjacent_runs_span_merging_fires() {
+        let decoration = TextDecoration {
+            line: TextDecorationLine::UNDERLINE,
+            style: TextDecorationStyle::Solid,
+            color: [0, 0, 0, 255],
+        };
+
+        let make_run = |x_offset_pt: f32| ShapedGlyphRun {
+            font_data: Arc::new(Vec::new()),
+            font_index: 0,
+            font_size: 10.0_f32.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration,
+            glyphs: vec![ShapedGlyph {
+                id: 0,
+                x_advance: 5.0, // 5.0 * 10pt = 50pt run width
+                x_offset: 0.0,
+                y_offset: 0.0,
+                text_range: 0..1,
+            }],
+            text: Arc::from("a"),
+            x_offset: x_offset_pt.as_pt(),
+            link: None,
+        };
+
+        let items = vec![
+            LineItem::Text(make_run(0.0)),  // ends at 50pt
+            LineItem::Text(make_run(50.0)), // starts at 50pt → gap = 0 → merges
+        ];
+
+        let pdf = with_canvas(|canvas| {
+            draw_line_decorations(canvas, &items, 0.0_f32.as_pt(), 12.0_f32.as_pt());
+        });
+        assert!(!pdf.is_empty());
+    }
+
+    // ── draw_shaped_lines: invisible image → continue (line 840) ─────────────
+
+    /// Covers line 840: an `InlineImage` with `visible = false` is skipped by
+    /// `draw_shaped_lines` without touching Krilla's draw_image path.
+    #[test]
+    fn draw_shaped_lines_invisible_image_skips_rendering() {
+        let line = ShapedLine {
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
+            items: vec![LineItem::Image(make_test_image(false))],
+        };
+        let pdf = with_canvas(|canvas| {
+            draw_shaped_lines(canvas, &[line], 0.0_f32.as_pt(), 0.0_f32.as_pt(), None);
+        });
+        assert!(!pdf.is_empty());
+    }
+
+    // ── draw_shaped_lines: invisible InlineBox → continue (lines 888-889) ────
+
+    /// Covers lines 888-889: an `InlineBoxItem` with `visible = false` is
+    /// skipped by `draw_shaped_lines`; `canvas.link_run_node_id` is restored and
+    /// the item is not dispatched.
+    #[test]
+    fn draw_shaped_lines_invisible_inline_box_skips_rendering() {
+        let line = ShapedLine {
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
+            items: vec![LineItem::InlineBox(make_test_inline_box(false))],
+        };
+        let pdf = with_canvas(|canvas| {
+            draw_shaped_lines(canvas, &[line], 0.0_f32.as_pt(), 0.0_f32.as_pt(), None);
+        });
+        assert!(!pdf.is_empty());
+    }
+}
