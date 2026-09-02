@@ -91,3 +91,17 @@ PASS  css/css-images/normalization-conic-degenerate.html     # fulgur-m92h: dege
 PASS  css/css-images/out-of-range-color-stop-conic.html      # fulgur-m92h: 範囲外 stop の renormalize
 PASS  css/css-images/repeating-conic-gradient.html           # fulgur-m92h: repeating-conic-gradient
 PASS  css/css-images/tiled-conic-gradients.html              # fulgur-m92h: background-size による tiled conic
+
+# fulgur-2s7p.1: pagination_layout.rs:2893 のストリップ溢れ判定
+# (`child_page_y > page_start_y`) が先頭のインフロー子要素では真にならず、
+# 溢れたコンテンツが無音破棄されるバグ。css-break-3 #parallel-flows の
+# 「class C break point は非ゼロのギャップがある場合のみ存在する」規定の
+# multicol reftest 群を cherry-pick。fulgur の実 repro は @page pagination
+# だが、`pagination_layout.rs` は multicol フラグメンタと共有実装
+# (モジュール doc 参照、fulgur-naj7.12) のため同じゲートを踏む regression net
+# として有効。css-break 全体の seed は重いのでこの cherry-pick のみ登録。
+# no-room-after-001 は fulgur repro と同型 (ゼロギャップの入れ子 wrapper div
+# を複数段はさむ) で primary 相当、000/room-after-000 は近接ケース。
+FAIL  css/css-break/overflowed-block-with-no-room-after-000.html  # fulgur-2s7p.1: page 1 diff: 7370/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-break/overflowed-block-with-no-room-after-001.html  # fulgur-2s7p.1: primary相当 (nested zero-gap wrapper div が fulgur repro と同型); page 1 diff: 7370/891662 pixels exceed tol (max_ch=255)
+FAIL  css/css-break/overflowed-block-with-room-after-000.html  # fulgur-2s7p.1: 非ゼロギャップの対照ケース (本来 break point が存在すべき); page 1 diff: 7599/891662 pixels exceed tol (max_ch=255)
