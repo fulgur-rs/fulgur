@@ -2370,20 +2370,25 @@ mod draw_decoration_direct_tests {
     // Helpers ────────────────────────────────────────────────────────────────
 
     /// Run `f` with a throwaway Krilla canvas (non-tagged, 200×200 pt page).
-    fn with_canvas<F: FnOnce(&mut Canvas<'_, '_>)>(f: F) {
+    /// Returns the serialized PDF bytes so callers can assert the document
+    /// is non-empty, confirming the canvas pipeline completed successfully.
+    fn with_canvas<F: FnOnce(&mut Canvas<'_, '_>)>(f: F) -> Vec<u8> {
         let mut doc = krilla::Document::new();
         let settings = krilla::page::PageSettings::from_wh(200.0, 200.0).expect("valid page size");
-        let mut page = doc.start_page_with(settings);
-        let mut surface = page.surface();
-        let mut canvas = Canvas {
-            surface: &mut surface,
-            bookmark_collector: None,
-            link_collector: None,
-            tag_collector: None,
-            link_run_node_id: None,
-            in_marked_content: false,
-        };
-        f(&mut canvas);
+        {
+            let mut page = doc.start_page_with(settings);
+            let mut surface = page.surface();
+            let mut canvas = Canvas {
+                surface: &mut surface,
+                bookmark_collector: None,
+                link_collector: None,
+                tag_collector: None,
+                link_run_node_id: None,
+                in_marked_content: false,
+            };
+            f(&mut canvas);
+        }
+        doc.finish().expect("document serialization must succeed")
     }
 
     /// Construct a minimal 10×10 pt `InlineImage` using the 1×1 red PNG fixture.
@@ -2426,7 +2431,7 @@ mod draw_decoration_direct_tests {
     /// `half = 0.002 < 0.01`.
     #[test]
     fn wavy_tiny_thickness_falls_back_to_straight_line() {
-        with_canvas(|canvas| {
+        let pdf = with_canvas(|canvas| {
             draw_decoration_line(
                 canvas,
                 0.0,
@@ -2437,6 +2442,7 @@ mod draw_decoration_direct_tests {
                 TextDecorationStyle::Wavy,
             );
         });
+        assert!(!pdf.is_empty());
     }
 
     /// Edge case: thickness exactly at the boundary (half == 0.01).  This should
@@ -2444,7 +2450,7 @@ mod draw_decoration_direct_tests {
     /// enters the normal wavy loop.
     #[test]
     fn wavy_boundary_thickness_enters_normal_loop() {
-        with_canvas(|canvas| {
+        let pdf = with_canvas(|canvas| {
             // half = 0.005 * 4.0 / 2.0 = 0.01 → NOT < 0.01 → normal wavy loop
             draw_decoration_line(
                 canvas,
@@ -2456,6 +2462,7 @@ mod draw_decoration_direct_tests {
                 TextDecorationStyle::Wavy,
             );
         });
+        assert!(!pdf.is_empty());
     }
 
     // ── draw_line_decorations: span-merging continue ─────────────────────────
@@ -2497,9 +2504,10 @@ mod draw_decoration_direct_tests {
             LineItem::Text(make_run(50.0)), // starts at 50pt → gap = 0 → merges
         ];
 
-        with_canvas(|canvas| {
+        let pdf = with_canvas(|canvas| {
             draw_line_decorations(canvas, &items, 0.0_f32.as_pt(), 12.0_f32.as_pt());
         });
+        assert!(!pdf.is_empty());
     }
 
     // ── draw_shaped_lines: invisible image → continue (line 840) ─────────────
@@ -2513,9 +2521,10 @@ mod draw_decoration_direct_tests {
             baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::Image(make_test_image(false))],
         };
-        with_canvas(|canvas| {
+        let pdf = with_canvas(|canvas| {
             draw_shaped_lines(canvas, &[line], 0.0_f32.as_pt(), 0.0_f32.as_pt(), None);
         });
+        assert!(!pdf.is_empty());
     }
 
     // ── draw_shaped_lines: invisible InlineBox → continue (lines 888-889) ────
@@ -2530,8 +2539,9 @@ mod draw_decoration_direct_tests {
             baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::InlineBox(make_test_inline_box(false))],
         };
-        with_canvas(|canvas| {
+        let pdf = with_canvas(|canvas| {
             draw_shaped_lines(canvas, &[line], 0.0_f32.as_pt(), 0.0_f32.as_pt(), None);
         });
+        assert!(!pdf.is_empty());
     }
 }
