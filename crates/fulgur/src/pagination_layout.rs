@@ -1621,22 +1621,32 @@ fn has_page_name_change_below(
 ///
 /// ## Known gaps deferred to `fulgur-a9qf` (Phase 3.1.5)
 ///
-/// `fragment_block_subtree` does **not** mirror `fragment_pagination_root`
-/// in three respects. None of these surface in the current test corpus
-/// (`cargo test -p fulgur` 1111 / 0); each is tracked as a regression
-/// scope-add on `fulgur-a9qf` (notes §5a / §5b / §5c) so they close
-/// alongside in-place mid-element split:
+/// `fragment_block_subtree` originally did **not** mirror
+/// `fragment_pagination_root` in three respects (notes §5a / §5b / §5c).
+/// §5b is now fixed (fulgur-2s7p.1); §5a and §5c remain open, tracked on
+/// `fulgur-a9qf` so they close alongside in-place mid-element split:
 ///
 /// - **Nested `position: running()` markers are not skipped here.** The
 ///   helper has no access to `running_store`, so a running marker that
 ///   sits inside an oversized subtree is treated as in-flow and
 ///   over-advances `cursor_y`. Body-level filtering is intact; only the
 ///   recursion path is affected.
-/// - **Nested inline roots are not split at line edges.** When a tall
-///   `<p>` (multi-line inline root) lives inside an oversized ancestor,
-///   the recursion falls back to DOM-child block split rather than
-///   calling `collect_inline_line_metrics` / `fragment_inline_root` like
-///   the body-level walker does.
+/// - ~~Nested inline roots are not split at line edges.~~ **Fixed by
+///   fulgur-2s7p.1**: a tall `<p>` (multi-line inline root) nested inside
+///   an oversized ancestor now calls `collect_inline_line_metrics` /
+///   `fragment_inline_root` from this walker's own per-child loop, the
+///   same as the body-level walker does — this was the root cause of a
+///   P0 silent-content-loss bug (a first in-flow child whose own content
+///   overflowed the remaining strip was emitted as one oversized
+///   fragment instead of continuing onto the next page). Caveat found
+///   while fixing this: `padding-top` / `padding-bottom` on the `<p>`
+///   itself is not accounted for in the overflow decision (this
+///   function's per-child loop reasons from `collect_inline_line_metrics`,
+///   which is padding-blind) — confirmed this gap is pre-existing and
+///   equally present in the unmodified body-level walker (not introduced
+///   here, not fixed here); matches the `padding-top` on inline roots
+///   Gotcha in `CLAUDE.md`. Prefer `margin-top` / `margin-bottom` on a
+///   splittable paragraph until that's addressed.
 /// - **Multi-page recursive traversal does not emit per-page parent
 ///   fragments for intermediate pages.** When the recursive call
 ///   advances more than one page, only the first and last page get a
@@ -2657,6 +2667,161 @@ fn fragment_block_subtree_inner(
         // the current strip, not a pre-advanced fresh page.)
 
         let child_x_in_body = parent_x_in_body + layout.location.x;
+
+        // fulgur-2s7p.1: nested inline-root line split. Mirrors
+        // `fragment_pagination_root`'s body-direct branch (its
+        // `line_metrics.len() > 1` block) — until this fix, only a
+        // body-direct paragraph was split at line boundaries here. A
+        // nested multi-line inline root (a `<p>` wrapped in one or more
+        // `<div>`s, reached only once this walker has already recursed
+        // at least once) fell through to the block-child gate below,
+        // which can only push the *whole* child to the next page or
+        // emit it as one oversized fragment — neither is correct when
+        // the child is itself splittable at line boundaries. This is
+        // the known gap flagged in this function's own doc comment
+        // ("nested inline roots are not split at line edges",
+        // fulgur-a9qf §5b) and the root cause of the P0 silent content
+        // loss in fulgur-2s7p.1 (a first in-flow child whose own
+        // content overflows the remaining strip never gets a chance to
+        // fragment, because `child_page_y > page_start_y` is false for
+        // it and `would_split_block_subtree` only sees zero-height text
+        // nodes as this node's DOM children).
+        let avoid_inside = matches!(
+            break_props.break_inside,
+            Some(crate::draw_primitives::BreakInside::Avoid)
+        );
+        let line_metrics = if avoid_inside {
+            Vec::new()
+        } else {
+            collect_inline_line_metrics(child)
+        };
+        if line_metrics.len() > 1 {
+            // Split-before fallback (CSS Fragmentation §4.2, class A
+            // break point): if the paragraph doesn't fit the remaining
+            // strip but something is already on this page, push to a
+            // fresh page before splitting — mirrors body-direct's same
+            // pre-check. When this container's first in-flow child is
+            // itself this paragraph (`cursor_y == page_start_y`, the
+            // fulgur-2s7p.1 repro shape), this is skipped and the split
+            // begins right where the container currently sits.
+            let para_total_h = line_metrics
+                .last()
+                .map(|l| l.1 - line_metrics[0].0)
+                .unwrap_or(child_h);
+            if cursor_y > page_start_y && cursor_y + para_total_h > page_height_px {
+                let should_emit = row_state
+                    .as_mut()
+                    .map(|rs| rs.emitted_parent_pages.insert(page_index))
+                    .unwrap_or(true);
+                if should_emit {
+                    geometry
+                        .entry(parent_id)
+                        .or_default()
+                        .fragments
+                        .push(Fragment {
+                            page_index,
+                            x: parent_x_in_body.as_px(),
+                            y: page_start_y.as_px(),
+                            width: parent_w.as_px(),
+                            height: (cursor_y - page_start_y).as_px(),
+                        });
+                }
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+            }
+            let pre_split_page = page_index;
+            let (new_page_index, new_cursor_y, _emitted) = fragment_inline_root(
+                geometry,
+                child_id,
+                child_x_in_body,
+                child_w,
+                cursor_y,
+                page_index,
+                page_height_px,
+                &line_metrics,
+            );
+            // Same shape as the recursion branch's fulgur-oc51 fix
+            // below: without a parent fragment per page the split
+            // crossed, the parent's own background / border would
+            // disappear from every page but the last.
+            if new_page_index > pre_split_page {
+                let first_height = (page_height_px - page_start_y).max(0.0);
+                if first_height > 0.0 {
+                    let should_emit = row_state
+                        .as_mut()
+                        .map(|rs| rs.emitted_parent_pages.insert(pre_split_page))
+                        .unwrap_or(true);
+                    if should_emit {
+                        geometry
+                            .entry(parent_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index: pre_split_page,
+                                x: parent_x_in_body.as_px(),
+                                y: page_start_y.as_px(),
+                                width: parent_w.as_px(),
+                                height: first_height.as_px(),
+                            });
+                    }
+                }
+                for p in (pre_split_page + 1)..new_page_index {
+                    let should_emit = row_state
+                        .as_mut()
+                        .map(|rs| rs.emitted_parent_pages.insert(p))
+                        .unwrap_or(true);
+                    if should_emit {
+                        geometry
+                            .entry(parent_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index: p,
+                                x: parent_x_in_body.as_px(),
+                                y: 0.0_f32.as_px(),
+                                width: parent_w.as_px(),
+                                height: page_height_px.as_px(),
+                            });
+                    }
+                }
+                page_start_y = 0.0;
+                origin_pending_target_y = Some(new_cursor_y);
+                origin_pending_same_row = None;
+            }
+            page_index = new_page_index;
+            cursor_y = new_cursor_y;
+            initial_page_occupied = false;
+            if !is_float {
+                prev_used_page = Some(used_end.clone());
+            }
+            if break_after_page {
+                geometry
+                    .entry(parent_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: parent_x_in_body.as_px(),
+                        y: page_start_y.as_px(),
+                        width: parent_w.as_px(),
+                        height: (cursor_y - page_start_y).as_px(),
+                    });
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+            }
+            if let Some(ref mut rs) = row_state {
+                if page_index > rs.max_end_page
+                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
+                {
+                    rs.max_end_page = page_index;
+                    rs.max_end_cursor_y = cursor_y;
+                }
+            }
+            continue;
+        }
 
         // fulgur-7hf5 (Phase 3.1.5c): unified recursion gate matching
         // `fragment_pagination_root`'s body-direct branch — recurse
@@ -7642,6 +7807,208 @@ h2 { string-set: chapter-title content(text); }
         assert!(
             pages >= 2,
             "expected multicol with span:all overflow to split into >=2 pages, got {pages}",
+        );
+    }
+
+    /// fulgur-2s7p.1: a first in-flow child whose subtree contains a
+    /// nested multi-line `<p>` (wrapped in one or more plain `<div>`s)
+    /// must have its lines split across the page boundary, the same
+    /// way a body-direct paragraph already does — it must not fall
+    /// through to the block-child gate (`child_page_y > page_start_y`,
+    /// this function's strip-overflow check) that can only push a
+    /// *whole* child to the next page or emit it as one oversized
+    /// fragment. Repro shape matches the reported bug: a sibling
+    /// occupies part of page 0, so the nested `<p>` — the parent's
+    /// first and only in-flow child — is itself mid-page and overflows
+    /// the remaining strip. Pre-fix, `child_page_y == page_start_y` for
+    /// this child (it's first), the strip-overflow gate never fires,
+    /// and the entire paragraph (including the ~30 words that don't
+    /// fit) is emitted as a single fragment overflowing the page
+    /// bottom — silently lost once rendering clips to the page.
+    ///
+    /// Uses `margin: 150px 0` rather than the originally reported
+    /// `padding: 150px 0` — see the identically-shaped end-to-end test
+    /// in `crates/fulgur/tests/render_smoke.rs`
+    /// (`fulgur_2s7p1_nested_first_child_overflow_continues_across_page`)
+    /// for why: `padding-top` on inline roots is a separate,
+    /// pre-existing, already documented Blitz limitation, verified to
+    /// affect body-direct paragraphs identically on unmodified `main`,
+    /// not something this fix touches.
+    #[test]
+    fn nested_inline_root_splits_at_line_boundary_when_first_child_overflows() {
+        let mut words = String::new();
+        for i in 0..120 {
+            words.push_str(&format!("W{i:04} "));
+        }
+        let html = format!(
+            r#"<!doctype html><html><body style="margin:0; font-size:14px">
+                <div style="height:100px"></div>
+                <div><div><p style="margin:150px 0; padding:0; line-height:20px">{words}</p></div></div>
+            </body></html>"#
+        );
+        let mut doc = parse(&html, 500.0);
+
+        fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if node
+                .element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "p")
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = find_p(doc, child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let body_id = find_body_id(&doc).expect("body must exist");
+        let p_id = find_p(&doc, body_id).expect("fixture must contain a <p>");
+
+        let table = run_pass(doc.deref_mut(), 400.0);
+        let p_geom = table.get(&p_id).expect("<p> must be recorded in geometry");
+
+        assert!(
+            p_geom.fragments.len() >= 2,
+            "expected the nested paragraph to split across >=2 pages, got {:?}",
+            p_geom.fragments
+        );
+        for frag in &p_geom.fragments {
+            assert!(
+                frag.y.to_f32() + frag.height.to_f32() <= 400.0 + 0.5,
+                "fragment must not overflow the page strip: {frag:?}"
+            );
+        }
+        let pages: std::collections::BTreeSet<u32> =
+            p_geom.fragments.iter().map(|f| f.page_index).collect();
+        assert_eq!(
+            pages.len(),
+            p_geom.fragments.len(),
+            "each fragment should land on a distinct page: {:?}",
+            p_geom.fragments
+        );
+    }
+
+    /// fulgur-2s7p.1 (inverse-failure guard, epic `fulgur-2s7p` design
+    /// note #2): the new inline-root split branch's own split-before
+    /// pre-check reads `cursor_y > page_start_y` — the same style of
+    /// proxy the epic's landmine list warns must not be misread as
+    /// "real content already placed on this page". A parent's own
+    /// `padding-top` alone (no preceding sibling) also advances
+    /// `cursor_y` past `page_start_y` for its first child, exactly like
+    /// real content would. If the pre-check fired on that basis alone
+    /// regardless of whether the paragraph actually overflows, it would
+    /// spuriously push a fresh page (and an extra parent fragment) for
+    /// content that fits fine. Here the padding (50px) plus the
+    /// paragraph's natural height comfortably fit one page strip
+    /// (400px) — assert exactly one fragment for both the paragraph and
+    /// its wrapping div, i.e. no spurious extra fragment was emitted.
+    #[test]
+    fn nested_inline_root_padding_top_alone_does_not_spawn_spurious_fragment() {
+        let html = r#"<!doctype html><html><body style="margin:0; font-size:14px">
+            <div id="wrap" style="padding-top:50px">
+                <p style="margin:0; line-height:20px">one two three four five</p>
+            </div>
+        </body></html>"#;
+        let mut doc = parse(html, 500.0);
+        let wrap_id = find_by_id(&doc, "wrap").expect("div#wrap");
+
+        fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if node
+                .element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "p")
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = find_p(doc, child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let p_id = find_p(&doc, wrap_id).expect("fixture must contain a <p>");
+
+        let table = run_pass(doc.deref_mut(), 400.0);
+        let p_geom = table.get(&p_id).expect("<p> must be recorded in geometry");
+        assert_eq!(
+            p_geom.fragments.len(),
+            1,
+            "padding-top alone must not force a page split: {:?}",
+            p_geom.fragments
+        );
+        let wrap_geom = table
+            .get(&wrap_id)
+            .expect("div#wrap must be recorded in geometry");
+        assert_eq!(
+            wrap_geom.fragments.len(),
+            1,
+            "padding-top alone must not spawn a spurious/ghost parent fragment: {:?}",
+            wrap_geom.fragments
+        );
+    }
+
+    /// fulgur-2s7p.1 (epic `fulgur-2s7p` design note #4 — break-before
+    /// / break-after symmetry): forcing the same break point via
+    /// `break-after: page` on the multi-line nested paragraph vs
+    /// `break-before: page` on its sibling must close the wrapping
+    /// div's page-0 fragment to the *same* height either way. The new
+    /// inline-root split branch has its own `break_after_page` handling
+    /// (mirroring the pre-existing block-child branches' pattern);
+    /// `break-before` on the sibling is handled by this function's
+    /// shared upstream check (unrelated to this fix). If cursor-derived
+    /// height and full-remaining-strip-derived height ever disagreed
+    /// between the two paths, the same logical break would produce a
+    /// different-looking parent background/border depending on which
+    /// side declared the break — this pins that they agree.
+    #[test]
+    fn nested_inline_root_break_after_vs_break_before_same_parent_height() {
+        let make_html = |p1_style: &str, p2_style: &str| {
+            format!(
+                r#"<!doctype html><html><body style="margin:0; font-size:14px">
+                    <div><div id="parent">
+                        <p id="p1" style="{p1_style} margin:0; line-height:20px">one two three four five six seven eight nine ten eleven twelve</p>
+                        <p id="p2" style="{p2_style} margin:0; line-height:20px">short tail</p>
+                    </div></div>
+                </body></html>"#
+            )
+        };
+        let html_after = make_html("break-after:page;", "");
+        let html_before = make_html("", "break-before:page;");
+
+        let run = |html: &str| -> (usize, f32) {
+            // Narrow viewport forces p1's 12 words to wrap across
+            // multiple lines, so the assertion exercises the new
+            // inline-root split branch's `break_after_page` handling
+            // (only reached when `line_metrics.len() > 1`), not the
+            // pre-existing single-line block-child path.
+            let mut doc = parse(html, 150.0);
+            let table_cs = blitz_adapter::extract_column_style_table(&doc);
+            let parent_id = find_by_id(&doc, "parent").expect("div#parent");
+            let p1_id = find_by_id(&doc, "p1").expect("p#p1");
+            let lines = super::collect_inline_line_metrics(doc.get_node(p1_id).expect("p1 node"));
+            let geom =
+                super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table_cs);
+            let parent_geom = geom.get(&parent_id).expect("div#parent must be recorded");
+            let page0 = parent_geom
+                .fragments
+                .iter()
+                .find(|f| f.page_index == 0)
+                .expect("page 0 fragment for div#parent");
+            (lines.len(), page0.height.to_f32())
+        };
+
+        let (lines_after, h_after) = run(&html_after);
+        let (lines_before, h_before) = run(&html_before);
+        assert!(
+            lines_after > 1 && lines_before > 1,
+            "fixture must wrap p1 to >1 line to exercise the new branch: after={lines_after} before={lines_before}"
+        );
+        assert!(
+            (h_after - h_before).abs() < 0.5,
+            "break-after vs break-before must close the parent fragment to the same height: after={h_after} before={h_before}"
         );
     }
 
