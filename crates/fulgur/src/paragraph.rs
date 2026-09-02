@@ -2386,6 +2386,8 @@ mod draw_decoration_direct_tests {
         f(&mut canvas);
     }
 
+    /// Construct a minimal 10×10 pt `InlineImage` using the 1×1 red PNG fixture.
+    /// Pass `visible: false` to exercise the invisible-image skip path.
     fn make_test_image(visible: bool) -> InlineImage {
         InlineImage {
             data: Arc::new(super::tests::TEST_PNG.to_vec()),
@@ -2401,6 +2403,8 @@ mod draw_decoration_direct_tests {
         }
     }
 
+    /// Construct a minimal 30×20 pt `InlineBoxItem`.
+    /// Pass `visible: false` to exercise the invisible-inline-box skip path.
     fn make_test_inline_box(visible: bool) -> InlineBoxItem {
         InlineBoxItem {
             node_id: None,
