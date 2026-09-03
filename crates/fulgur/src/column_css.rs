@@ -2504,4 +2504,113 @@ mod tests {
             other => panic!("expected Named page, got {other:?}"),
         }
     }
+
+    // -------- column-rule-style longhand --------
+
+    /// `column-rule-style: solid` (longhand) sets `style` on a default spec.
+    /// The `if let Ok(style) = result` success path in `parse_value` fires.
+    #[test]
+    fn column_rule_style_longhand_solid() {
+        let props = parse_declaration_block("column-rule-style: solid;");
+        assert_eq!(
+            props.rule.expect("rule spec").style,
+            ColumnRuleStyle::Solid,
+            "longhand solid must set Solid style"
+        );
+    }
+
+    /// `column-rule-style: dashed` (longhand).
+    #[test]
+    fn column_rule_style_longhand_dashed() {
+        let props = parse_declaration_block("column-rule-style: dashed;");
+        assert_eq!(
+            props.rule.expect("rule spec").style,
+            ColumnRuleStyle::Dashed,
+            "longhand dashed must set Dashed style"
+        );
+    }
+
+    /// `column-rule-style: dotted` (longhand).
+    #[test]
+    fn column_rule_style_longhand_dotted() {
+        let props = parse_declaration_block("column-rule-style: dotted;");
+        assert_eq!(
+            props.rule.expect("rule spec").style,
+            ColumnRuleStyle::Dotted,
+            "longhand dotted must set Dotted style"
+        );
+    }
+
+    /// `column-rule-style: none` (longhand) produces `ColumnRuleStyle::None`.
+    #[test]
+    fn column_rule_style_longhand_none() {
+        let props = parse_declaration_block("column-rule-style: none;");
+        assert_eq!(
+            props.rule.expect("rule spec").style,
+            ColumnRuleStyle::None,
+            "longhand none must set None style"
+        );
+    }
+
+    /// `column-rule-style: double` is a Phase-C value — `parse_rule_style_ident`
+    /// returns `None`, which triggers the `ok_or_else` closure at the longhand
+    /// handler (line 589). The declaration must drop silently so later
+    /// longhand properties (width, color) still apply.
+    #[test]
+    fn column_rule_style_longhand_unsupported_value_drops_silently() {
+        let props = parse_declaration_block("column-rule-style: double;");
+        assert!(
+            props.rule.is_none(),
+            "unsupported longhand style value must drop the declaration"
+        );
+    }
+
+    /// Same Phase-C path for `groove`.
+    #[test]
+    fn column_rule_style_longhand_groove_drops_silently() {
+        let props = parse_declaration_block("column-rule-style: groove;");
+        assert!(
+            props.rule.is_none(),
+            "unsupported longhand style groove must drop the declaration"
+        );
+    }
+
+    /// A non-ident token in `column-rule-style` (e.g., a number) causes
+    /// `input.expect_ident()?` to return `Err`, dropping the declaration.
+    #[test]
+    fn column_rule_style_longhand_non_ident_drops_silently() {
+        let props = parse_declaration_block("column-rule-style: 42;");
+        assert!(
+            props.rule.is_none(),
+            "non-ident token in column-rule-style must drop the declaration"
+        );
+    }
+
+    /// Longhand `column-rule-style` can combine with other longhands:
+    /// setting width first and then style must preserve the width.
+    #[test]
+    fn column_rule_style_longhand_preserves_existing_width() {
+        let props = parse_declaration_block("column-rule-width: 2pt; column-rule-style: solid;");
+        let rule = props.rule.expect("rule spec");
+        assert_eq!(rule.style, ColumnRuleStyle::Solid, "style");
+        assert!(
+            (rule.width.to_f32() - 2.0).abs() < 0.1,
+            "width must be preserved: {}",
+            rule.width.to_f32()
+        );
+    }
+
+    // -------- parse_length: unknown dimension unit --------
+
+    /// A Dimension token with an unrecognised unit (e.g., `vw`) causes
+    /// `length_to_pt` to return `None`, which triggers the `ok_or_else`
+    /// closure inside `parse_length` (line 247). The declaration drops.
+    #[test]
+    fn parse_length_unknown_dimension_unit_drops_declaration() {
+        let props = parse_declaration_block("column-rule-width: 10vw;");
+        assert!(
+            props.rule.is_none(),
+            "unknown dimension unit must drop the declaration"
+        );
+    }
 }
