@@ -2734,7 +2734,27 @@ fn fragment_block_subtree_inner(
                 .last()
                 .map(|l| l.1 - line_metrics[0].0)
                 .unwrap_or(child_h);
-            if cursor_y > page_start_y && cursor_y + para_total_h > page_height_px {
+            // codex P1: `entry_page_index` is captured *before* the
+            // split-before advance below, so `new_page_index >
+            // entry_page_index` (checked further down) is true whenever
+            // this child crossed a page boundary at all — whether from
+            // split-before alone (paragraph fits whole on the fresh
+            // page, so `fragment_inline_root` itself never advances
+            // past `pre_split_page`) or from `fragment_inline_root`
+            // splitting further. Using `pre_split_page` there instead
+            // would miss the split-before-only case, since `pre_split_page`
+            // is captured *after* that advance.
+            let entry_page_index = page_index;
+            // codex P1: compare against `child_page_y` (this child's
+            // own row-local start), not `cursor_y` — for a later
+            // grid/flex row cell, `cursor_y` is the previous cell's row
+            // bottom, which can overflow the page even when this cell
+            // would fit fine at its own row-local y. The leading
+            // `cursor_y > page_start_y` guard is kept as-is: it answers
+            // "is there real content already on this page" (the
+            // fulgur-2s7p.1 first-child exemption), which `cursor_y`
+            // correctly proxies for regardless of row position.
+            if cursor_y > page_start_y && child_page_y + para_total_h > page_height_px {
                 let should_emit = row_state
                     .as_mut()
                     .map(|rs| rs.emitted_parent_pages.insert(page_index))
@@ -2830,16 +2850,23 @@ fn fragment_block_subtree_inner(
                 }
                 page_start_y = 0.0;
                 origin_pending_target_y = Some(new_cursor_y);
-                // CodeRabbit + codex P1: mirror the recursion branch's
-                // same-row co-split bookkeeping (fulgur-ysms). Without
-                // this, a multi-line `<p>` that is a grid/flex row's
-                // first item and crosses a page boundary leaves
-                // `origin_pending_same_row` unset and `row_state`'s
-                // `crossed_by_recursion` false, so the row's *next*
-                // parallel item doesn't restore to the row-start state
-                // — it gets placed after this paragraph's last
-                // fragment instead of beside it, and the earlier-page
-                // row content is lost for that sibling.
+            }
+            // CodeRabbit + codex P1: mirror the recursion branch's
+            // same-row co-split bookkeeping (fulgur-ysms). Gated on
+            // `entry_page_index` (captured before split-before), not
+            // `pre_split_page`, so a split-before-only crossing (the
+            // paragraph fits whole on the fresh page, so
+            // `fragment_inline_root` never advances past
+            // `pre_split_page`) still marks the row as crossed. Without
+            // this, a multi-line `<p>` that is a grid/flex row's item
+            // and crosses a page boundary — via either path — leaves
+            // `origin_pending_same_row` unset and `row_state`'s
+            // `crossed_by_recursion` false, so the row's *next*
+            // parallel item doesn't restore to the row-start state — it
+            // gets placed after this paragraph's last fragment instead
+            // of beside it, and the earlier-page row content is lost
+            // for that sibling.
+            if new_page_index > entry_page_index {
                 let row_top = this_top_in_parent;
                 let row_bottom = row_top + child_h;
                 origin_pending_same_row =
@@ -2849,7 +2876,21 @@ fn fragment_block_subtree_inner(
                 }
             }
             page_index = new_page_index;
-            cursor_y = new_cursor_y;
+            // codex P2: mirror the recursion branch's fulgur-u0p0
+            // cursor handling — when `fragment_inline_root` stayed on
+            // the same page (`new_page_index == pre_split_page`), keep
+            // the larger of the parent's existing `cursor_y` (a
+            // previous parallel row cell's bottom) and this split's own
+            // `new_cursor_y`, rather than unconditionally shrinking to
+            // `new_cursor_y`. Otherwise a shorter same-page paragraph
+            // cell followed by `break-after: page` would close the
+            // parent's fragment at this cell's bottom instead of the
+            // row's true (taller) extent.
+            cursor_y = if new_page_index == pre_split_page {
+                cursor_y.max(new_cursor_y)
+            } else {
+                new_cursor_y
+            };
             initial_page_occupied = false;
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -3340,15 +3381,26 @@ fn fragment_inline_root(
             // fulgur-s67g Phase 2.1: honour widow / orphan minimums.
             let first_size = i - fragment_start_idx;
             let remaining_size = total_lines - i;
-            if first_size < ORPHANS_MIN || remaining_size < WIDOWS_MIN {
-                // Cannot split here without violating widow/orphan.
-                // Skip — keep accumulating into the current fragment.
-                // If no future split point honours both constraints,
-                // the loop falls through to "emit final fragment"
-                // below and the paragraph emits as a single oversized
-                // fragment (CSS Fragmentation §4.4: widows/orphans
-                // constraints are treated as preferences that can be
-                // relaxed to avoid unfulfillable breaks).
+            // codex P1: also refuse to split once the next fragment
+            // would land on `MAX_PAGES` — the same bound the oversized-
+            // block re-slice loop and the absolute-positioning path
+            // enforce. Without this, an attacker-controlled narrow
+            // `word-break: break-all` paragraph with pathologically
+            // many lines has no cap here (unlike those other paths),
+            // and `page_index` — which feeds `implied_page_count`,
+            // driving per-page allocation and rendering — can grow
+            // unbounded with the line count instead of being clamped.
+            let would_exceed_max_pages = page_index + 1 >= crate::MAX_PAGES;
+            if first_size < ORPHANS_MIN || remaining_size < WIDOWS_MIN || would_exceed_max_pages {
+                // Cannot split here without violating widow/orphan (or
+                // the MAX_PAGES budget). Skip — keep accumulating into
+                // the current fragment. If no future split point
+                // honours both constraints, the loop falls through to
+                // "emit final fragment" below and the paragraph emits
+                // as a single oversized fragment (CSS Fragmentation
+                // §4.4: widows/orphans constraints are treated as
+                // preferences that can be relaxed to avoid
+                // unfulfillable breaks).
                 continue;
             }
 
@@ -8282,6 +8334,196 @@ h2 { string-set: chapter-title content(text); }
         }
     }
 
+    /// codex P1 review on PR #741 (second round, commit 84654dc):
+    /// when the split-before pre-check alone pushes a grid/flex row's
+    /// multi-line `<p>` to a fresh page — and the paragraph then fits
+    /// *whole* on that fresh page, so `fragment_inline_root` itself
+    /// never advances past `pre_split_page` — the row was still never
+    /// marked as crossed (the row-bookkeeping was gated on
+    /// `new_page_index > pre_split_page`, which is false here even
+    /// though the row DID cross a page, via the split-before advance
+    /// itself). A later same-row cell then never restored to the
+    /// row-start state and lost its earlier-page presence entirely.
+    ///
+    /// Fixture: 2-column grid, two rows. Row 1 (two plain 20px cells)
+    /// advances `cursor_y` past the container's own entry point so
+    /// row 2's first cell — the multi-line `<p>` — does not qualify
+    /// for the "first in-flow child" split-before exemption. The `<p>`
+    /// is sized to fit whole on the fresh page after split-before
+    /// fires (isolating this from the multi-page-crossing case the
+    /// sibling test above covers). Row 2's second cell must land on
+    /// page 0 at the row-local y, not on the fresh page split-before
+    /// pushed the paragraph to.
+    #[test]
+    fn grid_row_split_before_only_crossing_still_cosplits_with_row_sibling() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
+                <div style="height: 20px; width: 60px"></div>
+                <div style="height: 20px; width: 60px"></div>
+                <p id="col_p2" style="margin:0; padding:0; line-height:20px; width:20px">one two three four five</p>
+                <div id="col_b2" style="height: 10px; width: 60px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let col_p2_id = find_by_id(&doc, "col_p2").expect("p#col_p2");
+        let col_b2_id = find_by_id(&doc, "col_b2").expect("div#col_b2");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
+
+        let col_p2_geom = geom.get(&col_p2_id).expect("p#col_p2 must be recorded");
+        assert_eq!(
+            col_p2_geom.fragments.len(),
+            1,
+            "fixture must fit col_p2 on one fresh page after split-before \
+             (isolating the split-before-only crossing from a further \
+             mid-paragraph split): {:?}",
+            col_p2_geom.fragments
+        );
+        assert_eq!(
+            col_p2_geom.fragments[0].page_index, 1,
+            "expected split-before to push col_p2 to page 1: {:?}",
+            col_p2_geom.fragments[0]
+        );
+
+        let col_b2_geom = geom.get(&col_b2_id).expect("div#col_b2 must be recorded");
+        let page0 = col_b2_geom
+            .fragments
+            .iter()
+            .find(|f| f.page_index == 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "col_b2 must co-split back to page 0 at the row-local y once \
+                     col_p2's split-before pushed it to page 1 — but has no \
+                     page-0 fragment at all: {:?}",
+                    col_b2_geom.fragments
+                )
+            });
+        assert!(
+            (page0.y.to_f32() - 90.0).abs() < 1.0,
+            "col_b2 must land at the row-local y=90 on page 0: page0={page0:?}"
+        );
+    }
+
+    /// codex P1 review on PR #741 (second round, commit 84654dc): the
+    /// split-before overflow check compared `cursor_y + para_total_h`
+    /// against `page_height_px`. For a grid/flex row's later cell,
+    /// `cursor_y` is the row's running max bottom from earlier cells,
+    /// not this cell's own row-local start (`child_page_y`) — so a
+    /// tall preceding cell can make the check see overflow even though
+    /// this paragraph would fit fine at its own position.
+    ///
+    /// Fixture: 2-column grid row, 70px into a 100px strip. Column A
+    /// (25px) pushes `cursor_y` to 95. Column B is a narrow 2-line
+    /// `<p>` whose own row-local start (`child_page_y` = 70) plus its
+    /// height fits comfortably under 100, but `cursor_y` (95) plus that
+    /// same height overflows — the false-positive split-before this
+    /// finding describes. Column B must land on page 0 (no split-before
+    /// push at all), not page 1.
+    #[test]
+    fn grid_row_split_before_check_uses_row_local_y_not_prior_cell_bottom() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
+                <div id="col_a" style="height: 25px; width: 60px"></div>
+                <p id="col_b" style="margin:0; padding:0; line-height:10px; width:20px">one two</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
+
+        let col_b_geom = geom.get(&col_b_id).expect("p#col_b must be recorded");
+        assert_eq!(
+            col_b_geom.fragments.len(),
+            1,
+            "col_b must fit whole at its row-local position, needing no split \
+             at all: {:?}",
+            col_b_geom.fragments
+        );
+        assert_eq!(
+            col_b_geom.fragments[0].page_index, 0,
+            "col_b fits at row-local y=70 on page 0 — a split-before push driven \
+             by col_a's row-max cursor_y (95) instead of col_b's own row-local \
+             y (70) would wrongly land it on page 1 instead: {:?}",
+            col_b_geom.fragments[0]
+        );
+    }
+
+    /// codex P2 review on PR #741 (second round, commit 84654dc): after
+    /// the line-split branch returns without crossing a page
+    /// (`new_page_index == pre_split_page`), `cursor_y` was set
+    /// unconditionally to `new_cursor_y` — the split paragraph's own
+    /// bottom. For a grid/flex row where an earlier cell is taller
+    /// than this paragraph, that shrinks `cursor_y` below the row's
+    /// true max extent (mirrors the recursion branch's fulgur-u0p0
+    /// `cursor_y.max(nc)` handling, which this branch skipped).
+    ///
+    /// Fixture: 2-column grid row. Column A (60px) establishes the
+    /// row's true bottom. Column B is a short 2-line `<p>` with
+    /// `break-after: page` whose own bottom is well under 60. The
+    /// grid's own parent fragment on page 0 — closed by column B's
+    /// `break-after: page` — must span the row's true height (60), not
+    /// column B's shorter one.
+    #[test]
+    fn grid_row_same_page_split_keeps_row_max_cursor_for_break_after() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div id="grid" style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
+                <div id="col_a" style="height: 60px; width: 60px"></div>
+                <p id="col_b" style="margin:0; padding:0; line-height:10px; width:20px; break-after:page">one two</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let grid_id = find_by_id(&doc, "grid").expect("div#grid");
+        let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0_f32.as_px(), &table_cs);
+
+        let col_b_geom = geom.get(&col_b_id).expect("p#col_b must be recorded");
+        assert_eq!(
+            col_b_geom.fragments.len(),
+            1,
+            "col_b must fit whole on the same page as its row-local start \
+             (isolating the same-page cursor_y handling from a crossing): {:?}",
+            col_b_geom.fragments
+        );
+        assert_eq!(
+            col_b_geom.fragments[0].page_index, 0,
+            "{:?}",
+            col_b_geom.fragments[0]
+        );
+        assert!(
+            col_b_geom.fragments[0].height.to_f32() < 59.0,
+            "fixture must make col_b's own bottom shorter than col_a's 60px \
+             row height: {:?}",
+            col_b_geom.fragments[0]
+        );
+
+        let grid_geom = geom.get(&grid_id).expect("div#grid must be recorded");
+        let page0 = grid_geom
+            .fragments
+            .iter()
+            .find(|f| f.page_index == 0)
+            .expect("div#grid must have a page-0 fragment");
+        assert!(
+            (page0.height.to_f32() - 60.0).abs() < 1.0,
+            "break-after: page on col_b must close the grid's page-0 fragment \
+             at the row's true max bottom (60, from col_a) — shrinking to \
+             col_b's own shorter bottom would clip col_a's background/border: \
+             page0={page0:?}"
+        );
+    }
+
     /// codex P2 review on PR #741: a nested multi-line `<p>` with a CSS
     /// transform paints as a single atomic box (CSS Transforms §6.1) —
     /// it must not be split into independently rendered per-page
@@ -9734,6 +9976,51 @@ h2 { string-set: chapter-title content(text); }
                 "fragment {idx} height should be 100px, got {h}"
             );
         }
+    }
+
+    /// codex P1 review on PR #741 (second round, commit 84654dc): unlike
+    /// the oversized-block re-slice loop and the absolute-positioning
+    /// path (both bounded by `crate::MAX_PAGES`), `fragment_inline_root`
+    /// had no cap on how far it advances `page_index` — bounded only by
+    /// the paragraph's own line count. A pathologically long
+    /// `word-break: break-all` paragraph (attacker-controlled HTML) can
+    /// wrap into far more lines than `MAX_PAGES`, and the resulting
+    /// `page_index` feeds `implied_page_count`, which drives per-page
+    /// allocation and rendering for every implied page — the exact
+    /// "small input amplifies into huge output" shape the other
+    /// `MAX_PAGES` guards in this file exist to prevent.
+    ///
+    /// 50,000 lines of 10px each on a 25px page strip split every 2
+    /// lines (satisfying `ORPHANS_MIN`/`WIDOWS_MIN`), which would
+    /// advance `page_index` by roughly 25,000 uncapped — far past
+    /// `MAX_PAGES` (10,000).
+    #[test]
+    fn fragment_inline_root_caps_page_advancement_at_max_pages() {
+        let lines: Vec<(f32, f32)> = (0..50_000)
+            .map(|i| (i as f32 * 10.0, i as f32 * 10.0 + 10.0))
+            .collect();
+        let mut geom = PaginationGeometryTable::new();
+        let (new_page, _new_cursor, _emitted) =
+            super::fragment_inline_root(&mut geom, 7, 0.0, 200.0, 0.0, 0, 25.0, &lines);
+        assert!(
+            new_page <= crate::MAX_PAGES,
+            "fragment_inline_root must clamp page advancement to MAX_PAGES \
+             ({}); got {new_page} — uncapped this would be ~25,000",
+            crate::MAX_PAGES,
+        );
+        let max_frag_page = geom
+            .get(&7)
+            .unwrap()
+            .fragments
+            .iter()
+            .map(|f| f.page_index)
+            .max()
+            .unwrap();
+        assert!(
+            max_frag_page <= crate::MAX_PAGES,
+            "no emitted fragment should exceed MAX_PAGES ({}); got {max_frag_page}",
+            crate::MAX_PAGES,
+        );
     }
 
     /// A paragraph starting on a non-zero `initial_page_index` must record
