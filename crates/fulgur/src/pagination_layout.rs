@@ -2769,7 +2769,14 @@ fn fragment_block_subtree_inner(
                             x: parent_x_in_body.as_px(),
                             y: page_start_y.as_px(),
                             width: parent_w.as_px(),
-                            height: (cursor_y - page_start_y).as_px(),
+                            // Use the full page strip height, not just
+                            // `cursor_y - page_start_y`: in a grid/flex row
+                            // context a later sibling cell can restore this
+                            // same page (`origin_pending_same_row`) and paint
+                            // past `cursor_y`, so the parent fragment must
+                            // already cover the whole strip to avoid a gap
+                            // under that restored content.
+                            height: (page_height_px - page_start_y).max(0.0).as_px(),
                         });
                 }
                 page_index += 1;
@@ -8359,7 +8366,7 @@ h2 { string-set: chapter-title content(text); }
         let html = r#"
             <html><body style="margin: 0; padding: 0; font-size: 12px">
               <div style="height: 70px"></div>
-              <div style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
+              <div id="grid2" style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
                 <div style="height: 20px; width: 60px"></div>
                 <div style="height: 20px; width: 60px"></div>
                 <p id="col_p2" style="margin:0; padding:0; line-height:20px; width:20px">one two three four five</p>
@@ -8369,6 +8376,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 200.0);
         let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let grid2_id = find_by_id(&doc, "grid2").expect("div#grid2");
         let col_p2_id = find_by_id(&doc, "col_p2").expect("p#col_p2");
         let col_b2_id = find_by_id(&doc, "col_b2").expect("div#col_b2");
 
@@ -8405,6 +8413,34 @@ h2 { string-set: chapter-title content(text); }
         assert!(
             (page0.y.to_f32() - 90.0).abs() < 1.0,
             "col_b2 must land at the row-local y=90 on page 0: page0={page0:?}"
+        );
+
+        // coderabbit review on PR #741: the grid's own page-0 parent
+        // fragment (its background/border strip) must cover the full
+        // remaining page-0 strip (page_start_y=70 through the page
+        // bottom at 100), not just `cursor_y - page_start_y` (90 - 70 =
+        // 20) at the moment split-before fired for col_p2. col_b2
+        // restores back to page 0 (row-local y=90..100) *after* that
+        // push, so a `cursor_y`-bounded parent fragment would stop at
+        // row 1's bottom (90) and leave col_b2's paint region
+        // (90..100) uncovered by the grid's own background.
+        let grid2_geom = geom.get(&grid2_id).expect("div#grid2 must be recorded");
+        let grid2_page0 = grid2_geom
+            .fragments
+            .iter()
+            .find(|f| f.page_index == 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "grid2 must have a page-0 parent fragment: {:?}",
+                    grid2_geom.fragments
+                )
+            });
+        assert!(
+            (grid2_page0.height.to_f32() - 30.0).abs() < 1.0,
+            "grid2's page-0 fragment must span the full remaining strip \
+             (70..100, height 30) to cover col_b2's restored paint \
+             region at row-local y=90..100, not stop at row 1's bottom \
+             (90, height 20): grid2_page0={grid2_page0:?}"
         );
     }
 
