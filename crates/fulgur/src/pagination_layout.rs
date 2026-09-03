@@ -1655,6 +1655,18 @@ fn has_page_name_change_below(
 ///   string-set / bookmark ops attached to `parent_id` itself would
 ///   then miss the intermediate pages — the existing tests attach ops
 ///   to leaf children, so this stays masked until 3.1.5.
+/// - **The oversized-single-child re-slice loop is not mirrored here.**
+///   `fragment_pagination_root` has a dedicated path (its `has_transform`
+///   / `child_h > page_height_px` branch) that repeatedly slices a
+///   *childless* (or otherwise non-recursible, e.g. `contain: size`)
+///   block taller than one page into one fragment per page strip. This
+///   walker has no equivalent — such a child only gets split if
+///   `needs_recursion` finds splittable grandchildren below it, so a
+///   nested `contain: size` ancestor wrapping a plain oversized `<div>`
+///   (no further in-flow content to recurse into) still renders as one
+///   fragment (WPT `monolithic-overflow-026-print`, unaffected by
+///   fulgur-2s7p.1 — that fix only added nested inline-root line
+///   splitting, a different code path from this one).
 ///
 /// Returns `(final_page_index, final_cursor_y)`: the page and y where
 /// the parent's last child finished. The caller resumes its outer
@@ -2690,7 +2702,21 @@ fn fragment_block_subtree_inner(
             break_props.break_inside,
             Some(crate::draw_primitives::BreakInside::Avoid)
         );
-        let line_metrics = if avoid_inside {
+        // A transformed subtree paints as a single atomic box (CSS
+        // Transforms §6.1) — same exclusion as the oversized-child
+        // atomic path (`has_transform` above in
+        // `fragment_pagination_root`). Without this, a nested
+        // multi-line `<p style="transform:...">` would be split into
+        // independently rendered per-page fragments and the rotation
+        // / skew / matrix would apply to each slice separately instead
+        // of the whole box, changing the painted result. Before this
+        // branch existed, such a child fell through to the oversized-
+        // child / recursion path below, which already treats it as
+        // atomic — this keeps that behaviour.
+        let has_transform = child
+            .primary_styles()
+            .is_some_and(|s| !s.get_box().transform.0.is_empty());
+        let line_metrics = if avoid_inside || has_transform {
             Vec::new()
         } else {
             collect_inline_line_metrics(child)
@@ -2727,16 +2753,33 @@ fn fragment_block_subtree_inner(
                         });
                 }
                 page_index += 1;
-                cursor_y = 0.0;
                 page_start_y = 0.0;
+                // codex P1 (fulgur-2s7p.1 follow-up): this child is
+                // the first in-flow child on the new page strip —
+                // rebase `page_taffy_origin` to its own top, mirroring
+                // `break_before_page`'s rebase above. Without this,
+                // `new_page_index == pre_split_page` below can't tell
+                // this split-before advance happened, so the
+                // same-row / origin-pending bookkeeping is skipped and
+                // the next sibling computes `child_page_y` from the
+                // stale pre-advance origin.
+                page_taffy_origin = this_top_in_parent;
+                child_page_y = 0.0;
             }
             let pre_split_page = page_index;
+            // codex P1: start from `child_page_y` (this child's own
+            // rebased page-local y), not the parent's running
+            // `cursor_y` — for block flow the two are equal, but for
+            // grid / flex parallel siblings `cursor_y` still holds the
+            // previous sibling's row bottom while `child_page_y` is
+            // this cell's row-local start (fulgur-u0p0, mirrored from
+            // the recursion branch below).
             let (new_page_index, new_cursor_y, _emitted) = fragment_inline_root(
                 geometry,
                 child_id,
                 child_x_in_body,
                 child_w,
-                cursor_y,
+                child_page_y,
                 page_index,
                 page_height_px,
                 &line_metrics,
@@ -2787,7 +2830,23 @@ fn fragment_block_subtree_inner(
                 }
                 page_start_y = 0.0;
                 origin_pending_target_y = Some(new_cursor_y);
-                origin_pending_same_row = None;
+                // CodeRabbit + codex P1: mirror the recursion branch's
+                // same-row co-split bookkeeping (fulgur-ysms). Without
+                // this, a multi-line `<p>` that is a grid/flex row's
+                // first item and crosses a page boundary leaves
+                // `origin_pending_same_row` unset and `row_state`'s
+                // `crossed_by_recursion` false, so the row's *next*
+                // parallel item doesn't restore to the row-start state
+                // — it gets placed after this paragraph's last
+                // fragment instead of beside it, and the earlier-page
+                // row content is lost for that sibling.
+                let row_top = this_top_in_parent;
+                let row_bottom = row_top + child_h;
+                origin_pending_same_row =
+                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+                if let Some(ref mut rs) = row_state {
+                    rs.crossed_by_recursion = true;
+                }
             }
             page_index = new_page_index;
             cursor_y = new_cursor_y;
@@ -8009,6 +8068,266 @@ h2 { string-set: chapter-title content(text); }
         assert!(
             (h_after - h_before).abs() < 0.5,
             "break-after vs break-before must close the parent fragment to the same height: after={h_after} before={h_before}"
+        );
+    }
+
+    /// codex P1 review on PR #741 (fulgur-2s7p.1 follow-up): the new
+    /// inline-root split branch's split-before pre-check advances
+    /// `page_index` / `page_start_y` to a fresh page but, pre-fix, never
+    /// rebased `page_taffy_origin` to the splitting child's own top.
+    /// When the paragraph then fits entirely on that fresh page (no
+    /// further split — `new_page_index == pre_split_page`), the
+    /// `new_page_index > pre_split_page` rebase-pending path below never
+    /// runs either, so `page_taffy_origin` stays stale. The FOLLOWING
+    /// sibling then computes `child_page_y` from that stale origin and
+    /// lands far past where the paragraph actually ended instead of
+    /// immediately after it.
+    ///
+    /// Fixture: A (90px) pushes `cursor_y` to 90 on a 100px strip, then
+    /// a narrow multi-line `<p>` (one word per line, comfortably under
+    /// 100px total) doesn't fit the remaining 10px — triggering
+    /// split-before — but fits whole on the fresh page. `div#after`
+    /// must land immediately after the paragraph's single fragment on
+    /// that same fresh page.
+    #[test]
+    fn nested_inline_root_split_before_rebases_taffy_origin_for_sibling() {
+        let html = r#"<!doctype html><html><body style="margin:0; font-size:12px">
+            <div>
+                <div style="height:90px"></div>
+                <p style="margin:0; padding:0; line-height:20px; width:20px">one two three four</p>
+                <div id="after" style="height:20px"></div>
+            </div>
+        </body></html>"#;
+        let mut doc = parse(html, 200.0);
+        let after_id = find_by_id(&doc, "after").expect("div#after");
+
+        fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if node
+                .element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "p")
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = find_p(doc, child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let body_id = find_body_id(&doc).expect("body must exist");
+        let p_id = find_p(&doc, body_id).expect("fixture must contain a <p>");
+
+        let table = run_pass(doc.deref_mut(), 100.0);
+
+        let p_geom = table.get(&p_id).expect("<p> must be recorded in geometry");
+        assert_eq!(
+            p_geom.fragments.len(),
+            1,
+            "fixture must fit the paragraph on one fresh page after split-before \
+             (this reproduces the `new_page_index == pre_split_page` case where \
+             the rebase-pending path is skipped): {:?}",
+            p_geom.fragments
+        );
+        let p_frag = &p_geom.fragments[0];
+        assert_eq!(
+            p_frag.page_index, 1,
+            "expected the split-before pre-check to push the paragraph to page 1: {p_frag:?}"
+        );
+
+        let after_geom = table
+            .get(&after_id)
+            .expect("div#after must be recorded in geometry");
+        assert_eq!(after_geom.fragments.len(), 1, "{:?}", after_geom.fragments);
+        let after_frag = &after_geom.fragments[0];
+
+        assert_eq!(
+            after_frag.page_index, p_frag.page_index,
+            "div#after must land on the same page the paragraph continued to \
+             (stale page_taffy_origin bug pushes it to a later page): \
+             p_frag={p_frag:?} after_frag={after_frag:?}"
+        );
+        assert!(
+            (after_frag.y.to_f32() - (p_frag.y.to_f32() + p_frag.height.to_f32())).abs() < 1.0,
+            "div#after must immediately follow the paragraph's fragment — a stale \
+             page_taffy_origin would place it far past the page bottom instead: \
+             p_frag={p_frag:?} after_frag={after_frag:?}"
+        );
+    }
+
+    /// codex P1 + CodeRabbit review on PR #741 (fulgur-2s7p.1
+    /// follow-up): when the new inline-root split branch's multi-line
+    /// `<p>` is a grid/flex row's parallel sibling (not the row's first
+    /// cell), `fragment_inline_root` was started from the parent's
+    /// running `cursor_y` (the previous cell's row-bottom) instead of
+    /// this cell's own row-local `child_page_y`, stacking the paragraph
+    /// below the previous cell instead of beside it at the row's y.
+    ///
+    /// Fixture: 3-column grid row on a 100px strip, 70px into the page
+    /// (30px available on the current strip). Column A (5px) advances
+    /// `cursor_y` to 75 while the row itself starts at row-local y=70.
+    /// Column B is a narrow 2-line `<p>` (one word per line, tight
+    /// 5px `line-height` — small enough that it fits the page from
+    /// *either* candidate start (70 or 75), isolating the
+    /// start-position bug from split-before / page-crossing behaviour
+    /// (covered separately by
+    /// `grid_row_multiline_paragraph_cosplits_with_later_row_siblings`
+    /// below). Column C (20px) exists only so the body-level preflight
+    /// (`would_split_block_subtree`, which sums direct children's
+    /// heights) sees enough total height to force recursion into the
+    /// grid at all — without it the grid is emitted as one atomic
+    /// fragment via `record_subtree_descendants`, never reaching the
+    /// per-child fragmenter loop this bug lives in.
+    #[test]
+    fn grid_row_inline_split_starts_at_row_local_y_not_prior_cell_bottom() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 60px 60px 60px; width: 180px;">
+                <div id="col_a" style="height: 5px; width: 60px"></div>
+                <p id="col_b" style="margin:0; padding:0; line-height:5px; width:20px">one two</p>
+                <div id="col_c" style="height: 20px; width: 60px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
+
+        let col_b_geom = geom.get(&col_b_id).expect("p#col_b must be recorded");
+        assert_eq!(
+            col_b_geom.fragments.len(),
+            1,
+            "fixture must fit col_b on the current page from either candidate \
+             start (isolating the start-position bug from page-crossing): {:?}",
+            col_b_geom.fragments
+        );
+        let frag = &col_b_geom.fragments[0];
+        assert_eq!(frag.page_index, 0, "{frag:?}");
+        assert!(
+            (frag.y.to_f32() - 70.0).abs() < 1.0,
+            "col_b must start at the row-local y=70 (col_a's row-top), not \
+             col_a's bottom y=75 (the `cursor_y`-vs-`child_page_y` start-arg \
+             bug): frag={frag:?}"
+        );
+    }
+
+    /// CodeRabbit review on PR #741 (fulgur-2s7p.1 follow-up): when the
+    /// new inline-root split branch's multi-line `<p>` is a grid/flex
+    /// row's FIRST cell and crosses a page boundary, it never set
+    /// `origin_pending_same_row` / `row_state.crossed_by_recursion`
+    /// (the same-row co-split bookkeeping the recursion branch already
+    /// has, fulgur-ysms). Later cells in the same row then never
+    /// restored to the row-start state — they landed only on the page
+    /// the paragraph's tail ended up on, losing their earlier-page row
+    /// content entirely.
+    ///
+    /// Fixture: 3-column grid row on a 100px strip, 70px into the page
+    /// (matches the sibling `grid_row_recursive_cells_cosplit_across_page_boundary`
+    /// fixture's numbers). Column 1 is a narrow multi-line `<p>` (one
+    /// word per line) tall enough to cross the page boundary — as the
+    /// row's first cell, `cursor_y == page_start_y` so split-before
+    /// doesn't fire and the split runs in place. Columns 2 and 3 must
+    /// still land on page 0 at the row-local y (70).
+    #[test]
+    fn grid_row_multiline_paragraph_cosplits_with_later_row_siblings() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div style="height: 70px"></div>
+              <div style="display: grid; grid-template-columns: 60px 60px 60px; width: 180px;">
+                <p id="col_p" style="margin:0; padding:0; line-height:20px; width:20px">one two three four five</p>
+                <div id="col_b" style="height: 10px; width: 60px"></div>
+                <div id="col_c" style="height: 10px; width: 60px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let col_p_id = find_by_id(&doc, "col_p").expect("p#col_p");
+        let col_b_id = find_by_id(&doc, "col_b").expect("div#col_b");
+        let col_c_id = find_by_id(&doc, "col_c").expect("div#col_c");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
+
+        let col_p_geom = geom.get(&col_p_id).expect("p#col_p must be recorded");
+        assert!(
+            col_p_geom.fragments.len() >= 2,
+            "fixture must cross the page boundary to exercise the co-split path: {:?}",
+            col_p_geom.fragments
+        );
+
+        for (id, geom_entry) in [("col_b", col_b_id), ("col_c", col_c_id)] {
+            let cell_geom = geom
+                .get(&geom_entry)
+                .unwrap_or_else(|| panic!("{id} must be recorded in geometry"));
+            let page0 = cell_geom
+                .fragments
+                .iter()
+                .find(|f| f.page_index == 0)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id} must co-split back to page 0 at the row-local y once \
+                     col_p crossed a page boundary — but has no page-0 fragment \
+                     at all (lost its earlier-page row content): {:?}",
+                        cell_geom.fragments
+                    )
+                });
+            assert!(
+                (page0.y.to_f32() - 70.0).abs() < 1.0,
+                "{id} must land at the row-local y=70 on page 0: page0={page0:?}"
+            );
+        }
+    }
+
+    /// codex P2 review on PR #741: a nested multi-line `<p>` with a CSS
+    /// transform paints as a single atomic box (CSS Transforms §6.1) —
+    /// it must not be split into independently rendered per-page
+    /// fragments (the rotation / skew / matrix would then apply to each
+    /// slice separately instead of the whole box). Before the new
+    /// inline-root split branch existed, such a child fell through to
+    /// the oversized-child / recursion path, which already excludes
+    /// transformed subtrees (see `has_transform` in
+    /// `fragment_pagination_root`) — this pins that the new branch
+    /// preserves the same exclusion instead of splitting it.
+    #[test]
+    fn nested_inline_root_with_transform_stays_atomic() {
+        let html = r#"<!doctype html><html><body style="margin:0; font-size:12px">
+            <div>
+                <div style="height:90px"></div>
+                <p style="margin:0; padding:0; line-height:20px; width:20px; transform:rotate(1deg)">one two three four five six seven eight</p>
+            </div>
+        </body></html>"#;
+        let mut doc = parse(html, 200.0);
+
+        fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if node
+                .element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "p")
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = find_p(doc, child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let body_id = find_body_id(&doc).expect("body must exist");
+        let p_id = find_p(&doc, body_id).expect("fixture must contain a <p>");
+
+        let table = run_pass(doc.deref_mut(), 100.0);
+        let p_geom = table.get(&p_id).expect("<p> must be recorded in geometry");
+        assert_eq!(
+            p_geom.fragments.len(),
+            1,
+            "a transformed multi-line paragraph must stay atomic (one fragment), \
+             not be split at line boundaries: {:?}",
+            p_geom.fragments
         );
     }
 
