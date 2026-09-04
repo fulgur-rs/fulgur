@@ -6444,6 +6444,48 @@ mod tests {
     }
 
     #[test]
+    fn extract_column_style_table_picks_up_extensionless_linked_stylesheet() {
+        // codex P2 review on PR #741: `looks_like_css` only recognises a
+        // stylesheet by MIME (`request.content_type`, always empty for
+        // local `file://` fetches — Blitz never populates it there) or by
+        // `.css` file extension. A `<link rel="stylesheet" href="theme">`
+        // (no extension) used to be classified as non-CSS up front, so
+        // `column_css_text` was never captured for it even though Blitz's
+        // own callback still resolves the fetch as `Resource::Css` and
+        // applies its declarations normally — silently dropping
+        // `break-inside` / `column-*` from the side table for this file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("theme"),
+            r#".callout { break-inside: avoid; column-fill: auto; }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="theme"></head>
+<body><div class="callout" id="c"></div></body></html>"#;
+
+        let (doc, _gcpm, column_css_texts) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+        assert!(
+            !column_css_texts.is_empty(),
+            "expected the extensionless linked stylesheet's text to be drained"
+        );
+
+        use std::ops::Deref;
+        let c = find_element_by_attr_id(doc.deref(), "c");
+        let table = extract_column_style_table(&doc, &column_css_texts);
+        let props = table.get(&c).expect("callout div must be in the table");
+        assert_eq!(
+            props.break_inside,
+            Some(crate::draw_primitives::BreakInside::Avoid),
+            "break-inside: avoid from the extensionless linked stylesheet must \
+             resolve, got {props:?}"
+        );
+        assert_eq!(props.fill, Some(crate::column_css::ColumnFill::Auto));
+    }
+
+    #[test]
     fn extract_column_style_table_respects_media_attribute() {
         // `<style media="screen">` must not feed the column side-table —
         // the PDF render path is the `print` medium. `<style media="print">`

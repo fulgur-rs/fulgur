@@ -170,7 +170,7 @@ impl NetProvider<Resource> for FulgurNetProvider {
         // it the same un-stripped text `walk_for_column_styles` already
         // reads from inline `<style>` text nodes keeps both sources
         // parsed identically.
-        let (bytes_for_blitz, gcpm_to_push, column_css_text) =
+        let (bytes_for_blitz, gcpm_to_push, column_css_text, raw_text_fallback) =
             if Self::looks_like_css(&request, &canonical_path) {
                 if let Ok(text) = std::str::from_utf8(&raw_bytes) {
                     let gcpm = parse_gcpm(text);
@@ -179,12 +179,24 @@ impl NetProvider<Resource> for FulgurNetProvider {
                         Bytes::from(cleaned.into_bytes()),
                         Some(gcpm),
                         Some(text.to_string()),
+                        None,
                     )
                 } else {
-                    (Bytes::from(raw_bytes), None, None)
+                    (Bytes::from(raw_bytes), None, None, None)
                 }
             } else {
-                (Bytes::from(raw_bytes), None, None)
+                // codex P2: `looks_like_css` under-detects a stylesheet
+                // served with no `.css` extension (e.g. `<link
+                // rel="stylesheet" href="theme">`) — `request.content_type`
+                // is always empty for local `file://` fetches (Blitz never
+                // populates it in this offline pathway), so the extension
+                // check is the only signal, and it misses here. Blitz's own
+                // callback still reliably reports `Resource::Css` once its
+                // stylo parser accepts the bytes, so keep the raw text
+                // around as a fallback the callback can use to backfill
+                // `column_css_texts` when this upfront guess was wrong.
+                let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
+                (Bytes::from(raw_bytes), None, None, fallback)
             };
 
         let inner = self.inner.clone();
@@ -192,8 +204,12 @@ impl NetProvider<Resource> for FulgurNetProvider {
             move |_doc_id: usize, result: Result<Resource, Option<String>>| {
                 if let Ok(res) = result {
                     let mut guard = inner.lock().unwrap();
-                    if let (Resource::Css(node_id, _), Some(text)) = (&res, &column_css_text) {
-                        guard.column_css_texts.push((*node_id, text.clone()));
+                    if let Resource::Css(node_id, _) = &res
+                        && let Some(text) = column_css_text
+                            .clone()
+                            .or_else(|| raw_text_fallback.clone())
+                    {
+                        guard.column_css_texts.push((*node_id, text));
                     }
                     guard.pending_resources.push(res);
                 }
