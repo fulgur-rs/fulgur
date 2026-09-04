@@ -2769,14 +2769,29 @@ fn fragment_block_subtree_inner(
                             x: parent_x_in_body.as_px(),
                             y: page_start_y.as_px(),
                             width: parent_w.as_px(),
-                            // Use the full page strip height, not just
-                            // `cursor_y - page_start_y`: in a grid/flex row
-                            // context a later sibling cell can restore this
-                            // same page (`origin_pending_same_row`) and paint
-                            // past `cursor_y`, so the parent fragment must
+                            // Only widen to the full page strip when we're
+                            // actually inside a grid/flex row
+                            // (`row_state.is_some()`, gated the same way
+                            // `should_emit` above is): a later same-row
+                            // sibling cell can restore this same page
+                            // (`origin_pending_same_row`) and paint past
+                            // `cursor_y`, so the parent fragment must
                             // already cover the whole strip to avoid a gap
-                            // under that restored content.
-                            height: (page_height_px - page_start_y).max(0.0).as_px(),
+                            // under that restored content. Outside a row
+                            // context (plain block flow — the common case,
+                            // e.g. a `break-inside:avoid` block pushed to a
+                            // fresh page) there is no such later sibling, so
+                            // stretching to the full remaining page height
+                            // is wrong: it paints the parent's background
+                            // far past its actual content and pushes
+                            // whatever comes after it onto a spurious extra
+                            // page (confirmed regression in
+                            // examples/break-inside via PR #741).
+                            height: if row_state.is_some() {
+                                (page_height_px - page_start_y).max(0.0).as_px()
+                            } else {
+                                (cursor_y - page_start_y).as_px()
+                            },
                         });
                 }
                 page_index += 1;
@@ -2885,16 +2900,40 @@ fn fragment_block_subtree_inner(
             page_index = new_page_index;
             // codex P2: mirror the recursion branch's fulgur-u0p0
             // cursor handling — when `fragment_inline_root` stayed on
-            // the same page (`new_page_index == pre_split_page`), keep
-            // the larger of the parent's existing `cursor_y` (a
+            // the same page (`new_page_index == pre_split_page`) AND
+            // we're inside a grid/flex row (`row_state.is_some()`),
+            // keep the larger of the parent's existing `cursor_y` (a
             // previous parallel row cell's bottom) and this split's own
             // `new_cursor_y`, rather than unconditionally shrinking to
             // `new_cursor_y`. Otherwise a shorter same-page paragraph
             // cell followed by `break-after: page` would close the
             // parent's fragment at this cell's bottom instead of the
             // row's true (taller) extent.
+            //
+            // Outside a row context, `cursor_y` at this point is NOT a
+            // "previous parallel cell's bottom" to preserve — when the
+            // split-before pre-check above fired, `cursor_y` still
+            // holds its *stale pre-advance* value (the position before
+            // the fresh-page rebase), since that block resets
+            // `page_start_y` / `page_taffy_origin` / `child_page_y` but
+            // deliberately leaves `cursor_y` untouched (only the
+            // grid/flex-row path needs it preserved across the
+            // rebase). Taking `.max()` against that stale value here
+            // wrongly keeps it instead of adopting `new_cursor_y`,
+            // stretching this parent's own trailing-close fragment
+            // (`cursor_y - page_start_y`) to nearly a full page even
+            // though the paragraph itself was short (confirmed
+            // regression in examples/break-inside: a `break-inside:
+            // avoid` callout with non-zero top padding — a real class-C
+            // break point — split-before-pushed to a fresh page, then
+            // had its short paragraph's actual end (`new_cursor_y`)
+            // discarded in favor of the pre-push cursor).
             cursor_y = if new_page_index == pre_split_page {
-                cursor_y.max(new_cursor_y)
+                if row_state.is_some() {
+                    cursor_y.max(new_cursor_y)
+                } else {
+                    new_cursor_y
+                }
             } else {
                 new_cursor_y
             };

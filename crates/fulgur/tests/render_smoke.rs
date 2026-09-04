@@ -6666,3 +6666,51 @@ body {{ margin:0; font-size:14px; }}</style>
         "expected all 120 tokens in pdftotext output, missing: {missing:?}"
     );
 }
+
+/// fulgur-2s7p.1 follow-up: a `break-inside: avoid` box with a
+/// non-zero top padding — a real CSS Fragmentation class-C break
+/// point, distinct from the zero-gap first-child case the test above
+/// covers — split-before-pushed to a fresh page, whose own short
+/// paragraph fits entirely on that one fresh page (no further page
+/// crossing).
+///
+/// Found while regenerating `examples/break-inside` after the fix
+/// above: `fragment_block_subtree_inner`'s split-before pre-check
+/// resets `page_index` / `page_start_y` / `page_taffy_origin` /
+/// `child_page_y` for the fresh page but deliberately leaves the outer
+/// `cursor_y` untouched (that staleness is intentional for a
+/// grid/flex row, where a parallel sibling cell's bottom must survive
+/// the rebase). The line right after `fragment_inline_root` returns —
+/// `cursor_y = if new_page_index == pre_split_page { cursor_y.max(new_cursor_y) } else { new_cursor_y }`
+/// — then took the `==` branch (the paragraph fit on the fresh page,
+/// no further crossing) and kept the *stale pre-push* `cursor_y` via
+/// `.max()`, since outside a grid/flex row `row_state` was `None` and
+/// nothing had reset it. The parent's own trailing-close fragment
+/// (`cursor_y - page_start_y`) then spanned from that stale pre-push
+/// value down to `page_start_y = 0`, i.e. nearly the *entire* fresh
+/// page — the box's background visibly stretched far past its actual
+/// short content, and the sibling below it (`<div id="after">`) was
+/// pushed onto a spurious extra page reading from the wrong `cursor_y`.
+/// Fixed by only taking the `.max()` when `row_state.is_some()`.
+#[test]
+fn nested_break_inside_avoid_box_with_padding_split_before_does_not_stretch_parent() {
+    let html = r#"<!DOCTYPE html>
+<style>@page { size: 300px 400px; margin: 0; }
+body { margin:0; font-size:14px; line-height:1.4; }</style>
+<body>
+<div style="height:370px"></div>
+<div style="break-inside:avoid; padding-top:20px; background:#eef;">
+<p style="margin:0;padding:0;line-height:20px">Key Insight line one two three four five six seven</p>
+</div>
+<div id="after" style="height:20px; background:#0f0;"></div>
+</body>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pages = page_count(&pdf);
+    assert_eq!(
+        pages, 2,
+        "expected the padded break-inside:avoid box (and the sibling after it) to \
+         fit on a compact page 2 — a stale-cursor stretch instead pushes both onto \
+         a spurious extra page, got {pages}"
+    );
+}
