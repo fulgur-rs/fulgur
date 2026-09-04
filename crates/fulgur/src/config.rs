@@ -584,6 +584,15 @@ mod tests {
     }
 
     #[test]
+    fn page_height_portrait_letter() {
+        let config = Config::builder()
+            .page_size(PageSize::LETTER)
+            .landscape(false)
+            .build();
+        assert!((config.page_height() - PageSize::LETTER.height).abs() < 0.01);
+    }
+
+    #[test]
     fn page_height_landscape_letter() {
         let config = Config::builder()
             .page_size(PageSize::LETTER)
