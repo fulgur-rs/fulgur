@@ -2928,8 +2928,20 @@ fn fragment_block_subtree_inner(
             // break point — split-before-pushed to a fresh page, then
             // had its short paragraph's actual end (`new_cursor_y`)
             // discarded in favor of the pre-push cursor).
+            //
+            // CodeRabbit: `row_state.is_some()` alone isn't enough —
+            // it's also true for the *first* cell of a brand-new
+            // grid/flex row. If split-before fires for that cell
+            // (`pre_split_page > entry_page_index`), `cursor_y` still
+            // holds the *previous row's* bottom on the *old* page, not
+            // a same-page previous-cell bottom — `.max()` against it is
+            // just as stale as the no-row case above. Only preserve /
+            // max when split-before did **not** advance the page
+            // (`pre_split_page == entry_page_index`), i.e. this is
+            // genuinely a later cell still being placed on the row's
+            // already-current page.
             cursor_y = if new_page_index == pre_split_page {
-                if row_state.is_some() {
+                if row_state.is_some() && pre_split_page == entry_page_index {
                     cursor_y.max(new_cursor_y)
                 } else {
                     new_cursor_y
@@ -8596,6 +8608,79 @@ h2 { string-set: chapter-title content(text); }
              at the row's true max bottom (60, from col_a) — shrinking to \
              col_b's own shorter bottom would clip col_a's background/border: \
              page0={page0:?}"
+        );
+    }
+
+    /// CodeRabbit review on PR #741 (third round, commit 32aa763):
+    /// `row_state.is_some()` alone doesn't distinguish a later cell of
+    /// the row *already on the current page* from the row's *first*
+    /// cell, which can itself trigger split-before onto a fresh page.
+    /// In the latter case `cursor_y` still holds the *previous row's*
+    /// bottom on the *old* page — not a same-page previous-cell bottom
+    /// — so `.max(new_cursor_y)` against it is exactly as stale as the
+    /// no-row case the surrounding fix (32aa763) was written to guard
+    /// against.
+    ///
+    /// Fixture: row 1 is two 90px cells (`cursor_y` = 90 on page 0).
+    /// Row 2's first cell is a 2-line `<p>` (`line-height:20px`, wraps
+    /// to 40px total) with `break-after:page` — short enough that
+    /// 90 + 40 > 100 forces split-before, but 40 alone fits the fresh
+    /// page whole (`new_page_index == pre_split_page`). The `<p>`'s own
+    /// `break-after:page` then closes the grid's page-1 fragment right
+    /// after it: that close must use the paragraph's actual bottom on
+    /// page 1 (40), not the stale row-1 bottom (90) carried over from
+    /// the old page.
+    #[test]
+    fn grid_row_first_cell_split_before_does_not_inherit_prior_row_cursor() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font-size: 12px">
+              <div id="grid3" style="display: grid; grid-template-columns: 60px 60px; width: 120px;">
+                <div style="height: 90px; width: 60px"></div>
+                <div style="height: 90px; width: 60px"></div>
+                <p id="col_p3" style="margin:0; padding:0; line-height:20px; width:20px; break-after:page">one two</p>
+                <div id="col_b3" style="height: 10px; width: 60px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 200.0);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let col_p3_id = find_by_id(&doc, "col_p3").expect("p#col_p3");
+        let grid3_id = find_by_id(&doc, "grid3").expect("div#grid3");
+
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
+
+        let col_p3_geom = geom.get(&col_p3_id).expect("p#col_p3 must be recorded");
+        assert_eq!(
+            col_p3_geom.fragments.len(),
+            1,
+            "fixture must fit col_p3 whole on the fresh page after \
+             split-before (isolating the same-page cursor_y bug from a \
+             further mid-paragraph split): {:?}",
+            col_p3_geom.fragments
+        );
+        let p3_frag = &col_p3_geom.fragments[0];
+        assert_eq!(
+            p3_frag.page_index, 1,
+            "expected split-before to push col_p3 to page 1: {p3_frag:?}"
+        );
+        assert!(
+            (p3_frag.height.to_f32() - 40.0).abs() < 1.0,
+            "fixture must make col_p3's own page-1 bottom (40, two 20px \
+             lines) shorter than row 1's 90px bottom: {p3_frag:?}"
+        );
+
+        let grid3_geom = geom.get(&grid3_id).expect("div#grid3 must be recorded");
+        let page1 = grid3_geom
+            .fragments
+            .iter()
+            .find(|f| f.page_index == 1)
+            .expect("div#grid3 must have a page-1 fragment");
+        assert!(
+            (page1.height.to_f32() - 40.0).abs() < 1.0,
+            "col_p3's break-after:page must close the grid's page-1 \
+             fragment at col_p3's own bottom (40) — inheriting row 1's \
+             stale 90px bottom from the old page would overstate it: \
+             page1={page1:?}"
         );
     }
 
