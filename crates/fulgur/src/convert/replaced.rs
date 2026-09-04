@@ -407,7 +407,7 @@ mod tests {
         store: &'a RunningElementStore,
         assets: Option<&'a AssetBundle>,
     ) -> ConvertContext<'a> {
-        let column_styles = crate::blitz_adapter::extract_column_style_table(doc);
+        let column_styles = crate::blitz_adapter::extract_column_style_table(doc, &[]);
         let multicol_geometry = crate::multicol_layout::run_pass(doc, &column_styles);
         let pagination_geometry = crate::pagination_layout::run_pass(doc, 842.0);
         ConvertContext {

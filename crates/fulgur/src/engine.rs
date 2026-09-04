@@ -199,14 +199,15 @@ impl Engine {
         // the margin-box renderer, so headers/footers would appear in
         // default browser styles even though their content resolved
         // correctly.
-        let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
-            &html,
-            self.config.content_width().as_pt().in_px().to_f32(),
-            self.config.page_height().as_pt().in_px().to_f32() as u32,
-            fonts,
-            self.system_fonts,
-            self.base_path.as_deref(),
-        );
+        let (mut doc, link_gcpm, link_column_css) =
+            crate::blitz_adapter::parse_html_with_local_resources(
+                &html,
+                self.config.content_width().as_pt().in_px().to_f32(),
+                self.config.page_height().as_pt().in_px().to_f32() as u32,
+                fonts,
+                self.system_fonts,
+                self.base_path.as_deref(),
+            );
         gcpm.extend_from(link_gcpm);
 
         // Inline `<style>` blocks in the HTML are parsed by stylo for
@@ -472,7 +473,8 @@ impl Engine {
         // that stylo 0.8.0 gates behind its gecko engine. The side-table is
         // consumed first by the multicol layout hook (for column-fill) and
         // then by the convert pass (for column-rule wrapping).
-        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let column_styles =
+            crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
         // Blitz treats multicol containers as plain blocks; route them
         // through fulgur's Taffy hook so columns balance and siblings
         // shift in lockstep. The returned geometry table captures per-
@@ -850,14 +852,15 @@ impl Engine {
     pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
-            html,
-            self.config.content_width().as_pt().in_px().to_f32(),
-            self.config.page_height().as_pt().in_px().to_f32() as u32,
-            fonts,
-            self.system_fonts,
-            self.base_path.as_deref(),
-        );
+        let (mut doc, _link_gcpm, link_column_css) =
+            crate::blitz_adapter::parse_html_with_local_resources(
+                html,
+                self.config.content_width().as_pt().in_px().to_f32(),
+                self.config.page_height().as_pt().in_px().to_f32() as u32,
+                fonts,
+                self.system_fonts,
+                self.base_path.as_deref(),
+            );
 
         let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
@@ -869,7 +872,8 @@ impl Engine {
             self.config.content_width().as_pt().in_px().to_f32(),
             self.config.content_height().as_pt().in_px().to_f32(),
         );
-        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let column_styles =
+            crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
@@ -915,14 +919,15 @@ impl Engine {
     ) {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
-            html,
-            self.config.content_width().as_pt().in_px().to_f32(),
-            self.config.page_height().as_pt().in_px().to_f32() as u32,
-            fonts,
-            self.system_fonts,
-            self.base_path.as_deref(),
-        );
+        let (mut doc, _link_gcpm, link_column_css) =
+            crate::blitz_adapter::parse_html_with_local_resources(
+                html,
+                self.config.content_width().as_pt().in_px().to_f32(),
+                self.config.page_height().as_pt().in_px().to_f32() as u32,
+                fonts,
+                self.system_fonts,
+                self.base_path.as_deref(),
+            );
 
         let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         let passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
@@ -934,7 +939,8 @@ impl Engine {
             self.config.content_width().as_pt().in_px().to_f32(),
             self.config.content_height().as_pt().in_px().to_f32(),
         );
-        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let column_styles =
+            crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),

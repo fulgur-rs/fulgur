@@ -813,6 +813,29 @@ impl<'a> PaginationLayoutTree<'a> {
             // `break-inside: avoid` is overridden when the subtree is
             // truly oversized (CSS Fragmentation §4.2 "unforced
             // break"), so we still fall through to splitting.
+            //
+            // fulgur-2s7p.5: the above was aspirational — nothing
+            // actually consulted `avoid_inside` here, so a
+            // `break-inside: avoid` block container (not itself an
+            // inline root — `avoid_inside` only suppresses the
+            // `line_metrics` branch above) that merely doesn't fit the
+            // *remaining* strip still recursed via
+            // `would_split_block_subtree`, which measures against
+            // `available_strip`, not a full page. The nested walker
+            // then split it at whatever gap-based break point it found
+            // (e.g. the box's own non-zero top padding), leaving a
+            // sliver of its background on the current page — visually
+            // still "breaking inside" the box, exactly what `avoid`
+            // promises not to do. Suppress the *unforced*-break
+            // trigger (`would_split_block_subtree` alone) when the box
+            // both wants to avoid an inside break AND fits whole on a
+            // fresh page (`child_h <= page_height_px`, same +1px
+            // quantization tolerance as the oversized check below) —
+            // it falls through to the plain cursor-advance path further
+            // down, which pushes the whole box, unsplit, to the next
+            // page. A forced break or page-name change below still
+            // recurses regardless: those aren't the "unforced break"
+            // `avoid` concerns itself with.
             let child_node = self.doc.get_node(child_id);
             let has_splittable_children = child_node.is_some_and(|n| !n.children.is_empty());
             // fulgur-7hf5: multicol containers (`column-count > 1` /
@@ -841,6 +864,7 @@ impl<'a> PaginationLayoutTree<'a> {
                     })
                 });
             let available_strip = (self.page_height_px - cursor_y).max(0.0);
+            let avoid_fits_whole_page = avoid_inside && child_h <= self.page_height_px + 1.0;
             let needs_recursion = has_splittable_children
                 && (!is_multicol || multicol_has_span_all)
                 && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
@@ -850,13 +874,14 @@ impl<'a> PaginationLayoutTree<'a> {
                         self.used_page_names.as_ref(),
                         0,
                     )
-                    || would_split_block_subtree(
-                        self.doc,
-                        child_id,
-                        available_strip,
-                        self.page_height_px,
-                        0,
-                    ));
+                    || (!avoid_fits_whole_page
+                        && would_split_block_subtree(
+                            self.doc,
+                            child_id,
+                            available_strip,
+                            self.page_height_px,
+                            0,
+                        )));
             if needs_recursion {
                 let child_x_in_body = body_x + layout.location.x;
                 let (new_page, new_cursor) = fragment_block_subtree(
@@ -2998,11 +3023,27 @@ fn fragment_block_subtree_inner(
         // fulgur-7hf5: see body-direct branch — multicol containers
         // are atomic from the fragmenter's perspective.
         let is_multicol = crate::blitz_adapter::is_multicol_container(child);
+        // fulgur-2s7p.5: mirrors the body-direct branch's
+        // `avoid_fits_whole_page` guard — a nested `break-inside:
+        // avoid` block container that fits whole on a fresh page must
+        // not be recursed into just because it doesn't fit the
+        // *remaining* strip (`would_split_block_subtree` measures
+        // against `available_strip`, not a full page), or the split-
+        // before branch above leaves a sliver of its background behind
+        // on the current page instead of moving the whole box.
+        let avoid_fits_whole_page = avoid_inside && child_h <= page_height_px + 1.0;
         let needs_recursion = !child.children.is_empty()
             && !is_multicol
             && (has_forced_break_below(doc, child_id, column_styles, 0)
                 || has_page_name_change_below(doc, child_id, used_page_names, 0)
-                || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
+                || (!avoid_fits_whole_page
+                    && would_split_block_subtree(
+                        doc,
+                        child_id,
+                        available_strip,
+                        page_height_px,
+                        0,
+                    )));
         if needs_recursion {
             let occupied_before_recursion = initial_page_occupied;
             let row_started_on_occupied_strip = row_state
@@ -6461,7 +6502,7 @@ h2 { string-set: chapter-title content(text); }
         blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
         let store = pass.into_store();
         blitz_adapter::resolve(&mut doc);
-        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+        let column_styles = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geometry =
             run_pass_with_break_styles(doc.deref_mut(), 720.0_f32.as_pt().in_px(), &column_styles);
 
@@ -6525,7 +6566,7 @@ h2 { string-set: chapter-title content(text); }
         blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
         let store = pass.into_running_store();
         blitz_adapter::resolve(&mut doc);
-        let column_styles = blitz_adapter::extract_column_style_table(&doc);
+        let column_styles = blitz_adapter::extract_column_style_table(&doc, &[]);
 
         let geometry = run_pass_with_break_and_running(
             doc.deref_mut(),
@@ -7427,13 +7468,13 @@ h2 { string-set: chapter-title content(text); }
 
         let direct_geom = {
             let mut doc = parse(html, 600.0);
-            let table = blitz_adapter::extract_column_style_table(&doc);
+            let table = blitz_adapter::extract_column_style_table(&doc, &[]);
             super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table)
         };
 
         let taffy_geom = {
             let mut doc = parse(html, 600.0);
-            let table = blitz_adapter::extract_column_style_table(&doc);
+            let table = blitz_adapter::extract_column_style_table(&doc, &[]);
             let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 800.0);
             tree.column_styles = Some(&table);
             tree.drive_taffy_root_layout();
@@ -7481,7 +7522,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // Filter to fragments whose width is exactly the cell width
@@ -7528,7 +7569,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut candidates: Vec<_> = geom
@@ -7575,7 +7616,7 @@ h2 { string-set: chapter-title content(text); }
             .final_layout
             .size
             .height = f32::INFINITY;
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 150.0_f32.as_px(), &table);
         // Load-bearing assertion: without the guard the injected `+inf`
         // reaches a Fragment height and poisons `cursor_y`, so emitted
@@ -7615,7 +7656,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut candidates: Vec<_> = geom
@@ -7650,7 +7691,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut cells: Vec<_> = geom
@@ -7690,7 +7731,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut cells: Vec<_> = geom
@@ -7730,7 +7771,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut page_one_cells: Vec<_> = geom
@@ -7766,7 +7807,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut page_one_cells: Vec<_> = geom
@@ -7813,7 +7854,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // 100×50 の inner div fragment 4 個を集める。
@@ -7883,7 +7924,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         let mut inner: Vec<(u32, f32, f32)> = geom
@@ -7970,7 +8011,7 @@ h2 { string-set: chapter-title content(text); }
 
         // 600 viewport, 400 page strip (small enough to overflow).
         let mut doc = parse(&html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
         let pages = super::implied_page_count(&geom);
         assert!(
@@ -8154,7 +8195,7 @@ h2 { string-set: chapter-title content(text); }
             // (only reached when `line_metrics.len() > 1`), not the
             // pre-existing single-line block-child path.
             let mut doc = parse(html, 150.0);
-            let table_cs = blitz_adapter::extract_column_style_table(&doc);
+            let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
             let parent_id = find_by_id(&doc, "parent").expect("div#parent");
             let p1_id = find_by_id(&doc, "p1").expect("p#p1");
             let lines = super::collect_inline_line_metrics(doc.get_node(p1_id).expect("p1 node"));
@@ -8302,7 +8343,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
 
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
@@ -8355,7 +8396,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let col_p_id = find_by_id(&doc, "col_p").expect("p#col_p");
         let col_b_id = find_by_id(&doc, "col_b").expect("div#col_b");
         let col_c_id = find_by_id(&doc, "col_c").expect("div#col_c");
@@ -8426,7 +8467,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let grid2_id = find_by_id(&doc, "grid2").expect("div#grid2");
         let col_p2_id = find_by_id(&doc, "col_p2").expect("p#col_p2");
         let col_b2_id = find_by_id(&doc, "col_b2").expect("div#col_b2");
@@ -8522,7 +8563,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
 
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table_cs);
@@ -8570,7 +8611,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let grid_id = find_by_id(&doc, "grid").expect("div#grid");
         let col_b_id = find_by_id(&doc, "col_b").expect("p#col_b");
 
@@ -8643,7 +8684,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 200.0);
-        let table_cs = blitz_adapter::extract_column_style_table(&doc);
+        let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
         let col_p3_id = find_by_id(&doc, "col_p3").expect("p#col_p3");
         let grid3_id = find_by_id(&doc, "grid3").expect("div#grid3");
 
@@ -8757,7 +8798,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // Find every fragment with height ≈ 100 on page 1; B is the
@@ -8794,7 +8835,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let second_on_page1: Vec<&Fragment> = geom
@@ -8951,7 +8992,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0_f32.as_px(), &table);
         // Page count must be ≥ 2 — without yb27 the trailing inline
         // text never reaches a new page (single fragment, page 0 only).
@@ -8991,7 +9032,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         // Locate the <section> node id explicitly so the assertion
         // targets the specific block that should keep a page-0
         // fragment — without this, a wide body fragment on page 0
@@ -9187,7 +9228,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
@@ -9226,7 +9267,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let mut frags: Vec<(u32, f32, f32)> = geom
@@ -9281,7 +9322,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         // inner divs: 40px tall, 100px wide
@@ -9335,7 +9376,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let mut inner: Vec<(u32, f32, f32)> = geom
@@ -9374,7 +9415,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert!(
             geom.values()
@@ -9398,7 +9439,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert!(
             geom.values()
@@ -9421,7 +9462,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert!(
             geom.values()
@@ -9447,7 +9488,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert!(
             geom.values()
@@ -9472,7 +9513,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert!(
             geom.values()
@@ -9579,7 +9620,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         // The inner div has break-after: page; has_forced_break_below must
         // recurse through the middle div and detect it, causing the outer
@@ -9610,7 +9651,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         // The second div must land on page 1 because the first carries
         // break-after: page; both divs fit in the 800px strip so overflow
@@ -9646,7 +9687,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         // The is_float guard prevents the float's named page from being stored
         // in prev_used_page, so the following in-flow sibling must stay on page 0.
@@ -9683,7 +9724,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         // The 1200px float must be sliced into ≥ 2 fragments (slicing path exercised).
         let max_frags = geom.values().map(|g| g.fragments.len()).max().unwrap_or(0);
@@ -9717,7 +9758,7 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         assert_eq!(
             super::implied_page_count(&geom),
@@ -9758,7 +9799,7 @@ h2 { string-set: chapter-title content(text); }
         let mut doc = parse(html, 600.0);
         let inner2_id = find_by_id(doc.deref_mut(), "inner2").expect("div#inner2");
         let after_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 600.0_f32.as_px(), &table);
         // Recursion-specific check: fragment_block_subtree records inner2 on
         // page 1. The slice path would record it on page 0 instead.
@@ -9798,7 +9839,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let after_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
-        let table = blitz_adapter::extract_column_style_table(&doc);
+        let table = blitz_adapter::extract_column_style_table(&doc, &[]);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
         let after_geom = geom.get(&after_id).expect("div#after must be in geometry");
         assert_eq!(after_geom.fragments.len(), 1);

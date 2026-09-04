@@ -10,10 +10,22 @@
 //!
 //! Scope and trade-offs:
 //!
-//! - Only inline `style="..."` attributes and top-level `<style>` blocks are
-//!   scanned. External stylesheets loaded via `<link rel=stylesheet>` reach
-//!   stylo/blitz for the properties they support but do **not** currently
-//!   populate this side-table — tracked as fulgur-s5ro.
+//! - Inline `style="..."` attributes, top-level `<style>` blocks, *and*
+//!   `<link rel=stylesheet>` / `@import`-loaded external stylesheets are all
+//!   scanned (fulgur-s5ro) — `blitz_adapter::parse_html_with_local_resources`
+//!   drains each successfully-loaded stylesheet's raw text via
+//!   [`crate::net::FulgurNetProvider::drain_column_css_texts`], and
+//!   `extract_column_style_table`'s DOM walk folds each one in at its
+//!   originating `<link>` element's own position, so document order is
+//!   preserved the same as for inline `<style>` blocks. One caveat: a
+//!   `<link rel=stylesheet media="...">` with a non-default, non-empty
+//!   `media` value is rewritten to a synthetic `<style>@import ...>` before
+//!   this walk runs (see `collect_link_media_rewrites`), and — like the
+//!   pre-existing `fulgur-owa` gap for GCPM contexts — its *first*
+//!   (wrong-media) fetch and its rewritten *second* fetch can both leave
+//!   entries in the drain buffer; only the second is folded in, but a
+//!   third-party CSS proxy/cache that serves different bytes per fetch could
+//!   still see both. Not solved here.
 //! - `<style media="...">` blocks whose media excludes `all` / `print` are
 //!   skipped by the harvester (`extract_column_style_table` in
 //!   `blitz_adapter.rs`). Full CSS media-query evaluation is deferred.
