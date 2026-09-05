@@ -3742,10 +3742,7 @@ mod tests {
         // the match falls through to `_ => None`.
         let mut pi = ParserInput::new("");
         let mut p = Parser::new(&mut pi);
-        assert!(
-            parse_page_margin_value(&mut p).is_none(),
-            "zero-value input must yield None"
-        );
+        assert!(parse_page_margin_value(&mut p).is_none());
     }
 
     // ── parse_string_set_value_list: unknown function silently ignored ────────
@@ -3809,9 +3806,7 @@ mod tests {
         assert_eq!(ctx.margin_boxes.len(), 1);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::String("prefix".to_string())],
-            "only the prefix before the malformed call must be retained; got: {:?}",
-            ctx.margin_boxes[0].content
+            vec![ContentItem::String("prefix".to_string())]
         );
     }
 
@@ -3830,9 +3825,7 @@ mod tests {
         assert_eq!(ctx.margin_boxes.len(), 1);
         assert_eq!(
             ctx.margin_boxes[0].content,
-            vec![ContentItem::String("prefix".to_string())],
-            "only the prefix before the malformed call must be retained; got: {:?}",
-            ctx.margin_boxes[0].content
+            vec![ContentItem::String("prefix".to_string())]
         );
     }
 
@@ -3851,9 +3844,7 @@ mod tests {
             vec![
                 ContentItem::String("prefix".to_string()),
                 ContentItem::String("suffix".to_string()),
-            ],
-            "content(unknown) must push no item; surrounding literals retained: {:?}",
-            ctx.margin_boxes[0].content
+            ]
         );
     }
 }
