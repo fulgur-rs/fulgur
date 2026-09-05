@@ -3706,14 +3706,21 @@ mod tests {
         assert_no_page_settings("@page { size: 100pt landscape; }");
     }
 
-    // ── parse_page_margin_value: >4 values returns None (line 417) ───────────
+    // ── parse_page_margin_value: trailing-token rejection for >4 values ────────
+    //
+    // Note: the `_ => None` arm at line 417 (values.len() == 0) is defensive
+    // code that cannot be reached through normal CSS parsing: if no valid length
+    // tokens are present the failing try_parse rolls back, leaving the token in
+    // the input, so `input.next()` succeeds and the function returns None at
+    // lines 402-403 before the match is reached. This test exercises the more
+    // common "4 values read, 5th triggers trailing-token rejection" path.
 
     #[test]
-    fn test_page_margin_five_values_is_discarded() {
-        // The loop reads at most 4 values then breaks. `input.next()` succeeds
-        // (5th value is still pending) → returns None (line 403-404). The margin
-        // is not stored. The @page rule still produces a PageSettingsRule because
-        // `size: A4` is valid.
+    fn test_page_margin_five_values_trailing_token_rejected() {
+        // The loop reads 4 values and breaks. The 5th token (`5pt`) is still in
+        // the input → `input.next()` succeeds → return None at lines 402-403
+        // (trailing-token rejection). The margin is not stored. The @page rule
+        // still produces a PageSettingsRule because `size: A4` is valid.
         let ctx = parse_gcpm("@page { size: A4; margin: 1pt 2pt 3pt 4pt 5pt; }");
         assert_eq!(ctx.page_settings.len(), 1);
         let ps = &ctx.page_settings[0];
@@ -3729,14 +3736,20 @@ mod tests {
     #[test]
     fn test_string_set_unknown_function_silently_ignored() {
         // fn_name is neither "content" nor "attr" → implicit else at line 885;
-        // the nested block is consumed and Ok(()) is returned, so the loop
-        // continues. The earlier literal is kept.
-        let css = r#"h1 { string-set: title "Chapter" other-func(x); }"#;
+        // the nested block is exhausted (empty arg list) and `Ok(())` is returned,
+        // so the loop CONTINUES. Using `other-func()` (no arguments) ensures the
+        // nested block is trivially empty after the closure, avoiding an
+        // early-termination via unconsumed nested tokens. A literal placed AFTER
+        // the ignored function is asserted present to prove continuation.
+        let css = r#"h1 { string-set: title "Before" other-func() "After"; }"#;
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.string_set_mappings.len(), 1);
         assert_eq!(
             ctx.string_set_mappings[0].values,
-            vec![StringSetValue::Literal("Chapter".to_string())]
+            vec![
+                StringSetValue::Literal("Before".to_string()),
+                StringSetValue::Literal("After".to_string()),
+            ]
         );
     }
 
@@ -3745,13 +3758,18 @@ mod tests {
     #[test]
     fn test_string_set_bare_number_token_silently_ignored() {
         // Token::Number hits `_ => {}` at line 890; the token is consumed and
-        // skipped; the loop continues. The earlier literal is preserved.
-        let css = r#"h1 { string-set: title "text" 123; }"#;
+        // skipped; the loop CONTINUES. To distinguish continuation from early
+        // termination we place a valid literal AFTER the number and assert that
+        // both the preceding and following literals are retained.
+        let css = r#"h1 { string-set: title "start" 123 "end"; }"#;
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.string_set_mappings.len(), 1);
         assert_eq!(
             ctx.string_set_mappings[0].values,
-            vec![StringSetValue::Literal("text".to_string())]
+            vec![
+                StringSetValue::Literal("start".to_string()),
+                StringSetValue::Literal("end".to_string()),
+            ]
         );
     }
 
