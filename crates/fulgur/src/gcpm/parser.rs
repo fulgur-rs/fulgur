@@ -3693,4 +3693,131 @@ mod tests {
             "expected UpperAlpha counter in items: {items:?}"
         );
     }
+
+    // ── parse_page_size_value: trailing token rejection (lines 365-367) ───────
+
+    #[test]
+    fn test_page_size_dim_with_trailing_ident_rejected() {
+        // `100pt` is a valid first dimension, but `landscape` is an ident, not
+        // a dimension. try_parse for height fails (line 357), so h = w = 100pt
+        // and `result = Some(Custom(100, 100))`. Then `input.next()` still
+        // finds `landscape` → trailing token → return None (line 367).
+        // No PageSettingsRule is pushed because size is None and margin is empty.
+        assert_no_page_settings("@page { size: 100pt landscape; }");
+    }
+
+    // ── parse_page_margin_value: >4 values returns None (line 417) ───────────
+
+    #[test]
+    fn test_page_margin_five_values_is_discarded() {
+        // The loop reads at most 4 values then breaks. `input.next()` succeeds
+        // (5th value is still pending) → returns None (line 403-404). The margin
+        // is not stored. The @page rule still produces a PageSettingsRule because
+        // `size: A4` is valid.
+        let ctx = parse_gcpm("@page { size: A4; margin: 1pt 2pt 3pt 4pt 5pt; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        let ps = &ctx.page_settings[0];
+        assert!(
+            ps.margin.top.is_none(),
+            "5-value margin shorthand must be discarded; got: {:?}",
+            ps.margin
+        );
+    }
+
+    // ── parse_string_set_value_list: unknown function silently ignored ────────
+
+    #[test]
+    fn test_string_set_unknown_function_silently_ignored() {
+        // fn_name is neither "content" nor "attr" → implicit else at line 885;
+        // the nested block is consumed and Ok(()) is returned, so the loop
+        // continues. The earlier literal is kept.
+        let css = r#"h1 { string-set: title "Chapter" other-func(x); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![StringSetValue::Literal("Chapter".to_string())]
+        );
+    }
+
+    // ── parse_string_set_value_list: unknown token type silently ignored ──────
+
+    #[test]
+    fn test_string_set_bare_number_token_silently_ignored() {
+        // Token::Number hits `_ => {}` at line 890; the token is consumed and
+        // skipped; the loop continues. The earlier literal is preserved.
+        let css = r#"h1 { string-set: title "text" 123; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![StringSetValue::Literal("text".to_string())]
+        );
+    }
+
+    // ── parse_content_value: target-counters missing separator (line 1171) ───
+
+    #[test]
+    fn test_content_target_counters_non_string_separator_discarded() {
+        // The separator argument must be a quoted string. `not-a-string` is an
+        // ident → `expect_string()` fails → Err(_) → return Ok(()) at line 1171;
+        // the TargetCounters item is NOT pushed.
+        let css = r#"@page { @top-center { content: target-counters(attr(href), page, not-a-string); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert!(
+            ctx.margin_boxes[0].content.is_empty(),
+            "TargetCounters with non-string separator must be discarded; got: {:?}",
+            ctx.margin_boxes[0].content
+        );
+    }
+
+    // ── parse_content_value: target-text invalid URL token (line 1193) ───────
+
+    #[test]
+    fn test_content_target_text_invalid_url_discarded() {
+        // parse_target_url receives Token::Number(123), which is not attr(),
+        // url(), a quoted string, or an unquoted URL → returns None (line 1010).
+        // None => return Ok(()) at line 1193; the TargetText item is NOT pushed.
+        let css = r#"@page { @top-center { content: target-text(123); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert!(
+            ctx.margin_boxes[0].content.is_empty(),
+            "target-text with invalid URL must be discarded; got: {:?}",
+            ctx.margin_boxes[0].content
+        );
+    }
+
+    // ── parse_content_value: content(unknown) silently ignored (line 1224) ───
+
+    #[test]
+    fn test_content_function_unknown_arg_silently_ignored() {
+        // `content(unknown)` → arg is "unknown" → `_ => {}` at line 1224;
+        // no ContentItem is pushed for that call, but surrounding literals are
+        // kept so the rest of the content list is unaffected.
+        let css = r#"@page { @top-center { content: "prefix" content(unknown) "suffix"; } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        let content = &ctx.margin_boxes[0].content;
+        assert!(
+            content
+                .iter()
+                .any(|i| matches!(i, ContentItem::String(s) if s == "prefix")),
+            "expected \"prefix\" in content: {content:?}"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|i| matches!(i, ContentItem::String(s) if s == "suffix")),
+            "expected \"suffix\" in content: {content:?}"
+        );
+        assert!(
+            !content.iter().any(|i| matches!(
+                i,
+                ContentItem::ContentText | ContentItem::ContentBefore | ContentItem::ContentAfter
+            )),
+            "unknown content() arg must not push a ContentItem: {content:?}"
+        );
+    }
 }
