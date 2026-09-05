@@ -3731,6 +3731,23 @@ mod tests {
         );
     }
 
+    // ── parse_page_margin_value: zero-value arm (line 417 `_ => None`) ────────
+
+    #[test]
+    fn test_page_margin_zero_values_returns_none() {
+        // The `_ => None` arm (line 417, values.len() == 0) is unreachable
+        // through normal CSS declaration parsing.  Exercise it by calling the
+        // private helper directly with an empty parser: the loop exits
+        // immediately with values = [], `input.next()` fails (exhausted), so
+        // the match falls through to `_ => None`.
+        let mut pi = ParserInput::new("");
+        let mut p = Parser::new(&mut pi);
+        assert!(
+            parse_page_margin_value(&mut p).is_none(),
+            "zero-value input must yield None"
+        );
+    }
+
     // ── parse_string_set_value_list: unknown function silently ignored ────────
 
     #[test]
@@ -3778,14 +3795,22 @@ mod tests {
     #[test]
     fn test_content_target_counters_non_string_separator_discarded() {
         // The separator argument must be a quoted string. `not-a-string` is an
-        // ident → `expect_string()` fails → Err(_) → return Ok(()) at line 1171;
+        // ident → try_parse rolls back → Err(_) → return Ok(()) at line 1171;
         // the TargetCounters item is NOT pushed.
-        let css = r#"@page { @top-center { content: target-counters(attr(href), page, not-a-string); } }"#;
+        //
+        // Early-termination: the rolled-back `not-a-string` token remains
+        // unconsumed in the nested block. parse_nested_block sees this after
+        // Ok(()) and returns Err; the outer try_parse propagates and breaks the
+        // loop. A "prefix" literal BEFORE the malformed call is retained (its
+        // own try_parse succeeded independently); "suffix" AFTER is not.
+        // Fixing this early-termination requires changes to parse_content_value.
+        let css = r#"@page { @top-center { content: "prefix" target-counters(attr(href), page, not-a-string) "suffix"; } }"#;
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.margin_boxes.len(), 1);
-        assert!(
-            ctx.margin_boxes[0].content.is_empty(),
-            "TargetCounters with non-string separator must be discarded; got: {:?}",
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::String("prefix".to_string())],
+            "only the prefix before the malformed call must be retained; got: {:?}",
             ctx.margin_boxes[0].content
         );
     }
@@ -3794,15 +3819,19 @@ mod tests {
 
     #[test]
     fn test_content_target_text_invalid_url_discarded() {
-        // parse_target_url receives Token::Number(123), which is not attr(),
-        // url(), a quoted string, or an unquoted URL → returns None (line 1010).
-        // None => return Ok(()) at line 1193; the TargetText item is NOT pushed.
-        let css = r#"@page { @top-center { content: target-text(123); } }"#;
+        // parse_target_url uses try_parse: Token::Number(123) is not attr(),
+        // url(), a quoted string, or an unquoted URL → try_parse rolls back
+        // (123 stays in stream) and returns None (line 1010).
+        // None => return Ok(()) at line 1193; but 123 is still unconsumed in
+        // the nested block → parse_nested_block returns Err → outer loop breaks.
+        // A "prefix" literal BEFORE is retained; "suffix" AFTER is not.
+        let css = r#"@page { @top-center { content: "prefix" target-text(123) "suffix"; } }"#;
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.margin_boxes.len(), 1);
-        assert!(
-            ctx.margin_boxes[0].content.is_empty(),
-            "target-text with invalid URL must be discarded; got: {:?}",
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::String("prefix".to_string())],
+            "only the prefix before the malformed call must be retained; got: {:?}",
             ctx.margin_boxes[0].content
         );
     }
@@ -3817,25 +3846,14 @@ mod tests {
         let css = r#"@page { @top-center { content: "prefix" content(unknown) "suffix"; } }"#;
         let ctx = parse_gcpm(css);
         assert_eq!(ctx.margin_boxes.len(), 1);
-        let content = &ctx.margin_boxes[0].content;
-        assert!(
-            content
-                .iter()
-                .any(|i| matches!(i, ContentItem::String(s) if s == "prefix")),
-            "expected \"prefix\" in content: {content:?}"
-        );
-        assert!(
-            content
-                .iter()
-                .any(|i| matches!(i, ContentItem::String(s) if s == "suffix")),
-            "expected \"suffix\" in content: {content:?}"
-        );
-        assert!(
-            !content.iter().any(|i| matches!(
-                i,
-                ContentItem::ContentText | ContentItem::ContentBefore | ContentItem::ContentAfter
-            )),
-            "unknown content() arg must not push a ContentItem: {content:?}"
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![
+                ContentItem::String("prefix".to_string()),
+                ContentItem::String("suffix".to_string()),
+            ],
+            "content(unknown) must push no item; surrounding literals retained: {:?}",
+            ctx.margin_boxes[0].content
         );
     }
 }
