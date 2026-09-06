@@ -533,4 +533,72 @@ mod tests {
         let config = Config::builder().pdf_ua(true).build();
         assert!(config.effective_bookmarks());
     }
+
+    // --- Margin::symmetric ---
+
+    #[test]
+    fn margin_symmetric_sets_vertical_and_horizontal() {
+        let m = Margin::symmetric(10.0, 20.0);
+        assert_eq!(m.top, 10.0);
+        assert_eq!(m.bottom, 10.0);
+        assert_eq!(m.right, 20.0);
+        assert_eq!(m.left, 20.0);
+    }
+
+    #[test]
+    fn margin_symmetric_equal_values_matches_uniform() {
+        let sym = Margin::symmetric(15.0, 15.0);
+        let uni = Margin::uniform(15.0);
+        assert_eq!(sym, uni);
+    }
+
+    #[test]
+    fn margin_symmetric_zero_horizontal() {
+        let m = Margin::symmetric(5.0, 0.0);
+        assert_eq!(m.top, 5.0);
+        assert_eq!(m.bottom, 5.0);
+        assert_eq!(m.right, 0.0);
+        assert_eq!(m.left, 0.0);
+    }
+
+    // --- Config::page_height landscape branch ---
+
+    #[test]
+    fn page_height_portrait_returns_portrait_height() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .landscape(false)
+            .build();
+        // portrait: height = 841.89pt
+        assert!((config.page_height() - PageSize::A4.height).abs() < 0.01);
+    }
+
+    #[test]
+    fn page_height_landscape_returns_flipped_height() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .landscape(true)
+            .build();
+        // landscape: page is rotated, so physical height = A4 portrait width
+        assert!((config.page_height() - PageSize::A4.width).abs() < 0.01);
+    }
+
+    #[test]
+    fn page_height_portrait_letter() {
+        let config = Config::builder()
+            .page_size(PageSize::LETTER)
+            .landscape(false)
+            .build();
+        assert!((config.page_height() - PageSize::LETTER.height).abs() < 0.01);
+    }
+
+    #[test]
+    fn page_height_landscape_letter() {
+        let config = Config::builder()
+            .page_size(PageSize::LETTER)
+            .landscape(true)
+            .build();
+        // Letter portrait width=612, height=792; landscape flips them
+        assert!((config.page_height() - PageSize::LETTER.width).abs() < 0.01);
+    }
 }
