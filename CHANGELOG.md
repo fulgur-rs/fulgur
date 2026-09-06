@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.41.0] - 2026-09-06
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(config): reject non-finite/negative/collapsing page size and margin by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/687
+* harden(asset): cap unbounded CSS/image asset registration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/688
+* harden(examples): scope wasm-demo HTTP server to examples/, not repo root by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/696
+* harden(asset): cap unbounded raw font-byte registration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/697
+### Features
+* feat(pagination): repeat table headers by @vsevolod in https://github.com/fulgur-rs/fulgur/pull/710
+### Bug Fixes
+* fix(gradient): harden stop resolution against non-finite geometry by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/684
+* fix: bump workspace MSRV to 1.89.0 to match dependency floor by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/701
+* fix(pagination): drop phantom header pages from trailing forced breaks by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/728
+* fix(pagination): address review findings on repeating table headers by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/721
+* fix(pagination): split nested inline-root paragraphs at line boundaries by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/741
+
+## New Contributors
+* @vsevolod made their first contribution in https://github.com/fulgur-rs/fulgur/pull/710
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.40.0...v0.41.0
+<!-- release-notes:auto:end -->
+
 ## [0.40.0] - 2026-07-28
 
 <!-- release-notes:auto:begin -->
