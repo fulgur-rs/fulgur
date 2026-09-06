@@ -7325,26 +7325,31 @@ mod tests {
 
     #[test]
     fn render_smoke_multicol_tall_paragraph_spanning_pages() {
-        // A narrow multicol container on a small page forces the column content
-        // to span multiple page fragments. `paint_multicol_paragraph_slices`'s
-        // `needs_partition = true` branch (lines 1386-1401) filters slices by
-        // the visible range on each page, exercising the `above || below ||
-        // straddles` continue guard.
+        // A multicol container with a `column-span: all` direct child forces
+        // the fragmenter (pagination_layout.rs:835-842) to split the container
+        // across pages, giving `container_geom.is_split() = true` and therefore
+        // `needs_partition = true` in `paint_multicol_paragraph_slices`.
         //
-        // Page: 80 mm × 40 mm with zero PDF margins so the full 40 mm is usable
-        // (PageSize::custom takes mm; Margin::uniform takes pt). At font-size:10px
-        // (≈ 7.5 pt) with 1.2 line-height a 37 mm column holds roughly 13 lines.
-        // The paragraph is repeated 8 times (~640 words) so it reliably overflows
-        // across at least 3 pages in the 2-column layout.
+        // Without `column-span: all` the fragmenter treats the multicol box as
+        // atomic (lines 827-845) and `is_split()` stays false, which skips the
+        // visibility-range filter at lines 1386-1401 entirely.
+        //
+        // Page: 80 mm × 40 mm with zero PDF margins (PageSize::custom = mm;
+        // Margin::uniform = pt). The first paragraph fills the first column group,
+        // the span-all heading forces a new fragment, and the second paragraph
+        // fills subsequent pages — ensuring at least two fragments and therefore
+        // the `needs_partition = true` branch.
         let sentence = "Alpha beta gamma delta epsilon zeta eta theta iota kappa \
                         lambda mu nu xi omicron pi rho sigma tau upsilon phi chi \
                         psi omega. Lorem ipsum dolor sit amet consectetur adipiscing \
                         elit sed do eiusmod tempor incididunt ut labore et dolore \
                         magna aliqua ut enim ad minim veniam quis nostrud. ";
-        let long_text = sentence.repeat(8);
+        let long_text = sentence.repeat(4);
         let html = format!(
             r#"<!doctype html><html><body style="margin:0">
             <div style="column-count:2;column-gap:5px;width:80mm;font-size:10px">
+              <p>{long_text}</p>
+              <div style="column-span:all;background:#eee;padding:2px">Spanning heading</div>
               <p>{long_text}</p>
             </div>
             </body></html>"#,
