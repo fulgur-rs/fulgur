@@ -7330,18 +7330,30 @@ mod tests {
         // `needs_partition = true` branch (lines 1386-1401) filters slices by
         // the visible range on each page, exercising the `above || below ||
         // straddles` continue guard.
+        //
+        // Page: 80 mm × 40 mm with zero PDF margins so the full 40 mm is usable
+        // (PageSize::custom takes mm; Margin::uniform takes pt). At font-size:10px
+        // (≈ 7.5 pt) with 1.2 line-height a 37 mm column holds roughly 13 lines.
+        // The paragraph is repeated 8 times (~640 words) so it reliably overflows
+        // across at least 3 pages in the 2-column layout.
+        let sentence = "Alpha beta gamma delta epsilon zeta eta theta iota kappa \
+                        lambda mu nu xi omicron pi rho sigma tau upsilon phi chi \
+                        psi omega. Lorem ipsum dolor sit amet consectetur adipiscing \
+                        elit sed do eiusmod tempor incididunt ut labore et dolore \
+                        magna aliqua ut enim ad minim veniam quis nostrud. ";
+        let long_text = sentence.repeat(8);
+        let html = format!(
+            r#"<!doctype html><html><body style="margin:0">
+            <div style="column-count:2;column-gap:5px;width:80mm;font-size:10px">
+              <p>{long_text}</p>
+            </div>
+            </body></html>"#,
+        );
         let pdf = crate::engine::Engine::builder()
-            .page_size(crate::config::PageSize::custom(80.0, 60.0))
+            .page_size(crate::config::PageSize::custom(80.0, 40.0))
+            .margin(crate::config::Margin::uniform(0.0))
             .build()
-            .render(
-                r#"<!doctype html><html><body style="margin:0">
-                <div style="column-count:2;column-gap:5px;width:80mm;font-size:10px">
-                  <p>Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda
-                     mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.
-                     Lorem ipsum dolor sit amet consectetur adipiscing elit.</p>
-                </div>
-                </body></html>"#,
-            )
+            .render(&html)
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
     }
