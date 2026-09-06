@@ -7269,4 +7269,97 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- dispatch_inline_box_content: opacity branch (lines 829-843) ---
+
+    #[test]
+    fn render_smoke_inline_block_with_opacity_and_block_child() {
+        // An inline-block with fractional `opacity` containing a block-level
+        // `<div>` child. During convert, the span becomes an opacity scope with
+        // the inner div in `opacity_descendants`. In `dispatch_inline_box_content`
+        // the `!block.opacity_descendants.is_empty()` guard fires, routing through
+        // `draw_under_opacity` (lines 829-843).
+        //
+        // NOTE: outer container MUST be <div>, not <p>. The HTML5 parser
+        // implicitly closes an open <p> when it encounters a block-level <div>
+        // start tag, which would place the <span> outside the paragraph and
+        // prevent the inline-box dispatch path from being exercised.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div>Before
+              <span style="display:inline-block;opacity:0.5;
+                           width:60px;height:40px">
+                <div style="width:50px;height:30px;background:#cef">inner</div>
+              </span>
+            after</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- dispatch_inline_box_content: plain subtree descendants (lines 864-892) ---
+
+    #[test]
+    fn render_smoke_inline_block_plain_with_block_descendant() {
+        // An inline-block with NO transform, NO overflow:hidden, NO opacity but
+        // containing a block-level `<div>` child. The child is recorded in
+        // `inline_box_subtree_descendants` so `dispatch_inline_box_content` falls
+        // through to the plain descendant dispatch loop (lines 862-892) after
+        // calling `dispatch_fragment` for the inline-block itself.
+        //
+        // NOTE: outer container MUST be <div> (not <p>) for the same HTML-parser
+        // reason explained in render_smoke_inline_block_with_opacity_and_block_child.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div>Before
+              <span style="display:inline-block;width:60px;height:40px">
+                <div style="width:50px;height:20px;background:#fce">child</div>
+              </span>
+            after</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- paint_multicol_paragraph_slices: multi-page multicol partition (lines 1396-1401) ---
+
+    #[test]
+    fn render_smoke_multicol_tall_paragraph_spanning_pages() {
+        // A multicol container with a `column-span: all` direct child forces
+        // the fragmenter (pagination_layout.rs:835-842) to split the container
+        // across pages, giving `container_geom.is_split() = true` and therefore
+        // `needs_partition = true` in `paint_multicol_paragraph_slices`.
+        //
+        // Without `column-span: all` the fragmenter treats the multicol box as
+        // atomic (lines 827-845) and `is_split()` stays false, which skips the
+        // visibility-range filter at lines 1386-1401 entirely.
+        //
+        // Page: 80 mm × 40 mm with zero PDF margins (PageSize::custom = mm;
+        // Margin::uniform = pt). The first paragraph fills the first column group,
+        // the span-all heading forces a new fragment, and the second paragraph
+        // fills subsequent pages — ensuring at least two fragments and therefore
+        // the `needs_partition = true` branch.
+        let sentence = "Alpha beta gamma delta epsilon zeta eta theta iota kappa \
+                        lambda mu nu xi omicron pi rho sigma tau upsilon phi chi \
+                        psi omega. Lorem ipsum dolor sit amet consectetur adipiscing \
+                        elit sed do eiusmod tempor incididunt ut labore et dolore \
+                        magna aliqua ut enim ad minim veniam quis nostrud. ";
+        let long_text = sentence.repeat(4);
+        let html = format!(
+            r#"<!doctype html><html><body style="margin:0">
+            <div style="column-count:2;column-gap:5px;width:80mm;font-size:10px">
+              <p>{long_text}</p>
+              <div style="column-span:all;background:#eee;padding:2px">Spanning heading</div>
+              <p>{long_text}</p>
+            </div>
+            </body></html>"#,
+        );
+        let pdf = crate::engine::Engine::builder()
+            .page_size(crate::config::PageSize::custom(80.0, 40.0))
+            .margin(crate::config::Margin::uniform(0.0))
+            .build()
+            .render(&html)
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
