@@ -7269,4 +7269,80 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- dispatch_inline_box_content: opacity branch (lines 829-843) ---
+
+    #[test]
+    fn render_smoke_inline_block_with_opacity_and_block_child() {
+        // An inline-block with fractional `opacity` containing a block-level
+        // `<div>` child. During convert, the span becomes an opacity scope with
+        // the inner div in `opacity_descendants`. In `dispatch_inline_box_content`
+        // the `!block.opacity_descendants.is_empty()` guard fires, routing through
+        // `draw_under_opacity` (lines 829-843).
+        //
+        // NOTE: outer container MUST be <div>, not <p>. The HTML5 parser
+        // implicitly closes an open <p> when it encounters a block-level <div>
+        // start tag, which would place the <span> outside the paragraph and
+        // prevent the inline-box dispatch path from being exercised.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div>Before
+              <span style="display:inline-block;opacity:0.5;
+                           width:60px;height:40px">
+                <div style="width:50px;height:30px;background:#cef">inner</div>
+              </span>
+            after</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- dispatch_inline_box_content: plain subtree descendants (lines 864-892) ---
+
+    #[test]
+    fn render_smoke_inline_block_plain_with_block_descendant() {
+        // An inline-block with NO transform, NO overflow:hidden, NO opacity but
+        // containing a block-level `<div>` child. The child is recorded in
+        // `inline_box_subtree_descendants` so `dispatch_inline_box_content` falls
+        // through to the plain descendant dispatch loop (lines 862-892) after
+        // calling `dispatch_fragment` for the inline-block itself.
+        //
+        // NOTE: outer container MUST be <div> (not <p>) for the same HTML-parser
+        // reason explained in render_smoke_inline_block_with_opacity_and_block_child.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div>Before
+              <span style="display:inline-block;width:60px;height:40px">
+                <div style="width:50px;height:20px;background:#fce">child</div>
+              </span>
+            after</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- paint_multicol_paragraph_slices: multi-page multicol partition (lines 1396-1401) ---
+
+    #[test]
+    fn render_smoke_multicol_tall_paragraph_spanning_pages() {
+        // A narrow multicol container on a small page forces the column content
+        // to span multiple page fragments. `paint_multicol_paragraph_slices`'s
+        // `needs_partition = true` branch (lines 1386-1401) filters slices by
+        // the visible range on each page, exercising the `above || below ||
+        // straddles` continue guard.
+        let pdf = crate::engine::Engine::builder()
+            .page_size(crate::config::PageSize::custom(80.0, 60.0))
+            .build()
+            .render(
+                r#"<!doctype html><html><body style="margin:0">
+                <div style="column-count:2;column-gap:5px;width:80mm;font-size:10px">
+                  <p>Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda
+                     mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.
+                     Lorem ipsum dolor sit amet consectetur adipiscing elit.</p>
+                </div>
+                </body></html>"#,
+            )
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
