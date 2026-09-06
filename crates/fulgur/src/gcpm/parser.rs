@@ -3693,4 +3693,158 @@ mod tests {
             "expected UpperAlpha counter in items: {items:?}"
         );
     }
+
+    // ── parse_page_size_value: trailing token rejection (lines 365-367) ───────
+
+    #[test]
+    fn test_page_size_dim_with_trailing_ident_rejected() {
+        // `100pt` is a valid first dimension, but `landscape` is an ident, not
+        // a dimension. try_parse for height fails (line 357), so h = w = 100pt
+        // and `result = Some(Custom(100, 100))`. Then `input.next()` still
+        // finds `landscape` → trailing token → return None (line 367).
+        // No PageSettingsRule is pushed because size is None and margin is empty.
+        assert_no_page_settings("@page { size: 100pt landscape; }");
+    }
+
+    // ── parse_page_margin_value: trailing-token rejection for >4 values ────────
+    //
+    // Note: the `_ => None` arm at line 417 (values.len() == 0) is defensive
+    // code that cannot be reached through normal CSS parsing: if no valid length
+    // tokens are present the failing try_parse rolls back, leaving the token in
+    // the input, so `input.next()` succeeds and the function returns None at
+    // lines 402-403 before the match is reached. This test exercises the more
+    // common "4 values read, 5th triggers trailing-token rejection" path.
+
+    #[test]
+    fn test_page_margin_five_values_trailing_token_rejected() {
+        // The loop reads 4 values and breaks. The 5th token (`5pt`) is still in
+        // the input → `input.next()` succeeds → return None at lines 402-403
+        // (trailing-token rejection). The margin is not stored. The @page rule
+        // still produces a PageSettingsRule because `size: A4` is valid.
+        let ctx = parse_gcpm("@page { size: A4; margin: 1pt 2pt 3pt 4pt 5pt; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        let ps = &ctx.page_settings[0];
+        assert!(
+            ps.margin.top.is_none(),
+            "5-value margin shorthand must be discarded; got: {:?}",
+            ps.margin
+        );
+    }
+
+    // ── parse_page_margin_value: zero-value arm (line 417 `_ => None`) ────────
+
+    #[test]
+    fn test_page_margin_zero_values_returns_none() {
+        // The `_ => None` arm (line 417, values.len() == 0) is unreachable
+        // through normal CSS declaration parsing.  Exercise it by calling the
+        // private helper directly with an empty parser: the loop exits
+        // immediately with values = [], `input.next()` fails (exhausted), so
+        // the match falls through to `_ => None`.
+        let mut pi = ParserInput::new("");
+        let mut p = Parser::new(&mut pi);
+        assert!(parse_page_margin_value(&mut p).is_none());
+    }
+
+    // ── parse_string_set_value_list: unknown function silently ignored ────────
+
+    #[test]
+    fn test_string_set_unknown_function_silently_ignored() {
+        // fn_name is neither "content" nor "attr" → implicit else at line 885;
+        // the nested block is exhausted (empty arg list) and `Ok(())` is returned,
+        // so the loop CONTINUES. Using `other-func()` (no arguments) ensures the
+        // nested block is trivially empty after the closure, avoiding an
+        // early-termination via unconsumed nested tokens. A literal placed AFTER
+        // the ignored function is asserted present to prove continuation.
+        let css = r#"h1 { string-set: title "Before" other-func() "After"; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![
+                StringSetValue::Literal("Before".to_string()),
+                StringSetValue::Literal("After".to_string()),
+            ]
+        );
+    }
+
+    // ── parse_string_set_value_list: unknown token type silently ignored ──────
+
+    #[test]
+    fn test_string_set_bare_number_token_silently_ignored() {
+        // Token::Number hits `_ => {}` at line 890; the token is consumed and
+        // skipped; the loop CONTINUES. To distinguish continuation from early
+        // termination we place a valid literal AFTER the number and assert that
+        // both the preceding and following literals are retained.
+        let css = r#"h1 { string-set: title "start" 123 "end"; }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![
+                StringSetValue::Literal("start".to_string()),
+                StringSetValue::Literal("end".to_string()),
+            ]
+        );
+    }
+
+    // ── parse_content_value: target-counters missing separator (line 1171) ───
+
+    #[test]
+    fn test_content_target_counters_non_string_separator_discarded() {
+        // The separator argument must be a quoted string. `not-a-string` is an
+        // ident → try_parse rolls back → Err(_) → return Ok(()) at line 1171;
+        // the TargetCounters item is NOT pushed.
+        //
+        // Early-termination: the rolled-back `not-a-string` token remains
+        // unconsumed in the nested block. parse_nested_block sees this after
+        // Ok(()) and returns Err; the outer try_parse propagates and breaks the
+        // loop. A "prefix" literal BEFORE the malformed call is retained (its
+        // own try_parse succeeded independently); "suffix" AFTER is not.
+        // Fixing this early-termination requires changes to parse_content_value.
+        let css = r#"@page { @top-center { content: "prefix" target-counters(attr(href), page, not-a-string) "suffix"; } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::String("prefix".to_string())]
+        );
+    }
+
+    // ── parse_content_value: target-text invalid URL token (line 1193) ───────
+
+    #[test]
+    fn test_content_target_text_invalid_url_discarded() {
+        // parse_target_url uses try_parse: Token::Number(123) is not attr(),
+        // url(), a quoted string, or an unquoted URL → try_parse rolls back
+        // (123 stays in stream) and returns None (line 1010).
+        // None => return Ok(()) at line 1193; but 123 is still unconsumed in
+        // the nested block → parse_nested_block returns Err → outer loop breaks.
+        // A "prefix" literal BEFORE is retained; "suffix" AFTER is not.
+        let css = r#"@page { @top-center { content: "prefix" target-text(123) "suffix"; } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::String("prefix".to_string())]
+        );
+    }
+
+    // ── parse_content_value: content(unknown) silently ignored (line 1224) ───
+
+    #[test]
+    fn test_content_function_unknown_arg_silently_ignored() {
+        // `content(unknown)` → arg is "unknown" → `_ => {}` at line 1224;
+        // no ContentItem is pushed for that call, but surrounding literals are
+        // kept so the rest of the content list is unaffected.
+        let css = r#"@page { @top-center { content: "prefix" content(unknown) "suffix"; } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![
+                ContentItem::String("prefix".to_string()),
+                ContentItem::String("suffix".to_string()),
+            ]
+        );
+    }
 }
