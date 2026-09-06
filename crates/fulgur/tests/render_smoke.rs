@@ -6594,3 +6594,123 @@ fn table_discarded_page_leaves_no_styled_wrapper_behind() {
         .expect("styled wrapper with a trailing forced break should render");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-2s7p.1: a first in-flow child (a `<p>` wrapped in one or
+/// more plain `<div>`s, itself the first and only child at every
+/// nesting level) whose own content overflows the remaining page
+/// strip must have its lines continue onto the next page instead of
+/// being silently dropped past the page bottom.
+///
+/// Pre-fix, `pagination_layout.rs`'s nested walker
+/// (`fragment_block_subtree_inner`) had no path to
+/// `fragment_inline_root` (only the body-direct walker did) — a first
+/// in-flow child's `child_page_y` always equals `page_start_y`
+/// (fulgur-2s7p.1's reported gate at line ~2893), so the strip-overflow
+/// check never fired, and the whole nested paragraph was emitted as one
+/// oversized fragment. Reported symptom: exit code 0, no warning, and
+/// 30 of 120 space-separated tokens silently missing from
+/// `pdftotext` output.
+///
+/// Uses `margin: 150px 0` on the `<p>` rather than the originally
+/// reported `padding: 150px 0` — deliberately, not as a simplification.
+/// `padding-top` on inline roots is a separate, pre-existing, already
+/// documented Blitz limitation (CLAUDE.md Gotchas: "`padding-top` on
+/// inline roots ignored (use `margin-top`)"): Taffy correctly sizes
+/// the box including the padding, but the nested walker's split
+/// decision (mirroring the body-direct walker's identical, unmodified
+/// `fragment_inline_root` call) reasons in line-metric space, which
+/// does not include padding either. Verified independently that the
+/// *original* `padding: 150px 0` repro (unchanged from the bug report)
+/// still loses the same 30/120 tokens even with this fix applied, and
+/// that a plain body-direct `<p style="padding:150px 0">` (no nesting
+/// at all) loses them too on unmodified `main` — proving the padding
+/// gap is pre-existing and orthogonal to the nested-recursion defect
+/// this test targets. Tracked separately; not fixed here (see the
+/// fulgur-2s7p.1 fix commit message for the full writeup).
+#[test]
+fn fulgur_2s7p1_nested_first_child_overflow_continues_across_page() {
+    let mut words = String::new();
+    for i in 0..120 {
+        words.push_str(&format!("W{i:04} "));
+    }
+    let html = format!(
+        r#"<!DOCTYPE html>
+<style>@page {{ size: 600px 500px; margin: 50px; }}
+body {{ margin:0; font-size:14px; }}</style>
+<body>
+<div style="height:100px"></div>
+<div><div><p style="margin:150px 0;padding:0;line-height:20px">
+{words}
+</p></div></div>
+</body>"#
+    );
+    let pdf = Engine::builder().build().render(&html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pages = page_count(&pdf);
+    assert!(
+        pages >= 2,
+        "expected the overflow to force a 2nd page, got {pages}"
+    );
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        // pdftotext not installed locally — page-count assertion above
+        // still exercises the fix; CI has poppler-utils preinstalled.
+        return;
+    };
+    let missing: Vec<String> = (0..120)
+        .map(|i| format!("W{i:04}"))
+        .filter(|tok| !text.contains(tok.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "expected all 120 tokens in pdftotext output, missing: {missing:?}"
+    );
+}
+
+/// fulgur-2s7p.1 follow-up: a `break-inside: avoid` box with a
+/// non-zero top padding — a real CSS Fragmentation class-C break
+/// point, distinct from the zero-gap first-child case the test above
+/// covers — split-before-pushed to a fresh page, whose own short
+/// paragraph fits entirely on that one fresh page (no further page
+/// crossing).
+///
+/// Found while regenerating `examples/break-inside` after the fix
+/// above: `fragment_block_subtree_inner`'s split-before pre-check
+/// resets `page_index` / `page_start_y` / `page_taffy_origin` /
+/// `child_page_y` for the fresh page but deliberately leaves the outer
+/// `cursor_y` untouched (that staleness is intentional for a
+/// grid/flex row, where a parallel sibling cell's bottom must survive
+/// the rebase). The line right after `fragment_inline_root` returns —
+/// `cursor_y = if new_page_index == pre_split_page { cursor_y.max(new_cursor_y) } else { new_cursor_y }`
+/// — then took the `==` branch (the paragraph fit on the fresh page,
+/// no further crossing) and kept the *stale pre-push* `cursor_y` via
+/// `.max()`, since outside a grid/flex row `row_state` was `None` and
+/// nothing had reset it. The parent's own trailing-close fragment
+/// (`cursor_y - page_start_y`) then spanned from that stale pre-push
+/// value down to `page_start_y = 0`, i.e. nearly the *entire* fresh
+/// page — the box's background visibly stretched far past its actual
+/// short content, and the sibling below it (`<div id="after">`) was
+/// pushed onto a spurious extra page reading from the wrong `cursor_y`.
+/// Fixed by only taking the `.max()` when `row_state.is_some()`.
+#[test]
+fn nested_break_inside_avoid_box_with_padding_split_before_does_not_stretch_parent() {
+    let html = r#"<!DOCTYPE html>
+<style>@page { size: 300px 400px; margin: 0; }
+body { margin:0; font-size:14px; line-height:1.4; }</style>
+<body>
+<div style="height:370px"></div>
+<div style="break-inside:avoid; padding-top:20px; background:#eef;">
+<p style="margin:0;padding:0;line-height:20px">Key Insight line one two three four five six seven</p>
+</div>
+<div id="after" style="height:20px; background:#0f0;"></div>
+</body>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pages = page_count(&pdf);
+    assert_eq!(
+        pages, 2,
+        "expected the padded break-inside:avoid box (and the sibling after it) to \
+         fit on a compact page 2 — a stale-cursor stretch instead pushes both onto \
+         a spurious extra page, got {pages}"
+    );
+}

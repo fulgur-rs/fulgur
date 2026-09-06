@@ -60,6 +60,17 @@ pub struct FulgurNetProvider {
 struct Inner {
     gcpm_contexts: Vec<GcpmContext>,
     pending_resources: Vec<Resource>,
+    /// fulgur-s5ro: raw CSS text harvested from every successfully-loaded
+    /// `<link rel=stylesheet>` / `@import` payload, tagged with the DOM
+    /// node id that triggered the fetch (`Resource::Css(node_id, _)`'s own
+    /// `node_id` — the same one `parse_html_with_local_resources` already
+    /// uses to dedupe media-rewritten `<link>`s). The caller folds these
+    /// into `column_css`'s side-table via `walk_for_column_styles`'s
+    /// existing document-order DOM walk, keyed by this node id, so a
+    /// linked stylesheet's declarations land in the same relative
+    /// position as its `<link>` element would if it were an inline
+    /// `<style>` block.
+    column_css_texts: Vec<(usize, String)>,
 }
 
 impl FulgurNetProvider {
@@ -86,6 +97,16 @@ impl FulgurNetProvider {
     pub fn drain_gcpm_contexts(&self) -> Vec<GcpmContext> {
         let mut inner = self.inner.lock().unwrap();
         std::mem::take(&mut inner.gcpm_contexts)
+    }
+
+    /// Take the `(node_id, raw_css_text)` pairs harvested from CSS
+    /// payloads (fulgur-s5ro). The caller folds each entry into
+    /// `column_css`'s side-table, keyed by `node_id`, and must apply the
+    /// same `rewrite_node_ids` dedup filter it already applies to
+    /// [`Self::drain_pending_resources`] before doing so.
+    pub fn drain_column_css_texts(&self) -> Vec<(usize, String)> {
+        let mut inner = self.inner.lock().unwrap();
+        std::mem::take(&mut inner.column_css_texts)
     }
 
     /// Resolve a request URL to a real, canonicalised path inside the
@@ -142,24 +163,55 @@ impl NetProvider<Resource> for FulgurNetProvider {
         // For CSS, hand Blitz the *cleaned* body so its style engine
         // never sees `@page` / `position: running(...)` constructs.
         // The GCPM context is pushed into our buffer *after* the
-        // handler returns (see below).
-        let (bytes_for_blitz, gcpm_to_push) = if Self::looks_like_css(&request, &canonical_path) {
-            if let Ok(text) = std::str::from_utf8(&raw_bytes) {
-                let gcpm = parse_gcpm(text);
-                let cleaned = gcpm.cleaned_css.clone();
-                (Bytes::from(cleaned.into_bytes()), Some(gcpm))
+        // handler returns (see below). `column_css_text` retains the raw
+        // (uncleaned) payload — `column_css`'s tiny parser only looks for
+        // a handful of properties (`break-*`, `column-*`) and silently
+        // drops anything it doesn't recognise (fulgur-s5ro), so feeding
+        // it the same un-stripped text `walk_for_column_styles` already
+        // reads from inline `<style>` text nodes keeps both sources
+        // parsed identically.
+        let (bytes_for_blitz, gcpm_to_push, column_css_text, raw_text_fallback) =
+            if Self::looks_like_css(&request, &canonical_path) {
+                if let Ok(text) = std::str::from_utf8(&raw_bytes) {
+                    let gcpm = parse_gcpm(text);
+                    let cleaned = gcpm.cleaned_css.clone();
+                    (
+                        Bytes::from(cleaned.into_bytes()),
+                        Some(gcpm),
+                        Some(text.to_string()),
+                        None,
+                    )
+                } else {
+                    (Bytes::from(raw_bytes), None, None, None)
+                }
             } else {
-                (Bytes::from(raw_bytes), None)
-            }
-        } else {
-            (Bytes::from(raw_bytes), None)
-        };
+                // codex P2: `looks_like_css` under-detects a stylesheet
+                // served with no `.css` extension (e.g. `<link
+                // rel="stylesheet" href="theme">`) — `request.content_type`
+                // is always empty for local `file://` fetches (Blitz never
+                // populates it in this offline pathway), so the extension
+                // check is the only signal, and it misses here. Blitz's own
+                // callback still reliably reports `Resource::Css` once its
+                // stylo parser accepts the bytes, so keep the raw text
+                // around as a fallback the callback can use to backfill
+                // `column_css_texts` when this upfront guess was wrong.
+                let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
+                (Bytes::from(raw_bytes), None, None, fallback)
+            };
 
         let inner = self.inner.clone();
         let callback: SharedCallback<Resource> = Arc::new(
             move |_doc_id: usize, result: Result<Resource, Option<String>>| {
                 if let Ok(res) = result {
-                    inner.lock().unwrap().pending_resources.push(res);
+                    let mut guard = inner.lock().unwrap();
+                    if let Resource::Css(node_id, _) = &res
+                        && let Some(text) = column_css_text
+                            .clone()
+                            .or_else(|| raw_text_fallback.clone())
+                    {
+                        guard.column_css_texts.push((*node_id, text));
+                    }
+                    guard.pending_resources.push(res);
                 }
             },
         );
