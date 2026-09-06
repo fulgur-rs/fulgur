@@ -3547,10 +3547,10 @@ fn build_metadata(config: &Config, html_title: Option<&str>) -> krilla::metadata
     if let Some(ref producer) = config.producer {
         metadata = metadata.producer(producer.clone());
     }
-    if let Some(ref date_str) = config.creation_date {
-        if let Some(dt) = parse_datetime(date_str) {
-            metadata = metadata.creation_date(dt);
-        }
+    if let Some(ref date_str) = config.creation_date
+        && let Some(dt) = parse_datetime(date_str)
+    {
+        metadata = metadata.creation_date(dt);
     }
     metadata
 }
@@ -3970,16 +3970,10 @@ impl<'a> MarginBoxRenderer<'a> {
             }
 
             if let Some((drawables, geometry)) = self.render_cache.get(&cache_key) {
-                if let Some(root_id) = drawables.root_id {
-                    if let Some(root_block) = drawables.block_styles.get(&root_id) {
-                        paint_root_block_v2(
-                            canvas,
-                            root_block,
-                            rect.x.to_f32(),
-                            rect.y.to_f32(),
-                            None,
-                        );
-                    }
+                if let Some(root_id) = drawables.root_id
+                    && let Some(root_block) = drawables.block_styles.get(&root_id)
+                {
+                    paint_root_block_v2(canvas, root_block, rect.x.to_f32(), rect.y.to_f32(), None);
                 }
                 // `body_offset_pt` is (0, 0) here because the wrapper HTML fixes
                 // `body { margin: 0; padding: 0; }` via an inline style, which
@@ -4034,22 +4028,21 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
     let px: f32 = 'outer: {
         if let Some(root_node) = base_doc.get_node(root.id) {
             for &child_id in &root_node.children {
-                if let Some(child) = base_doc.get_node(child_id) {
-                    if let blitz_dom::NodeData::Element(elem) = &child.data {
-                        if elem.name.local.as_ref() == "body" {
-                            for &body_child_id in &child.children {
-                                if let Some(body_child) = base_doc.get_node(body_child_id) {
-                                    let size = &body_child.final_layout.size;
-                                    let v = if use_width { size.width } else { size.height };
-                                    if v > 0.0 {
-                                        break 'outer v;
-                                    }
-                                }
+                if let Some(child) = base_doc.get_node(child_id)
+                    && let blitz_dom::NodeData::Element(elem) = &child.data
+                    && elem.name.local.as_ref() == "body"
+                {
+                    for &body_child_id in &child.children {
+                        if let Some(body_child) = base_doc.get_node(body_child_id) {
+                            let size = &body_child.final_layout.size;
+                            let v = if use_width { size.width } else { size.height };
+                            if v > 0.0 {
+                                break 'outer v;
                             }
-                            let size = &child.final_layout.size;
-                            break 'outer if use_width { size.width } else { size.height };
                         }
                     }
+                    let size = &child.final_layout.size;
+                    break 'outer if use_width { size.width } else { size.height };
                 }
             }
         }
@@ -4106,16 +4099,14 @@ fn build_struct_tree(
         if heading_titles.contains_key(&node_id) {
             continue;
         }
-        if let Some(entry) = drawables.semantics.get(&node_id) {
-            if matches!(entry.tag, crate::tagging::PdfTag::H { .. }) {
-                if let Some(title) = drawables
-                    .paragraphs
-                    .get(&node_id)
-                    .and_then(heading_title_of)
-                {
-                    heading_titles.insert(node_id, title);
-                }
-            }
+        if let Some(entry) = drawables.semantics.get(&node_id)
+            && matches!(entry.tag, crate::tagging::PdfTag::H { .. })
+            && let Some(title) = drawables
+                .paragraphs
+                .get(&node_id)
+                .and_then(heading_title_of)
+        {
+            heading_titles.insert(node_id, title);
         }
     }
 
@@ -4270,6 +4261,27 @@ mod tests {
     #[test]
     fn escape_attr_empty_string() {
         assert_eq!(escape_attr(""), "");
+    }
+
+    // --- get_body_child_dimension ---
+
+    /// A margin box whose content produces no laid-out body child (an empty
+    /// `content` string) must fall back to the body box itself rather than
+    /// measuring 0 — otherwise the edge distribution in `compute_edge_layout`
+    /// would collapse the box.
+    #[test]
+    fn get_body_child_dimension_falls_back_to_body_box() {
+        let mut doc = crate::blitz_adapter::parse(
+            r#"<html><body style="width:200px;height:50px"></body></html>"#,
+            400.0,
+            &[],
+        );
+        crate::blitz_adapter::resolve(&mut doc);
+        // 200 CSS px -> 150 pt, 50 CSS px -> 37.5 pt.
+        let w = get_body_child_dimension(&doc, true).to_f32();
+        let h = get_body_child_dimension(&doc, false).to_f32();
+        assert!((w - 150.0).abs() < 0.01, "width fallback: {w}");
+        assert!((h - 37.5).abs() < 0.01, "height fallback: {h}");
     }
 
     // --- strip_display_none ---

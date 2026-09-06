@@ -322,10 +322,10 @@ mod tests {
             return None;
         }
         let node = doc.get_node(node_id)?;
-        if let Some(elem) = node.element_data() {
-            if elem.name.local.as_ref() == tag {
-                return Some(node_id);
-            }
+        if let Some(elem) = node.element_data()
+            && elem.name.local.as_ref() == tag
+        {
+            return Some(node_id);
         }
         node.children
             .iter()

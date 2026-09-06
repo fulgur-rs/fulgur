@@ -453,10 +453,10 @@ impl AssetBundle {
         // (Stylo resolves `content: url("icon.png")` against the engine's
         // base URL), strip the recorded base prefix to recover the relative
         // asset name.
-        if let Some(base) = &self.base_path_str {
-            if let Some(rel) = key.strip_prefix(base.as_str()) {
-                return self.images.get(Self::normalize_key(rel));
-            }
+        if let Some(base) = &self.base_path_str
+            && let Some(rel) = key.strip_prefix(base.as_str())
+        {
+            return self.images.get(Self::normalize_key(rel));
         }
         None
     }

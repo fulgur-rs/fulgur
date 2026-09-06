@@ -53,32 +53,29 @@ fn format_filter(value: &minijinja::Value, spec: &str) -> String {
     }
 
     // ",.Nf" — comma + N decimal places
-    if let Some(rest) = spec.strip_prefix(',') {
-        if let Some(prec_str) = rest.strip_prefix('.').and_then(|s| s.strip_suffix('f')) {
-            if let Ok(prec) = prec_str.parse::<usize>() {
-                if let Some(f) = as_f64 {
-                    return insert_commas(&format!("{:.prec$}", f));
-                }
-            }
-        }
+    if let Some(rest) = spec.strip_prefix(',')
+        && let Some(prec_str) = rest.strip_prefix('.').and_then(|s| s.strip_suffix('f'))
+        && let Ok(prec) = prec_str.parse::<usize>()
+        && let Some(f) = as_f64
+    {
+        return insert_commas(&format!("{:.prec$}", f));
     }
 
     // ".Nf" — N decimal places
-    if let Some(inner) = spec.strip_prefix('.').and_then(|s| s.strip_suffix('f')) {
-        if let Ok(prec) = inner.parse::<usize>() {
-            if let Some(f) = as_f64 {
-                return format!("{:.prec$}", f);
-            }
-        }
+    if let Some(inner) = spec.strip_prefix('.').and_then(|s| s.strip_suffix('f'))
+        && let Ok(prec) = inner.parse::<usize>()
+        && let Some(f) = as_f64
+    {
+        return format!("{:.prec$}", f);
     }
 
     // "0Nd" — zero-padded integer
-    if spec.starts_with('0') && spec.ends_with('d') {
-        if let Ok(width) = spec[..spec.len() - 1].parse::<usize>() {
-            if let Some(n) = as_i64 {
-                return format!("{:0width$}", n);
-            }
-        }
+    if spec.starts_with('0')
+        && spec.ends_with('d')
+        && let Ok(width) = spec[..spec.len() - 1].parse::<usize>()
+        && let Some(n) = as_i64
+    {
+        return format!("{:0width$}", n);
     }
 
     value.to_string()
