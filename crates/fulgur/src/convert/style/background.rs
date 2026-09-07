@@ -1321,11 +1321,19 @@ mod tests {
             has_raster,
             "expected a Raster background layer in drawables"
         );
-        // No gradient layer must be found: the `_ => None` arm is the raster arm.
-        // Use the pre-existing helper to avoid dead gradient match arms in this patch.
+        // Verify that none of the layers in the already-built drawables (which includes
+        // the raster layer above) is a non-raster/gradient type. This exercises the
+        // raster-exclusion logic on an actual raster layer present in `drawables`.
+        let has_any_gradient = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| !matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
         assert!(
-            first_gradient_stop_count(html).is_none(),
-            "a raster-only background must not produce a gradient stop count"
+            !has_any_gradient,
+            "a raster-only background must not produce gradient layers in drawables"
         );
     }
 }
