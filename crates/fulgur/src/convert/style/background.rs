@@ -1322,20 +1322,9 @@ mod tests {
             "expected a Raster background layer in drawables"
         );
         // No gradient layer must be found: the `_ => None` arm is the raster arm.
-        let gradient_count: Option<usize> = drawables.block_styles.values().find_map(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .find_map(|layer| match &layer.content {
-                    BgImageContent::LinearGradient { stops, .. }
-                    | BgImageContent::RadialGradient { stops, .. }
-                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                    _ => None,
-                })
-        });
+        // Use the pre-existing helper to avoid dead gradient match arms in this patch.
         assert!(
-            gradient_count.is_none(),
+            first_gradient_stop_count(html).is_none(),
             "a raster-only background must not produce a gradient stop count"
         );
     }
