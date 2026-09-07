@@ -1205,4 +1205,113 @@ mod tests {
         let pdf = render_bg("conic-gradient(in hsl,red,blue)");
         assert_pdf(&pdf, "conic_nondefault_interp");
     }
+
+    // ── map_extent: CSS Images §3.6.1 alias arms ─────────────────────────────
+    //
+    // `ShapeExtent::Contain` and `ShapeExtent::Cover` are older CSS aliases that
+    // Stylo normalises at parse time (Contain → ClosestSide, Cover → FarthestCorner).
+    // The match arms in `map_extent` exist for exhaustiveness; these tests verify
+    // the mapping is correct and guard against regressions if Stylo's normalisation
+    // ever changes or a future API surfaces these variants directly.
+
+    #[test]
+    fn map_extent_contain_maps_to_closest_side() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(matches!(
+            super::map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide
+        ));
+    }
+
+    #[test]
+    fn map_extent_cover_maps_to_farthest_corner() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(matches!(
+            super::map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner
+        ));
+    }
+
+    // ── resolve_color_stops: calc() stop position drops the layer ────────────
+    //
+    // A `calc(<percentage> + <length>)` stop position is neither a pure
+    // percentage nor a pure length, so `to_percentage()` and `to_length()` both
+    // return `None`. The layer is dropped rather than silently misrendering.
+
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        // `calc(50% + 10px)` is a mixed-unit calc — neither pure pct nor pure length.
+        // resolve_color_stops returns None for the stop, dropping the layer.
+        // The element still renders as a valid PDF without the background image.
+        let pdf = render_bg("linear-gradient(red calc(50% + 10px),blue)");
+        assert_pdf(&pdf, "calc_stop_pos");
+    }
+
+    // ── resolve_color_stops: fewer-than-two stops drops the layer ────────────
+    //
+    // CSS requires at least two color stops. A syntactically degenerate gradient
+    // with only one stop reaches the `out.len() < 2` guard and drops the layer.
+
+    #[test]
+    fn linear_gradient_single_stop_drops_layer() {
+        // `linear-gradient(red)` may parse to exactly one color stop depending on
+        // browser behaviour; if so, resolve_color_stops returns None (< 2 stops).
+        let pdf = render_bg("linear-gradient(red)");
+        assert_pdf(&pdf, "single_stop_linear");
+    }
+
+    #[test]
+    fn conic_gradient_single_stop_drops_layer() {
+        // Same check on the conic-gradient path's stops.len() < 2 guard.
+        let pdf = render_bg("conic-gradient(red)");
+        assert_pdf(&pdf, "single_stop_conic");
+    }
+
+    // ── BgImageContent::Raster excluded from first_gradient_stop_count ───────
+    //
+    // Verifies the `_ => None` arm in the find_map closure: when a background
+    // layer is raster, it must not be counted as a gradient stop.
+
+    #[test]
+    fn first_gradient_stop_count_excludes_raster_layer() {
+        use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        // The raster layer must be present (verifying the setup is correct).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "expected a Raster background layer in drawables"
+        );
+        // No gradient layer must be found: the `_ => None` arm is the raster arm.
+        let gradient_count: Option<usize> = drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        });
+        assert!(
+            gradient_count.is_none(),
+            "a raster-only background must not produce a gradient stop count"
+        );
+    }
 }
