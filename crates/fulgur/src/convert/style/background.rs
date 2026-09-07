@@ -1006,13 +1006,13 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    /// Return the stop count of the first gradient background layer found in
-    /// `html`'s converted block styles, or `None` if there is no gradient.
-    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+    /// Search `drawables` for the stop count of the first gradient background
+    /// layer found in any block style, returning `None` if there is no gradient.
+    /// Raster layers hit the `_ => None` arm and are excluded.
+    fn first_gradient_stop_count_in_drawables(
+        drawables: &crate::drawables::Drawables,
+    ) -> Option<usize> {
         use crate::draw_primitives::BgImageContent;
-        let drawables = Engine::builder()
-            .build()
-            .build_drawables_for_testing_no_gcpm(html);
         drawables.block_styles.values().find_map(|block| {
             block
                 .style
@@ -1025,6 +1025,15 @@ mod tests {
                     _ => None,
                 })
         })
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        first_gradient_stop_count_in_drawables(&drawables)
     }
 
     /// Security regression: an unbounded `column-stop` list must not be
@@ -1321,18 +1330,11 @@ mod tests {
             has_raster,
             "expected a Raster background layer in drawables"
         );
-        // Verify that none of the layers in the already-built drawables (which includes
-        // the raster layer above) is a non-raster/gradient type. This exercises the
-        // raster-exclusion logic on an actual raster layer present in `drawables`.
-        let has_any_gradient = drawables.block_styles.values().any(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .any(|layer| !matches!(&layer.content, BgImageContent::Raster { .. }))
-        });
+        // Pass the already-built drawables (which include the actual raster layer)
+        // through the shared helper. This exercises the `_ => None` arm of
+        // `first_gradient_stop_count_in_drawables` on a real raster layer.
         assert!(
-            !has_any_gradient,
+            first_gradient_stop_count_in_drawables(&drawables).is_none(),
             "a raster-only background must not produce gradient layers in drawables"
         );
     }
