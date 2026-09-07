@@ -1006,13 +1006,13 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    /// Return the stop count of the first gradient background layer found in
-    /// `html`'s converted block styles, or `None` if there is no gradient.
-    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+    /// Search `drawables` for the stop count of the first gradient background
+    /// layer found in any block style, returning `None` if there is no gradient.
+    /// Raster layers hit the `_ => None` arm and are excluded.
+    fn first_gradient_stop_count_in_drawables(
+        drawables: &crate::drawables::Drawables,
+    ) -> Option<usize> {
         use crate::draw_primitives::BgImageContent;
-        let drawables = Engine::builder()
-            .build()
-            .build_drawables_for_testing_no_gcpm(html);
         drawables.block_styles.values().find_map(|block| {
             block
                 .style
@@ -1025,6 +1025,15 @@ mod tests {
                     _ => None,
                 })
         })
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        first_gradient_stop_count_in_drawables(&drawables)
     }
 
     /// Security regression: an unbounded `column-stop` list must not be
@@ -1204,5 +1213,129 @@ mod tests {
     fn conic_gradient_non_default_interpolation_drops_layer() {
         let pdf = render_bg("conic-gradient(in hsl,red,blue)");
         assert_pdf(&pdf, "conic_nondefault_interp");
+    }
+
+    // ── map_extent: CSS Images §3.6.1 alias arms ─────────────────────────────
+    //
+    // `ShapeExtent::Contain` and `ShapeExtent::Cover` are older CSS aliases that
+    // Stylo normalises at parse time (Contain → ClosestSide, Cover → FarthestCorner).
+    // The match arms in `map_extent` exist for exhaustiveness; these tests verify
+    // the mapping is correct and guard against regressions if Stylo's normalisation
+    // ever changes or a future API surfaces these variants directly.
+
+    #[test]
+    fn map_extent_contain_maps_to_closest_side() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(matches!(
+            super::map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide
+        ));
+    }
+
+    #[test]
+    fn map_extent_cover_maps_to_farthest_corner() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(matches!(
+            super::map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner
+        ));
+    }
+
+    // ── resolve_color_stops: calc() stop position drops the layer ────────────
+    //
+    // A `calc(<percentage> + <length>)` stop position is neither a pure
+    // percentage nor a pure length, so `to_percentage()` and `to_length()` both
+    // return `None`. The layer is dropped rather than silently misrendering.
+
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        // `calc(50% + 10px)` is a mixed-unit calc — neither pure pct nor pure length.
+        // resolve_color_stops returns None for the stop, dropping the layer.
+        // The element still renders as a valid PDF without the background image.
+        let css = "linear-gradient(red calc(50% + 10px),blue)";
+        let pdf = render_bg(css);
+        assert_pdf(&pdf, "calc_stop_pos");
+        // The layer must be absent from Drawables, not silently misrendered.
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "calc mixed-unit stop must drop the gradient layer entirely"
+        );
+    }
+
+    // ── resolve_color_stops: fewer-than-two stops drops the layer ────────────
+    //
+    // CSS requires at least two color stops. A syntactically degenerate gradient
+    // with only one stop reaches the `out.len() < 2` guard and drops the layer.
+
+    #[test]
+    fn linear_gradient_single_stop_drops_layer() {
+        // `linear-gradient(red)` may parse to exactly one color stop depending on
+        // browser behaviour; if so, resolve_color_stops returns None (< 2 stops).
+        let css = "linear-gradient(red)";
+        let pdf = render_bg(css);
+        assert_pdf(&pdf, "single_stop_linear");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "single-stop linear-gradient must drop the layer"
+        );
+    }
+
+    #[test]
+    fn conic_gradient_single_stop_drops_layer() {
+        // Same check on the conic-gradient path's stops.len() < 2 guard.
+        let css = "conic-gradient(red)";
+        let pdf = render_bg(css);
+        assert_pdf(&pdf, "single_stop_conic");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "single-stop conic-gradient must drop the layer"
+        );
+    }
+
+    // ── BgImageContent::Raster excluded from first_gradient_stop_count ───────
+    //
+    // Verifies the `_ => None` arm in the find_map closure: when a background
+    // layer is raster, it must not be counted as a gradient stop.
+
+    #[test]
+    fn first_gradient_stop_count_excludes_raster_layer() {
+        use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        // The raster layer must be present (verifying the setup is correct).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "expected a Raster background layer in drawables"
+        );
+        // Pass the already-built drawables (which include the actual raster layer)
+        // through the shared helper. This exercises the `_ => None` arm of
+        // `first_gradient_stop_count_in_drawables` on a real raster layer.
+        assert!(
+            first_gradient_stop_count_in_drawables(&drawables).is_none(),
+            "a raster-only background must not produce gradient layers in drawables"
+        );
     }
 }
