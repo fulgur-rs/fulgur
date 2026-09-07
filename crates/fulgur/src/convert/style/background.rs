@@ -1245,8 +1245,17 @@ mod tests {
         // `calc(50% + 10px)` is a mixed-unit calc — neither pure pct nor pure length.
         // resolve_color_stops returns None for the stop, dropping the layer.
         // The element still renders as a valid PDF without the background image.
-        let pdf = render_bg("linear-gradient(red calc(50% + 10px),blue)");
+        let css = "linear-gradient(red calc(50% + 10px),blue)";
+        let pdf = render_bg(css);
         assert_pdf(&pdf, "calc_stop_pos");
+        // The layer must be absent from Drawables, not silently misrendered.
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "calc mixed-unit stop must drop the gradient layer entirely"
+        );
     }
 
     // ── resolve_color_stops: fewer-than-two stops drops the layer ────────────
@@ -1258,15 +1267,31 @@ mod tests {
     fn linear_gradient_single_stop_drops_layer() {
         // `linear-gradient(red)` may parse to exactly one color stop depending on
         // browser behaviour; if so, resolve_color_stops returns None (< 2 stops).
-        let pdf = render_bg("linear-gradient(red)");
+        let css = "linear-gradient(red)";
+        let pdf = render_bg(css);
         assert_pdf(&pdf, "single_stop_linear");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "single-stop linear-gradient must drop the layer"
+        );
     }
 
     #[test]
     fn conic_gradient_single_stop_drops_layer() {
         // Same check on the conic-gradient path's stops.len() < 2 guard.
-        let pdf = render_bg("conic-gradient(red)");
+        let css = "conic-gradient(red)";
+        let pdf = render_bg(css);
         assert_pdf(&pdf, "single_stop_conic");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        assert!(
+            first_gradient_stop_count(&html).is_none(),
+            "single-stop conic-gradient must drop the layer"
+        );
     }
 
     // ── BgImageContent::Raster excluded from first_gradient_stop_count ───────
