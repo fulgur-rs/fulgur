@@ -1397,7 +1397,7 @@ mod tests {
                 .style
                 .background_layers
                 .iter()
-                .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
         });
         assert!(
             has_raster,
