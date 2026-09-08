@@ -1351,9 +1351,18 @@ mod tests {
     /// catch-all arm (line 96). Element still renders (gradient layer present).
     #[test]
     fn multi_layer_background_with_none_layer_renders() {
-        assert_pdf(
-            &render_bg("linear-gradient(red, blue), none"),
-            "gradient_and_none_layers",
+        let css = "linear-gradient(red, blue), none";
+        assert_pdf(&render_bg(css), "gradient_and_none_layers");
+        // Confirm the gradient layer was actually retained (not silently dropped).
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(&html);
+        assert!(
+            gradient_stop_count_from_drawables(&drawables).is_some(),
+            "linear-gradient layer must be retained in a multi-layer background containing `none`"
         );
     }
 
@@ -1392,6 +1401,19 @@ mod tests {
             .assets(bundle)
             .build()
             .build_drawables_for_testing_no_gcpm(html);
+        // First confirm a Raster layer was actually produced (rules out empty-layers false-pass).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "raster background must produce a BgImageContent::Raster layer"
+        );
+        // Then confirm the gradient stop-count helper returns None for that layer.
         assert!(
             gradient_stop_count_from_drawables(&drawables).is_none(),
             "raster background must not count as gradient stops"
