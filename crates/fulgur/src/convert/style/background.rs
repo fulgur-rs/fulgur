@@ -626,6 +626,7 @@ fn convert_bg_clip(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{AssetBundle, Engine};
 
     /// 1×1 red PNG (minimal valid file with correct CRC sums).
@@ -1204,5 +1205,196 @@ mod tests {
     fn conic_gradient_non_default_interpolation_drops_layer() {
         let pdf = render_bg("conic-gradient(in hsl,red,blue)");
         assert_pdf(&pdf, "conic_nondefault_interp");
+    }
+
+    // ── map_extent: Contain / Cover alias arms ────────────────────────────────
+
+    /// `ShapeExtent::Contain` and `ShapeExtent::Cover` are CSS-compat aliases
+    /// for `closest-side` and `farthest-corner` respectively (CSS Images §3.6.1).
+    /// They are not produced by the standard `radial-gradient` syntax but exist
+    /// in Stylo for compatibility; the match arms must be tested directly.
+    #[test]
+    fn map_extent_contain_and_cover_alias_correctly() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide,
+            "Contain must alias to ClosestSide"
+        );
+        assert_eq!(
+            map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner,
+            "Cover must alias to FarthestCorner"
+        );
+    }
+
+    // ── resolve_color_stops: direct unit tests ────────────────────────────────
+    //
+    // The CSS parser (Stylo) rejects syntactically-invalid gradient stop lists
+    // (leading/trailing/consecutive hints, <1 stop) before they reach
+    // `resolve_color_stops`, so these edge-case guard paths cannot be triggered
+    // through the normal render pipeline. Direct calls with hand-constructed
+    // Stylo values are the only way to cover them.
+
+    /// Fewer than 2 colour stops: the CSS spec requires at least 2 distinct
+    /// stops; `resolve_color_stops` returns `None` for 0 or 1 stop.
+    #[test]
+    fn resolve_color_stops_fewer_than_two_stops_returns_none() {
+        use style::color::AbsoluteColor;
+        use style::values::computed::{Color, LengthPercentage};
+        use style::values::generics::image::GradientItem;
+        let cc = AbsoluteColor::BLACK;
+        // 0 stops
+        let result =
+            resolve_color_stops(&[] as &[GradientItem<Color, LengthPercentage>], &cc, "test");
+        assert!(result.is_none(), "0 stops must return None");
+        // 1 stop
+        let result =
+            resolve_color_stops(&[GradientItem::SimpleColorStop(Color::BLACK)], &cc, "test");
+        assert!(result.is_none(), "1 stop must return None");
+    }
+
+    /// A leading interpolation hint (before the first colour stop) is invalid.
+    /// `resolve_color_stops` logs a warning and returns `None`.
+    #[test]
+    fn resolve_color_stops_leading_hint_returns_none() {
+        use style::color::AbsoluteColor;
+        use style::values::computed::{Color, LengthPercentage, Percentage};
+        use style::values::generics::image::GradientItem;
+        let cc = AbsoluteColor::BLACK;
+        let items: Vec<GradientItem<Color, LengthPercentage>> = vec![
+            GradientItem::InterpolationHint(LengthPercentage::new_percent(Percentage(0.3))),
+            GradientItem::SimpleColorStop(Color::BLACK),
+            GradientItem::SimpleColorStop(Color::WHITE),
+        ];
+        assert!(
+            resolve_color_stops(&items, &cc, "linear-gradient").is_none(),
+            "leading hint must return None"
+        );
+    }
+
+    /// Two consecutive interpolation hints (no colour stop between them) are
+    /// invalid; `resolve_color_stops` returns `None`.
+    #[test]
+    fn resolve_color_stops_consecutive_hints_return_none() {
+        use style::color::AbsoluteColor;
+        use style::values::computed::{Color, LengthPercentage, Percentage};
+        use style::values::generics::image::GradientItem;
+        let cc = AbsoluteColor::BLACK;
+        let items: Vec<GradientItem<Color, LengthPercentage>> = vec![
+            GradientItem::SimpleColorStop(Color::BLACK),
+            GradientItem::InterpolationHint(LengthPercentage::new_percent(Percentage(0.3))),
+            GradientItem::InterpolationHint(LengthPercentage::new_percent(Percentage(0.6))),
+            GradientItem::SimpleColorStop(Color::WHITE),
+        ];
+        assert!(
+            resolve_color_stops(&items, &cc, "linear-gradient").is_none(),
+            "consecutive hints must return None"
+        );
+    }
+
+    /// A trailing interpolation hint (after the last colour stop) is invalid;
+    /// `resolve_color_stops` returns `None`.
+    #[test]
+    fn resolve_color_stops_trailing_hint_returns_none() {
+        use style::color::AbsoluteColor;
+        use style::values::computed::{Color, LengthPercentage, Percentage};
+        use style::values::generics::image::GradientItem;
+        let cc = AbsoluteColor::BLACK;
+        let items: Vec<GradientItem<Color, LengthPercentage>> = vec![
+            GradientItem::SimpleColorStop(Color::BLACK),
+            GradientItem::SimpleColorStop(Color::WHITE),
+            GradientItem::InterpolationHint(LengthPercentage::new_percent(Percentage(0.7))),
+        ];
+        assert!(
+            resolve_color_stops(&items, &cc, "linear-gradient").is_none(),
+            "trailing hint must return None"
+        );
+    }
+
+    /// An interpolation hint with a pixel-length position (not a percentage)
+    /// is valid; `resolve_color_stops` must accept it and produce a stop with
+    /// `GradientStopPosition::LengthPx`. This exercises the `to_length()` branch
+    /// inside the hint arm of `resolve_color_stops`.
+    #[test]
+    fn resolve_color_stops_length_hint_is_accepted() {
+        use crate::draw_primitives::GradientStopPosition;
+        use style::color::AbsoluteColor;
+        use style::values::computed::{Color, Length, LengthPercentage};
+        use style::values::generics::image::GradientItem;
+        let cc = AbsoluteColor::BLACK;
+        let items: Vec<GradientItem<Color, LengthPercentage>> = vec![
+            GradientItem::SimpleColorStop(Color::BLACK),
+            GradientItem::InterpolationHint(LengthPercentage::new_length(Length::new(50.0))),
+            GradientItem::SimpleColorStop(Color::WHITE),
+        ];
+        let stops = resolve_color_stops(&items, &cc, "linear-gradient")
+            .expect("length-positioned hint must be accepted");
+        assert!(
+            stops.iter().any(|s| s.is_hint),
+            "the hint stop must be retained with is_hint=true"
+        );
+        assert!(
+            stops
+                .iter()
+                .any(|s| { s.is_hint && matches!(s.position, GradientStopPosition::LengthPx(_)) }),
+            "hint position must be LengthPx"
+        );
+    }
+
+    // ── Image::None in a multi-layer background ───────────────────────────────
+
+    /// `background: linear-gradient(red, blue), none` produces a two-entry
+    /// computed image list: `[Gradient(...), None]`. The outer loop in `apply_to`
+    /// iterates all entries; when it reaches `Image::None` it hits the `_ => None`
+    /// catch-all arm (line 96). Element still renders (gradient layer present).
+    #[test]
+    fn multi_layer_background_with_none_layer_renders() {
+        assert_pdf(
+            &render_bg("linear-gradient(red, blue), none"),
+            "gradient_and_none_layers",
+        );
+    }
+
+    // ── first_gradient_stop_count: raster / svg background layer (line 1025) ──
+
+    /// Inner helper shared by `first_gradient_stop_count` and the raster test
+    /// below. Separating it lets us supply an asset bundle without modifying the
+    /// no-bundle fast path used by most gradient-cap tests.
+    fn gradient_stop_count_from_drawables(
+        drawables: &crate::drawables::Drawables,
+    ) -> Option<usize> {
+        use crate::draw_primitives::BgImageContent;
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// A document whose only background layer is a raster image (`Raster` variant)
+    /// should return `None` from the stop-count helper — no gradient is present.
+    /// This exercises the `_ => None` arm in `gradient_stop_count_from_drawables`.
+    #[test]
+    fn gradient_stop_count_is_none_for_raster_background_layer() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        assert!(
+            gradient_stop_count_from_drawables(&drawables).is_none(),
+            "raster background must not count as gradient stops"
+        );
     }
 }
