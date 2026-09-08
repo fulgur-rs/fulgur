@@ -1009,23 +1009,13 @@ mod tests {
 
     /// Return the stop count of the first gradient background layer found in
     /// `html`'s converted block styles, or `None` if there is no gradient.
+    /// Delegates to [`gradient_stop_count_from_drawables`] so the matching
+    /// logic is defined in one place.
     fn first_gradient_stop_count(html: &str) -> Option<usize> {
-        use crate::draw_primitives::BgImageContent;
         let drawables = Engine::builder()
             .build()
             .build_drawables_for_testing_no_gcpm(html);
-        drawables.block_styles.values().find_map(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .find_map(|layer| match &layer.content {
-                    BgImageContent::LinearGradient { stops, .. }
-                    | BgImageContent::RadialGradient { stops, .. }
-                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                    _ => None,
-                })
-        })
+        gradient_stop_count_from_drawables(&drawables)
     }
 
     /// Security regression: an unbounded `column-stop` list must not be
@@ -1368,9 +1358,9 @@ mod tests {
 
     // ── first_gradient_stop_count: raster / svg background layer (line 1025) ──
 
-    /// Inner helper shared by `first_gradient_stop_count` and the raster test
-    /// below. Separating it lets us supply an asset bundle without modifying the
-    /// no-bundle fast path used by most gradient-cap tests.
+    /// Shared matcher used by [`first_gradient_stop_count`] and the raster test
+    /// below. Separating it lets callers supply pre-built drawables (e.g. with
+    /// an asset bundle) without duplicating the match logic.
     fn gradient_stop_count_from_drawables(
         drawables: &crate::drawables::Drawables,
     ) -> Option<usize> {
