@@ -3045,14 +3045,20 @@ fn css_escape_ident(s: &str) -> String {
 ///
 /// Selector components here come from the trusted author CSS via
 /// `gcpm::parser` (`Token::Ident` in cssparser), not from arbitrary HTML.
-/// Tag names are lowercased to match HTML's case-insensitive convention;
-/// id/class are still escaped because a hostile author can craft a bare
-/// token containing metacharacters via CSS escapes — defense in depth on
-/// the trusted side, and required by `element_specificity_prefix` for the
-/// untrusted case (fulgur-ka6c).
+/// Tag names are lowercased to match HTML's case-insensitive convention.
+///
+/// All three arms are escaped, because cssparser hands back the *unescaped*
+/// token value: author CSS `p\7b x { position: running(h) }` parses to
+/// `Tag("p{x")`, so an unescaped tag arm emitted `p{x{display:none}` and the
+/// stray `{` swallowed every following rule in the generated sheet as that
+/// rule's body — silently dropping the suppression for every later running
+/// element (CodeRabbit review, PR #719). Escaping keeps each generated rule
+/// well-formed and self-delimiting, so one hostile selector can no longer
+/// disable the others. Escaping is also what `element_specificity_prefix`
+/// relies on for the untrusted case (fulgur-ka6c).
 fn selector_text(parsed: &ParsedSelector) -> String {
     match parsed {
-        ParsedSelector::Tag(name) => name.to_ascii_lowercase(),
+        ParsedSelector::Tag(name) => css_escape_ident(&name.to_ascii_lowercase()),
         ParsedSelector::Class(name) => format!(".{}", css_escape_ident(name)),
         ParsedSelector::Id(name) => format!("#{}", css_escape_ident(name)),
     }
@@ -3797,6 +3803,52 @@ mod tests {
     #[test]
     fn build_running_display_none_css_empty_for_no_mappings() {
         assert!(build_running_display_none_css(&[]).is_empty());
+    }
+
+    /// CodeRabbit review (PR #719): cssparser stores `Token::Ident`
+    /// *unescaped*, so author CSS `p\7b x { … }` reaches us as
+    /// `Tag("p{x")`. Emitting that tag verbatim produced
+    /// `p{x{display:none}.keep{display:none}` — the stray `{` opens a
+    /// declaration block, so a CSS parser reads every following rule as
+    /// this rule's body and `.keep` never gets its `display: none`. One
+    /// crafted tag selector could therefore un-suppress every other
+    /// running element in the document. Escaping the tag keeps each rule
+    /// self-delimiting.
+    #[test]
+    fn build_running_display_none_css_escapes_tag_metacharacters() {
+        let mappings = vec![
+            RunningMapping {
+                parsed: ParsedSelector::Tag("p{x".into()),
+                running_name: "top".into(),
+            },
+            RunningMapping {
+                parsed: ParsedSelector::Class("keep".into()),
+                running_name: "bottom".into(),
+            },
+        ];
+        assert_eq!(
+            build_running_display_none_css(&mappings),
+            r"p\{x{display:none}.keep{display:none}",
+            "the tag's `{{` must be escaped so the following rule survives"
+        );
+    }
+
+    /// The escaping must be a no-op for ordinary tag names, including
+    /// ones ending in a digit (`h1`) and custom elements (`my-widget`) —
+    /// otherwise every existing running-element selector would change.
+    #[test]
+    fn build_running_display_none_css_leaves_ordinary_tags_untouched() {
+        for tag in ["div", "h1", "my-widget", "HEADER"] {
+            let mappings = vec![RunningMapping {
+                parsed: ParsedSelector::Tag(tag.into()),
+                running_name: "top".into(),
+            }];
+            assert_eq!(
+                build_running_display_none_css(&mappings),
+                format!("{}{{display:none}}", tag.to_ascii_lowercase()),
+                "escaping must not alter the ordinary tag name {tag}"
+            );
+        }
     }
 
     /// `relayout_position_fixed` must reshape every `position: fixed`
