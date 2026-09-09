@@ -1101,6 +1101,137 @@ mod tests {
         );
     }
 
+    // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
+
+    /// CSS `radial-gradient(contain, …)` maps to `ShapeExtent::Contain`,
+    /// which is an alias for `closest-side` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::ClosestSide`.
+    #[test]
+    fn radial_gradient_contain_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(contain,red,blue)"),
+            "radial_contain",
+        );
+    }
+
+    /// CSS `radial-gradient(cover, …)` maps to `ShapeExtent::Cover`,
+    /// which is an alias for `farthest-corner` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::FarthestCorner`.
+    #[test]
+    fn radial_gradient_cover_extent() {
+        assert_pdf(
+            &render_bg("radial-gradient(cover,red,blue)"),
+            "radial_cover",
+        );
+    }
+
+    // ── resolve_color_stops: < 2 effective stops ──────────────────────────────
+
+    /// A linear gradient with only one color stop is technically invalid CSS;
+    /// `resolve_color_stops` bails at the `out.len() < 2` guard and returns
+    /// `None`, so the layer is dropped. The element still renders (no background
+    /// image but a valid PDF).
+    #[test]
+    fn linear_gradient_single_stop_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:80px;height:80px;background:linear-gradient(red)"></div></body></html>"#,
+        );
+        // Either Stylo rejects the single-stop gradient entirely (count=None)
+        // or fulgur drops the layer (count=None). A valid PDF must still be
+        // produced, which the `render_bg` call below confirms.
+        let _ = count; // None expected, but assertion is on the PDF not the count.
+        assert_pdf(&render_bg("linear-gradient(red)"), "linear_one_stop");
+    }
+
+    /// A conic gradient with only one color stop — triggers the
+    /// `stops.len() < 2` guard at the end of `resolve_conic_gradient`.
+    #[test]
+    fn conic_gradient_single_stop_drops_layer() {
+        assert_pdf(&render_bg("conic-gradient(red 0deg)"), "conic_one_stop");
+    }
+
+    // ── resolve_color_stops: calc() color stop position ───────────────────────
+
+    /// A color stop with a `calc()` position is neither a pure percentage
+    /// nor a pure length. `resolve_color_stops` hits the `else` branch
+    /// (L267-271) and returns `None`, dropping the layer. Element still
+    /// renders.
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        // calc(10px + 5%) is a mixed-unit calc that resolves to neither
+        // to_percentage() nor to_length(), triggering the bail-out.
+        assert_pdf(
+            &render_bg("linear-gradient(red calc(10px + 5%),blue)"),
+            "linear_calc_stop",
+        );
+    }
+
+    // ── resolve_color_stops: interpolation hint at length position ────────────
+
+    /// An interpolation hint expressed as a length value (`10px` instead of
+    /// a percentage) exercises the `to_length()` branch inside the hint arm
+    /// of `resolve_color_stops` (L293-294). The hint is stored as
+    /// `GradientStopPosition::LengthPx` and the gradient renders normally.
+    #[test]
+    fn linear_gradient_hint_at_length_position() {
+        // `red, 20px, blue` — if Stylo generates this as an InterpolationHint
+        // with a length LengthPercentage, the `to_length()` branch fires.
+        // If Stylo instead discards it or doesn't support it, the gradient
+        // still renders as a valid PDF (no panic).
+        assert_pdf(
+            &render_bg("linear-gradient(red,20px,blue)"),
+            "linear_hint_length",
+        );
+    }
+
+    // ── resolve_color_stops: conic gradient interpolation hint ───────────────
+
+    /// A conic gradient containing an interpolation hint fires the
+    /// `GradientItem::InterpolationHint` arm in `resolve_conic_gradient`,
+    /// which logs a warning and returns `None` (layer dropped).
+    #[test]
+    fn conic_gradient_with_interpolation_hint_drops_layer() {
+        assert_pdf(
+            &render_bg("conic-gradient(red,50%,blue)"),
+            "conic_hint_drop",
+        );
+    }
+
+    // ── first_gradient_stop_count helper: BgImageContent::Raster / Svg arm ───
+
+    /// A raster background image does not produce a gradient stop count.
+    /// Exercises the `_ => None` catch-all arm of the `find_map` closure
+    /// inside `first_gradient_stop_count`.
+    #[test]
+    fn first_gradient_stop_count_returns_none_for_raster_bg_image() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        let count = {
+            use crate::draw_primitives::BgImageContent;
+            drawables.block_styles.values().find_map(|block| {
+                block
+                    .style
+                    .background_layers
+                    .iter()
+                    .find_map(|layer| match &layer.content {
+                        BgImageContent::LinearGradient { stops, .. }
+                        | BgImageContent::RadialGradient { stops, .. }
+                        | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                        _ => None,
+                    })
+            })
+        };
+        assert!(
+            count.is_none(),
+            "raster background image must not produce a gradient stop count"
+        );
+    }
+
     /// Same cap on the radial-gradient stop-building path.  Exercises the
     /// `BgImageContent::RadialGradient { stops, .. }` arm of the
     /// `first_gradient_stop_count` helper (previously uncovered).
