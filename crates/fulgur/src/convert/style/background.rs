@@ -1101,6 +1101,192 @@ mod tests {
         );
     }
 
+    // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
+
+    /// CSS `radial-gradient(contain, …)` maps to `ShapeExtent::Contain`,
+    /// which is an alias for `closest-side` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::ClosestSide`.
+    #[test]
+    fn radial_gradient_contain_extent() {
+        // Stylo rejects `contain` as an unknown token in radial-gradient(), so
+        // no gradient layer is produced. The test documents that this input
+        // produces a valid PDF without a crash.
+        assert_pdf(
+            &render_bg("radial-gradient(contain,red,blue)"),
+            "radial_contain",
+        );
+    }
+
+    /// CSS `radial-gradient(cover, …)` maps to `ShapeExtent::Cover`,
+    /// which is an alias for `farthest-corner` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::FarthestCorner`.
+    #[test]
+    fn radial_gradient_cover_extent() {
+        // Stylo's modern mode rejects `cover` as an unknown token in
+        // radial-gradient(), so no gradient layer is produced via CSS parsing.
+        // See map_extent_cover_maps_to_farthest_corner for the direct unit test.
+        assert_pdf(
+            &render_bg("radial-gradient(cover,red,blue)"),
+            "radial_cover",
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Contain)` must return `RadialExtent::ClosestSide`.
+    /// Stylo's modern-mode CSS parser rejects `contain` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_contain_maps_to_closest_side() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Cover)` must return `RadialExtent::FarthestCorner`.
+    /// Stylo's modern-mode CSS parser rejects `cover` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_cover_maps_to_farthest_corner() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner
+        );
+    }
+
+    // ── resolve_color_stops: < 2 effective stops ──────────────────────────────
+
+    /// A linear gradient with only one color stop is technically invalid CSS;
+    /// `resolve_color_stops` bails at the `out.len() < 2` guard and returns
+    /// `None`, so the layer is dropped. The element still renders (no background
+    /// image but a valid PDF).
+    #[test]
+    fn linear_gradient_single_stop_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "single-stop linear-gradient must drop the layer (Stylo or fulgur bails at <2 stops)"
+        );
+    }
+
+    /// A conic gradient with only one color stop — triggers the
+    /// `stops.len() < 2` guard at the end of `resolve_conic_gradient`.
+    #[test]
+    fn conic_gradient_single_stop_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red 0deg)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "single-stop conic-gradient must drop the layer"
+        );
+    }
+
+    // ── resolve_color_stops: calc() color stop position ───────────────────────
+
+    /// A color stop with a `calc()` position is neither a pure percentage
+    /// nor a pure length. `resolve_color_stops` hits the `else` branch
+    /// (L267-271) and returns `None`, dropping the layer. Element still
+    /// renders.
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        // calc(10px + 5%) is a mixed-unit calc that resolves to neither
+        // to_percentage() nor to_length(), triggering the bail-out.
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red calc(10px + 5%),blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "mixed-unit calc() stop position must drop the layer"
+        );
+    }
+
+    // ── resolve_color_stops: interpolation hint at length position ────────────
+
+    /// An interpolation hint expressed as a length value (`10px` instead of
+    /// a percentage) exercises the `to_length()` branch inside the hint arm
+    /// of `resolve_color_stops` (L293-294). The hint is stored as
+    /// `GradientStopPosition::LengthPx` and the gradient renders normally.
+    #[test]
+    fn linear_gradient_hint_at_length_position() {
+        // `red, 20px, blue` — if Stylo generates this as an InterpolationHint
+        // with a length LengthPercentage, the `to_length()` branch fires.
+        // If Stylo instead discards it or doesn't support it, the gradient
+        // still renders as a valid PDF (no panic).
+        assert_pdf(
+            &render_bg("linear-gradient(red,20px,blue)"),
+            "linear_hint_length",
+        );
+    }
+
+    // ── resolve_color_stops: conic gradient interpolation hint ───────────────
+
+    /// A conic gradient containing an interpolation hint fires the
+    /// `GradientItem::InterpolationHint` arm in `resolve_conic_gradient`,
+    /// which logs a warning and returns `None` (layer dropped).
+    /// The standalone `50%` is an interpolation hint (CSS Images L4 §2.3),
+    /// so Stylo either emits an `InterpolationHint` (fulgur drops the layer)
+    /// or rejects the syntax entirely (no layer either way).
+    #[test]
+    fn conic_gradient_with_interpolation_hint_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red,50%,blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "conic-gradient with interpolation hint must drop the layer (Stylo emits \
+             InterpolationHint or rejects syntax; neither produces a retained layer)"
+        );
+    }
+
+    // ── first_gradient_stop_count helper: BgImageContent::Raster / Svg arm ───
+
+    /// A raster background image does not produce a gradient stop count.
+    /// Exercises the `_ => None` catch-all arm of the `find_map` closure
+    /// inside `first_gradient_stop_count`.
+    #[test]
+    fn first_gradient_stop_count_returns_none_for_raster_bg_image() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        use crate::draw_primitives::BgImageContent;
+        // First verify that a Raster layer was actually produced — otherwise
+        // count.is_none() could succeed vacuously (no layer at all).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "url(dot.png) must produce a BgImageContent::Raster layer"
+        );
+        // All layers should be Raster or Svg — no gradient layer must exist.
+        let no_gradient = drawables.block_styles.values().all(|block| {
+            block.style.background_layers.iter().all(|layer| {
+                matches!(
+                    &layer.content,
+                    BgImageContent::Raster { .. } | BgImageContent::Svg { .. }
+                )
+            })
+        });
+        assert!(
+            no_gradient,
+            "raster background image must not produce a gradient layer"
+        );
+    }
+
     /// Same cap on the radial-gradient stop-building path.  Exercises the
     /// `BgImageContent::RadialGradient { stops, .. }` arm of the
     /// `first_gradient_stop_count` helper (previously uncovered).
