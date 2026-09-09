@@ -1265,21 +1265,18 @@ mod tests {
             has_raster,
             "url(dot.png) must produce a BgImageContent::Raster layer"
         );
-        let count = drawables.block_styles.values().find_map(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .find_map(|layer| match &layer.content {
-                    BgImageContent::LinearGradient { stops, .. }
-                    | BgImageContent::RadialGradient { stops, .. }
-                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                    _ => None,
-                })
+        // All layers should be Raster or Svg — no gradient layer must exist.
+        let no_gradient = drawables.block_styles.values().all(|block| {
+            block.style.background_layers.iter().all(|layer| {
+                matches!(
+                    &layer.content,
+                    BgImageContent::Raster { .. } | BgImageContent::Svg { .. }
+                )
+            })
         });
         assert!(
-            count.is_none(),
-            "raster background image must not produce a gradient stop count"
+            no_gradient,
+            "raster background image must not produce a gradient layer"
         );
     }
 
