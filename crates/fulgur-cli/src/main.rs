@@ -1010,6 +1010,18 @@ mod tests {
 
     // --- logging ---
 
+    /// `log::set_max_level` is process-global and `cargo test` runs these in
+    /// parallel, so every test that sets or asserts on the level takes this
+    /// lock. Without it, `init_logging` (which sets the level from `RUST_LOG`)
+    /// can land between another test's `set_max_level` and its assertion.
+    static LOG_LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`LOG_LEVEL_LOCK`], ignoring poisoning: a panic in one level test
+    /// must not cascade into spurious failures in the others.
+    fn log_level_guard() -> std::sync::MutexGuard<'static, ()> {
+        LOG_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The documented default: nothing set, or nothing parseable, is `warn`.
     #[test]
     fn parse_log_level_defaults_to_warn() {
@@ -1074,6 +1086,7 @@ mod tests {
     #[test]
     fn stderr_logger_enabled_follows_max_level() {
         use log::Log;
+        let _guard = log_level_guard();
         log::set_max_level(log::LevelFilter::Warn);
         let warn = log::Metadata::builder().level(log::Level::Warn).build();
         let info = log::Metadata::builder().level(log::Level::Info).build();
@@ -1081,6 +1094,56 @@ mod tests {
         assert!(
             !StderrLogger.enabled(&info),
             "info is below the warn filter"
+        );
+    }
+
+    /// `log` itself: exercise both arms of its `enabled` gate and `flush`.
+    /// Called directly on the unit struct rather than through the `log`
+    /// facade, so this needs no globally installed logger — the record it
+    /// writes goes to the test harness's captured stderr.
+    #[test]
+    fn stderr_logger_log_writes_only_when_enabled() {
+        use log::Log;
+        let _guard = log_level_guard();
+        log::set_max_level(log::LevelFilter::Warn);
+
+        // Enabled: at the filter level, so this takes the writing arm.
+        StderrLogger.log(
+            &log::Record::builder()
+                .level(log::Level::Warn)
+                .args(format_args!("covered warn line"))
+                .build(),
+        );
+        // Disabled: below the filter, so this takes the early-out arm.
+        StderrLogger.log(
+            &log::Record::builder()
+                .level(log::Level::Trace)
+                .args(format_args!("must not be written"))
+                .build(),
+        );
+
+        // A no-op, but it is part of the trait surface and must not panic.
+        StderrLogger.flush();
+    }
+
+    /// `init_logging` installs the process-global logger. It is idempotent by
+    /// construction — `set_logger` returns `Err` once a logger exists, and the
+    /// guard skips `set_max_level` — so calling it twice here is safe and
+    /// pins that a repeat call cannot panic or reset the filter.
+    ///
+    /// Deliberately does not assert a specific level: `RUST_LOG` may be set in
+    /// the surrounding environment, and mutating it would race the other tests
+    /// in this binary. The parsing contract is covered by `parse_log_level`.
+    #[test]
+    fn init_logging_installs_a_logger_and_is_idempotent() {
+        let _guard = log_level_guard();
+        init_logging();
+        let after_first = log::max_level();
+        init_logging();
+        assert_eq!(
+            log::max_level(),
+            after_first,
+            "a second init_logging must not change the filter"
         );
     }
 }
