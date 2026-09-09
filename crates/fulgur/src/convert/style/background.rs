@@ -1229,11 +1229,18 @@ mod tests {
     /// A conic gradient containing an interpolation hint fires the
     /// `GradientItem::InterpolationHint` arm in `resolve_conic_gradient`,
     /// which logs a warning and returns `None` (layer dropped).
+    /// The standalone `50%` is an interpolation hint (CSS Images L4 §2.3),
+    /// so Stylo either emits an `InterpolationHint` (fulgur drops the layer)
+    /// or rejects the syntax entirely (no layer either way).
     #[test]
     fn conic_gradient_with_interpolation_hint_drops_layer() {
-        assert_pdf(
-            &render_bg("conic-gradient(red,50%,blue)"),
-            "conic_hint_drop",
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red,50%,blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "conic-gradient with interpolation hint must drop the layer (Stylo emits \
+             InterpolationHint or rejects syntax; neither produces a retained layer)"
         );
     }
 
