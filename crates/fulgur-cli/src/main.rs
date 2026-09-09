@@ -472,9 +472,8 @@ impl log::Log for StderrLogger {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),
-                "{}: {}",
-                record.level().as_str().to_lowercase(),
-                record.args()
+                "{}",
+                format_log_line(record.level(), record.args())
             );
         }
     }
@@ -484,15 +483,36 @@ impl log::Log for StderrLogger {
 
 /// Install [`StderrLogger`], honouring `RUST_LOG` (default: `warn`).
 fn init_logging() {
-    let level = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
-        .unwrap_or(log::LevelFilter::Warn);
+    let level = parse_log_level(std::env::var("RUST_LOG").ok().as_deref());
     // Only fails if a logger is already installed, which cannot happen
     // here — but a logging failure must never abort a render.
     if log::set_logger(&StderrLogger).is_ok() {
         log::set_max_level(level);
     }
+}
+
+/// Render one log record as the line [`StderrLogger`] writes.
+///
+/// Split out from `log` so the formatting is testable without installing a
+/// global logger or capturing the process's stderr.
+fn format_log_line(level: log::Level, args: &std::fmt::Arguments<'_>) -> String {
+    format!("{}: {}", level.as_str().to_lowercase(), args)
+}
+
+/// Resolve the `RUST_LOG` value to a level filter.
+///
+/// Accepts exactly one level name (case-insensitive). Anything else —
+/// absent, empty, a target directive like `fulgur=debug`, or a
+/// multi-directive string like `warn,fulgur=debug` — falls back to `warn`
+/// rather than erroring, because logging configuration must never fail a
+/// render. Surrounding whitespace is tolerated.
+///
+/// Split out from [`init_logging`] so the contract is testable without
+/// mutating process-wide environment or logger state.
+fn parse_log_level(value: Option<&str>) -> log::LevelFilter {
+    value
+        .and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Warn)
 }
 
 fn main() {
@@ -986,5 +1006,81 @@ mod tests {
     fn margin_rejects_one_bad_value_among_four() {
         let m = parse_margin("10 10 10 -10");
         assert_eq!(m, Margin::default());
+    }
+
+    // --- logging ---
+
+    /// The documented default: nothing set, or nothing parseable, is `warn`.
+    #[test]
+    fn parse_log_level_defaults_to_warn() {
+        assert_eq!(parse_log_level(None), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level(Some("")), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level(Some("nonsense")), log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn parse_log_level_accepts_each_single_level() {
+        for (text, expected) in [
+            ("error", log::LevelFilter::Error),
+            ("warn", log::LevelFilter::Warn),
+            ("info", log::LevelFilter::Info),
+            ("debug", log::LevelFilter::Debug),
+            ("trace", log::LevelFilter::Trace),
+            ("off", log::LevelFilter::Off),
+        ] {
+            assert_eq!(parse_log_level(Some(text)), expected, "level {text}");
+            assert_eq!(
+                parse_log_level(Some(&text.to_uppercase())),
+                expected,
+                "level {text} uppercased"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_log_level_tolerates_surrounding_whitespace() {
+        assert_eq!(parse_log_level(Some("  debug \n")), log::LevelFilter::Debug);
+    }
+
+    /// `env_logger`-style directives are NOT supported, and silently fall back
+    /// to the default rather than erroring. This is the documented contract
+    /// (README) and the likeliest user surprise, so pin it.
+    #[test]
+    fn parse_log_level_falls_back_on_target_directives() {
+        assert_eq!(
+            parse_log_level(Some("fulgur=debug")),
+            log::LevelFilter::Warn
+        );
+        assert_eq!(
+            parse_log_level(Some("warn,fulgur=debug")),
+            log::LevelFilter::Warn
+        );
+    }
+
+    #[test]
+    fn format_log_line_lowercases_the_level() {
+        assert_eq!(
+            format_log_line(log::Level::Warn, &format_args!("missing asset {}", 3)),
+            "warn: missing asset 3"
+        );
+        assert_eq!(
+            format_log_line(log::Level::Error, &format_args!("boom")),
+            "error: boom"
+        );
+    }
+
+    /// `enabled` gates on the globally installed max level. Set it explicitly
+    /// so the assertion does not depend on whether `init_logging` has run.
+    #[test]
+    fn stderr_logger_enabled_follows_max_level() {
+        use log::Log;
+        log::set_max_level(log::LevelFilter::Warn);
+        let warn = log::Metadata::builder().level(log::Level::Warn).build();
+        let info = log::Metadata::builder().level(log::Level::Info).build();
+        assert!(StderrLogger.enabled(&warn));
+        assert!(
+            !StderrLogger.enabled(&info),
+            "info is below the warn filter"
+        );
     }
 }
