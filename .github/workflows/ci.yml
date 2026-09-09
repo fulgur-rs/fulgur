@@ -123,6 +123,16 @@ jobs:
       - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+      # `render_smoke.rs`'s two page-overflow content-loss tests hard-require
+      # `pdftotext`: it is the only extractor here that respects the page box,
+      # so skipping would turn them into green tests that assert nothing about
+      # the defect they exist to catch (see their doc comments). They are
+      # `#[cfg_attr(windows, ignore)]`d because poppler has no first-party
+      # Windows package; macOS gets it from Homebrew so the guard keeps running
+      # on two of the three platforms.
+      - name: Install poppler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install poppler
       - name: Configure mold linker
         if: matrix.mold
         run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV

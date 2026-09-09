@@ -6864,6 +6864,14 @@ fn render_unaffected_by_at_page_only_margin_without_builder_override() {
 ///
 /// A lib-side test is required on top of the VRT reftests because the
 /// coverage job excludes `fulgur-vrt` (CLAUDE.md).
+///
+/// Ignored on Windows only: poppler ships no first-party Windows build, so
+/// CI cannot guarantee `pdftotext` there. Linux and macOS CI both install
+/// it, so the guard still runs on two platforms — and the invariant it
+/// checks (page-box geometry) is platform-independent. This is an explicit
+/// `ignore`, not a silent in-test skip, so a missing extractor shows up as
+/// an ignored test rather than a passing one.
+#[cfg_attr(windows, ignore = "poppler/pdftotext is not installable on Windows CI")]
 #[test]
 fn leading_child_that_must_break_does_not_lose_content() {
     const N: usize = 300;
@@ -6926,6 +6934,14 @@ fn leading_child_that_must_break_does_not_lose_content() {
 /// `leading_child_that_must_break_does_not_lose_content` — the lost
 /// glyphs are in the content stream either way, just painted outside the
 /// page box.
+///
+/// Ignored on Windows only: poppler ships no first-party Windows build, so
+/// CI cannot guarantee `pdftotext` there. Linux and macOS CI both install
+/// it, so the guard still runs on two platforms — and the invariant it
+/// checks (page-box geometry) is platform-independent. This is an explicit
+/// `ignore`, not a silent in-test skip, so a missing extractor shows up as
+/// an ignored test rather than a passing one.
+#[cfg_attr(windows, ignore = "poppler/pdftotext is not installable on Windows CI")]
 #[test]
 fn padded_leading_child_that_must_break_does_not_lose_content() {
     // A SHORT probe is essential. The defect needs a paragraph whose
