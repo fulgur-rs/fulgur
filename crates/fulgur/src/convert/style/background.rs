@@ -1108,6 +1108,9 @@ mod tests {
     /// `map_extent` converts it to `RadialExtent::ClosestSide`.
     #[test]
     fn radial_gradient_contain_extent() {
+        // Stylo rejects `contain` as an unknown token in radial-gradient(), so
+        // no gradient layer is produced. The test documents that this input
+        // produces a valid PDF without a crash.
         assert_pdf(
             &render_bg("radial-gradient(contain,red,blue)"),
             "radial_contain",
@@ -1119,6 +1122,9 @@ mod tests {
     /// `map_extent` converts it to `RadialExtent::FarthestCorner`.
     #[test]
     fn radial_gradient_cover_extent() {
+        // Stylo rejects `cover` as an unknown token in radial-gradient(), so
+        // no gradient layer is produced. The test documents that this input
+        // produces a valid PDF without a crash.
         assert_pdf(
             &render_bg("radial-gradient(cover,red,blue)"),
             "radial_cover",
@@ -1134,20 +1140,25 @@ mod tests {
     #[test]
     fn linear_gradient_single_stop_drops_layer() {
         let count = first_gradient_stop_count(
-            r#"<html><body><div style="width:80px;height:80px;background:linear-gradient(red)"></div></body></html>"#,
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red)"></div></body></html>"#,
         );
-        // Either Stylo rejects the single-stop gradient entirely (count=None)
-        // or fulgur drops the layer (count=None). A valid PDF must still be
-        // produced, which the `render_bg` call below confirms.
-        let _ = count; // None expected, but assertion is on the PDF not the count.
-        assert_pdf(&render_bg("linear-gradient(red)"), "linear_one_stop");
+        assert!(
+            count.is_none(),
+            "single-stop linear-gradient must drop the layer (Stylo or fulgur bails at <2 stops)"
+        );
     }
 
     /// A conic gradient with only one color stop — triggers the
     /// `stops.len() < 2` guard at the end of `resolve_conic_gradient`.
     #[test]
     fn conic_gradient_single_stop_drops_layer() {
-        assert_pdf(&render_bg("conic-gradient(red 0deg)"), "conic_one_stop");
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red 0deg)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "single-stop conic-gradient must drop the layer"
+        );
     }
 
     // ── resolve_color_stops: calc() color stop position ───────────────────────
@@ -1160,9 +1171,12 @@ mod tests {
     fn linear_gradient_calc_stop_position_drops_layer() {
         // calc(10px + 5%) is a mixed-unit calc that resolves to neither
         // to_percentage() nor to_length(), triggering the bail-out.
-        assert_pdf(
-            &render_bg("linear-gradient(red calc(10px + 5%),blue)"),
-            "linear_calc_stop",
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red calc(10px + 5%),blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "mixed-unit calc() stop position must drop the layer"
         );
     }
 
