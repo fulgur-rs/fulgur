@@ -1122,12 +1122,38 @@ mod tests {
     /// `map_extent` converts it to `RadialExtent::FarthestCorner`.
     #[test]
     fn radial_gradient_cover_extent() {
-        // Stylo rejects `cover` as an unknown token in radial-gradient(), so
-        // no gradient layer is produced. The test documents that this input
-        // produces a valid PDF without a crash.
+        // Stylo's modern mode rejects `cover` as an unknown token in
+        // radial-gradient(), so no gradient layer is produced via CSS parsing.
+        // See map_extent_cover_maps_to_farthest_corner for the direct unit test.
         assert_pdf(
             &render_bg("radial-gradient(cover,red,blue)"),
             "radial_cover",
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Contain)` must return `RadialExtent::ClosestSide`.
+    /// Stylo's modern-mode CSS parser rejects `contain` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_contain_maps_to_closest_side() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Cover)` must return `RadialExtent::FarthestCorner`.
+    /// Stylo's modern-mode CSS parser rejects `cover` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_cover_maps_to_farthest_corner() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner
         );
     }
 
