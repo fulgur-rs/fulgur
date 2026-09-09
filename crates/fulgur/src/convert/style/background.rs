@@ -1251,21 +1251,32 @@ mod tests {
             .assets(bundle)
             .build()
             .build_drawables_for_testing_no_gcpm(html);
-        let count = {
-            use crate::draw_primitives::BgImageContent;
-            drawables.block_styles.values().find_map(|block| {
-                block
-                    .style
-                    .background_layers
-                    .iter()
-                    .find_map(|layer| match &layer.content {
-                        BgImageContent::LinearGradient { stops, .. }
-                        | BgImageContent::RadialGradient { stops, .. }
-                        | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                        _ => None,
-                    })
-            })
-        };
+        use crate::draw_primitives::BgImageContent;
+        // First verify that a Raster layer was actually produced — otherwise
+        // count.is_none() could succeed vacuously (no layer at all).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "url(dot.png) must produce a BgImageContent::Raster layer"
+        );
+        let count = drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        });
         assert!(
             count.is_none(),
             "raster background image must not produce a gradient stop count"
