@@ -1332,59 +1332,50 @@ mod tests {
         }
     }
 
-    // ── first_gradient_stop_count: non-gradient content arm ──────────────────
+    // ── BgImageContent::Raster arm (non-gradient URL background) ─────────────
 
-    /// Helper that works like `first_gradient_stop_count` but accepts a
-    /// pre-built `AssetBundle` so URL background images can be resolved.
-    fn first_gradient_stop_count_with_bundle(html: &str, bundle: AssetBundle) -> Option<usize> {
+    /// A PNG `url(...)` background resolves to `BgImageContent::Raster`, not a
+    /// gradient.  Verifies both that the raster layer is present and that no
+    /// gradient stop count is exposed — ensuring the non-gradient variant is
+    /// actually exercised and the absence of a gradient is not due to a missing
+    /// layer.
+    #[test]
+    fn first_gradient_stop_count_none_for_raster_background() {
         use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
         let drawables = Engine::builder()
             .assets(bundle)
             .build()
             .build_drawables_for_testing_no_gcpm(html);
-        drawables.block_styles.values().find_map(|block| {
-            block
-                .style
-                .background_layers
-                .iter()
-                .find_map(|layer| match &layer.content {
-                    BgImageContent::LinearGradient { stops, .. }
-                    | BgImageContent::RadialGradient { stops, .. }
-                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
-                    // Raster / SVG URL backgrounds are not gradients.
-                    _ => None,
-                })
-        })
-    }
 
-    /// A URL background resolved to `BgImageContent::Raster` is not a
-    /// gradient, so `first_gradient_stop_count_with_bundle` returns `None`.
-    /// This exercises the `_ => None` catch-all arm in the helper's inner
-    /// match against non-gradient `BgImageContent` variants.
-    #[test]
-    fn first_gradient_stop_count_none_for_raster_background() {
-        let mut bundle = AssetBundle::default();
-        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
-        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
-        let count = first_gradient_stop_count_with_bundle(html, bundle);
+        // The PNG must have been resolved: at least one Raster layer must exist.
         assert!(
-            count.is_none(),
-            "a raster URL background should not produce a gradient stop count"
+            drawables.block_styles.values().any(|block| {
+                block
+                    .style
+                    .background_layers
+                    .iter()
+                    .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+            }),
+            "url(dot.png) background should resolve to a Raster layer"
         );
-    }
 
-    /// CSS gradients need no bundle; `first_gradient_stop_count_with_bundle`
-    /// returns `Some` for gradient content even when the bundle is empty.
-    /// This covers the gradient match arms inside the bundle-accepting helper.
-    #[test]
-    fn first_gradient_stop_count_with_bundle_returns_count_for_gradient() {
-        let count = first_gradient_stop_count_with_bundle(
-            r#"<html><body><div style="width:80px;height:80px;background:linear-gradient(red,blue)"></div></body></html>"#,
-            AssetBundle::default(),
-        );
+        // No gradient layer may be present.
+        let has_gradient = drawables.block_styles.values().any(|block| {
+            block.style.background_layers.iter().any(|layer| {
+                matches!(
+                    layer.content,
+                    BgImageContent::LinearGradient { .. }
+                        | BgImageContent::RadialGradient { .. }
+                        | BgImageContent::ConicGradient { .. }
+                )
+            })
+        });
         assert!(
-            count.is_some(),
-            "linear-gradient background should produce a stop count"
+            !has_gradient,
+            "a raster URL background should not produce a gradient layer"
         );
     }
 }
