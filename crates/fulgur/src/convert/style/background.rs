@@ -1205,4 +1205,102 @@ mod tests {
         let pdf = render_bg("conic-gradient(in hsl,red,blue)");
         assert_pdf(&pdf, "conic_nondefault_interp");
     }
+
+    // ── calc() stop positions ─────────────────────────────────────────────────
+
+    /// A `ComplexColorStop` whose position is `calc(50% + 10px)` produces a
+    /// computed `LengthPercentage` that is neither a pure percentage
+    /// (`to_percentage()` returns `None`) nor a pure length (`to_length()`
+    /// returns `None` for mixed calc).  `resolve_color_stops` logs a warning
+    /// and returns `None`, dropping the layer; the element still renders.
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        let pdf = render_bg("linear-gradient(red calc(50% + 10px),blue)");
+        assert_pdf(&pdf, "calc_stop_pos");
+    }
+
+    // ── conic-gradient interpolation hint ────────────────────────────────────
+
+    /// An interpolation hint inside a `conic-gradient` is not yet supported.
+    /// `resolve_conic_gradient` returns `None` (layer dropped) when it
+    /// encounters `GradientItem::InterpolationHint`.  The element still
+    /// renders without the gradient background.
+    #[test]
+    fn conic_gradient_interpolation_hint_drops_layer() {
+        // `30%` between two color stops is a color hint in CSS Images 4.
+        let pdf = render_bg("conic-gradient(red,30%,blue)");
+        assert_pdf(&pdf, "conic_hint_drop");
+    }
+
+    // ── map_extent: Contain and Cover alias keywords ──────────────────────────
+
+    /// CSS Images §3.6.1 defines `contain` and `cover` as aliases for
+    /// `closest-side` and `farthest-corner` respectively in radial gradients.
+    /// Stylo may or may not emit `ShapeExtent::Contain`/`Cover`; either way
+    /// the output must be a valid PDF.
+    #[test]
+    fn radial_gradient_contain_and_cover_size_keywords() {
+        for (name, css) in [
+            ("contain", "radial-gradient(contain circle,red,blue)"),
+            ("cover", "radial-gradient(cover,red,blue)"),
+        ] {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    // ── first_gradient_stop_count: non-gradient content arm ──────────────────
+
+    /// Helper that works like `first_gradient_stop_count` but accepts a
+    /// pre-built `AssetBundle` so URL background images can be resolved.
+    fn first_gradient_stop_count_with_bundle(html: &str, bundle: AssetBundle) -> Option<usize> {
+        use crate::draw_primitives::BgImageContent;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    // Raster / SVG URL backgrounds are not gradients.
+                    _ => None,
+                })
+        })
+    }
+
+    /// A URL background resolved to `BgImageContent::Raster` is not a
+    /// gradient, so `first_gradient_stop_count_with_bundle` returns `None`.
+    /// This exercises the `_ => None` catch-all arm in the helper's inner
+    /// match against non-gradient `BgImageContent` variants.
+    #[test]
+    fn first_gradient_stop_count_none_for_raster_background() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let count = first_gradient_stop_count_with_bundle(html, bundle);
+        assert!(
+            count.is_none(),
+            "a raster URL background should not produce a gradient stop count"
+        );
+    }
+
+    /// CSS gradients need no bundle; `first_gradient_stop_count_with_bundle`
+    /// returns `Some` for gradient content even when the bundle is empty.
+    /// This covers the gradient match arms inside the bundle-accepting helper.
+    #[test]
+    fn first_gradient_stop_count_with_bundle_returns_count_for_gradient() {
+        let count = first_gradient_stop_count_with_bundle(
+            r#"<html><body><div style="width:80px;height:80px;background:linear-gradient(red,blue)"></div></body></html>"#,
+            AssetBundle::default(),
+        );
+        assert!(
+            count.is_some(),
+            "linear-gradient background should produce a stop count"
+        );
+    }
 }
