@@ -1281,16 +1281,33 @@ mod tests {
         })
     }
 
-    /// CSS Images §3.6.1 defines `contain` and `cover` as aliases for
-    /// `closest-side` and `farthest-corner` respectively in radial gradients.
-    /// If Stylo supports the keyword, `map_extent` must map it to the correct
-    /// `RadialExtent`; if Stylo rejects it as a parse error the layer is
-    /// dropped and the output must still be a valid PDF.
+    /// Verifies `first_radial_gradient_size` returns `Some` for a standard
+    /// `radial-gradient` that Stylo parses, covering the `Some(size.clone())`
+    /// arm in the helper.
+    #[test]
+    fn first_radial_gradient_size_returns_some_for_standard_gradient() {
+        use crate::draw_primitives::{RadialExtent, RadialGradientSize};
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(closest-side circle,red,blue)"></div></body></html>"#,
+        );
+        let size =
+            first_radial_gradient_size(html).expect("standard radial-gradient must yield a layer");
+        assert!(
+            matches!(size, RadialGradientSize::Extent(RadialExtent::ClosestSide)),
+            "closest-side circle must map to ClosestSide, got {size:?}"
+        );
+    }
+
+    /// CSS Images §3.6.1 defines `contain` / `cover` as aliases for
+    /// `closest-side` / `farthest-corner`, but the current Stylo build rejects
+    /// both tokens as unknown in `radial-gradient()`, so the layer is dropped.
+    /// Verifies both that the PDF is still valid and that no radial layer was
+    /// produced.  If a future Stylo update accepts these keywords the test will
+    /// fail and should be updated to assert the correct `RadialExtent` instead.
     #[test]
     fn radial_gradient_contain_and_cover_size_keywords() {
-        use crate::draw_primitives::{RadialExtent, RadialGradientSize};
-
-        // contain → closest-side (if parsed)
+        // contain → layer dropped (Stylo parse error)
         let contain_html = concat!(
             r#"<html><body><div style="width:120px;height:80px;"#,
             r#"background:radial-gradient(contain circle,red,blue)"></div></body></html>"#,
@@ -1302,14 +1319,12 @@ mod tests {
                 .expect("render should succeed"),
             "contain",
         );
-        if let Some(size) = first_radial_gradient_size(contain_html) {
-            assert!(
-                matches!(size, RadialGradientSize::Extent(RadialExtent::ClosestSide)),
-                "contain must map to closest-side, got {size:?}"
-            );
-        }
+        assert!(
+            first_radial_gradient_size(contain_html).is_none(),
+            "Stylo rejects 'contain', so no radial-gradient layer must be present"
+        );
 
-        // cover → farthest-corner (if parsed)
+        // cover → layer dropped (Stylo parse error)
         let cover_html = concat!(
             r#"<html><body><div style="width:120px;height:80px;"#,
             r#"background:radial-gradient(cover,red,blue)"></div></body></html>"#,
@@ -1321,15 +1336,10 @@ mod tests {
                 .expect("render should succeed"),
             "cover",
         );
-        if let Some(size) = first_radial_gradient_size(cover_html) {
-            assert!(
-                matches!(
-                    size,
-                    RadialGradientSize::Extent(RadialExtent::FarthestCorner)
-                ),
-                "cover must map to farthest-corner, got {size:?}"
-            );
-        }
+        assert!(
+            first_radial_gradient_size(cover_html).is_none(),
+            "Stylo rejects 'cover', so no radial-gradient layer must be present"
+        );
     }
 
     // ── BgImageContent::Raster arm (non-gradient URL background) ─────────────
