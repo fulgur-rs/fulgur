@@ -1215,8 +1215,21 @@ mod tests {
     /// and returns `None`, dropping the layer; the element still renders.
     #[test]
     fn linear_gradient_calc_stop_position_drops_layer() {
-        let pdf = render_bg("linear-gradient(red calc(50% + 10px),blue)");
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:linear-gradient(red calc(50% + 10px),blue)"></div></body></html>"#,
+        );
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render should succeed");
         assert_pdf(&pdf, "calc_stop_pos");
+        // The layer must have been dropped: no gradient in background_layers.
+        assert_eq!(
+            first_gradient_stop_count(html),
+            None,
+            "calc() stop position must drop the gradient layer"
+        );
     }
 
     // ── conic-gradient interpolation hint ────────────────────────────────────
@@ -1228,23 +1241,94 @@ mod tests {
     #[test]
     fn conic_gradient_interpolation_hint_drops_layer() {
         // `30%` between two color stops is a color hint in CSS Images 4.
-        let pdf = render_bg("conic-gradient(red,30%,blue)");
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:conic-gradient(red,30%,blue)"></div></body></html>"#,
+        );
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render should succeed");
         assert_pdf(&pdf, "conic_hint_drop");
+        // The layer must have been dropped: no gradient in background_layers.
+        assert_eq!(
+            first_gradient_stop_count(html),
+            None,
+            "interpolation hint must drop the conic-gradient layer"
+        );
     }
 
     // ── map_extent: Contain and Cover alias keywords ──────────────────────────
 
+    /// Returns the `RadialGradientSize` of the first radial-gradient layer, or
+    /// `None` if no radial gradient layer is present.
+    fn first_radial_gradient_size(
+        html: &str,
+    ) -> Option<crate::draw_primitives::RadialGradientSize> {
+        use crate::draw_primitives::BgImageContent;
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::RadialGradient { size, .. } => Some(size.clone()),
+                    _ => None,
+                })
+        })
+    }
+
     /// CSS Images §3.6.1 defines `contain` and `cover` as aliases for
     /// `closest-side` and `farthest-corner` respectively in radial gradients.
-    /// Stylo may or may not emit `ShapeExtent::Contain`/`Cover`; either way
-    /// the output must be a valid PDF.
+    /// If Stylo supports the keyword, `map_extent` must map it to the correct
+    /// `RadialExtent`; if Stylo rejects it as a parse error the layer is
+    /// dropped and the output must still be a valid PDF.
     #[test]
     fn radial_gradient_contain_and_cover_size_keywords() {
-        for (name, css) in [
-            ("contain", "radial-gradient(contain circle,red,blue)"),
-            ("cover", "radial-gradient(cover,red,blue)"),
-        ] {
-            assert_pdf(&render_bg(css), name);
+        use crate::draw_primitives::{RadialExtent, RadialGradientSize};
+
+        // contain → closest-side (if parsed)
+        let contain_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(contain circle,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(contain_html)
+                .expect("render should succeed"),
+            "contain",
+        );
+        if let Some(size) = first_radial_gradient_size(contain_html) {
+            assert!(
+                matches!(size, RadialGradientSize::Extent(RadialExtent::ClosestSide)),
+                "contain must map to closest-side, got {size:?}"
+            );
+        }
+
+        // cover → farthest-corner (if parsed)
+        let cover_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(cover,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(cover_html)
+                .expect("render should succeed"),
+            "cover",
+        );
+        if let Some(size) = first_radial_gradient_size(cover_html) {
+            assert!(
+                matches!(
+                    size,
+                    RadialGradientSize::Extent(RadialExtent::FarthestCorner)
+                ),
+                "cover must map to farthest-corner, got {size:?}"
+            );
         }
     }
 
