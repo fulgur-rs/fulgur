@@ -1342,6 +1342,25 @@ mod tests {
         );
     }
 
+    /// Calls `map_extent` directly with the two alias variants (`Contain` and
+    /// `Cover`) that Stylo's CSS parser rejects in `radial-gradient()`, so they
+    /// cannot be reached via end-to-end HTML rendering.  Per CSS Images §3.6.1
+    /// these are aliases for `ClosestSide` and `FarthestCorner` respectively.
+    #[test]
+    fn map_extent_contain_and_cover_aliases() {
+        use super::map_extent;
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(
+            matches!(map_extent(ShapeExtent::Contain), RadialExtent::ClosestSide),
+            "Contain must alias ClosestSide"
+        );
+        assert!(
+            matches!(map_extent(ShapeExtent::Cover), RadialExtent::FarthestCorner),
+            "Cover must alias FarthestCorner"
+        );
+    }
+
     // ── BgImageContent::Raster arm (non-gradient URL background) ─────────────
 
     /// A PNG `url(...)` background resolves to `BgImageContent::Raster`, not a
