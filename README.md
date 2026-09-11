@@ -131,6 +131,27 @@ fulgur render --pdf-ua --language en -o report.pdf report.html
 | `--pdf-ua` | Enable PDF/UA-1 conformance (implies `--tagged` and `--bookmarks`) | false |
 | `--stdin` | Read HTML from stdin | false |
 
+#### Diagnostics
+
+Fulgur reports non-fatal problems — missing assets, unparseable CSS, and
+content laid out past the page box — through the `log` facade. The CLI
+installs a stderr logger for these, so a render that would otherwise drop
+content off the paper and still exit `0` now says so.
+
+Set the verbosity with `RUST_LOG`:
+
+```bash
+RUST_LOG=info fulgur render input.html -o out.pdf
+```
+
+| Aspect | Behaviour |
+|---|---|
+| Default | `warn` |
+| Accepted values | a single level: `error`, `warn`, `info`, `debug`, `trace`, `off` |
+| Target filters | **not** supported — `fulgur=debug` and multi-directive strings such as `warn,fulgur=debug` fall back to the default |
+| Invalid values | fall back to the default; logging configuration never fails a render |
+| Stream | always stderr, so `-o -` PDF bytes on stdout stay uncorrupted |
+
 ## Library Usage
 
 ```rust
