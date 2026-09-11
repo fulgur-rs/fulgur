@@ -4,8 +4,8 @@
 1 0 obj
 <<
   /Type /Pages
-  /Count 6
-  /Kids [8 0 R 10 0 R 12 0 R 14 0 R 16 0 R 18 0 R]
+  /Count 3
+  /Kids [8 0 R 10 0 R 12 0 R]
 >>
 endobj
 
@@ -205,19 +205,9 @@ endobj
 
 9 0 obj
 <<
-  /Length 540
+  /Length 330
 >>
 stream
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 24 Tf
-1 0 0 -1 46 79 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\r\000\b\000\016)] TJ
-ET
-Q
 q
 1 0 0 -1 0 300 cm
 0 0 0 rg
@@ -258,7 +248,7 @@ endobj
 
 11 0 obj
 <<
-  /Length 330
+  /Length 345
 >>
 stream
 q
@@ -268,7 +258,7 @@ BT
 0 Tr
 /f0 13.5 Tf
 1 0 0 -1 40 30 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\r\000\b\000\016)] TJ
+[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021) 20.000183 (\000\022\000\f)] TJ
 ET
 Q
 q
@@ -301,155 +291,6 @@ endobj
 
 13 0 obj
 <<
-  /Length 573
->>
-stream
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 24 Tf
-1 0 0 -1 46 63.25 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021) 19.999634 (\000\022\000\f)] TJ
-ET
-Q
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 13.5 Tf
-1 0 0 -1 40 30 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021) 20.000183 (\000\022\000\f)] TJ
-ET
-Q
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 6.75 Tf
-1 0 0 -1 40 6 Tm
-[(\000\017\000\003\000\004\000\005\000\020)] TJ
-ET
-Q
-endstream
-endobj
-
-14 0 obj
-<<
-  /Type /Page
-  /Resources <<
-    /ProcSet [/PDF /Text /ImageC /ImageB]
-    /Font <<
-      /f0 2 0 R
-    >>
-  >>
-  /MediaBox [0 0 400 300]
-  /Parent 1 0 R
-  /Contents 15 0 R
->>
-endobj
-
-15 0 obj
-<<
-  /Length 345
->>
-stream
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 13.5 Tf
-1 0 0 -1 40 30 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021) 20.000183 (\000\022\000\f)] TJ
-ET
-Q
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 6.75 Tf
-1 0 0 -1 40 6 Tm
-[(\000\017\000\003\000\004\000\005\000\020)] TJ
-ET
-Q
-endstream
-endobj
-
-16 0 obj
-<<
-  /Type /Page
-  /Resources <<
-    /ProcSet [/PDF /Text /ImageC /ImageB]
-    /Font <<
-      /f0 2 0 R
-    >>
-  >>
-  /MediaBox [0 0 400 300]
-  /Parent 1 0 R
-  /Contents 17 0 R
->>
-endobj
-
-17 0 obj
-<<
-  /Length 609
->>
-stream
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 24 Tf
-1 0 0 -1 46 63.25 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021\000\013\000\003) 19.999573 (\000\016\000\016)] TJ
-ET
-Q
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 13.5 Tf
-1 0 0 -1 40 30 Tm
-[(\000\001\000\002\000\003\000\004\000\005\000\006\000\007\000\b\000\t\000\n\000\004\000\013\000\f\000\005\000\006\000\021\000\013\000\003) 20.000183 (\000\016\000\016)] TJ
-ET
-Q
-q
-1 0 0 -1 0 300 cm
-0 0 0 rg
-BT
-0 Tr
-/f0 6.75 Tf
-1 0 0 -1 40 6 Tm
-[(\000\017\000\003\000\004\000\005\000\020)] TJ
-ET
-Q
-endstream
-endobj
-
-18 0 obj
-<<
-  /Type /Page
-  /Resources <<
-    /ProcSet [/PDF /Text /ImageC /ImageB]
-    /Font <<
-      /f0 2 0 R
-    >>
-  >>
-  /MediaBox [0 0 400 300]
-  /Parent 1 0 R
-  /Contents 19 0 R
->>
-endobj
-
-19 0 obj
-<<
   /Length 363
 >>
 stream
@@ -476,63 +317,57 @@ Q
 endstream
 endobj
 
-20 0 obj
+14 0 obj
 <<
   /Producer (fulgur)
 >>
 endobj
 
-21 0 obj
+15 0 obj
 <<
   /Length 761
   /Type /Metadata
   /Subtype /XML
 >>
 stream
-<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="xmp-writer"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"  xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"  xmlns:xmpTPg="http://ns.adobe.com/xap/1.0/t/pg/"  xmlns:pdf="http://ns.adobe.com/pdf/1.3/" ><pdf:Producer>fulgur</pdf:Producer><xmpTPg:NPages>6</xmpTPg:NPages><dc:format>application/pdf</dc:format><xmpMM:InstanceID>AvNfFS3zrQ1YYAVMF1fbQg==</xmpMM:InstanceID><xmpMM:DocumentID>AvNfFS3zrQ1YYAVMF1fbQg==</xmpMM:DocumentID><xmpMM:RenditionClass>proof</xmpMM:RenditionClass><pdf:PDFVersion>1.7</pdf:PDFVersion></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="r"?>
+<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="xmp-writer"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"  xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"  xmlns:xmpTPg="http://ns.adobe.com/xap/1.0/t/pg/"  xmlns:pdf="http://ns.adobe.com/pdf/1.3/" ><pdf:Producer>fulgur</pdf:Producer><xmpTPg:NPages>3</xmpTPg:NPages><dc:format>application/pdf</dc:format><xmpMM:InstanceID>kKs1d0UNVwCzwbjKVRkaIg==</xmpMM:InstanceID><xmpMM:DocumentID>kKs1d0UNVwCzwbjKVRkaIg==</xmpMM:DocumentID><xmpMM:RenditionClass>proof</xmpMM:RenditionClass><pdf:PDFVersion>1.7</pdf:PDFVersion></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="r"?>
 endstream
 endobj
 
-22 0 obj
+16 0 obj
 <<
   /Type /Catalog
   /Pages 1 0 R
-  /Metadata 21 0 R
+  /Metadata 15 0 R
 >>
 endobj
 
 xref
-0 23
+0 17
 0000000000 65535 f
 0000000016 00000 n
-0000000115 00000 n
-0000000276 00000 n
-0000000698 00000 n
-0000000814 00000 n
-0000001057 00000 n
-0000001994 00000 n
-0000006173 00000 n
-0000006368 00000 n
-0000006962 00000 n
-0000007159 00000 n
-0000007544 00000 n
-0000007741 00000 n
-0000008369 00000 n
-0000008566 00000 n
-0000008966 00000 n
-0000009163 00000 n
-0000009827 00000 n
-0000010024 00000 n
-0000010442 00000 n
-0000010486 00000 n
-0000011336 00000 n
+0000000094 00000 n
+0000000255 00000 n
+0000000677 00000 n
+0000000793 00000 n
+0000001036 00000 n
+0000001973 00000 n
+0000006152 00000 n
+0000006347 00000 n
+0000006731 00000 n
+0000006928 00000 n
+0000007328 00000 n
+0000007525 00000 n
+0000007943 00000 n
+0000007987 00000 n
+0000008837 00000 n
 trailer
 <<
-  /Size 23
-  /Root 22 0 R
-  /Info 20 0 R
-  /ID [(AvNfFS3zrQ1YYAVMF1fbQg==) (AvNfFS3zrQ1YYAVMF1fbQg==)]
+  /Size 17
+  /Root 16 0 R
+  /Info 14 0 R
+  /ID [(kKs1d0UNVwCzwbjKVRkaIg==) (kKs1d0UNVwCzwbjKVRkaIg==)]
 >>
 startxref
-11410
+8911
 %%EOF

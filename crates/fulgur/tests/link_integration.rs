@@ -143,10 +143,21 @@ fn margin_box_running_element_link_keeps_pdf_annotation() {
         "margin-box anchor should emit a PDF link annotation"
     );
     assert!(text.contains("/URI"), "missing /URI action type");
+    // `position: running(name)` is rewritten to `display: none` at its
+    // source position (the "real" DOM copy must not also paint in normal
+    // flow — only its @page margin-box copy should). Exactly one URI
+    // entry is therefore expected, from the margin-box render. This test
+    // previously asserted `uri_count >= 2` under the assumption that the
+    // source copy staying visible was correct — that was actually a bug
+    // (inline-`<style>`-sourced running elements rendered a second time
+    // at their source position instead of being suppressed there; see the
+    // fulgur-css-flag-running fix), not a feature to preserve.
     let uri_count = text.matches("https://margin-box-link.test").count();
-    assert!(
-        uri_count >= 2,
-        "expected both source running element and margin-box render to keep link annotations, got {uri_count} URI entries"
+    assert_eq!(
+        uri_count, 1,
+        "expected exactly one link annotation, from the margin-box render \
+         (the source running element must be suppressed, not duplicated); \
+         got {uri_count} URI entries"
     );
 }
 
