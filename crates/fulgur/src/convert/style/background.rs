@@ -1205,4 +1205,206 @@ mod tests {
         let pdf = render_bg("conic-gradient(in hsl,red,blue)");
         assert_pdf(&pdf, "conic_nondefault_interp");
     }
+
+    // ── calc() stop positions ─────────────────────────────────────────────────
+
+    /// A `ComplexColorStop` whose position is `calc(50% + 10px)` produces a
+    /// computed `LengthPercentage` that is neither a pure percentage
+    /// (`to_percentage()` returns `None`) nor a pure length (`to_length()`
+    /// returns `None` for mixed calc).  `resolve_color_stops` logs a warning
+    /// and returns `None`, dropping the layer; the element still renders.
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:linear-gradient(red calc(50% + 10px),blue)"></div></body></html>"#,
+        );
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render should succeed");
+        assert_pdf(&pdf, "calc_stop_pos");
+        // The layer must have been dropped: no gradient in background_layers.
+        assert_eq!(
+            first_gradient_stop_count(html),
+            None,
+            "calc() stop position must drop the gradient layer"
+        );
+    }
+
+    // ── conic-gradient interpolation hint ────────────────────────────────────
+
+    /// An interpolation hint inside a `conic-gradient` is not yet supported.
+    /// `resolve_conic_gradient` returns `None` (layer dropped) when it
+    /// encounters `GradientItem::InterpolationHint`.  The element still
+    /// renders without the gradient background.
+    #[test]
+    fn conic_gradient_interpolation_hint_drops_layer() {
+        // `30%` between two color stops is a color hint in CSS Images 4.
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:conic-gradient(red,30%,blue)"></div></body></html>"#,
+        );
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render should succeed");
+        assert_pdf(&pdf, "conic_hint_drop");
+        // The layer must have been dropped: no gradient in background_layers.
+        assert_eq!(
+            first_gradient_stop_count(html),
+            None,
+            "interpolation hint must drop the conic-gradient layer"
+        );
+    }
+
+    // ── map_extent: Contain and Cover alias keywords ──────────────────────────
+
+    /// Returns the `RadialGradientSize` of the first radial-gradient layer, or
+    /// `None` if no radial gradient layer is present.
+    fn first_radial_gradient_size(
+        html: &str,
+    ) -> Option<crate::draw_primitives::RadialGradientSize> {
+        use crate::draw_primitives::BgImageContent;
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::RadialGradient { size, .. } => Some(size.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Verifies `first_radial_gradient_size` returns `Some` for a standard
+    /// `radial-gradient` that Stylo parses, covering the `Some(size.clone())`
+    /// arm in the helper.
+    #[test]
+    fn first_radial_gradient_size_returns_some_for_standard_gradient() {
+        use crate::draw_primitives::{RadialExtent, RadialGradientSize};
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(closest-side circle,red,blue)"></div></body></html>"#,
+        );
+        let size =
+            first_radial_gradient_size(html).expect("standard radial-gradient must yield a layer");
+        assert!(
+            matches!(size, RadialGradientSize::Extent(RadialExtent::ClosestSide)),
+            "closest-side circle must map to ClosestSide, got {size:?}"
+        );
+    }
+
+    /// CSS Images §3.6.1 defines `contain` / `cover` as aliases for
+    /// `closest-side` / `farthest-corner`, but the current Stylo build rejects
+    /// both tokens as unknown in `radial-gradient()`, so the layer is dropped.
+    /// Verifies both that the PDF is still valid and that no radial layer was
+    /// produced.  If a future Stylo update accepts these keywords the test will
+    /// fail and should be updated to assert the correct `RadialExtent` instead.
+    #[test]
+    fn radial_gradient_contain_and_cover_size_keywords() {
+        // contain → layer dropped (Stylo parse error)
+        let contain_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(contain circle,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(contain_html)
+                .expect("render should succeed"),
+            "contain",
+        );
+        assert!(
+            first_radial_gradient_size(contain_html).is_none(),
+            "Stylo rejects 'contain', so no radial-gradient layer must be present"
+        );
+
+        // cover → layer dropped (Stylo parse error)
+        let cover_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(cover,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(cover_html)
+                .expect("render should succeed"),
+            "cover",
+        );
+        assert!(
+            first_radial_gradient_size(cover_html).is_none(),
+            "Stylo rejects 'cover', so no radial-gradient layer must be present"
+        );
+    }
+
+    /// Calls `map_extent` directly with the two alias variants (`Contain` and
+    /// `Cover`) that Stylo's CSS parser rejects in `radial-gradient()`, so they
+    /// cannot be reached via end-to-end HTML rendering.  Per CSS Images §3.6.1
+    /// these are aliases for `ClosestSide` and `FarthestCorner` respectively.
+    #[test]
+    fn map_extent_contain_and_cover_aliases() {
+        use super::map_extent;
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(
+            matches!(map_extent(ShapeExtent::Contain), RadialExtent::ClosestSide),
+            "Contain must alias ClosestSide"
+        );
+        assert!(
+            matches!(map_extent(ShapeExtent::Cover), RadialExtent::FarthestCorner),
+            "Cover must alias FarthestCorner"
+        );
+    }
+
+    // ── BgImageContent::Raster arm (non-gradient URL background) ─────────────
+
+    /// A PNG `url(...)` background resolves to `BgImageContent::Raster`, not a
+    /// gradient.  Verifies both that the raster layer is present and that no
+    /// gradient stop count is exposed — ensuring the non-gradient variant is
+    /// actually exercised and the absence of a gradient is not due to a missing
+    /// layer.
+    #[test]
+    fn first_gradient_stop_count_none_for_raster_background() {
+        use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+
+        // The PNG must have been resolved: at least one Raster layer must exist.
+        assert!(
+            drawables.block_styles.values().any(|block| {
+                block
+                    .style
+                    .background_layers
+                    .iter()
+                    .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+            }),
+            "url(dot.png) background should resolve to a Raster layer"
+        );
+
+        // No gradient layer may be present.
+        let has_gradient = drawables.block_styles.values().any(|block| {
+            block.style.background_layers.iter().any(|layer| {
+                matches!(
+                    layer.content,
+                    BgImageContent::LinearGradient { .. }
+                        | BgImageContent::RadialGradient { .. }
+                        | BgImageContent::ConicGradient { .. }
+                )
+            })
+        });
+        assert!(
+            !has_gradient,
+            "a raster URL background should not produce a gradient layer"
+        );
+    }
 }
