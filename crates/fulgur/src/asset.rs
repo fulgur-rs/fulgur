@@ -1735,4 +1735,111 @@ mod tests {
              in addition to key+data bytes — otherwise entry count is unbounded"
         );
     }
+
+    // --- combined_css ---
+
+    #[test]
+    fn combined_css_joins_stylesheets_with_newline() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_css("h1 { color: red; }");
+        bundle.add_css("body { margin: 0; }");
+        assert_eq!(
+            bundle.combined_css(),
+            "h1 { color: red; }\nbody { margin: 0; }",
+            "combined_css must join entries with a newline separator"
+        );
+    }
+
+    #[test]
+    fn combined_css_empty_bundle_returns_empty_string() {
+        let bundle = AssetBundle::new();
+        assert_eq!(
+            bundle.combined_css(),
+            "",
+            "empty bundle must yield empty combined CSS"
+        );
+    }
+
+    #[test]
+    fn combined_css_single_entry_has_no_separator() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_css("body { color: blue; }");
+        assert_eq!(bundle.combined_css(), "body { color: blue; }");
+    }
+
+    // --- Default impl ---
+
+    #[test]
+    fn default_bundle_is_equivalent_to_new() {
+        let bundle: AssetBundle = Default::default();
+        assert!(bundle.css.is_empty(), "Default bundle must have no CSS");
+        assert!(bundle.fonts.is_empty(), "Default bundle must have no fonts");
+        assert!(
+            bundle.images.is_empty(),
+            "Default bundle must have no images"
+        );
+    }
+
+    // --- add_css_file: non-UTF-8 content ---
+
+    #[test]
+    fn add_css_file_rejects_non_utf8_content() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // Write bytes that are invalid UTF-8 (lone continuation byte + overlong sequence).
+        tmp.write_all(&[0xFF, 0xFE, 0x80])
+            .expect("write non-UTF8 bytes");
+        let mut bundle = AssetBundle::new();
+        let err = bundle
+            .add_css_file(tmp.path())
+            .expect_err("non-UTF8 CSS file must be rejected");
+        match err {
+            Error::Io(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "expected InvalidData, got {e}"
+            ),
+            other => panic!("expected Error::Io(InvalidData), got {other:?}"),
+        }
+        assert!(
+            bundle.css.is_empty(),
+            "CSS must not be stored after rejection"
+        );
+    }
+
+    // --- set_base_url: URL without file:/// prefix ---
+
+    #[test]
+    fn set_base_url_without_file_prefix_stores_full_string_as_base() {
+        // When the URL does not start with "file:///", strip_prefix returns None
+        // and unwrap_or(url) stores the full string as the base path.
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("logo.png", vec![1, 2, 3]);
+        bundle.set_base_url("project/subdir/");
+        // base_path_str is now Some("project/subdir/"); strip it from the absolute path
+        // to recover the short key.
+        assert!(
+            bundle.get_image("project/subdir/logo.png").is_some(),
+            "get_image must find logo.png via a non-file:// base prefix"
+        );
+        // A path that does not start with the base must still return None.
+        assert!(
+            bundle.get_image("other/logo.png").is_none(),
+            "get_image must not match when the path does not start with the base"
+        );
+    }
+
+    // --- FontFormat Debug derive ---
+
+    #[test]
+    fn font_format_debug_all_variants() {
+        // Exercise the derived Debug impl for every FontFormat variant.
+        // Without this, the generated match arms in Debug::fmt are missed lines.
+        assert!(format!("{:?}", FontFormat::Ttf).contains("Ttf"));
+        assert!(format!("{:?}", FontFormat::Otf).contains("Otf"));
+        assert!(format!("{:?}", FontFormat::Ttc).contains("Ttc"));
+        assert!(format!("{:?}", FontFormat::Woff1).contains("Woff1"));
+        assert!(format!("{:?}", FontFormat::Woff2).contains("Woff2"));
+        assert!(format!("{:?}", FontFormat::Unknown).contains("Unknown"));
+    }
 }
