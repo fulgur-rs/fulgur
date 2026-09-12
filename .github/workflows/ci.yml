@@ -295,26 +295,32 @@ jobs:
           # Gives each of the 7 wpt matrix phases (css-page, multicol-1/2/3,
           # bugs, opacity-visibility, smoke) its own cache slot instead of
           # sharing `ubuntu-latest-fulgur` with the `vrt` job and each other.
-          # This is a hygiene improvement (avoids one phase's rebuild
-          # evicting another's cache entry), NOT a confirmed fix for a
-          # specific incident: on one push-to-main run, 3 phases (bugs,
-          # opacity-visibility, smoke — the ones queued behind the other 4
-          # for a runner slot) failed identically with `cargo: could not
-          # find Cargo.toml`, immediately after a "Cache restored
-          # successfully" that otherwise looked like a clean, complete
-          # download.
+          # Real hygiene improvement, but NOT what fixes the `cargo: could
+          # not find Cargo.toml` failure this comment used to describe as
+          # unexplained (fulgur PR #752) — confirmed root cause, tracked in
+          # fulgur-5x02:
           #
-          # Per Swatinem/rust-cache's own docs, the paths it restores are
-          # `~/.cargo/{bin,registry,git,...}` and `<workspace>/target` —
-          # never the checked-out working tree itself — and matrix jobs run
-          # on independent runner VMs with no shared filesystem, so a
-          # same-key concurrent save/restore cannot plausibly overwrite
-          # another job's `actions/checkout` output (Cargo.toml lives at the
-          # repo root, outside every cached path). Flagged by Codex review
-          # on the PR that introduced this comment (fulgur PR #752) — the
-          # real mechanism is still unknown. The "Verify checkout" step
-          # below exists to actually capture that if/when this recurs,
-          # rather than continuing to guess.
+          # This job's "Cache Paths" is the whole `<workspace>/target`
+          # (this repo doesn't scope rust-cache to subpaths), and
+          # `scripts/wpt/fetch.sh` creates a nested git repo at
+          # `target/wpt/.git`. That nested `.git` gets swept into the
+          # rust-cache tarball and, on a cache hit, restored via
+          # `tar -x ... -C <workspace>` — but doesn't survive that
+          # round-trip as a fully valid repo. `git -C target/wpt ...` then
+          # fails to recognize `target/wpt` as its own root, discovery
+          # falls through to the enclosing fulgur checkout, and
+          # `checkout --detach FETCH_HEAD` replaces fulgur's own working
+          # tree (Cargo.toml included) with WPT's sparse subset — while
+          # still exiting 0, so `Fetch WPT subset` reports success and
+          # `Verify checkout` (which runs *before* that step) never sees
+          # the damage. Cache hit correlated with this failure on every
+          # job checked, no exceptions; per-phase keys alone don't prevent
+          # it since the corrupted payload is per-key already.
+          #
+          # fetch.sh now verifies `target/wpt` really is its own git root
+          # before reusing it (reinitializing otherwise), and the step
+          # below strips `target/wpt` before this action's post-job save
+          # runs, so a WPT checkout never re-enters the cache at all.
           shared-key: ubuntu-latest-fulgur-wpt-${{ matrix.phase }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install poppler-utils
@@ -361,6 +367,15 @@ jobs:
           name: wpt-${{ matrix.phase }}-report
           path: target/wpt-report/${{ matrix.phase }}
           if-no-files-found: warn
+      - name: Evict WPT checkout from the build-artifact cache
+        # Swatinem/rust-cache saves this whole `target/` dir (see the
+        # comment on that step above) via a post-job hook that runs after
+        # every explicit step here regardless of ordering. target/wpt is a
+        # git checkout, not a build artifact, and round-tripping it through
+        # the cache tarball is what caused fulgur-5x02 — so make sure it's
+        # gone before that save happens.
+        if: always()
+        run: rm -rf target/wpt
 
   bindings-check:
     name: Bindings type-check
