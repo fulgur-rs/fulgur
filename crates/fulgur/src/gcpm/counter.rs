@@ -540,10 +540,10 @@ pub fn resolve_element_policy<'a>(
 
     // Fallback: scan preceding pages for the most recent assignment.
     for prev in (0..page_idx).rev() {
-        if let Some(state) = page_states.get(prev).and_then(|s| s.get(name)) {
-            if let Some(&last_id) = state.instance_ids.last() {
-                return store.get_html(last_id);
-            }
+        if let Some(state) = page_states.get(prev).and_then(|s| s.get(name))
+            && let Some(&last_id) = state.instance_ids.last()
+        {
+            return store.get_html(last_id);
         }
     }
 
@@ -721,11 +721,11 @@ impl CounterState {
     /// growth across pages.
     pub fn reset(&mut self, name: &str, value: i32) {
         let stack = self.stacks.entry(name.to_string()).or_default();
-        if let Some(top) = stack.last_mut() {
-            if top.parent_id == COUNTER_ROOT_PARENT {
-                top.value = value;
-                return;
-            }
+        if let Some(top) = stack.last_mut()
+            && top.parent_id == COUNTER_ROOT_PARENT
+        {
+            top.value = value;
+            return;
         }
         stack.push(CounterInstance {
             parent_id: COUNTER_ROOT_PARENT,

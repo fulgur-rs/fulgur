@@ -1761,13 +1761,11 @@ mod tests {
         fn find_by_id(doc: &BaseDocument, id: &str) -> Option<usize> {
             fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
                 let node = doc.get_node(node_id)?;
-                if let Some(ed) = node.element_data() {
-                    if let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
-                    {
-                        if attr_id.value.as_str() == target {
-                            return Some(node_id);
-                        }
-                    }
+                if let Some(ed) = node.element_data()
+                    && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                    && attr_id.value.as_str() == target
+                {
+                    return Some(node_id);
                 }
                 for &child in &node.children {
                     if let Some(found) = walk(doc, child, target) {

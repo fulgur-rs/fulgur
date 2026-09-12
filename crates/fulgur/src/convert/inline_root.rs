@@ -288,21 +288,21 @@ pub(super) fn resolve_enclosing_anchor(
             return None;
         }
         let node = doc.get_node(id)?;
-        if let NodeData::Element(el) = &node.data {
-            if el.name.local.as_ref() == "a" {
-                let href = crate::blitz_adapter::get_attr(el, "href")?.trim();
-                if href.is_empty() {
-                    return None;
-                }
-                let target = if let Some(frag) = href.strip_prefix('#') {
-                    LinkTarget::Internal(Arc::new(frag.to_string()))
-                } else {
-                    LinkTarget::External(Arc::new(href.to_string()))
-                };
-                let alt = crate::blitz_adapter::element_text(doc, id);
-                let alt_text = if alt.is_empty() { None } else { Some(alt) };
-                return Some((id, LinkSpan { target, alt_text }));
+        if let NodeData::Element(el) = &node.data
+            && el.name.local.as_ref() == "a"
+        {
+            let href = crate::blitz_adapter::get_attr(el, "href")?.trim();
+            if href.is_empty() {
+                return None;
             }
+            let target = if let Some(frag) = href.strip_prefix('#') {
+                LinkTarget::Internal(Arc::new(frag.to_string()))
+            } else {
+                LinkTarget::External(Arc::new(href.to_string()))
+            };
+            let alt = crate::blitz_adapter::element_text(doc, id);
+            let alt_text = if alt.is_empty() { None } else { Some(alt) };
+            return Some((id, LinkSpan { target, alt_text }));
         }
         cur = node.parent;
         depth += 1;
@@ -420,10 +420,11 @@ fn convert_inline_box_node(
     // them register here would double-paint via the inline-box dispatch.
     // Returning `None` causes `paragraph::draw_shaped_lines` to skip the
     // inline-box dispatch for this item.
-    if let Some(node) = doc.get_node(node_id) {
-        if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
-            return None;
-        }
+    if let Some(node) = doc.get_node(node_id)
+        && positioned::is_absolutely_positioned(node)
+        && is_pseudo_node(doc, node)
+    {
+        return None;
     }
     convert_node(doc, node_id, ctx, depth + 1, out);
     Some(node_id)
@@ -545,12 +546,11 @@ pub(super) fn extract_paragraph(
                 }
                 parley::PositionedLayoutItem::InlineBox(positioned) => {
                     let node_id = positioned.id as usize;
-                    if let Some(box_node) = doc.get_node(node_id) {
-                        if positioned::is_absolutely_positioned(box_node)
-                            && is_pseudo_node(doc, box_node)
-                        {
-                            continue;
-                        }
+                    if let Some(box_node) = doc.get_node(node_id)
+                        && positioned::is_absolutely_positioned(box_node)
+                        && is_pseudo_node(doc, box_node)
+                    {
+                        continue;
                     }
                     // Mark before recursing so we can compute the inline-box
                     // descendant set for the v2 dispatcher's skip table.

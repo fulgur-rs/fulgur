@@ -12,6 +12,70 @@ pub struct RenderedTest {
     pub pdf_path: PathBuf,
 }
 
+/// List `<stem>-<n>.png` files directly inside `work_dir`, sorted.
+///
+/// `<n>` must be a non-empty run of ASCII digits — a debug artifact a human
+/// drops in `work_dir` with a similar prefix (e.g. `<stem>-preview.png`)
+/// must not be swept up: `remove_stale_pngs` would delete it, and
+/// `render_test` would decode it as a page and corrupt the page count.
+///
+/// Propagates `ReadDir` entry errors instead of silently dropping them: a
+/// dropped entry would under-count pages, and both callers rely on an
+/// accurate count — `remove_stale_pngs` to avoid leaving a stale file behind
+/// uncounted, `render_test` to avoid reporting success on a truncated page
+/// set.
+///
+/// Shared between the two callers so the naming scheme lives in exactly one
+/// place. Each caller still derives its own `stem` from `prefix.file_name()`
+/// with its own error policy — see call sites.
+fn list_page_pngs(work_dir: &Path, stem: &str) -> Result<Vec<PathBuf>> {
+    let needle = format!("{stem}-");
+    let mut matches = Vec::new();
+    for entry in
+        std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
+        let p = entry.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if let Some(page_number) = name
+            .strip_prefix(&needle)
+            .and_then(|suffix| suffix.strip_suffix(".png"))
+            && !page_number.is_empty()
+            && page_number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            matches.push(p);
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+/// Delete `<prefix>-*.png` files left in `work_dir` by a previous run.
+///
+/// Propagates cleanup failures — a leftover PNG from a prior run would mix
+/// into the current page count and skew diff results, so we must fail loud
+/// rather than silently continue with stale data. The one tolerated failure
+/// is `NotFound`: the directory listing is a snapshot, so an entry can
+/// legitimately disappear between listing and removal.
+///
+/// Scoping (which files are stale, via [`list_page_pngs`]) and acting
+/// (deleting them) are separate passes: the scope check can never run
+/// interleaved with, or after, removal side effects.
+fn remove_stale_pngs(work_dir: &Path, prefix: &Path) -> Result<()> {
+    let stem = prefix
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for p in list_page_pngs(work_dir, &stem)? {
+        if let Err(e) = std::fs::remove_file(&p)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Render `test_html_path` and return one RgbaImage per page.
 ///
 /// The path is canonicalized, and its parent directory is used as
@@ -20,12 +84,6 @@ pub struct RenderedTest {
 /// `dpi` controls pdftocairo's rasterization resolution.
 /// `assets`: optional bundle of fonts/images injected into the engine
 /// (cloned internally; `AssetBundle` stores shared `Arc`s so clones are cheap).
-// MSRV bump to 1.89 (PR #701) makes clippy suggest collapsing the nested
-// `if`/`if let` below into a let-chain; left as-is because the collapse
-// would touch the (untested) stale-PNG removal error branch and trip
-// codecov/patch on lines this PR isn't otherwise changing. Tracked in
-// fulgur-pt70 alongside the core-library collapsible_if backlog.
-#[allow(clippy::collapsible_if)]
 pub fn render_test(
     test_html_path: &Path,
     work_dir: &Path,
@@ -55,28 +113,7 @@ pub fn render_test(
 
     // Remove stale page PNGs from prior runs so page count is accurate.
     let prefix = work_dir.join("page");
-    let stem = prefix
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let stale_needle = format!("{stem}-");
-    // Propagate cleanup failures — a leftover PNG from a prior run would mix
-    // into the current page count and skew diff results, so we must fail loud
-    // rather than silently continue with stale data.
-    for entry in
-        std::fs::read_dir(work_dir).with_context(|| format!("read dir {}", work_dir.display()))?
-    {
-        let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
-        let p = entry.path();
-        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with(&stale_needle) && name.ends_with(".png") {
-            if let Err(e) = std::fs::remove_file(&p) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
-                }
-            }
-        }
-    }
+    remove_stale_pngs(work_dir, &prefix)?;
 
     let pdf_path = work_dir.join("fixture.pdf");
     std::fs::write(&pdf_path, &pdf_bytes)
@@ -105,17 +142,7 @@ pub fn render_test(
         .ok_or_else(|| anyhow::anyhow!("bad prefix"))?
         .to_string_lossy()
         .into_owned();
-    let needle = format!("{stem}-");
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(work_dir)
-        .with_context(|| format!("read dir {}", work_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            name.starts_with(&needle) && name.ends_with(".png")
-        })
-        .collect();
-    entries.sort();
+    let entries = list_page_pngs(work_dir, &stem)?;
 
     if entries.is_empty() {
         bail!("pdftocairo produced no PNGs in {}", work_dir.display());
@@ -131,4 +158,64 @@ pub fn render_test(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(RenderedTest { pages, pdf_path })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn removes_only_matching_stale_pngs() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path();
+        // Includes a zero-padded index (pdftocairo pads to the width of the
+        // max page number once a test has 10+ pages).
+        for name in ["page-1.png", "page-10.png", "page-01.png"] {
+            std::fs::write(dir.join(name), b"stale").unwrap();
+        }
+        // Non-matching: wrong stem, wrong extension, the exact prefix without
+        // the `-` separator (`page.png` is not `page-<n>.png`), and a
+        // non-numeric suffix (a human-dropped debug artifact, not a page).
+        for name in ["other-1.png", "page-1.txt", "page.png", "page-preview.png"] {
+            std::fs::write(dir.join(name), b"keep").unwrap();
+        }
+
+        remove_stale_pngs(dir, &dir.join("page")).unwrap();
+
+        assert!(!dir.join("page-1.png").exists());
+        assert!(!dir.join("page-10.png").exists());
+        assert!(!dir.join("page-01.png").exists());
+        assert!(dir.join("other-1.png").exists());
+        assert!(dir.join("page-1.txt").exists());
+        assert!(dir.join("page.png").exists());
+        assert!(dir.join("page-preview.png").exists());
+    }
+
+    #[test]
+    fn propagates_removal_failure() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path();
+        // A *directory* named like a stale page PNG: `remove_file` fails with
+        // something other than `NotFound`, which must not be swallowed.
+        std::fs::create_dir(dir.join("page-1.png")).unwrap();
+
+        let err = remove_stale_pngs(dir, &dir.join("page")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("remove stale PNG"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn propagates_read_dir_failure() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+
+        let err = remove_stale_pngs(&missing, &missing.join("page")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("read dir"),
+            "unexpected error: {err:#}"
+        );
+    }
 }
