@@ -134,6 +134,76 @@ fn collect_table_cells(
 
 #[cfg(test)]
 mod tests {
+    // --- overflow: hidden on <table> — clip_descendants path ---
+    //
+    // A table with `overflow: hidden` (or any non-Visible overflow) triggers
+    // `has_overflow_clip()` → `clipping = true` → `draw_mark()` fires →
+    // the `if let Some(mark) = mark { ... entry.clip_descendants = ... }` block
+    // executes (lines 62–70 of table.rs). Without this test that entire block
+    // is dead from the test runner's perspective.
+    #[test]
+    fn table_overflow_hidden_produces_valid_pdf() {
+        let html = "<!DOCTYPE html><html><body>\
+            <table style=\"overflow: hidden; width: 200px;\">\
+                <tr><td style=\"width: 100px; height: 20px;\">Cell</td></tr>\
+            </table>\
+            </body></html>";
+        let pdf = crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Targeted assertion: `clip_descendants` must be non-empty for a table
+    // with `overflow: hidden` that contains real cell content.  This verifies
+    // the assignment `entry.clip_descendants = descendants` (table.rs:70)
+    // rather than just confirming the engine doesn't panic.
+    #[test]
+    fn table_overflow_hidden_populates_clip_descendants() {
+        use crate::units::F32Units;
+        use std::ops::DerefMut;
+
+        let html = "<!DOCTYPE html><html><body>\
+            <table style=\"overflow: hidden; width: 200px;\">\
+                <tr><td style=\"width: 100px; height: 20px;\">A</td></tr>\
+            </table>\
+            </body></html>";
+
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc, &[]);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = crate::convert::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        let d = crate::convert::dom_to_drawables(&doc, &mut ctx);
+
+        assert!(!d.tables.is_empty(), "table entry must exist");
+        let has_clipped = d.tables.values().any(|t| !t.clip_descendants.is_empty());
+        assert!(
+            has_clipped,
+            "a table with overflow: hidden must have non-empty clip_descendants"
+        );
+    }
+
     // --- comment node inside <tbody> ---
     //
     // HTML5 keeps comment nodes inside their table-section parent rather than
