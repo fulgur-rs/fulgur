@@ -20,7 +20,7 @@ rayon = { version = "1", optional = true }
 cssparser = "0.37"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
-usvg = "0.45"
+usvg = "0.48"
 blitz-html = "0.2"
 blitz-dom = "0.2"
 blitz-traits = "0.2"
