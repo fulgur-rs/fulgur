@@ -6714,3 +6714,93 @@ body { margin:0; font-size:14px; line-height:1.4; }</style>
          a spurious extra page, got {pages}"
     );
 }
+
+#[test]
+fn tagged_padded_paragraph_with_link_uses_run_tagging_in_dispatch() {
+    // Covers render.rs lines 1152-1153 — `use_run_tagging=true` in
+    // `dispatch_fragment`'s block+para arm.
+    //
+    // A `<p>` with `padding` triggers `needs_block_wrapper()=true`, creating
+    // both `block_styles[p_id]` AND `paragraphs[p_id]` at the same node_id.
+    // In tagged mode with a link run, `run_tag_target` returns Some for `<p>`
+    // (it has `PdfTag::P` in the semantic map), so `use_run_tagging=true` and
+    // `canvas.link_run_node_id` is set instead of `try_start_tagged`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p style="padding: 8px"><a href="https://example.com">link text</a></p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged padded p with link must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_multicol_spanning_text_with_link_uses_run_tagging_in_paint_slices() {
+    // Covers render.rs lines 1374-1380 — `use_run_tagging=true` inside
+    // `paint_multicol_paragraph_slices`.
+    //
+    // The text is long enough to span both columns of the narrow container,
+    // so `paragraph_slices` is populated and `paint_multicol_paragraph_slices`
+    // is called. In tagged mode with a link run and a semantic node for the
+    // source paragraph, `use_run_tagging=true` and `canvas.link_run_node_id`
+    // is set inside the function.
+    //
+    // The existing `tagged_pdf_link_in_multicol_produces_link_struct_element`
+    // test uses a short `<p>` that fits in one column and therefore does not
+    // create paragraph slices; this test uses enough text to guarantee spanning.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="columns:2;column-gap:10px;width:160px;font-size:10px">
+            Lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+            eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim
+            ad minim veniam quis nostrud exercitation ullamco laboris nisi ut
+            aliquip ex ea commodo consequat and here is
+            <a href="https://example.com">a link</a> in the middle of enough
+            text to overflow the first column into the second column of this
+            narrow two-column container so that paragraph slices are created.
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged multicol spanning text with link must render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn opacity_inline_root_with_pseudo_image_reaches_para_for_block_in_draw_under_opacity() {
+    // Covers render.rs lines 2295-2321 — `para_for_block = Some` inside
+    // `draw_under_opacity`'s else branch.
+    //
+    // A `<p>` with opacity + visual style (background + padding) is BOTH an
+    // inline root (giving `paragraphs[p_id]`) and a styled block (giving
+    // `block_styles[p_id]`). The `::before` pseudo image registers as a
+    // separate drawable that goes into `opacity_descendants`, causing
+    // `draw_under_opacity` to be called for `p_id`. Inside the function,
+    // `para_for_block = drawables.paragraphs.get(&p_id) = Some`, reaching
+    // lines 2295-2321. Tagged mode with a link run also exercises the
+    // `use_run_tagging=true` sub-path at lines 2299-2301.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .fancy::before { content: url("dot.png"); }
+        .fancy { opacity: 0.5; background: #eee; padding: 4px; }
+    </style></head><body>
+        <p class="fancy"><a href="https://example.com">link text</a></p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("opacity inline root with pseudo image must render");
+    assert!(!pdf.is_empty());
+}
