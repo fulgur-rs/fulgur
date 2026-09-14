@@ -2625,4 +2625,55 @@ mod tests {
             "unknown dimension unit must drop the declaration"
         );
     }
+
+    // -------- column-rule shorthand: malformed token after partial parse --------
+
+    /// Width (1pt) and style (solid) are consumed successfully, but the next
+    /// token "INVALID_TOKEN" fails all three component parsers (width, style,
+    /// color). Since `color.is_none()` is true the color branch is entered and
+    /// fails, reaching the fall-through `return None` (line 723 via line 720).
+    #[test]
+    fn column_rule_shorthand_unknown_third_token_drops_rule() {
+        let props = parse_declaration_block("column-rule: 1pt solid INVALID_TOKEN;");
+        assert!(
+            props.rule.is_none(),
+            "unrecognised token after width+style must drop the rule"
+        );
+    }
+
+    /// All three components (width, style, color) are consumed, but a trailing
+    /// token "extra" remains. The exhaustion check at line 727 fires and the
+    /// shorthand is dropped as invalid.
+    #[test]
+    fn column_rule_shorthand_trailing_token_drops_rule() {
+        let props = parse_declaration_block("column-rule: 1pt solid red extra;");
+        assert!(
+            props.rule.is_none(),
+            "trailing token after a complete shorthand must drop the rule"
+        );
+    }
+
+    // -------- parse_selector_list: empty / trailing-combinator inputs --------
+
+    /// An empty string has no tokens, so `current.parts` is empty when the
+    /// loop ends and `selectors` is also empty — the early-return `Vec::new()`
+    /// at line 851 fires.
+    #[test]
+    fn selector_list_empty_input_returns_empty() {
+        assert!(
+            parse_selector_list("").is_empty(),
+            "empty input must produce no selectors"
+        );
+    }
+
+    /// A trailing adjacent-sibling combinator (`.a +`) leaves `prev_sibling`
+    /// set but `current.parts` empty. The guard at line 846 (`prev_sibling.is_some()`)
+    /// catches this and returns `Vec::new()`.
+    #[test]
+    fn selector_list_trailing_combinator_drops_list() {
+        assert!(
+            parse_selector_list(".a +").is_empty(),
+            "trailing combinator without a following subject must drop the whole list"
+        );
+    }
 }
