@@ -407,21 +407,21 @@ fn walk_semantics(
     let child_override = if let Some(elem) = node.element_data() {
         if let Some(mut tag) = crate::tagging::classify_element(elem.name.local.as_ref()) {
             // CSS list-style-type を読んで ListNumbering をオーバーライド
-            if matches!(tag, crate::tagging::PdfTag::L { .. }) {
-                if let Some(styles) = node.primary_styles() {
-                    use ::style::properties::longhands::list_style_type::computed_value::T as LST;
-                    use krilla::tagging::ListNumbering;
-                    let numbering = match styles.clone_list_style_type() {
-                        LST::Disc => ListNumbering::Disc,
-                        LST::Circle => ListNumbering::Circle,
-                        LST::Square => ListNumbering::Square,
-                        LST::Decimal => ListNumbering::Decimal,
-                        LST::LowerAlpha => ListNumbering::LowerAlpha,
-                        LST::UpperAlpha => ListNumbering::UpperAlpha,
-                        _ => ListNumbering::None,
-                    };
-                    tag = crate::tagging::PdfTag::L { numbering };
-                }
+            if matches!(tag, crate::tagging::PdfTag::L { .. })
+                && let Some(styles) = node.primary_styles()
+            {
+                use ::style::properties::longhands::list_style_type::computed_value::T as LST;
+                use krilla::tagging::ListNumbering;
+                let numbering = match styles.clone_list_style_type() {
+                    LST::Disc => ListNumbering::Disc,
+                    LST::Circle => ListNumbering::Circle,
+                    LST::Square => ListNumbering::Square,
+                    LST::Decimal => ListNumbering::Decimal,
+                    LST::LowerAlpha => ListNumbering::LowerAlpha,
+                    LST::UpperAlpha => ListNumbering::UpperAlpha,
+                    _ => ListNumbering::None,
+                };
+                tag = crate::tagging::PdfTag::L { numbering };
             }
 
             // parent を決定: override があればそれを使い、なければ DOM walk-up

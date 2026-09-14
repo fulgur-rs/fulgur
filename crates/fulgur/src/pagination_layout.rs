@@ -3236,13 +3236,12 @@ fn fragment_block_subtree_inner(
             if !is_float {
                 prev_used_page = Some(used_end.clone());
             }
-            if let Some(ref mut rs) = row_state {
-                if page_index > rs.max_end_page
-                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
-                {
-                    rs.max_end_page = page_index;
-                    rs.max_end_cursor_y = cursor_y;
-                }
+            if let Some(ref mut rs) = row_state
+                && (page_index > rs.max_end_page
+                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y))
+            {
+                rs.max_end_page = page_index;
+                rs.max_end_cursor_y = cursor_y;
             }
             continue;
         }
@@ -3339,13 +3338,12 @@ fn fragment_block_subtree_inner(
         if !is_float {
             prev_used_page = Some(used_end.clone());
         }
-        if let Some(ref mut rs) = row_state {
-            if page_index > rs.max_end_page
-                || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
-            {
-                rs.max_end_page = page_index;
-                rs.max_end_cursor_y = cursor_y;
-            }
+        if let Some(ref mut rs) = row_state
+            && (page_index > rs.max_end_page
+                || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y))
+        {
+            rs.max_end_page = page_index;
+            rs.max_end_cursor_y = cursor_y;
         }
     }
 
