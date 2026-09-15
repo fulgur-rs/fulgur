@@ -10359,4 +10359,160 @@ h2 { string-set: chapter-title content(text); }
         let dbg = format!("{g:?}");
         assert!(dbg.contains("PaginationGeometry"), "got: {dbg}");
     }
+
+    // ── collect_running_element_states: pure-function branch coverage ─────────
+
+    /// Empty geometry → exactly one empty page state (same convention as the
+    /// other collect_* functions).
+    #[test]
+    fn running_states_empty_geometry_returns_one_empty_page() {
+        let geom = PaginationGeometryTable::new();
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty());
+    }
+
+    /// Node appears in geometry but has no entry in the running store →
+    /// its page slot stays empty (the `instance_for_node` guard fires).
+    #[test]
+    fn running_states_node_not_in_store_is_skipped() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(42).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let store = crate::gcpm::running::RunningElementStore::new();
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].is_empty(), "node not in store must not appear");
+    }
+
+    /// Node has geometry with empty fragments → the `first_frag` guard fires
+    /// and the node is silently skipped.
+    #[test]
+    fn running_states_node_with_empty_fragments_is_skipped() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(5).or_default(); // entry exists but fragments vec is empty
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        store.register(5, "header".into(), "<h1>hi</h1>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        assert!(
+            states[0].is_empty(),
+            "empty fragments must not emit a state"
+        );
+    }
+
+    /// Two nodes sharing the same running name on the same page must accumulate
+    /// both instance_ids under that name entry (not overwrite each other).
+    #[test]
+    fn running_states_two_nodes_same_name_same_page_accumulate_ids() {
+        let mut geom = PaginationGeometryTable::new();
+        for node_id in [10_usize, 20] {
+            geom.entry(node_id).or_default().fragments.push(Fragment {
+                page_index: 0,
+                x: 0.0_f32.as_px(),
+                y: 0.0_f32.as_px(),
+                width: 50.0_f32.as_px(),
+                height: 20.0_f32.as_px(),
+            });
+        }
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        let id0 = store.register(10, "section".into(), "<p>A</p>".into());
+        let id1 = store.register(20, "section".into(), "<p>B</p>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        let entry = states[0].get("section").expect("section must be present");
+        assert!(
+            entry.instance_ids.contains(&id0),
+            "instance id0 ({id0}) must be present"
+        );
+        assert!(
+            entry.instance_ids.contains(&id1),
+            "instance id1 ({id1}) must be present"
+        );
+        assert_eq!(entry.instance_ids.len(), 2);
+    }
+
+    /// Two nodes with different running names each appear in their own slot.
+    #[test]
+    fn running_states_two_different_names_produce_separate_entries() {
+        let mut geom = PaginationGeometryTable::new();
+        for node_id in [1_usize, 2] {
+            geom.entry(node_id).or_default().fragments.push(Fragment {
+                page_index: 0,
+                x: 0.0_f32.as_px(),
+                y: 0.0_f32.as_px(),
+                width: 50.0_f32.as_px(),
+                height: 10.0_f32.as_px(),
+            });
+        }
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        store.register(1, "header".into(), "<h1>H</h1>".into());
+        store.register(2, "footer".into(), "<p>F</p>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        assert!(states[0].contains_key("header"), "header entry must exist");
+        assert!(states[0].contains_key("footer"), "footer entry must exist");
+    }
+
+    /// Running element on page 1 must not appear in the page 0 slot.
+    #[test]
+    fn running_states_node_on_page_1_appears_only_in_slot_1() {
+        let mut geom = PaginationGeometryTable::new();
+        // Node 10 on page 0, node 20 on page 1.
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        geom.entry(20).or_default().fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        store.register(20, "chapter".into(), "<h2>Ch2</h2>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 2, "two pages expected");
+        assert!(
+            states[0].is_empty(),
+            "page 0 must not carry the page-1 element"
+        );
+        assert!(
+            states[1].contains_key("chapter"),
+            "chapter must appear on page 1"
+        );
+    }
+
+    /// A node registered in the store but absent from geometry is never visited
+    /// by the geometry loop — it produces no state entry.
+    #[test]
+    fn running_states_store_only_node_not_in_geom_produces_no_entry() {
+        let mut geom = PaginationGeometryTable::new();
+        geom.entry(10).or_default().fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        // node 77 is in the store but has no geometry entry → loop never visits it.
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        store.register(77, "ghost".into(), "<p>x</p>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 1);
+        assert!(
+            states[0].is_empty(),
+            "store-only node (not in geom) must not produce a state entry"
+        );
+    }
 }
