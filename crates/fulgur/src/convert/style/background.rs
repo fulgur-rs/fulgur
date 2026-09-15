@@ -1006,13 +1006,12 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    /// Return the stop count of the first gradient background layer found in
-    /// `html`'s converted block styles, or `None` if there is no gradient.
-    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+    /// Scan `drawables` for the first gradient background layer and return its
+    /// stop count, or `None` if no gradient layer exists.  Non-gradient layers
+    /// (`Raster`, `Svg`) exercise the `_ => None` arm of the inner `find_map`
+    /// when called with asset-backed drawables.
+    fn gradient_stop_count_in_drawables(drawables: &crate::drawables::Drawables) -> Option<usize> {
         use crate::draw_primitives::BgImageContent;
-        let drawables = Engine::builder()
-            .build()
-            .build_drawables_for_testing_no_gcpm(html);
         drawables.block_styles.values().find_map(|block| {
             block
                 .style
@@ -1025,6 +1024,15 @@ mod tests {
                     _ => None,
                 })
         })
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        gradient_stop_count_in_drawables(&drawables)
     }
 
     /// Security regression: an unbounded `column-stop` list must not be
@@ -1272,18 +1280,12 @@ mod tests {
             has_raster,
             "url(dot.png) must produce a BgImageContent::Raster layer"
         );
-        // All layers should be Raster or Svg — no gradient layer must exist.
-        let no_gradient = drawables.block_styles.values().all(|block| {
-            block.style.background_layers.iter().all(|layer| {
-                matches!(
-                    &layer.content,
-                    BgImageContent::Raster { .. } | BgImageContent::Svg { .. }
-                )
-            })
-        });
+        // Call the shared helper with the asset-backed drawables so the
+        // `_ => None` arm for BgImageContent::Raster is actually executed.
+        let gradient_count = gradient_stop_count_in_drawables(&drawables);
         assert!(
-            no_gradient,
-            "raster background image must not produce a gradient layer"
+            gradient_count.is_none(),
+            "raster background image must not produce a gradient stop count"
         );
     }
 
