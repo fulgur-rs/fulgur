@@ -10427,15 +10427,8 @@ h2 { string-set: chapter-title content(text); }
         let states = collect_running_element_states(&geom, &store);
         assert_eq!(states.len(), 1);
         let entry = states[0].get("section").expect("section must be present");
-        assert!(
-            entry.instance_ids.contains(&id0),
-            "instance id0 ({id0}) must be present"
-        );
-        assert!(
-            entry.instance_ids.contains(&id1),
-            "instance id1 ({id1}) must be present"
-        );
-        assert_eq!(entry.instance_ids.len(), 2);
+        // geometry is a BTreeMap so node_id 10 is visited before 20 → source order.
+        assert_eq!(entry.instance_ids, vec![id0, id1]);
     }
 
     /// Two nodes with different running names each appear in their own slot.
