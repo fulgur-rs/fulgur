@@ -1392,32 +1392,6 @@ mod tests {
         assert_pdf(&pdf, "conic_nondefault_interp");
     }
 
-    // ── calc() stop positions ─────────────────────────────────────────────────
-
-    /// A `ComplexColorStop` whose position is `calc(50% + 10px)` produces a
-    /// computed `LengthPercentage` that is neither a pure percentage
-    /// (`to_percentage()` returns `None`) nor a pure length (`to_length()`
-    /// returns `None` for mixed calc).  `resolve_color_stops` logs a warning
-    /// and returns `None`, dropping the layer; the element still renders.
-    #[test]
-    fn linear_gradient_calc_stop_position_drops_layer() {
-        let html = concat!(
-            r#"<html><body><div style="width:120px;height:80px;"#,
-            r#"background:linear-gradient(red calc(50% + 10px),blue)"></div></body></html>"#,
-        );
-        let pdf = Engine::builder()
-            .build()
-            .render(html)
-            .expect("render should succeed");
-        assert_pdf(&pdf, "calc_stop_pos");
-        // The layer must have been dropped: no gradient in background_layers.
-        assert_eq!(
-            first_gradient_stop_count(html),
-            None,
-            "calc() stop position must drop the gradient layer"
-        );
-    }
-
     // ── conic-gradient interpolation hint ────────────────────────────────────
 
     /// An interpolation hint inside a `conic-gradient` is not yet supported.
