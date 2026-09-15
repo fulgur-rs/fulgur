@@ -116,6 +116,27 @@ pub struct PaginationGeometry {
     /// must treat the fragments as copies of the whole node, never as
     /// slices of it.
     pub is_repeat: bool,
+    /// For an inline root split at line boundaries: the line index each
+    /// fragment starts at, plus a terminating total line count — so
+    /// `fragments[k]` covers lines
+    /// `line_boundaries[k]..line_boundaries[k + 1]`. Empty for every
+    /// other producer.
+    ///
+    /// This exists because the split decision and its consumer were
+    /// measuring in different units. [`fragment_inline_root`] chooses
+    /// the partition from Parley's line metrics, which are rounded to
+    /// whole pixels; `render::paragraph_lines_for_page` then
+    /// *re-derived* that same partition by accumulating
+    /// `ShapedLine::height`, which keeps the fractional height. The two
+    /// disagree, and when they do a line belongs to no fragment at all
+    /// and is dropped from the document with no later fragment to
+    /// recover it from — silently, with the page count short to match.
+    ///
+    /// Publishing the partition the fragmenter actually chose removes
+    /// the second accounting. Consumers must still tolerate an empty
+    /// vector (a paragraph that was strip-sliced whole rather than
+    /// split at line boundaries publishes nothing).
+    pub line_boundaries: Vec<usize>,
 }
 
 impl PaginationGeometry {
@@ -3472,6 +3493,31 @@ fn fragment_inline_root(
     let mut emitted = 0usize;
     let total_lines = line_metrics.len();
 
+    // css-break-3 §3.3: no fragment may be emitted into a strip that
+    // cannot hold even its first line. There is no split point that
+    // helps here — every candidate fragment starts with that line — so
+    // the break belongs BEFORE the paragraph.
+    //
+    // A paragraph starting 10px above the page bottom, with 28px lines,
+    // is the reported case: the loop below has only one split rule
+    // ("this line overflows"), the orphan guard refuses to close a
+    // one-line first fragment, so it accumulates and then emits a 56px
+    // two-line fragment into that 10px gap. Both lines are painted, the
+    // second lands below the page box, and it is gone from the document
+    // with the page count short to match and exit code 0.
+    //
+    // Relaxation (§4.4) is handled separately, in the loop: it is the
+    // right answer when at least one line fits and only the orphan /
+    // widow minimum is unreachable. It cannot help when nothing fits.
+    let first_line_extent = line_metrics[0].1 - line_metrics[0].0;
+    if paragraph_top_in_body > 0.0
+        && paragraph_top_in_body + first_line_extent > page_height_px
+        && page_index + 1 < crate::MAX_PAGES
+    {
+        page_index += 1;
+        paragraph_top_in_body = 0.0;
+    }
+
     for (i, &(_line_top_local, line_bottom_local)) in line_metrics.iter().enumerate() {
         let frag_top_local = line_metrics[fragment_start_idx].0;
         let projected_bottom_in_body = paragraph_top_in_body + (line_bottom_local - frag_top_local);
@@ -3515,7 +3561,12 @@ fn fragment_inline_root(
                 width: width.as_px(),
                 height: frag_h.as_px(),
             };
-            geometry.entry(child_id).or_default().fragments.push(frag);
+            let entry = geometry.entry(child_id).or_default();
+            entry.fragments.push(frag);
+            // Publish the partition rather than leaving the consumer to
+            // rediscover it from fragment heights — see
+            // `PaginationGeometry::line_boundaries`.
+            entry.line_boundaries.push(fragment_start_idx);
             emitted += 1;
 
             page_index += 1;
@@ -3535,7 +3586,15 @@ fn fragment_inline_root(
         width: width.as_px(),
         height: frag_h.as_px(),
     };
-    geometry.entry(child_id).or_default().fragments.push(frag);
+    let entry = geometry.entry(child_id).or_default();
+    entry.fragments.push(frag);
+    entry.line_boundaries.push(fragment_start_idx);
+    // Terminator: `fragments[k]` covers
+    // `line_boundaries[k]..line_boundaries[k + 1]`, so the vector is one
+    // longer than the fragment list and its last element is the total
+    // line count. A consumer can check that last element against the
+    // line vector it holds to prove both sides mean the same lines.
+    entry.line_boundaries.push(total_lines);
     emitted += 1;
 
     let cursor_y = paragraph_top_in_body + frag_h;
