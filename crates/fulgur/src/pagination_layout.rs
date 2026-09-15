@@ -10407,8 +10407,52 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// A node with two fragments (page 0 and page 1) must be recorded only under
+    /// the page of its *first* fragment. The implementation calls
+    /// `geom.fragments.first()` and does not scan subsequent fragments, so only
+    /// page 0 carries the state entry.
+    #[test]
+    fn running_states_only_first_fragment_page_is_used() {
+        let mut geom = PaginationGeometryTable::new();
+        let entry = geom.entry(7).or_default();
+        entry.fragments.push(Fragment {
+            page_index: 0,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        entry.fragments.push(Fragment {
+            page_index: 1,
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
+        });
+        let mut store = crate::gcpm::running::RunningElementStore::new();
+        let instance_id = store.register(7, "banner".into(), "<p>B</p>".into());
+        let states = collect_running_element_states(&geom, &store);
+        assert_eq!(states.len(), 2, "two pages expected");
+        let p0 = &states[0];
+        let p1 = &states[1];
+        assert!(
+            p0.contains_key("banner"),
+            "banner must be recorded on page 0 (first fragment)"
+        );
+        assert_eq!(p0["banner"].instance_ids, vec![instance_id]);
+        assert!(
+            p1.is_empty(),
+            "page 1 must not carry a duplicate entry for the second fragment"
+        );
+    }
+
     /// Two nodes sharing the same running name on the same page must accumulate
-    /// both instance_ids under that name entry (not overwrite each other).
+    /// both instance_ids under that name entry, ordered by geometry traversal
+    /// (BTreeMap key order), not by registration order.
+    ///
+    /// Registering node 20 before node 10 in the store gives node 20 a lower
+    /// instance_id. The assertion still expects [id_for_10, id_for_20] because
+    /// the geometry loop visits node 10 (smaller key) before node 20.
     #[test]
     fn running_states_two_nodes_same_name_same_page_accumulate_ids() {
         let mut geom = PaginationGeometryTable::new();
@@ -10422,13 +10466,17 @@ h2 { string-set: chapter-title content(text); }
             });
         }
         let mut store = crate::gcpm::running::RunningElementStore::new();
-        let id0 = store.register(10, "section".into(), "<p>A</p>".into());
-        let id1 = store.register(20, "section".into(), "<p>B</p>".into());
+        // Intentionally register in reverse order (20 before 10) so that the
+        // instance_id for node 20 is lower than for node 10. The assertion
+        // below proves the order is driven by BTreeMap traversal, not by
+        // registration order.
+        let id_for_20 = store.register(20, "section".into(), "<p>B</p>".into());
+        let id_for_10 = store.register(10, "section".into(), "<p>A</p>".into());
         let states = collect_running_element_states(&geom, &store);
         assert_eq!(states.len(), 1);
         let entry = states[0].get("section").expect("section must be present");
-        // geometry is a BTreeMap so node_id 10 is visited before 20 → source order.
-        assert_eq!(entry.instance_ids, vec![id0, id1]);
+        // geometry traversal: key 10 < 20, so id_for_10 is pushed first.
+        assert_eq!(entry.instance_ids, vec![id_for_10, id_for_20]);
     }
 
     /// Two nodes with different running names each appear in their own slot.
