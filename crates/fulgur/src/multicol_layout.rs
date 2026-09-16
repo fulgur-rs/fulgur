@@ -3730,7 +3730,7 @@ mod tests {
         let root = doc.root_element().id;
 
         // Pre-condition: Taffy caches layout results during resolve().
-        let pre = doc.get_node(root).map_or(true, |n| n.cache.is_empty());
+        let pre = doc.get_node(root).is_none_or(|n| n.cache.is_empty());
         assert!(
             !pre,
             "resolve() must populate the root node cache (pre-condition for this test)"
@@ -3738,7 +3738,7 @@ mod tests {
 
         // Depth-limit call: cache must be unchanged (still non-empty).
         clear_subtree_cache_inner(&mut doc, root, crate::MAX_DOM_DEPTH);
-        let after_limit = doc.get_node(root).map_or(true, |n| n.cache.is_empty());
+        let after_limit = doc.get_node(root).is_none_or(|n| n.cache.is_empty());
         assert!(
             !after_limit,
             "depth-limit guard must not clear the root node cache"
@@ -3746,7 +3746,7 @@ mod tests {
 
         // Contrast: depth=0 must actually clear the cache.
         clear_subtree_cache_inner(&mut doc, root, 0);
-        let after_zero = doc.get_node(root).map_or(false, |n| n.cache.is_empty());
+        let after_zero = doc.get_node(root).is_some_and(|n| n.cache.is_empty());
         assert!(
             after_zero,
             "depth=0 must clear the root node cache (confirms clearing itself works)"
