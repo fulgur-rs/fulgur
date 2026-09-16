@@ -3703,4 +3703,46 @@ mod tests {
         // col_w with n=1 and gap=-10: (200 - (-10)*(1-1)) / 1 = 200 → max(0) = 200
         assert!(w >= 0.0, "column width must not be negative: {w}");
     }
+
+    // ── clear_subtree_cache_inner: depth-limit and absent-node branches ──────
+
+    #[test]
+    fn clear_subtree_cache_inner_at_max_depth_returns_immediately() {
+        // When depth == MAX_DOM_DEPTH the function must bail out before
+        // touching any node — exercising the `if depth >= MAX_DOM_DEPTH { return; }`
+        // guard (line 1544). We verify by passing a valid node_id at the depth
+        // limit and confirming the call completes without panicking.  A layout
+        // pass run afterward proves the document is still in a consistent state.
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2;"><p>text</p></div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let root = doc.root_element().id;
+        // Passing MAX_DOM_DEPTH as depth: the function must return immediately.
+        clear_subtree_cache_inner(&mut doc, root, crate::MAX_DOM_DEPTH);
+
+        // The document must still be usable after the no-op call.
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        let laid_out = tree.layout_multicol_subtrees();
+        assert_eq!(
+            laid_out, 1,
+            "document must remain operable after depth-limit no-op"
+        );
+    }
+
+    #[test]
+    fn clear_subtree_cache_inner_absent_node_returns_without_panic() {
+        // When `node_id` does not exist in the document, `get_node_mut` returns
+        // `None` — exercising the `else { return; }` branch (lines 1552–1553).
+        // Passing a large id that is guaranteed not to be in the parsed document.
+        let html = r#"<!doctype html><html><body><p>hello</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        clear_subtree_cache_inner(&mut doc, 9_999_999, 0);
+        // No panic ⇒ the absent-node guard fired correctly.
+    }
 }
