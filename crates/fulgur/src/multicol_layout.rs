@@ -3710,9 +3710,17 @@ mod tests {
     fn clear_subtree_cache_inner_at_max_depth_returns_immediately() {
         // When depth == MAX_DOM_DEPTH the function must bail out before
         // touching any node — exercising the `if depth >= MAX_DOM_DEPTH { return; }`
-        // guard (line 1544). We verify by passing a valid node_id at the depth
-        // limit and confirming the call completes without panicking.  A layout
-        // pass run afterward proves the document is still in a consistent state.
+        // guard (line 1544).
+        //
+        // Verification strategy:
+        //   1. After `resolve()`, Taffy populates every node's layout cache via
+        //      `CacheTree::cache_store` — `cache.is_empty()` returns false.
+        //   2. `clear_subtree_cache_inner` at `MAX_DOM_DEPTH` must be a no-op:
+        //      the cache must remain non-empty afterward.
+        //   3. By contrast, calling at depth=0 (the normal path) must actually
+        //      clear the cache — confirming that clearing itself works and the
+        //      MAX_DOM_DEPTH call was a genuine early return, not a silent no-op
+        //      caused by some other reason.
         let html = r#"<!doctype html><html><body>
             <div style="column-count: 2;"><p>text</p></div>
         </body></html>"#;
@@ -3720,10 +3728,31 @@ mod tests {
         crate::blitz_adapter::resolve(&mut doc);
 
         let root = doc.root_element().id;
-        // Passing MAX_DOM_DEPTH as depth: the function must return immediately.
-        clear_subtree_cache_inner(&mut doc, root, crate::MAX_DOM_DEPTH);
 
-        // The document must still be usable after the no-op call.
+        // Pre-condition: Taffy caches layout results during resolve().
+        let pre = doc.get_node(root).map_or(true, |n| n.cache.is_empty());
+        assert!(
+            !pre,
+            "resolve() must populate the root node cache (pre-condition for this test)"
+        );
+
+        // Depth-limit call: cache must be unchanged (still non-empty).
+        clear_subtree_cache_inner(&mut doc, root, crate::MAX_DOM_DEPTH);
+        let after_limit = doc.get_node(root).map_or(true, |n| n.cache.is_empty());
+        assert!(
+            !after_limit,
+            "depth-limit guard must not clear the root node cache"
+        );
+
+        // Contrast: depth=0 must actually clear the cache.
+        clear_subtree_cache_inner(&mut doc, root, 0);
+        let after_zero = doc.get_node(root).map_or(false, |n| n.cache.is_empty());
+        assert!(
+            after_zero,
+            "depth=0 must clear the root node cache (confirms clearing itself works)"
+        );
+
+        // Document remains operational.
         let column_styles = crate::column_css::ColumnStyleTable::new();
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         let laid_out = tree.layout_multicol_subtrees();
