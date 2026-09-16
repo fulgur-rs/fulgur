@@ -210,41 +210,41 @@ pub(super) fn inject_inline_pseudo_images(
     before: Option<InlineImage>,
     after: Option<InlineImage>,
 ) {
-    if let Some(mut img) = before {
-        if let Some(first_line) = lines.first_mut() {
-            let shift = img.width;
-            for item in &mut first_line.items {
-                match item {
-                    LineItem::Text(run) => run.x_offset += shift,
-                    LineItem::Image(i) => i.x_offset += shift,
-                    LineItem::InlineBox(ib) => ib.x_offset += shift,
-                }
+    if let Some(mut img) = before
+        && let Some(first_line) = lines.first_mut()
+    {
+        let shift = img.width;
+        for item in &mut first_line.items {
+            match item {
+                LineItem::Text(run) => run.x_offset += shift,
+                LineItem::Image(i) => i.x_offset += shift,
+                LineItem::InlineBox(ib) => ib.x_offset += shift,
             }
-            img.x_offset = crate::units::Pt::ZERO;
-            first_line.items.insert(0, LineItem::Image(img));
         }
+        img.x_offset = crate::units::Pt::ZERO;
+        first_line.items.insert(0, LineItem::Image(img));
     }
-    if let Some(mut img) = after {
-        if let Some(last_line) = lines.last_mut() {
-            let last_end = last_line
-                .items
-                .iter()
-                .map(|item| match item {
-                    LineItem::Text(run) => {
-                        run.x_offset
-                            + run
-                                .glyphs
-                                .iter()
-                                .map(|g| g.x_advance * run.font_size)
-                                .sum::<crate::units::Pt>()
-                    }
-                    LineItem::Image(i) => i.x_offset + i.width,
-                    LineItem::InlineBox(ib) => ib.x_offset + ib.width,
-                })
-                .fold(crate::units::Pt::ZERO, crate::units::Pt::max);
-            img.x_offset = last_end;
-            last_line.items.push(LineItem::Image(img));
-        }
+    if let Some(mut img) = after
+        && let Some(last_line) = lines.last_mut()
+    {
+        let last_end = last_line
+            .items
+            .iter()
+            .map(|item| match item {
+                LineItem::Text(run) => {
+                    run.x_offset
+                        + run
+                            .glyphs
+                            .iter()
+                            .map(|g| g.x_advance * run.font_size)
+                            .sum::<crate::units::Pt>()
+                }
+                LineItem::Image(i) => i.x_offset + i.width,
+                LineItem::InlineBox(ib) => ib.x_offset + ib.width,
+            })
+            .fold(crate::units::Pt::ZERO, crate::units::Pt::max);
+        img.x_offset = last_end;
+        last_line.items.push(LineItem::Image(img));
     }
 }
 

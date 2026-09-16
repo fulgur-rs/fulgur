@@ -240,24 +240,24 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
             });
         }
 
-        if let Some(items) = content_items {
-            if let Some(pseudo) = pseudo {
-                self.content_counter_mappings.push(ContentCounterMapping {
-                    parsed: selector.clone(),
-                    pseudo,
-                    content: items,
-                });
-            }
+        if let Some(items) = content_items
+            && let Some(pseudo) = pseudo
+        {
+            self.content_counter_mappings.push(ContentCounterMapping {
+                parsed: selector.clone(),
+                pseudo,
+                content: items,
+            });
         }
 
-        if let Some(text) = static_content {
-            if let Some(pseudo) = pseudo {
-                self.static_content_mappings.push(StaticContentMapping {
-                    parsed: selector.clone(),
-                    pseudo,
-                    text,
-                });
-            }
+        if let Some(text) = static_content
+            && let Some(pseudo) = pseudo
+        {
+            self.static_content_mappings.push(StaticContentMapping {
+                parsed: selector.clone(),
+                pseudo,
+                text,
+            });
         }
 
         // Push a bookmark mapping when either `bookmark-level` or
