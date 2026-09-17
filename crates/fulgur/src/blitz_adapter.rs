@@ -264,6 +264,7 @@ pub fn parse_html_with_local_resources(
     system_fonts: bool,
     base_path: Option<&Path>,
 ) -> ParsedWithLocalResources {
+    use std::collections::HashMap;
     use std::collections::HashSet;
 
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
@@ -306,7 +307,12 @@ pub fn parse_html_with_local_resources(
     // `process_style_element` for each new <style>, which parses the
     // @import, calls StylesheetLoader → NetProvider::fetch → CssHandler
     // with `MediaList` properly propagated, and pushes new Resources.
-    apply_link_media_rewrites(&mut doc, &rewrites);
+    //
+    // `link_rewrite_map` pairs each rewritten `<link>`'s original node id
+    // with its freshly created replacement `<style>` node's id — needed
+    // below to remap `link_gcpm_by_node`'s keys (see the "Node id reuse
+    // hazard" doc comment on `apply_link_media_rewrites`).
+    let link_rewrite_map = apply_link_media_rewrites(&mut doc, &rewrites);
 
     // Second drain: load the correctly-fetched stylesheets.
     for resource in net_provider.drain_pending_resources() {
@@ -325,7 +331,28 @@ pub fn parse_html_with_local_resources(
     // duplicate here — see this function's doc comment for why (only the
     // wrong-media, original-`<link>`-node-id entry ever exists) — so no
     // `rewrite_node_ids` filter is applied.
-    let link_gcpm_by_node = net_provider.drain_gcpm_by_link_node();
+    //
+    // Node id remap (fulgur-smlr Part 0): `gcpm_by_link_node`'s keys were
+    // captured at fetch time, *before* `apply_link_media_rewrites` ran.
+    // `doc`'s node arena is a `slab::Slab`, so a media-rewritten `<link>`'s
+    // freed id can be immediately reused for an unrelated `<link>`'s
+    // replacement `<style>` node when 2+ media-restricted `<link>`s exist
+    // in one document — a pre-rewrite key can therefore identify the
+    // *wrong* node (or no live node at all) once `doc` is mutated. Remap
+    // every entry whose key is a rewritten `<link>`'s original node id to
+    // that rewrite's replacement `<style>` node id instead, so downstream
+    // consumers walking the post-rewrite `doc` (Part 1/2 of this plan)
+    // always resolve a live node. A non-rewritten `<link>`'s key is never
+    // present in `link_rewrite_map` and passes through unchanged.
+    let rewrite_id_map: HashMap<usize, usize> = link_rewrite_map.into_iter().collect();
+    let link_gcpm_by_node: Vec<(usize, crate::gcpm::GcpmContext)> = net_provider
+        .drain_gcpm_by_link_node()
+        .into_iter()
+        .map(|(node_id, ctx)| {
+            let remapped_id = rewrite_id_map.get(&node_id).copied().unwrap_or(node_id);
+            (remapped_id, ctx)
+        })
+        .collect();
 
     // fulgur-s5ro: same dedup as the first resource drain above — a
     // media-rewritten `<link>`'s original (wrong-media) fetch pushed a
@@ -663,6 +690,191 @@ fn walk_for_inline_styles(
     for &child_id in &node.children {
         walk_for_inline_styles(doc, child_id, out, depth + 1);
     }
+}
+
+/// Like [`extract_gcpm_from_inline_styles`], but keyed by the `<style>`
+/// element's node id instead of flattened into one context — feeds the
+/// document-order GCPM cascade fold ([`document_ordered_gcpm_mappings`],
+/// fulgur-smlr Part A).
+fn collect_inline_gcpm_by_node(
+    doc: &HtmlDocument,
+) -> std::collections::BTreeMap<usize, crate::gcpm::GcpmContext> {
+    let mut out = std::collections::BTreeMap::new();
+    let root = doc.root_element();
+    walk_for_inline_styles_by_node(doc, root.id, &mut out, 0);
+    out
+}
+
+fn walk_for_inline_styles_by_node(
+    doc: &HtmlDocument,
+    node_id: usize,
+    out: &mut std::collections::BTreeMap<usize, crate::gcpm::GcpmContext>,
+    depth: usize,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        let mut css = String::new();
+        for &child_id in &node.children {
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Text(t) = &child.data
+            {
+                css.push_str(&t.content);
+            }
+        }
+        if !css.is_empty() {
+            out.insert(node_id, crate::gcpm::parser::parse_gcpm(&css));
+        }
+        return;
+    }
+    for &child_id in &node.children {
+        walk_for_inline_styles_by_node(doc, child_id, out, depth + 1);
+    }
+}
+
+/// Folds GCPM contexts from `<link>`/`<style>` nodes into `out` in true DOM
+/// document order. Mirrors `walk_for_column_styles`'s node-matching shape.
+///
+/// Takes a SINGLE node-id-keyed map rather than the two-map (`link_gcpm` /
+/// `style_gcpm`) split an earlier sketch of this function used. A given
+/// node id in the live `doc` is unambiguously either a `<link>` or a
+/// `<style>` element — never both — and `document_ordered_gcpm_mappings`
+/// has already merged every source (real `<link>` fetches, remapped
+/// media-rewritten `<link>` fetches, inline `<style>` blocks, the
+/// AssetBundle-injected `<style>`) into that one map before calling this
+/// function. A two-map split would strand a media-rewritten `<link>`'s
+/// entry: after `parse_html_with_local_resources`'s Part 0 remap, that
+/// entry is keyed by its replacement `<style>` node's id, not any live
+/// `<link>` id — the two-map version left it sitting in the "link" map
+/// while only the `<style>` branch below would ever look it up. One
+/// shared map sidesteps that: whichever branch's node-type check matches
+/// at a given id is the only one that will ever consult it.
+fn fold_gcpm_by_document_order(
+    doc: &HtmlDocument,
+    node_id: usize,
+    node_gcpm: &std::collections::BTreeMap<usize, crate::gcpm::GcpmContext>,
+    out: &mut crate::gcpm::GcpmContext,
+    depth: usize,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "link"
+        && el
+            .attr(blitz_dom::LocalName::from("rel"))
+            .is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|tok| tok.eq_ignore_ascii_case("stylesheet"))
+            })
+    {
+        if let Some(ctx) = node_gcpm.get(&node_id) {
+            out.extend_from(ctx.clone());
+        }
+        return;
+    }
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        if let Some(ctx) = node_gcpm.get(&node_id) {
+            out.extend_from(ctx.clone());
+        }
+        return;
+    }
+    for &child_id in &node.children {
+        fold_gcpm_by_document_order(doc, child_id, node_gcpm, out, depth + 1);
+    }
+}
+
+/// Recomputes `running_mappings`/`bookmark_mappings` in true DOM document
+/// order across AssetBundle CSS, `<link>`/`@import` CSS, and inline
+/// `<style>` blocks (fulgur-smlr Part A). Must run after the pass that
+/// injects AssetBundle's cleaned CSS as `<head>`'s last `<style>` child
+/// (`InjectCssPass`), so that synthetic node is discoverable at its real
+/// document position.
+///
+/// `link_gcpm_by_node` comes from [`parse_html_with_local_resources`]'s
+/// return value — real per-`<link>` contexts (with `@import` subtrees
+/// already folded in, and media-rewritten `<link>` keys already remapped
+/// to their replacement `<style>` node's id — see that function's Part 0
+/// doc comment and `apply_link_media_rewrites`'s "Node id reuse hazard"
+/// note).
+///
+/// # Merge strategy (why not a plain three-way `extend`)
+///
+/// Every node-keyed GCPM source is folded into ONE `BTreeMap` before the
+/// document-order walk, but the three sources are combined with two
+/// *different* merge rules, not uniformly:
+///
+/// - `collect_inline_gcpm_by_node(doc)` seeds the map first. This walk
+///   runs over the FINAL `doc` (after `apply_passes`), so it also visits
+///   two kinds of node whose *own* text is a near-duplicate of content
+///   that belongs to a different source: a media-rewritten `<link>`'s
+///   synthetic `<style>@import url(...) media;</style>` replacement (its
+///   own text carries no GCPM construct — `parse_gcpm` on bare `@import`
+///   text returns a fully empty [`crate::gcpm::GcpmContext`], verified in
+///   `blitz_adapter`'s test suite), and — when `assetbundle_css_injected`
+///   — `InjectCssPass`'s injected `<style>` (its own text is
+///   `combined_css` with GCPM constructs ALREADY stripped by the earlier
+///   `parse_gcpm` call in `engine.rs`, so `bookmark-level`/`bookmark-label`
+///   *would* still be present verbatim there — see below).
+/// - `link_gcpm_by_node` entries are merged into that seed via
+///   `extend_from` (append, not overwrite). This is safe specifically
+///   because the only node id a `link_gcpm_by_node` entry can ever share
+///   with the seed map is a media-rewritten `<link>`'s replacement
+///   `<style>` id, whose seed-map entry is always fully empty (see
+///   above) — so `extend_from`-ing the real content into it never
+///   double-counts anything.
+/// - The AssetBundle-injected `<style>` node (when present) is instead
+///   `insert`ed (overwritten), NOT `extend_from`-merged. Unlike
+///   `position: running(...)` (which `parse_gcpm`'s `cleaned_css` builder
+///   replaces with `display: none`), `bookmark-level` / `bookmark-label`
+///   declarations are **not** stripped from `cleaned_css` — only
+///   `running(...)`, `counter-*`, and multi-item `content:` are. So the
+///   seed map's own entry for the injected node (built from parsing its
+///   *cleaned* text) can already carry real `bookmark_mappings` whenever
+///   AssetBundle CSS declared any `bookmark-*` rule. `extend_from`-ing a
+///   second, fresh parse of the pre-strip `combined_css` on top of that
+///   would duplicate every such mapping. `insert` replaces the stale,
+///   already-computed entry outright with the authoritative one instead.
+pub(crate) fn document_ordered_gcpm_mappings(
+    doc: &HtmlDocument,
+    combined_css: &str,
+    assetbundle_css_injected: bool,
+    link_gcpm_by_node: &[(usize, crate::gcpm::GcpmContext)],
+    ua_bookmark_mappings: Vec<crate::gcpm::bookmark::BookmarkMapping>,
+) -> (
+    Vec<crate::gcpm::RunningMapping>,
+    Vec<crate::gcpm::bookmark::BookmarkMapping>,
+) {
+    let mut node_gcpm = collect_inline_gcpm_by_node(doc);
+    for (node_id, ctx) in link_gcpm_by_node.iter().cloned() {
+        node_gcpm.entry(node_id).or_default().extend_from(ctx);
+    }
+    if assetbundle_css_injected
+        && let Some(head_id) = find_element_by_tag(doc, "head")
+        && let Some(node) = doc.get_node(head_id)
+        && let Some(&last_child) = node.children.last()
+    {
+        node_gcpm.insert(last_child, crate::gcpm::parser::parse_gcpm(combined_css));
+    }
+
+    let mut ordered = crate::gcpm::GcpmContext::default();
+    let root_id = doc.root_element().id;
+    fold_gcpm_by_document_order(doc, root_id, &node_gcpm, &mut ordered, 0);
+
+    let mut bookmark_mappings = ua_bookmark_mappings;
+    bookmark_mappings.extend(ordered.bookmark_mappings);
+    (ordered.running_mappings, bookmark_mappings)
 }
 
 /// Harvest the column-* properties that blitz/stylo (servo feature) does not
@@ -3749,7 +3961,19 @@ fn escape_css_url(raw: &str) -> String {
 /// therefore end up identifying a *different* `<link>`'s replacement
 /// `<style>` once this function returns. Anything consuming such
 /// pre-rewrite ids against the post-rewrite `doc` must account for this.
-pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[LinkMediaRewrite]) {
+///
+/// Returns `(link_node_id, style_id)` pairs, one per rewrite, in the same
+/// order as `rewrites` — the id of the removed original `<link>` paired
+/// with the id of its freshly created replacement `<style>`. Callers that
+/// captured a `<link>`'s node id *before* this function ran (e.g.
+/// `FulgurNetProvider::drain_gcpm_by_link_node`) must remap through this
+/// mapping afterward per the "Node id reuse hazard" note above —
+/// `parse_html_with_local_resources` does exactly that.
+pub(crate) fn apply_link_media_rewrites(
+    doc: &mut HtmlDocument,
+    rewrites: &[LinkMediaRewrite],
+) -> Vec<(usize, usize)> {
+    let mut id_map = Vec::with_capacity(rewrites.len());
     for rw in rewrites {
         let css = format!(
             r#"@import url("{}") {};"#,
@@ -3763,7 +3987,9 @@ pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[Link
         mutator.append_children(style_id, &[text_id]);
         mutator.insert_nodes_before(rw.link_node_id, &[style_id]);
         mutator.remove_and_drop_node(rw.link_node_id);
+        id_map.push((rw.link_node_id, style_id));
     }
+    id_map
 }
 
 #[cfg(test)]
@@ -4173,18 +4399,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_html_with_local_resources_media_restricted_link_keys_by_original_link_node() {
-        // fulgur-smlr: a `<link rel=stylesheet media=X>` (X neither empty
-        // nor "all") is fetched TWICE internally (see the "Known
-        // limitation" doc comment on `parse_html_with_local_resources`)
-        // — once directly for the original `<link>` node, ignoring
-        // `media`, and once via the synthetic
-        // `<style>@import url(...) X;</style>` that
-        // `apply_link_media_rewrites` creates. `Resource::Css` is only
-        // ever reported for the first (a `<link>` element's own fetch,
-        // never one reached via `@import`), so there is exactly ONE
-        // `gcpm_by_link_node` entry, keyed by the original `<link>`'s
-        // node id — not two, and not zero.
+    fn parse_html_with_local_resources_media_restricted_link_remaps_key_to_live_style_node() {
+        // fulgur-smlr Part 0: a `<link rel=stylesheet media=X>` (X neither
+        // empty nor "all") is fetched TWICE internally (see the "Known
+        // limitation" doc comment on `parse_html_with_local_resources`) —
+        // once directly for the original `<link>` node, ignoring `media`,
+        // and once via the synthetic `<style>@import url(...) X;</style>`
+        // that `apply_link_media_rewrites` creates. `Resource::Css` is
+        // only ever reported for the first (a `<link>` element's own
+        // fetch, never one reached via `@import`), so there is exactly
+        // ONE `gcpm_by_link_node` entry — not two, and not zero.
+        //
+        // That entry is captured at fetch time keyed by the original
+        // `<link>`'s node id, but `apply_link_media_rewrites` then removes
+        // that `<link>` from `doc` and replaces it with the synthetic
+        // `<style>` at a node id that can be a completely different slab
+        // slot. Without a remap, the entry's key would dangle (or, with
+        // 2+ media-restricted `<link>`s, silently point at a DIFFERENT
+        // link's replacement node — see
+        // `parse_html_with_local_resources_media_restricted_links_do_not_cross_attribute_after_remap`
+        // below for that scenario). `parse_html_with_local_resources`
+        // remaps the key through `apply_link_media_rewrites`'s returned
+        // `(link_node_id, style_id)` pairs before returning, so the entry
+        // here must now be keyed by the LIVE synthetic `<style>` node's
+        // id, not the removed original `<link>`'s.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("print.css"),
@@ -4206,18 +4444,6 @@ mod tests {
              gcpm_by_link_node entry, got {link_gcpm_by_node:?}"
         );
 
-        // `apply_link_media_rewrites` removes the original `<link
-        // id="the-link">` from `doc` and replaces it with a synthetic
-        // `<style>` carrying `@import url("print.css") print;` — so the
-        // original node id can no longer be looked up by its `id`
-        // attribute post-hoc. Instead, confirm the rewrite really
-        // happened (no `<link>` survives) and that the entry is keyed by
-        // some node OTHER than the surviving synthetic `<style>` — the
-        // only two candidates `Resource::Css` could ever report for
-        // print.css are the removed `<link>`'s own fetch and the
-        // `<style>`'s `@import` fetch, and this function's doc comment
-        // establishes the latter never fires a callback, so ruling out
-        // the `<style>`'s id is sufficient to show it's the former.
         assert!(
             find_element_by_tag(&doc, "link").is_none(),
             "the original <link> must have been removed by the media rewrite"
@@ -4225,10 +4451,11 @@ mod tests {
         let style_node_id =
             find_element_by_tag(&doc, "style").expect("synthetic <style> must exist");
         let (node_id, ctx) = &link_gcpm_by_node[0];
-        assert_ne!(
+        assert_eq!(
             *node_id, style_node_id,
-            "the entry must be keyed by the removed original <link>'s node id, \
-             not the synthetic <style>'s"
+            "after the Part 0 remap, the entry must be keyed by the LIVE \
+             synthetic <style>'s node id, not the removed original <link>'s \
+             (possibly dangling or reused-by-someone-else) id"
         );
         assert!(
             ctx.bookmark_mappings
@@ -4237,6 +4464,289 @@ mod tests {
             "expected print.css's bookmark mapping, got {:?}",
             ctx.bookmark_mappings
         );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_media_restricted_links_do_not_cross_attribute_after_remap() {
+        // fulgur-smlr Part 0: the exact regression this fix targets. Two
+        // `<link media=print>` tags in one document, each media-rewritten
+        // to a synthetic `<style>@import ...>`. `doc`'s node arena is a
+        // `slab::Slab` (LIFO free list): the first rewrite frees link A's
+        // slot, and the second rewrite's `create_element` (for link B's
+        // replacement `<style>`) can immediately reuse that freed slot.
+        // Without the Part 0 remap, `link_gcpm_by_node`'s pre-rewrite keys
+        // (captured at fetch time) would then be wrong: link A's entry
+        // would dangle or resolve to link B's replacement node, and vice
+        // versa, silently cross-attributing or dropping GCPM content.
+        //
+        // Assert BOTH entries survive, each keyed by a LIVE `<style>` node
+        // in the final `doc`, and that each one's own content (a distinct
+        // `bookmark-level` selector) is attributed to the correct
+        // `@import` target — not swapped, not dropped, not duplicated.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".rule-a { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".rule-b { bookmark-level: 2; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link rel="stylesheet" href="a.css" media="print">
+<link rel="stylesheet" href="b.css" media="print">
+</head>
+<body><p class="rule-a rule-b">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            2,
+            "two media-restricted <link>s must contribute two entries, \
+             got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        // Every live <style> node id in the final doc, so we can confirm
+        // each entry's key resolves to a real, currently-live element
+        // (not a stale/dangling pre-rewrite id).
+        fn collect_style_ids(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            if let Some(el) = node.element_data()
+                && el.name.local.as_ref() == "style"
+            {
+                out.push(node_id);
+            }
+            for &child_id in &node.children {
+                collect_style_ids(doc, child_id, out);
+            }
+        }
+        let mut live_style_ids = Vec::new();
+        collect_style_ids(doc.deref(), doc.root_element().id, &mut live_style_ids);
+        assert_eq!(
+            live_style_ids.len(),
+            2,
+            "expected exactly two synthetic <style> nodes, got {live_style_ids:?}"
+        );
+
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "both original <link>s must have been removed by the media rewrite"
+        );
+
+        // Each entry's key must be one of the two LIVE <style> ids...
+        for (node_id, _) in &link_gcpm_by_node {
+            assert!(
+                live_style_ids.contains(node_id),
+                "entry key {node_id} must be a live <style> node id, got live ids \
+                 {live_style_ids:?} (this fails if the pre-remap dangling/stale key \
+                 leaked through)"
+            );
+        }
+        // ...and the two entries must not share a key (no cross-attribution
+        // collapsing them onto the same node).
+        assert_ne!(
+            link_gcpm_by_node[0].0, link_gcpm_by_node[1].0,
+            "the two entries must not share a node id after remap"
+        );
+
+        // Finally, confirm content: exactly one entry carries rule-a's
+        // mapping and the OTHER carries rule-b's — never both on one
+        // entry (which would mean the remap merged/duplicated) and never
+        // neither (which would mean one was silently dropped).
+        let has_rule_a: Vec<bool> = link_gcpm_by_node
+            .iter()
+            .map(|(_, ctx)| {
+                ctx.bookmark_mappings
+                    .iter()
+                    .any(|m| m.selector == ParsedSelector::Class("rule-a".to_string()))
+            })
+            .collect();
+        let has_rule_b: Vec<bool> = link_gcpm_by_node
+            .iter()
+            .map(|(_, ctx)| {
+                ctx.bookmark_mappings
+                    .iter()
+                    .any(|m| m.selector == ParsedSelector::Class("rule-b".to_string()))
+            })
+            .collect();
+        assert_eq!(
+            has_rule_a.iter().filter(|&&b| b).count(),
+            1,
+            "exactly one entry must carry rule-a's mapping, got {link_gcpm_by_node:?}"
+        );
+        assert_eq!(
+            has_rule_b.iter().filter(|&&b| b).count(),
+            1,
+            "exactly one entry must carry rule-b's mapping, got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            !(has_rule_a[0] && has_rule_b[0]),
+            "a single entry must not carry BOTH rules' mappings (cross-attribution), \
+             got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            !(has_rule_a[1] && has_rule_b[1]),
+            "a single entry must not carry BOTH rules' mappings (cross-attribution), \
+             got {link_gcpm_by_node:?}"
+        );
+
+        // Strongest check: correlate each entry's KEY (a live <style> node
+        // id) with that SAME node's own `@import url("X.css")` text, and
+        // confirm X.css is the file that actually declares the rule the
+        // entry's `ctx` carries. This is the one check a "both entries'
+        // content merely survived somewhere" style assertion would miss —
+        // without the Part 0 remap, a key can resolve to a live <style>
+        // node whose `@import` names the OTHER link's file while `ctx`
+        // still carries content read from the correct file at fetch time,
+        // i.e. content and key would point at two different links.
+        fn style_import_href(doc: &blitz_dom::BaseDocument, style_id: usize) -> String {
+            let node = doc.get_node(style_id).expect("style node");
+            let mut text = String::new();
+            for &child_id in &node.children {
+                if let Some(child) = doc.get_node(child_id)
+                    && let blitz_dom::node::NodeData::Text(t) = &child.data
+                {
+                    text.push_str(&t.content);
+                }
+            }
+            text
+        }
+        for (node_id, ctx) in &link_gcpm_by_node {
+            let import_text = style_import_href(doc.deref(), *node_id);
+            let carries_rule_a = ctx
+                .bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("rule-a".to_string()));
+            if carries_rule_a {
+                assert!(
+                    import_text.contains(r#"url("a.css")"#),
+                    "entry keyed by node {node_id} carries rule-a's mapping but its \
+                     LIVE <style> node's @import is {import_text:?}, not a.css — \
+                     key and content point at different links"
+                );
+            } else {
+                assert!(
+                    import_text.contains(r#"url("b.css")"#),
+                    "entry keyed by node {node_id} carries rule-b's mapping but its \
+                     LIVE <style> node's @import is {import_text:?}, not b.css — \
+                     key and content point at different links"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_three_media_restricted_links_all_survive_remap() {
+        // fulgur-smlr Part 0 edge case: 3+ media-restricted <link>s, not
+        // just 2. Each rewrite in `apply_link_media_rewrites`'s loop frees
+        // its own <link>'s slot right after creating its replacement
+        // <style>, so slot reuse can chain across more than one pair (e.g.
+        // link C's replacement could reuse link B's just-freed slot, which
+        // itself may have reused link A's). The remap must stay correct
+        // per-pair regardless of how many rewrites chain together.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, sel, level) in [("a", "rule-a", 1), ("b", "rule-b", 2), ("c", "rule-c", 3)] {
+            std::fs::write(
+                dir.path().join(format!("{name}.css")),
+                format!(".{sel} {{ bookmark-level: {level}; bookmark-label: content(); }}"),
+            )
+            .unwrap();
+        }
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link rel="stylesheet" href="a.css" media="print">
+<link rel="stylesheet" href="b.css" media="print">
+<link rel="stylesheet" href="c.css" media="print">
+</head>
+<body><p class="rule-a rule-b rule-c">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            3,
+            "three media-restricted <link>s must contribute three entries, \
+             got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "all three original <link>s must have been removed by the media rewrite"
+        );
+
+        use std::ops::Deref;
+        fn collect_style_ids(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            if let Some(el) = node.element_data()
+                && el.name.local.as_ref() == "style"
+            {
+                out.push(node_id);
+            }
+            for &child_id in &node.children {
+                collect_style_ids(doc, child_id, out);
+            }
+        }
+        let mut live_style_ids = Vec::new();
+        collect_style_ids(doc.deref(), doc.root_element().id, &mut live_style_ids);
+        assert_eq!(
+            live_style_ids.len(),
+            3,
+            "expected exactly three synthetic <style> nodes, got {live_style_ids:?}"
+        );
+
+        // Every entry's key must be a live <style> id, and no two entries
+        // may share a key.
+        let mut keys: Vec<usize> = Vec::new();
+        for (node_id, _) in &link_gcpm_by_node {
+            assert!(
+                live_style_ids.contains(node_id),
+                "entry key {node_id} must be a live <style> node id, got live ids \
+                 {live_style_ids:?}"
+            );
+            assert!(
+                !keys.contains(node_id),
+                "no two entries may share a node id, got {link_gcpm_by_node:?}"
+            );
+            keys.push(*node_id);
+        }
+
+        // Each of the three rules must appear in EXACTLY one entry, and no
+        // entry may carry more than one rule's mapping.
+        for sel in ["rule-a", "rule-b", "rule-c"] {
+            let count = link_gcpm_by_node
+                .iter()
+                .filter(|(_, ctx)| {
+                    ctx.bookmark_mappings
+                        .iter()
+                        .any(|m| m.selector == ParsedSelector::Class(sel.to_string()))
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "selector {sel} must appear in exactly one entry, got {link_gcpm_by_node:?}"
+            );
+        }
+        for (node_id, ctx) in &link_gcpm_by_node {
+            assert_eq!(
+                ctx.bookmark_mappings.len(),
+                1,
+                "entry keyed by {node_id} must carry exactly one rule's mapping \
+                 (no cross-attribution merge), got {:?}",
+                ctx.bookmark_mappings
+            );
+        }
     }
 
     struct NoOpPass;
@@ -6505,13 +7015,15 @@ mod tests {
         let mut doc = parse(html, 800.0, &[]);
         let rewrites = collect_link_media_rewrites(&doc);
         assert_eq!(rewrites.len(), 1);
+        let original_link_node_id = rewrites[0].link_node_id;
 
-        apply_link_media_rewrites(&mut doc, &rewrites);
+        let id_map = apply_link_media_rewrites(&mut doc, &rewrites);
 
         let head = find_element_by_tag(&doc, "head").expect("head exists");
         let head_node = doc.get_node(head).unwrap();
 
         let mut style_text_found: Option<String> = None;
+        let mut style_node_id_found: Option<usize> = None;
         let mut a_css_link_found = false;
         let mut b_css_link_found = false;
         for &cid in &head_node.children {
@@ -6519,6 +7031,7 @@ mod tests {
             if let Some(el) = child.element_data() {
                 match el.name.local.as_ref() {
                     "style" => {
+                        style_node_id_found = Some(cid);
                         for &gc in &child.children {
                             let gnode = doc.get_node(gc).unwrap();
                             if let blitz_dom::node::NodeData::Text(t) = &gnode.data {
@@ -6540,6 +7053,21 @@ mod tests {
         assert!(b_css_link_found, "<link href=b.css> must be preserved");
         let text = style_text_found.expect("<style> with @import must exist");
         assert_eq!(text, r#"@import url("a.css") print;"#);
+
+        // fulgur-smlr Part 0: the returned id map must pair the removed
+        // original <link>'s node id with the replacement <style>'s own
+        // (live) node id, so a caller holding a pre-rewrite key can remap
+        // it to something that still resolves in the post-rewrite `doc`.
+        assert_eq!(id_map.len(), 1, "one rewrite in, one mapping entry out");
+        assert_eq!(
+            id_map[0].0, original_link_node_id,
+            "mapping's first element must be the original <link>'s node id"
+        );
+        assert_eq!(
+            id_map[0].1,
+            style_node_id_found.expect("synthetic <style> node must exist"),
+            "mapping's second element must be the replacement <style>'s live node id"
+        );
     }
 
     #[test]
