@@ -519,15 +519,21 @@ git commit -m "refactor(blitz_adapter): thread node-id-tagged link GCPM contexts
 
 **Files:**
 
-- Modify: `crates/fulgur/src/blitz_adapter.rs` — extend
-  `walk_for_column_styles` (line 1016) rather than adding a new walk (see
-  the spike's known shortcut #2 in the plan header)
+- Modify: `crates/fulgur/src/blitz_adapter.rs` — add two standalone
+  walks (`collect_inline_gcpm_by_node` / `fold_gcpm_by_document_order`,
+  see Steps 2-3). Earlier drafts of this plan said to extend
+  `walk_for_column_styles` (line 1016) instead of adding a new
+  traversal, matching the spike's known shortcut #2 in the plan header —
+  that merge was not done in the actual implementation (Steps 2-3 below
+  give standalone-walk code, which is what shipped) and is now tracked
+  as a follow-up performance optimization rather than a Task 6
+  requirement, since the spike already measured the unmerged cost as
+  negligible (see the plan header's spike results).
 - Test: same file, near the existing `extract_column_style_table` tests
 
 **Step 1: Read the current `walk_for_column_styles` / `extract_column_style_table`**
-(lines 659–1075) in full before editing — this task generalizes it to
-*also* fold GCPM mapping contexts as it visits the same `<link>`/`<style>`
-nodes, instead of adding a second, structurally-identical traversal.
+(lines 659–1075) in full before editing — for context on the existing
+node-visiting shape this task's new walks mirror (see Steps 2-3).
 
 **Step 2: Add the inline-`<style>`-by-node collector**
 
