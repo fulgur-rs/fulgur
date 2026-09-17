@@ -218,6 +218,20 @@ pub fn canonical_directory_url(path: &Path) -> Option<String> {
     }
 }
 
+/// Return type of [`parse_html_with_local_resources`]: the parsed
+/// document, the merged flat GCPM context, the column-CSS side-table
+/// texts, and (fulgur-smlr) the per-top-level-`<link>` node-id-tagged
+/// GCPM contexts. A named alias avoids `clippy::type_complexity` on the
+/// bare 4-tuple; see the function's own doc comment for what each part
+/// means and its "Known limitation" sections for caveats specific to
+/// media-restricted `<link>`s.
+pub type ParsedWithLocalResources = (
+    HtmlDocument,
+    crate::gcpm::GcpmContext,
+    Vec<(usize, String)>,
+    Vec<(usize, crate::gcpm::GcpmContext)>,
+);
+
 /// # Known limitation (tracked as beads fulgur-owa)
 ///
 /// Each `<link rel=stylesheet media=X>` that is rewritten to
@@ -232,6 +246,16 @@ pub fn canonical_directory_url(path: &Path) -> Option<String> {
 /// stylesheets get registered twice. Fixing this requires
 /// URL-tagged GCPM drain semantics in `FulgurNetProvider`; see
 /// `bd show fulgur-owa`.
+///
+/// The node-id-tagged `link_gcpm_by_node` (4th return value, fulgur-smlr)
+/// is affected by the same double-fetch, but not doubled: `Resource::Css`
+/// only fires for a `<link>` element's own fetch, never for one reached
+/// via `@import` (see `net.rs`'s `fetch()`), so the second, correctly
+/// media-scoped fetch never produces its own entry. A media-restricted
+/// `<link>`'s single `link_gcpm_by_node` entry therefore ends up keyed by
+/// the original `<link>`'s node id, carrying content extracted while
+/// ignoring `media` (same content the flat path above carries
+/// unconditionally today).
 pub fn parse_html_with_local_resources(
     html: &str,
     viewport_width: f32,
@@ -239,7 +263,7 @@ pub fn parse_html_with_local_resources(
     font_data: &[Arc<Vec<u8>>],
     system_fonts: bool,
     base_path: Option<&Path>,
-) -> (HtmlDocument, crate::gcpm::GcpmContext, Vec<(usize, String)>) {
+) -> ParsedWithLocalResources {
     use std::collections::HashSet;
 
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
@@ -296,6 +320,13 @@ pub fn parse_html_with_local_resources(
         gcpm.extend_from(ctx);
     }
 
+    // fulgur-smlr: unlike `gcpm_contexts` above and `column_css_texts`
+    // below, a media-rewritten `<link>`'s double fetch does NOT produce a
+    // duplicate here — see this function's doc comment for why (only the
+    // wrong-media, original-`<link>`-node-id entry ever exists) — so no
+    // `rewrite_node_ids` filter is applied.
+    let link_gcpm_by_node = net_provider.drain_gcpm_by_link_node();
+
     // fulgur-s5ro: same dedup as the first resource drain above — a
     // media-rewritten `<link>`'s original (wrong-media) fetch pushed a
     // `column_css_texts` entry too, tagged with the *original* `<link>`
@@ -310,7 +341,7 @@ pub fn parse_html_with_local_resources(
         .into_iter()
         .filter(|(node_id, _)| !rewrite_node_ids.contains(node_id))
         .collect();
-    (doc, gcpm, column_css_texts)
+    (doc, gcpm, column_css_texts, link_gcpm_by_node)
 }
 
 /// The single primitive that actually constructs an `HtmlDocument`.
@@ -3950,7 +3981,7 @@ mod tests {
 <html><head><link rel="stylesheet" href="parent.css"></head>
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
-        let (_doc, gcpm, _column_css) =
+        let (_doc, gcpm, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
 
         let cleaned = &gcpm.cleaned_css;
@@ -3965,6 +3996,235 @@ mod tests {
             "child @import rules must come before parent's own rules in cleaned_css \
              to preserve CSS cascade. child at {child_pos}, parent at {parent_pos}.\n\
              cleaned_css:\n{cleaned}"
+        );
+    }
+
+    // ── `link_gcpm_by_node` (fulgur-smlr) ──────────────────────────
+
+    #[test]
+    fn parse_html_with_local_resources_tags_single_link_by_node_id() {
+        // A single `<link>` with no `@import` must produce exactly one
+        // `link_gcpm_by_node` entry, keyed by that `<link>` element's own
+        // node id, whose GCPM mappings mirror what that one file
+        // declared.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("style.css"),
+            r#".single-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="style.css"></head>
+<body><p class="single-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "expected exactly one top-level <link> entry, got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_node_id = find_element_by_attr_id(doc.deref(), "the-link");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_eq!(
+            *node_id, link_node_id,
+            "entry must be keyed by the <link> element's own node id"
+        );
+        assert!(
+            ctx.bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("single-rule".to_string())),
+            "expected the bookmark mapping declared in style.css, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_folds_import_subtree_into_one_link_entry() {
+        // `<link href="parent.css">` where parent.css has
+        // `@import "child.css"` must fold BOTH files' GCPM content into a
+        // SINGLE `link_gcpm_by_node` entry keyed by the <link>'s own node
+        // id (not two — child.css never gets its own entry, mirroring
+        // `parse_html_with_local_resources_orders_imports_before_parent`
+        // for the flat `cleaned_css` path). The child's mapping must
+        // appear before the parent's own mapping in `bookmark_mappings`,
+        // preserving the same child-before-parent post-order the
+        // existing `cleaned_css` ordering test asserts.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("parent.css"),
+            r#"@import "child.css"; .parent-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.css"),
+            r#".child-rule { bookmark-level: 2; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="parent.css"></head>
+<body><p class="parent-rule child-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "expected the whole @import subtree folded into ONE entry \
+             (keyed by the top-level <link>), got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_node_id = find_element_by_attr_id(doc.deref(), "the-link");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_eq!(
+            *node_id, link_node_id,
+            "the single folded entry must be keyed by the <link>'s node id, \
+             not child.css (which has no node id of its own)"
+        );
+
+        let child_pos = ctx
+            .bookmark_mappings
+            .iter()
+            .position(|m| m.selector == ParsedSelector::Class("child-rule".to_string()))
+            .expect("child.css's bookmark mapping must be present");
+        let parent_pos = ctx
+            .bookmark_mappings
+            .iter()
+            .position(|m| m.selector == ParsedSelector::Class("parent-rule".to_string()))
+            .expect("parent.css's own bookmark mapping must be present");
+        assert!(
+            child_pos < parent_pos,
+            "child @import mapping must precede parent's own mapping (post-order), \
+             child at {child_pos}, parent at {parent_pos}: {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_tags_two_independent_links_separately() {
+        // Two independent top-level `<link>` tags (no `@import`) must
+        // produce TWO `link_gcpm_by_node` entries, keyed by two DIFFERENT
+        // node ids — node ids must not be accidentally shared between
+        // unrelated `<link>` elements.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".a-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".b-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link id="link-a" rel="stylesheet" href="a.css">
+<link id="link-b" rel="stylesheet" href="b.css">
+</head>
+<body><p class="a-rule b-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            2,
+            "expected two independent <link> entries, got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_a_id = find_element_by_attr_id(doc.deref(), "link-a");
+        let link_b_id = find_element_by_attr_id(doc.deref(), "link-b");
+        assert_ne!(
+            link_a_id, link_b_id,
+            "sanity: the two <link> elements must have distinct DOM node ids"
+        );
+
+        let node_ids: Vec<usize> = link_gcpm_by_node.iter().map(|(id, _)| *id).collect();
+        assert!(
+            node_ids.contains(&link_a_id) && node_ids.contains(&link_b_id),
+            "expected entries keyed by both link-a's ({link_a_id}) and link-b's \
+             ({link_b_id}) node ids, got {node_ids:?}"
+        );
+        assert_ne!(
+            node_ids[0], node_ids[1],
+            "the two entries must not share a node id"
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_media_restricted_link_keys_by_original_link_node() {
+        // fulgur-smlr: a `<link rel=stylesheet media=X>` (X neither empty
+        // nor "all") is fetched TWICE internally (see the "Known
+        // limitation" doc comment on `parse_html_with_local_resources`)
+        // — once directly for the original `<link>` node, ignoring
+        // `media`, and once via the synthetic
+        // `<style>@import url(...) X;</style>` that
+        // `apply_link_media_rewrites` creates. `Resource::Css` is only
+        // ever reported for the first (a `<link>` element's own fetch,
+        // never one reached via `@import`), so there is exactly ONE
+        // `gcpm_by_link_node` entry, keyed by the original `<link>`'s
+        // node id — not two, and not zero.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("print.css"),
+            r#".print-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="print.css" media="print"></head>
+<body><p class="print-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "a media-restricted <link> must contribute exactly one \
+             gcpm_by_link_node entry, got {link_gcpm_by_node:?}"
+        );
+
+        // `apply_link_media_rewrites` removes the original `<link
+        // id="the-link">` from `doc` and replaces it with a synthetic
+        // `<style>` carrying `@import url("print.css") print;` — so the
+        // original node id can no longer be looked up by its `id`
+        // attribute post-hoc. Instead, confirm the rewrite really
+        // happened (no `<link>` survives) and that the entry is keyed by
+        // some node OTHER than the surviving synthetic `<style>` — the
+        // only two candidates `Resource::Css` could ever report for
+        // print.css are the removed `<link>`'s own fetch and the
+        // `<style>`'s `@import` fetch, and this function's doc comment
+        // establishes the latter never fires a callback, so ruling out
+        // the `<style>`'s id is sufficient to show it's the former.
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "the original <link> must have been removed by the media rewrite"
+        );
+        let style_node_id =
+            find_element_by_tag(&doc, "style").expect("synthetic <style> must exist");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_ne!(
+            *node_id, style_node_id,
+            "the entry must be keyed by the removed original <link>'s node id, \
+             not the synthetic <style>'s"
+        );
+        assert!(
+            ctx.bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("print-rule".to_string())),
+            "expected print.css's bookmark mapping, got {:?}",
+            ctx.bookmark_mappings
         );
     }
 
@@ -6288,7 +6548,7 @@ mod tests {
         }
         html.push_str("</body></html>");
 
-        let (doc, _gcpm, _column_css) =
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(&html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let root = doc.root_element();
@@ -6327,7 +6587,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_between_block_children() {
         let html = "<html><body><a id='x'><div>foo</div><div>bar</div></a></body></html>";
-        let (doc, _gcpm, _column_css) =
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
@@ -6338,7 +6598,7 @@ mod tests {
     #[test]
     fn element_text_inserts_space_for_br() {
         let html = "<html><body><a id='x'>foo<br>bar</a></body></html>";
-        let (doc, _gcpm, _column_css) =
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
@@ -6351,7 +6611,7 @@ mod tests {
         // If the text already ends in whitespace, a block boundary should
         // not add another space.
         let html = "<html><body><a id='x'>foo <div>bar</div></a></body></html>";
-        let (doc, _gcpm, _column_css) =
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
@@ -6368,7 +6628,7 @@ mod tests {
         let html = r#"<!doctype html><html><head>
             <style>@page { size: A4 landscape; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _, _column_css) =
+        let (doc, _, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
@@ -6381,7 +6641,7 @@ mod tests {
     #[test]
     fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
         let html = r#"<!doctype html><html><body>x</body></html>"#;
-        let (doc, _, _column_css) =
+        let (doc, _, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert!(gcpm.page_settings.is_empty());
@@ -6397,7 +6657,7 @@ mod tests {
             <style>@page { size: A4 landscape; }</style>
             <style>@page { margin: 2cm; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _, _column_css) =
+        let (doc, _, _column_css, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
@@ -6559,7 +6819,7 @@ mod tests {
 <html><head><link rel="stylesheet" href="style.css"></head>
 <body><div class="callout" id="c"></div></body></html>"#;
 
-        let (doc, _gcpm, column_css_texts) =
+        let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
         assert!(
             !column_css_texts.is_empty(),
@@ -6600,7 +6860,7 @@ mod tests {
 <html><head><link rel="stylesheet" href="theme"></head>
 <body><div class="callout" id="c"></div></body></html>"#;
 
-        let (doc, _gcpm, column_css_texts) =
+        let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
             parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
         assert!(
             !column_css_texts.is_empty(),

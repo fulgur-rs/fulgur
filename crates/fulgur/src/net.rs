@@ -59,6 +59,24 @@ pub struct FulgurNetProvider {
 #[derive(Default)]
 struct Inner {
     gcpm_contexts: Vec<GcpmContext>,
+    /// One entry per top-level `<link rel=stylesheet>` fetch (not each
+    /// nested `@import`), keyed by that `<link>` element's node id, with
+    /// its entire `@import` subtree already folded in (in the same
+    /// child-before-parent post-order `gcpm_contexts` uses). Built
+    /// alongside `gcpm_contexts` rather than replacing it — the flat
+    /// `gcpm_contexts` path is still what
+    /// `parse_html_with_local_resources` folds into the single merged
+    /// `GcpmContext` consumed for `cleaned_css`/`margin_boxes`/
+    /// `page_settings`/etc. This new field feeds only the document-order
+    /// `running_mappings`/`bookmark_mappings` recompute (fulgur-smlr, a
+    /// later task in that plan).
+    gcpm_by_link_node: Vec<(usize, GcpmContext)>,
+    /// Recursion depth through nested `@import` fetches — 0 outside any
+    /// fetch, incremented on entry to `fetch()`, decremented on exit.
+    /// A fetch that finds depth 0 on entry is a top-level `<link>` fetch;
+    /// this is the only way to distinguish that from a nested `@import`
+    /// fetch, since Blitz calls `NetProvider::fetch` identically for both.
+    import_depth: usize,
     pending_resources: Vec<Resource>,
     /// fulgur-s5ro: raw CSS text harvested from every successfully-loaded
     /// `<link rel=stylesheet>` / `@import` payload, tagged with the DOM
@@ -97,6 +115,15 @@ impl FulgurNetProvider {
     pub fn drain_gcpm_contexts(&self) -> Vec<GcpmContext> {
         let mut inner = self.inner.lock().unwrap();
         std::mem::take(&mut inner.gcpm_contexts)
+    }
+
+    /// Take the `(node_id, GcpmContext)` pairs accumulated per top-level
+    /// `<link>` fetch (fulgur-smlr). Unlike [`Self::drain_gcpm_contexts`],
+    /// each entry here already has its `@import` subtree folded in and is
+    /// tagged with the `<link>` element's own node id.
+    pub fn drain_gcpm_by_link_node(&self) -> Vec<(usize, GcpmContext)> {
+        let mut inner = self.inner.lock().unwrap();
+        std::mem::take(&mut inner.gcpm_by_link_node)
     }
 
     /// Take the `(node_id, raw_css_text)` pairs harvested from CSS
@@ -199,17 +226,34 @@ impl NetProvider<Resource> for FulgurNetProvider {
                 (Bytes::from(raw_bytes), None, None, fallback)
             };
 
+        let is_top_level_import_root = {
+            let mut inner = self.inner.lock().unwrap();
+            let top = inner.import_depth == 0;
+            inner.import_depth += 1;
+            top
+        };
+        let gcpm_start = self.inner.lock().unwrap().gcpm_contexts.len();
+
+        // Set by the callback below when Blitz reports this fetch's own
+        // `Resource::Css(node_id, _)` — read back after `handler.bytes`
+        // returns, the same way `column_css_text`/`raw_text_fallback` are
+        // captured by the closure and consumed after the call.
+        let node_id_slot: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
         let inner = self.inner.clone();
+        let node_id_slot_cb = node_id_slot.clone();
         let callback: SharedCallback<Resource> = Arc::new(
             move |_doc_id: usize, result: Result<Resource, Option<String>>| {
                 if let Ok(res) = result {
                     let mut guard = inner.lock().unwrap();
-                    if let Resource::Css(node_id, _) = &res
-                        && let Some(text) = column_css_text
+                    if let Resource::Css(node_id, _) = &res {
+                        *node_id_slot_cb.lock().unwrap() = Some(*node_id);
+                        if let Some(text) = column_css_text
                             .clone()
                             .or_else(|| raw_text_fallback.clone())
-                    {
-                        guard.column_css_texts.push((*node_id, text));
+                        {
+                            guard.column_css_texts.push((*node_id, text));
+                        }
                     }
                     guard.pending_resources.push(res);
                 }
@@ -232,6 +276,33 @@ impl NetProvider<Resource> for FulgurNetProvider {
         // `gcpm.cleaned_css`.
         if let Some(gcpm) = gcpm_to_push {
             self.inner.lock().unwrap().gcpm_contexts.push(gcpm);
+        }
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.import_depth -= 1;
+            if is_top_level_import_root {
+                let merged = inner.gcpm_contexts[gcpm_start..].iter().cloned().fold(
+                    GcpmContext::default(),
+                    |mut acc, ctx| {
+                        acc.extend_from(ctx);
+                        acc
+                    },
+                );
+                // `Resource::Css` is only ever reported for a `<link>`
+                // element's own fetch, never for one reached via
+                // `@import` (verified empirically) — so a fetch with no
+                // `node_id_slot` here is either a failed/non-CSS fetch,
+                // or an `@import`-reached one (including the top-level
+                // `@import` inside a media-rewritten `<link>`'s synthetic
+                // `<style>`, which is why THAT case ends up tagged with
+                // the *original* `<link>`'s node id from its own,
+                // wrong-media fetch instead — see
+                // `parse_html_with_local_resources`'s doc comment).
+                if let Some(node_id) = *node_id_slot.lock().unwrap() {
+                    inner.gcpm_by_link_node.push((node_id, merged));
+                }
+            }
         }
     }
 }
@@ -419,6 +490,10 @@ mod tests {
         assert!(
             provider.drain_pending_resources().is_empty(),
             "rejected fetches must not register a pending resource"
+        );
+        assert!(
+            provider.drain_gcpm_by_link_node().is_empty(),
+            "a rejected fetch must not register a node-id-tagged GCPM entry either"
         );
     }
 }

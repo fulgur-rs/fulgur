@@ -199,7 +199,7 @@ impl Engine {
         // the margin-box renderer, so headers/footers would appear in
         // default browser styles even though their content resolved
         // correctly.
-        let (mut doc, link_gcpm, link_column_css) =
+        let (mut doc, link_gcpm, link_column_css, _link_gcpm_by_node) =
             crate::blitz_adapter::parse_html_with_local_resources(
                 &html,
                 self.config.content_width().as_pt().in_px().to_f32(),
@@ -852,7 +852,7 @@ impl Engine {
     pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm, link_column_css) =
+        let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
             crate::blitz_adapter::parse_html_with_local_resources(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
@@ -919,7 +919,7 @@ impl Engine {
     ) {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm, link_column_css) =
+        let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
             crate::blitz_adapter::parse_html_with_local_resources(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
