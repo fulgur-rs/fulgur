@@ -1473,39 +1473,63 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         }
         // A real `@charset` is only ever valid as the ABSOLUTE first thing
         // in a stylesheet — before even an `@import` or a `@layer`
-        // statement. One that appears anywhere else is not a genuine
-        // encoding declaration; it's an ordinary (invalid) at-rule that
-        // DOES terminate the valid `@import` zone like any other.
-        if name.eq_ignore_ascii_case("charset") && !was_first_rule {
+        // statement — AND its prelude must be a well-formed `<string>`
+        // and nothing else. `@charset nope;` (an identifier, not a
+        // string) is not a genuine encoding declaration either, even if
+        // it's first (codex review, PR #768, discussion r4039954616).
+        // Either way, a malformed/misplaced `@charset` is an ordinary
+        // invalid at-rule that DOES terminate the valid `@import` zone
+        // like any other.
+        if name.eq_ignore_ascii_case("charset") {
+            let well_formed = input
+                .try_parse(|input| -> Result<(), ParseError<'i, ()>> {
+                    input.expect_string()?;
+                    input.expect_exhausted().map_err(Into::into)
+                })
+                .is_ok();
+            while input.next().is_ok() {}
+            if was_first_rule && well_formed {
+                return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
+            }
             self.seen_non_import = true;
             return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
         }
-        // A statement-form `@layer <name>;` is exempt from terminating the
-        // valid `@import` zone only BEFORE the first `@import` — CSS
+        // A statement-form `@layer <name>#;` is exempt from terminating
+        // the valid `@import` zone only BEFORE the first `@import` — CSS
         // Cascade Level 5 explicitly disallows `@layer` rules BETWEEN
         // `@import` rules, and a `@layer` that comes after an `@import`
         // invalidates any FURTHER `@import`s (see `seen_import` doc
-        // comment). Once an `@import` has been seen, treat `@layer` like
-        // any other ordinary at-rule instead of falling into the shared
-        // exempt path below.
-        if name.eq_ignore_ascii_case("layer") && self.seen_import {
+        // comment) — AND only when its prelude is a well-formed,
+        // non-empty `<layer-name>#` list (comma-separated dotted
+        // identifiers). A bare `@layer;` (codex review, PR #768,
+        // discussion r4039954616) has no name at all and is malformed,
+        // so it doesn't qualify either. Any of these disqualifications
+        // fall through to ordinary-invalid-at-rule treatment, which DOES
+        // terminate the zone — matching a block-form `@layer`, which
+        // always terminates regardless of its own name's validity (see
+        // `parse_block`).
+        if name.eq_ignore_ascii_case("layer") {
+            let well_formed = !self.seen_import
+                && input
+                    .try_parse(|input| -> Result<(), ParseError<'i, ()>> {
+                        loop {
+                            input.expect_ident()?;
+                            while input.try_parse(|input| input.expect_delim('.')).is_ok() {
+                                input.expect_ident()?;
+                            }
+                            if input.try_parse(|input| input.expect_comma()).is_err() {
+                                break;
+                            }
+                        }
+                        input.expect_exhausted().map_err(Into::into)
+                    })
+                    .is_ok();
+            while input.next().is_ok() {}
+            if well_formed {
+                return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
+            }
             self.seen_non_import = true;
             return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
-        }
-        // `@charset "utf-8";` (when first) and statement-form
-        // `@layer <name>;` (when before the first `@import`) are the two
-        // exceptions the CSS spec carves out of "any other statement
-        // terminates the valid @import zone" — see the `seen_non_import`
-        // doc comment. Both are always followed by `;`, never `{ }`,
-        // EXCEPT `@layer` also has a block form (`@layer <name> { ... }`)
-        // that behaves like any other rule and DOES terminate the zone.
-        // Consume the prelude tokens (name list / charset string) — their
-        // content doesn't matter here — and let `rule_without_block` /
-        // `parse_block` (whichever the framework calls next, depending on
-        // whether a block actually follows) make that call.
-        if name.eq_ignore_ascii_case("charset") || name.eq_ignore_ascii_case("layer") {
-            while input.next().is_ok() {}
-            return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
         }
         self.seen_non_import = true;
         Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
@@ -1850,6 +1874,59 @@ mod tests {
     #[test]
     fn extract_top_level_import_hrefs_ignores_import_after_layer_following_import() {
         let css = r#"@import "a.css"; @layer base; @import "b.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string()]
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039954616) asked for a
+    /// malformed `@charset` (e.g. `@charset nope;`, an identifier rather
+    /// than a `<string>`) at the TRUE first position to also lose its
+    /// exemption. That specific shape turns out to be unreachable at this
+    /// layer: `cssparser::StyleSheetParser::next()` itself hard-codes
+    /// "any at-rule literally named `charset` that is the very first rule
+    /// of the stylesheet is silently consumed up to `;`/`{`" — completely
+    /// independent of `AtRuleParser`, and regardless of whether its
+    /// prelude is well-formed. `ImportHrefScanner::parse_prelude` never
+    /// even runs for that rule, so no validation added there can change
+    /// its outcome (in fact the swallow means a genuinely-first malformed
+    /// `@charset` behaves as if it were never in the source at all — a
+    /// following `@import` is correctly still collected, just not
+    /// because of anything our scanner decided).
+    ///
+    /// The validation this PR added is NOT dead code, though: it's
+    /// reachable — and matters — for a SECOND `@charset` occurrence. The
+    /// library's hard-coded swallow only fires once (its own
+    /// `first_stylesheet_rule` flag flips after the first at-rule, eaten
+    /// or not), so a second `@charset` DOES reach
+    /// `ImportHrefScanner::parse_prelude` normally. Without validating
+    /// its content, this scanner's OWN `is_first_rule` bookkeeping — never
+    /// touched by the swallowed first `@charset`, since our code never
+    /// ran for it — would incorrectly read `true` for that second
+    /// occurrence too, exempting it regardless of validity. This test
+    /// pins that real, reachable case.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_second_malformed_charset() {
+        let css = r#"@charset "UTF-8"; @charset nope; @import "b.css";"#;
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// Codex review (PR #768, discussion r4039954616): a bare `@layer;`
+    /// with no name at all is malformed (the statement form requires a
+    /// non-empty `<layer-name>#` list) and must not exempt itself either.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_malformed_layer() {
+        let css = r#"@layer; @import "b.css";"#;
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// A well-formed, dotted, multi-name `@layer` statement (before any
+    /// `@import`) is still exempt — the validation added alongside the
+    /// malformed cases above must not reject legitimate syntax.
+    #[test]
+    fn extract_top_level_import_hrefs_allows_import_after_dotted_multi_name_layer() {
+        let css = r#"@layer base.reset, base.type; @import "a.css";"#;
         assert_eq!(
             extract_top_level_import_hrefs(css),
             vec!["a.css".to_string()]
