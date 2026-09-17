@@ -22,6 +22,38 @@ pub enum ParsedSelector {
     Tag(String),
 }
 
+/// CSS specificity for the flat (Tag | Class | Id) grammar `ParsedSelector`
+/// currently supports. Each mapping's selector is a single simple selector
+/// (no compounds — fulgur-j63u/nmo track that separately), so specificity
+/// collapses to one tier instead of the full `(id, class, type)` triple
+/// real CSS specificity uses. Declaration order gives `Tag < Class < Id`,
+/// matching the CSS specification's precedence.
+///
+/// Not yet called outside tests — wired up by `RunningElementPass` (Task 2)
+/// and `BookmarkPass` (Task 3) of fulgur-smlr. Plain `#[allow(dead_code)]`
+/// rather than `#[expect(dead_code)]`: the lint only fires in the
+/// non-`cfg(test)` build (the unit test below exercises this function, so
+/// `#[expect]` would itself fail as an unfulfilled expectation in the test
+/// build). Remove this attribute once Task 2 adds a real call site.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SelectorSpecificity {
+    Tag,
+    Class,
+    Id,
+}
+
+/// The specificity tier of a single simple selector (see
+/// [`SelectorSpecificity`]).
+#[allow(dead_code)]
+pub(crate) fn specificity(selector: &ParsedSelector) -> SelectorSpecificity {
+    match selector {
+        ParsedSelector::Tag(_) => SelectorSpecificity::Tag,
+        ParsedSelector::Class(_) => SelectorSpecificity::Class,
+        ParsedSelector::Id(_) => SelectorSpecificity::Id,
+    }
+}
+
 /// Maps a CSS selector to a running element name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningMapping {
@@ -651,6 +683,18 @@ mod tests {
     #[test]
     fn test_leader_style_char_custom() {
         assert_eq!(LeaderStyle::Custom("·".to_string()).leader_char(), "·");
+    }
+
+    #[test]
+    fn specificity_orders_tag_below_class_below_id() {
+        assert!(
+            specificity(&ParsedSelector::Tag("h1".into()))
+                < specificity(&ParsedSelector::Class("x".into()))
+        );
+        assert!(
+            specificity(&ParsedSelector::Class("x".into()))
+                < specificity(&ParsedSelector::Id("y".into()))
+        );
     }
 }
 
