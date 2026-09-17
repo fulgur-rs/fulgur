@@ -989,7 +989,7 @@ fn resolve_style_imports(
     out: &mut crate::gcpm::GcpmContext,
     depth: usize,
     in_progress: &mut std::collections::HashSet<std::path::PathBuf>,
-    cache: &mut std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
+    cache: &mut std::collections::HashMap<(std::path::PathBuf, usize), crate::gcpm::GcpmContext>,
 ) {
     if depth >= MAX_STYLE_IMPORT_DEPTH {
         return;
@@ -1004,7 +1004,22 @@ fn resolve_style_imports(
         if !canonical.starts_with(security_base) {
             continue;
         }
-        if let Some(cached) = cache.get(&canonical) {
+        // `child_depth` is the depth level this file's OWN recursion runs
+        // at — i.e. how much `MAX_STYLE_IMPORT_DEPTH` budget it has left
+        // to resolve its own nested `@import`s. The cache is keyed by
+        // `(canonical, child_depth)`, not just `canonical`: a file first
+        // reached near the depth cap gets its deeper imports cut short,
+        // and caching that truncated result under the bare path alone
+        // would incorrectly replay it for a LATER, shallower reference to
+        // the same file that actually has enough budget to resolve them
+        // (codex review, PR #768, discussion r4039620905). Keying by depth
+        // too still bounds total work — at most `MAX_STYLE_IMPORT_DEPTH`
+        // distinct cache entries per file — so this can't reintroduce the
+        // combinatorial blowup the cache exists to prevent (see the
+        // `in_progress` doc comment above for why that guard is separate
+        // from, and unaffected by, this key choice).
+        let child_depth = depth + 1;
+        if let Some(cached) = cache.get(&(canonical.clone(), child_depth)) {
             out.extend_from(cached.clone());
             continue;
         }
@@ -1033,13 +1048,13 @@ fn resolve_style_imports(
             security_base,
             child_dir,
             &mut file_ctx,
-            depth + 1,
+            child_depth,
             in_progress,
             cache,
         );
         file_ctx.extend_from(crate::gcpm::parser::parse_gcpm(&text));
         in_progress.remove(&canonical);
-        cache.insert(canonical.clone(), file_ctx.clone());
+        cache.insert((canonical.clone(), child_depth), file_ctx.clone());
         out.extend_from(file_ctx);
     }
 }
@@ -5552,6 +5567,66 @@ mod tests {
             1,
             "a percent-encoded href must decode to the real filename, \
              got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039620905): the cache must not
+    /// replay a TRUNCATED result for a file first reached near
+    /// `MAX_STYLE_IMPORT_DEPTH`, when that same file is later reached
+    /// again from a shallower position with enough depth budget left to
+    /// resolve it fully. `shared.css` is reached twice: once through a
+    /// 15-level wrapper chain (landing it at depth 16 — the cap — so its
+    /// own `@import "child.css"` never resolves), and once directly at
+    /// depth 1 (plenty of budget left). Keying the cache by `(path, depth)`
+    /// instead of just `path` means the second reference is a cache MISS
+    /// and gets fully resolved, so `child.css`'s mapping must be present
+    /// — a bare-path-keyed cache would incorrectly replay the first,
+    /// truncated resolution and drop it entirely.
+    #[test]
+    fn resolve_style_imports_does_not_reuse_depth_truncated_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 15-level wrapper chain: level1.css -> level2.css -> ... ->
+        // level15.css -> shared.css. `shared.css` is processed at
+        // depth 15, so ITS OWN `@import "child.css"` computes
+        // child_depth = 16 == MAX_STYLE_IMPORT_DEPTH and never resolves.
+        for i in 1..15 {
+            std::fs::write(
+                dir.path().join(format!("level{i}.css")),
+                format!(r#"@import "level{}.css";"#, i + 1),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("level15.css"), r#"@import "shared.css";"#).unwrap();
+        std::fs::write(
+            dir.path().join("shared.css"),
+            r#"@import "child.css"; .shared-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.css"),
+            r#".child-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        // Root imports the deep chain FIRST (so shared.css's truncated
+        // resolution is cached before the direct reference is seen), then
+        // imports shared.css directly at depth 1.
+        let css = r#"@import "level1.css"; @import "shared.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let child_rule_count = ctx
+            .bookmark_mappings
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("child-rule".to_string()))
+            .count();
+        assert!(
+            child_rule_count >= 1,
+            "child.css's mapping must be resolved via the direct, \
+             shallow reference to shared.css even though an earlier deep \
+             chain reference to the same file was truncated by the depth \
+             cap — got {:?}",
             ctx.bookmark_mappings
         );
     }
