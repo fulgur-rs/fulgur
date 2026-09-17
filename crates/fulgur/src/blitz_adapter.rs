@@ -7426,6 +7426,44 @@ li::marker { content: url("star.png"); }
     }
 
     #[test]
+    fn bookmark_pass_level_specificity_survives_later_lower_specificity_none() {
+        // `bookmark-level: none` is just another value competing in the
+        // same per-property `level` cascade — it is not a special
+        // out-of-band kill switch. A higher-specificity Id mapping sets a
+        // numeric level and comes FIRST; a lower-specificity Tag mapping
+        // sets `None_` and comes SECOND.
+        //
+        // Under the OLD code (pure forward field overlay, ignoring
+        // specificity), the later `None_` would unconditionally suppress
+        // the entry — wrong. The new code must let the higher-specificity
+        // numeric level survive, so the entry is emitted with level=3.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(3)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::None_),
+                    label: None,
+                },
+            ],
+        );
+        assert_eq!(
+            results.len(),
+            1,
+            "the lower-specificity Tag mapping's `none` must not suppress \
+             the entry set by the higher-specificity Id mapping"
+        );
+        assert_eq!(results[0].1.level, 3);
+        assert_eq!(results[0].1.label, "Heading");
+    }
+
+    #[test]
     fn bookmark_pass_no_mappings_is_noop() {
         let html = r#"<html><body><h1>Title</h1></body></html>"#;
         let results = run_bookmark_pass(html, vec![]);
