@@ -921,6 +921,31 @@ fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::
     ctx
 }
 
+/// Resolve an `@import` href as a URL against `resolve_dir`, returning the
+/// local filesystem path it points at — NOT joined as a raw filesystem
+/// path component, so a query string (`chapters.css?v=1`) or a
+/// percent-escape (`chapter%20one.css`) resolves and decodes the same way
+/// Blitz's own fetch path does, instead of being treated as literal
+/// filename characters.
+///
+/// `Url` (`blitz_traits::net::Url`) is only imported on non-wasm targets
+/// (see its `use` site) — WASM has no real filesystem to resolve against
+/// (`FulgurNetProvider::resolve_local_path`'s WASM stub and
+/// `canonical_directory_url`'s WASM branch both unconditionally return
+/// `None`/reject for the same reason), so this returns `None` there too
+/// rather than pulling in the gated import.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_import_href_as_url(resolve_dir: &Path, href: &str) -> Option<std::path::PathBuf> {
+    let resolve_dir_url = Url::from_directory_path(resolve_dir).ok()?;
+    let joined = resolve_dir_url.join(href).ok()?;
+    joined.to_file_path().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resolve_import_href_as_url(_resolve_dir: &Path, _href: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Recursively resolve every `@import` reachable from `css`'s own top-level
 /// `@import` statements and fold each imported file's GCPM content into
 /// `out`. See [`parse_gcpm_with_style_imports`] for why this exists.
@@ -969,19 +994,8 @@ fn resolve_style_imports(
     if depth >= MAX_STYLE_IMPORT_DEPTH {
         return;
     }
-    // Resolve hrefs as URLs against the importing stylesheet's own
-    // directory, not as raw filesystem path components — an href like
-    // `chapters.css?v=1` or `chapter%20one.css` is a URL Blitz's own
-    // fetch path resolves and decodes, not a literal filename containing
-    // `?v=1` or `%20`.
-    let Ok(resolve_dir_url) = Url::from_directory_path(resolve_dir) else {
-        return;
-    };
     for href in crate::gcpm::parser::extract_top_level_import_hrefs(css) {
-        let Ok(joined) = resolve_dir_url.join(&href) else {
-            continue;
-        };
-        let Ok(candidate) = joined.to_file_path() else {
+        let Some(candidate) = resolve_import_href_as_url(resolve_dir, &href) else {
             continue;
         };
         let Ok(canonical) = candidate.canonicalize() else {
