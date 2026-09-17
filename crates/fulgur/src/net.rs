@@ -72,10 +72,13 @@ struct Inner {
     /// later task in that plan).
     gcpm_by_link_node: Vec<(usize, GcpmContext)>,
     /// Recursion depth through nested `@import` fetches — 0 outside any
-    /// fetch, incremented on entry to `fetch()`, decremented on exit.
-    /// A fetch that finds depth 0 on entry is a top-level `<link>` fetch;
-    /// this is the only way to distinguish that from a nested `@import`
-    /// fetch, since Blitz calls `NetProvider::fetch` identically for both.
+    /// fetch, incremented on entry to `fetch()`, decremented on exit. A
+    /// fetch that finds depth 0 on entry was not reached via a parent CSS
+    /// file's `@import` — in practice this is a `<link>` fetch (the
+    /// common case this Vec is built for) or a top-level `<style>@import>`
+    /// (which never produces a `Resource::Css` callback anyway, so never
+    /// contributes an entry — see the callback-firing note in `fetch()`
+    /// below).
     import_depth: usize,
     pending_resources: Vec<Resource>,
     /// fulgur-s5ro: raw CSS text harvested from every successfully-loaded
