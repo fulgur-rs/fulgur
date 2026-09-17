@@ -1392,10 +1392,22 @@ struct ImportHrefScanner<'a> {
     /// `@import` already precedes it — it must be treated as an ordinary
     /// invalid at-rule that terminates the valid `@import` zone, not as
     /// the exempt case). Set to `false` the moment any rule is consumed,
-    /// checked only by the `@charset` branch (a `@layer` statement's
-    /// exemption is NOT position-sensitive this way — see its own call
-    /// site).
+    /// checked only by the `@charset` branch.
     is_first_rule: bool,
+    /// Whether at least one `@import` has been consumed yet (valid or
+    /// not). A statement-form `@layer` (`@layer <name>;`) is exempt from
+    /// terminating the valid `@import` zone only BEFORE the first
+    /// `@import` — CSS Cascade Level 5 §6.4.4.2 is explicit that "no
+    /// `@layer` rules are allowed between `@import` ... rules" and "any
+    /// `@layer` rule that comes after an `@import` ... rule will cause
+    /// any subsequent `@import` ... rules to be ignored" (CodeRabbit
+    /// review, PR #768: `@import "a.css"; @layer base; @import "b.css";`
+    /// must drop `b.css`, unlike a leading `@layer base; @import ...`
+    /// which establishes layer order up front and stays exempt). Unlike
+    /// `is_first_rule`, `@charset` doesn't need an analogous flag — it's
+    /// already the strictest possible gate (only the very first rule
+    /// qualifies at all).
+    seen_import: bool,
 }
 
 /// [`ImportHrefScanner`]'s at-rule prelude, distinguishing the one case that
@@ -1456,6 +1468,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
             // (`net.rs`), which doesn't media-gate nested `@import`s reached
             // through a `<link>`/`@import` chain either.
             while input.next().is_ok() {}
+            self.seen_import = true;
             return Ok(ScannedAtRulePrelude::Import(href));
         }
         // A real `@charset` is only ever valid as the ABSOLUTE first thing
@@ -1467,17 +1480,29 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
             self.seen_non_import = true;
             return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
         }
+        // A statement-form `@layer <name>;` is exempt from terminating the
+        // valid `@import` zone only BEFORE the first `@import` — CSS
+        // Cascade Level 5 explicitly disallows `@layer` rules BETWEEN
+        // `@import` rules, and a `@layer` that comes after an `@import`
+        // invalidates any FURTHER `@import`s (see `seen_import` doc
+        // comment). Once an `@import` has been seen, treat `@layer` like
+        // any other ordinary at-rule instead of falling into the shared
+        // exempt path below.
+        if name.eq_ignore_ascii_case("layer") && self.seen_import {
+            self.seen_non_import = true;
+            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+        }
         // `@charset "utf-8";` (when first) and statement-form
-        // `@layer <name>;` are the two exceptions the CSS spec carves out
-        // of "any other statement terminates the valid @import zone" —
-        // see the `seen_non_import` doc comment. Both are always followed
-        // by `;`, never `{ }`, EXCEPT `@layer` also has a block form
-        // (`@layer <name> { ... }`) that behaves like any other rule and
-        // DOES terminate the zone. Consume the prelude tokens (name list /
-        // charset string) — their content doesn't matter here — and let
-        // `rule_without_block` / `parse_block` (whichever the framework
-        // calls next, depending on whether a block actually follows) make
-        // that call.
+        // `@layer <name>;` (when before the first `@import`) are the two
+        // exceptions the CSS spec carves out of "any other statement
+        // terminates the valid @import zone" — see the `seen_non_import`
+        // doc comment. Both are always followed by `;`, never `{ }`,
+        // EXCEPT `@layer` also has a block form (`@layer <name> { ... }`)
+        // that behaves like any other rule and DOES terminate the zone.
+        // Consume the prelude tokens (name list / charset string) — their
+        // content doesn't matter here — and let `rule_without_block` /
+        // `parse_block` (whichever the framework calls next, depending on
+        // whether a block actually follows) make that call.
         if name.eq_ignore_ascii_case("charset") || name.eq_ignore_ascii_case("layer") {
             while input.next().is_ok() {}
             return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
@@ -1568,6 +1593,7 @@ pub(crate) fn extract_top_level_import_hrefs(css: &str) -> Vec<String> {
         out: &mut out,
         seen_non_import: false,
         is_first_rule: true,
+        seen_import: false,
     };
     let mut input = ParserInput::new(css);
     let mut input = Parser::new(&mut input);
@@ -1809,6 +1835,21 @@ mod tests {
     #[test]
     fn extract_top_level_import_hrefs_ignores_charset_after_import() {
         let css = r#"@import "a.css"; @charset "UTF-8"; @import "b.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string()]
+        );
+    }
+
+    /// CodeRabbit review (PR #768, CSS Cascade Level 5 §6.4.4.2): a
+    /// statement-form `@layer` AFTER an `@import` is
+    /// disallowed BETWEEN imports and invalidates any FURTHER `@import`s
+    /// — unlike a LEADING `@layer` (before the first `@import`), which
+    /// stays exempt (`extract_top_level_import_hrefs_allows_import_after_layer_statement`
+    /// covers that case). Only `a.css` (before the `@layer`) must survive.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_layer_following_import() {
+        let css = r#"@import "a.css"; @layer base; @import "b.css";"#;
         assert_eq!(
             extract_top_level_import_hrefs(css),
             vec!["a.css".to_string()]
