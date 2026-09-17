@@ -317,21 +317,41 @@ impl Engine {
         // `document_ordered_gcpm_mappings` itself, against the freshly
         // document-ordered `bookmark_mappings` rather than the old flat
         // ones.
-        let ua_bookmark_mappings = if self.config.effective_bookmarks() {
-            crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS).bookmark_mappings
-        } else {
-            Vec::new()
-        };
-        let (ordered_running, ordered_bookmarks) =
-            crate::blitz_adapter::document_ordered_gcpm_mappings(
-                &doc,
-                &combined_css,
-                assetbundle_css_injected,
-                &link_gcpm_by_node,
-                ua_bookmark_mappings,
-            );
-        gcpm.running_mappings = ordered_running;
-        gcpm.bookmark_mappings = ordered_bookmarks;
+        //
+        // Skip both of `document_ordered_gcpm_mappings`'s DOM walks
+        // entirely when their output cannot affect anything downstream.
+        // `RunningElementPass` (below) runs whenever `gcpm.running_mappings`
+        // is non-empty, independent of the bookmarks feature — so a
+        // non-empty `running_mappings` always needs the reorder.
+        // `BookmarkPass`, in contrast, only ever runs when
+        // `effective_bookmarks()` is true (see `bookmark_active` below); if
+        // it's false, `gcpm.bookmark_mappings` is never read again no
+        // matter what it contains, so reordering it would be pure waste.
+        // `effective_bookmarks()` defaults to `false` (`bookmarks` is
+        // opt-in; `pdf_ua` also implies it — see `config.rs`), so a
+        // document that declares neither `position: running()` nor
+        // bookmarks-related CSS and doesn't opt into the bookmarks/PDF-UA
+        // flags pays zero extra DOM-walk cost here — restoring the "zero
+        // net new traversal cost for the common case" property.
+        if self.config.effective_bookmarks() || !gcpm.running_mappings.is_empty() {
+            let ua_bookmark_mappings = if self.config.effective_bookmarks() {
+                crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS)
+                    .bookmark_mappings
+            } else {
+                Vec::new()
+            };
+            let (ordered_running, ordered_bookmarks) =
+                crate::blitz_adapter::document_ordered_gcpm_mappings(
+                    &doc,
+                    &combined_css,
+                    assetbundle_css_injected,
+                    &link_gcpm_by_node,
+                    ua_bookmark_mappings,
+                    self.base_path.as_deref(),
+                );
+            gcpm.running_mappings = ordered_running;
+            gcpm.bookmark_mappings = ordered_bookmarks;
+        }
 
         // Extract running elements via DomPass (before resolve)
         let running_store = if !gcpm.running_mappings.is_empty() {
@@ -1930,6 +1950,36 @@ mod tests {
             .render(html)
             .unwrap();
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── GCPM: document_ordered_gcpm_mappings skip guard ────────────────────
+
+    #[test]
+    fn bookmark_rules_present_but_bookmarks_disabled_skips_reorder_safely() {
+        // fulgur-smlr: `document_ordered_gcpm_mappings`'s two DOM walks are
+        // skipped when `effective_bookmarks()` is false AND
+        // `gcpm.running_mappings` is empty — `bookmark-level` CSS is
+        // declared here but `.bookmarks(true)` is never called, so this
+        // hits the skip branch. `BookmarkPass` never runs either way when
+        // bookmarks are disabled, so the render must still succeed and
+        // produce no `/Outlines` — the skip must not corrupt anything
+        // downstream even though `gcpm.bookmark_mappings` is left
+        // un-reordered.
+        let mut assets = AssetBundle::new();
+        assets.add_css(r#".target { bookmark-level: 1; bookmark-label: "Should Not Appear"; }"#);
+        let html = r#"<body><p class="target">Content</p></body>"#;
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(
+            !s.contains("/Outlines"),
+            "bookmarks are disabled; no /Outlines should be emitted even \
+             though bookmark-level CSS is present"
+        );
     }
 
     // ���─ GCPM: string-set with snapshot recording (lines 272-279) ─────────

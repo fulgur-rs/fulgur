@@ -1366,6 +1366,103 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     }
 }
 
+/// A minimal `AtRuleParser`/`QualifiedRuleParser` pair used only to scan for
+/// top-level `@import` statements — see [`extract_top_level_import_hrefs`].
+/// Everything except `@import` is rejected, which makes cssparser's own
+/// built-in error-recovery skip it (the same recovery `GcpmSheetParser`
+/// already relies on to ignore any at-rule other than `@page`).
+struct ImportHrefScanner<'a> {
+    out: &'a mut Vec<String>,
+}
+
+impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
+    type Prelude = String;
+    type AtRule = ();
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        if !name.eq_ignore_ascii_case("import") {
+            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+        }
+        input.skip_whitespace();
+        let href = match input.next()?.clone() {
+            Token::UnquotedUrl(ref u) => u.as_ref().to_string(),
+            Token::QuotedString(ref s) => s.as_ref().to_string(),
+            Token::Function(ref f) if f.eq_ignore_ascii_case("url") => {
+                let nested: Result<String, ParseError<'i, ()>> =
+                    input.parse_nested_block(|input| {
+                        input
+                            .expect_string()
+                            .map(|s| s.as_ref().to_string())
+                            .map_err(Into::into)
+                    });
+                match nested {
+                    Ok(href) => href,
+                    Err(_) => {
+                        return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+                    }
+                }
+            }
+            _ => return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name))),
+        };
+        // Discard the rest of the prelude (media / layer() / supports()) —
+        // callers of `extract_top_level_import_hrefs` don't gate on media
+        // for this content, matching the existing flat `gcpm_contexts` fold
+        // (`net.rs`), which doesn't media-gate nested `@import`s reached
+        // through a `<link>`/`@import` chain either.
+        while input.next().is_ok() {}
+        Ok(href)
+    }
+
+    fn rule_without_block(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &cssparser::ParserState,
+    ) -> Result<Self::AtRule, ()> {
+        self.out.push(prelude);
+        Ok(())
+    }
+}
+
+impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+/// Extract every top-level `@import` statement's target URL from raw CSS
+/// text, in source order. Ignores each `@import`'s media qualifier entirely.
+///
+/// This exists for fulgur-smlr's inline-`<style>` GCPM cascade fold: a
+/// `<style>` tag's *own literal text* never triggers a `NetProvider` fetch
+/// for its `@import` targets — Blitz fetches the *imported* file directly,
+/// and the resulting `Resource`/GCPM context carries no hook back to which
+/// `<style>` DOM node declared the `@import` in the first place (blitz-dom's
+/// `StylesheetLoader` is keyed by the *document's* id, not any per-node id
+/// — verified against blitz-dom 0.2.4's `document.rs::make_stylesheet` and
+/// `net.rs::StylesheetLoader`). So a caller that wants to resolve this
+/// content itself (see `blitz_adapter::resolve_style_imports`) first needs
+/// to know which URLs a `<style>` tag's own `@import`s point at — that's
+/// what this function answers, using the same cssparser-based tokenizer
+/// [`parse_gcpm`] uses elsewhere in this module (so quoted/unquoted
+/// `url(...)`, comments, and escapes are handled spec-correctly, unlike a
+/// hand-rolled string scan).
+pub(crate) fn extract_top_level_import_hrefs(css: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut scanner = ImportHrefScanner { out: &mut out };
+    let mut input = ParserInput::new(css);
+    let mut input = Parser::new(&mut input);
+    let iter = StyleSheetParser::new(&mut input, &mut scanner);
+    for item in iter {
+        let _ = item;
+    }
+    out
+}
+
 /// Serialize `s` as the body of a CSS double-quoted string (the caller
 /// supplies the surrounding `"`). Escapes `"` and `\`, and every control
 /// character per the CSS `<string-token>` grammar, so a resolved literal can
@@ -1461,6 +1558,57 @@ mod tests {
         assert!(ctx.running_mappings.is_empty());
         assert!(ctx.margin_boxes.is_empty());
         assert_eq!(ctx.cleaned_css, css);
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_bare_string() {
+        let css = r#"@import "chapters.css"; body { color: red; }"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["chapters.css".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_unquoted_url() {
+        let css = r#"@import url(chapters.css);"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["chapters.css".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_quoted_url_with_media() {
+        let css = r#"@import url("print.css") print;"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["print.css".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_multiple_in_order() {
+        let css = r#"@import "a.css"; @import "b.css"; body { color: red; }"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string(), "b.css".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_returns_empty_for_no_import() {
+        let css = "body { color: red; } .x { bookmark-level: 1; }";
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_malformed_import() {
+        // A malformed @import (no valid URL/string token) must be skipped,
+        // not panic — matches the project-wide "no panic on bad CSS"
+        // invariant.
+        let css = "@import ; body { color: red; }";
+        assert!(extract_top_level_import_hrefs(css).is_empty());
     }
 
     #[test]

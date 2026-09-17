@@ -242,3 +242,126 @@ fn two_media_restricted_links_both_survive_the_node_id_remap() {
          (fulgur-smlr Part 0 regression guard), got {titles:?}"
     );
 }
+
+/// Critical regression guard (found in code review of the document-order
+/// fold): a top-level `<style>@import url(...);</style>` — no `<link>`
+/// anywhere — must still surface the imported file's GCPM content.
+///
+/// Before the fulgur-smlr document-order fold existed, this content
+/// reached `gcpm.bookmark_mappings` via the OLD flat
+/// `gcpm.extend_from(link_gcpm)` path, built from `net.rs`'s
+/// `drain_gcpm_contexts()` (which captures every fetched stylesheet's GCPM
+/// content, `@import`-reached or not, just without a node id). The
+/// document-order fold's two sources — `link_gcpm_by_node` (keyed by
+/// `Resource::Css`'s node id, never populated for a `<style>` tag's own
+/// `@import`) and a plain `parse_gcpm` of the `<style>` tag's own literal
+/// text (which contains no GCPM declarations of its own — they're in the
+/// *imported* file) — cannot see this content at all, so replacing the old
+/// flat computation wholesale would otherwise silently drop it. See
+/// `blitz_adapter::parse_gcpm_with_style_imports`'s doc comment for the
+/// fix (independent filesystem-based `@import` resolution, since Blitz
+/// gives `FulgurNetProvider` no way to attribute this fetch back to the
+/// declaring `<style>` node).
+#[test]
+fn style_tag_top_level_import_content_survives() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("chapters.css"),
+        r#".target { bookmark-level: 1; bookmark-label: "FromStyleImport"; }"#,
+    )
+    .unwrap();
+
+    let html = r#"<!doctype html><html><head>
+        <style>@import url("chapters.css");</style>
+    </head><body><p class="target">Content</p></body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["FromStyleImport".to_string()],
+        "a top-level <style>@import(...)> target's GCPM content must survive \
+         end-to-end, got {titles:?}"
+    );
+}
+
+/// Same regression, but for the AssetBundle-injected `<style>` node rather
+/// than an author-written one — `InjectCssPass` puts AssetBundle's
+/// `combined_css` into a `<style>` tag too, so it is equally exposed to
+/// this bug if AssetBundle CSS itself declares a top-level `@import`.
+#[test]
+fn assetbundle_css_top_level_import_content_survives() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("chapters.css"),
+        r#".target { bookmark-level: 1; bookmark-label: "FromAssetBundleImport"; }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(r#"@import url("chapters.css");"#);
+
+    let html = r#"<!doctype html><html><body>
+        <p class="target">Content</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["FromAssetBundleImport".to_string()],
+        "AssetBundle CSS's own top-level @import target's GCPM content must \
+         survive end-to-end, got {titles:?}"
+    );
+}
+
+/// The `@import` resolution must recurse: a `<style>` tag's top-level
+/// `@import` target can itself `@import` a further file, and that file's
+/// GCPM content must also survive (child-before-parent order, matching
+/// `net.rs`'s existing `<link>`/`@import`-subtree convention).
+#[test]
+fn style_tag_nested_import_content_survives() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("parent.css"),
+        r#"@import "child.css"; .parent-rule { bookmark-level: 1; bookmark-label: "Parent"; }"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("child.css"),
+        r#".child-rule { bookmark-level: 1; bookmark-label: "Child"; }"#,
+    )
+    .unwrap();
+
+    let html = r#"<!doctype html><html><head>
+        <style>@import url("parent.css");</style>
+    </head><body>
+        <p class="child-rule">Child content</p>
+        <p class="parent-rule">Parent content</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["Child".to_string(), "Parent".to_string()],
+        "both the direct import (parent.css) and its own nested import \
+         (child.css) must survive, child-before-parent, got {titles:?}"
+    );
+}
