@@ -846,14 +846,35 @@ fn walk_for_style_import_presence(doc: &HtmlDocument, node_id: usize, depth: usi
 /// level, so a self-referencing file with `k` imports produces on the
 /// order of `k^MAX_STYLE_IMPORT_DEPTH` recursive calls before the depth
 /// cap alone would stop it — at `k = 3` that is tens of millions of calls,
-/// confirmed in review to not complete within 60 seconds. The
-/// `visited`/`HashSet<PathBuf>` parameter threaded through
-/// [`resolve_style_imports`] is what actually bounds TOTAL work (to
-/// O(distinct files reachable under `security_base`), each visited at
-/// most once ever) — the depth cap here is a secondary, cheap backstop
-/// once the visited-set already makes runaway branching impossible, not
-/// the primary defense.
+/// confirmed in review to not complete within 60 seconds. The `cache`
+/// parameter threaded through [`resolve_style_imports`] is what actually
+/// bounds total work FOR AN ACYCLIC GRAPH (to O(distinct files reachable
+/// under `security_base`), each read+parsed at most once) — but a file
+/// that's part of a genuine cycle is never cached (see the
+/// `resolve_style_imports` doc comment on why), so branching inside a
+/// cyclic subgraph is NOT bounded by the cache at all. See
+/// [`MAX_STYLE_IMPORT_TOTAL_READS`] for the guard that covers that case.
 const MAX_STYLE_IMPORT_DEPTH: usize = 16;
+
+/// Hard ceiling on the TOTAL number of distinct file reads
+/// [`resolve_style_imports`] will perform across one whole top-level
+/// resolution, independent of caching, depth, or graph shape. This is the
+/// backstop for exactly the case the cache can't cover (codex review,
+/// PR #768, discussion r4039954605): a file that's part of a genuine
+/// import cycle is never cached (a cut-short result must not be replayed
+/// in an unrelated context — see the cache-safety doc comment), so a
+/// cyclic subgraph with branching (`k` `@import`s of the next file at
+/// every level, closing back on itself) reads and re-parses every branch
+/// from scratch on every reference, reproducing the SAME
+/// `k^MAX_STYLE_IMPORT_DEPTH` blowup the cache exists to prevent for the
+/// acyclic case. A hard read budget bounds worst-case work to a small
+/// constant regardless: once exhausted, every further `@import` is
+/// treated the same as a depth-cap or cycle cut (skipped, contributing
+/// nothing), so resolution always terminates quickly even for a
+/// pathological all-cyclic, high-fan-out graph. Legitimate real-world
+/// `@import` graphs are very unlikely to have anywhere near this many
+/// distinct files.
+const MAX_STYLE_IMPORT_TOTAL_READS: usize = 64;
 
 /// Parse `css` for GCPM constructs via [`crate::gcpm::parser::parse_gcpm`],
 /// then ALSO resolve any top-level `@import` statements `css` itself
@@ -905,16 +926,18 @@ fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::
     if let Some(base) = base_path
         && let Ok(canonical_base) = base.canonicalize()
     {
-        let mut in_progress = std::collections::HashSet::new();
-        let mut cache = std::collections::HashMap::new();
+        let mut state = ImportResolutionState {
+            in_progress: std::collections::HashSet::new(),
+            cache: std::collections::HashMap::new(),
+            remaining_reads: MAX_STYLE_IMPORT_TOTAL_READS,
+        };
         resolve_style_imports(
             css,
             &canonical_base,
             &canonical_base,
             &mut ctx,
             0,
-            &mut in_progress,
-            &mut cache,
+            &mut state,
         );
     }
     ctx.extend_from(crate::gcpm::parser::parse_gcpm(css));
@@ -985,26 +1008,45 @@ fn resolve_import_href_as_url(_resolve_dir: &Path, _href: &str) -> Option<std::p
 /// (as a single shared `visited` set would) silently reorders the cascade.
 ///
 /// Returns `true` if this call's own resolution (or any nested import it
-/// resolved) was CUT SHORT — either by hitting `MAX_STYLE_IMPORT_DEPTH` or
-/// by skipping an import that collided with the current `in_progress`
-/// ancestor chain. Whether a given target is "cut short" is NOT an
-/// inherent property of that file: it depends on which ancestors happen to
-/// be active on THIS call chain (codex review, PR #768, discussion
-/// r4039797387) — e.g. if `a.css` imports `x.css` and `x.css` imports
-/// `a.css`, resolving `x.css` while `a.css` is an active ancestor omits
-/// `a.css`'s content from `x.css`'s result, but a SIBLING stylesheet that
-/// imports `x.css` outside that ancestor chain would resolve it fully. A
-/// cut-short result is therefore never written to `cache` — only a result
-/// that finished on its own terms is safe to replay for an unrelated
-/// future reference.
+/// resolved) was CUT SHORT — by hitting `MAX_STYLE_IMPORT_DEPTH`, by
+/// skipping an import that collided with the current `in_progress`
+/// ancestor chain, or by exhausting `remaining_reads`. Whether a given
+/// target is "cut short" is NOT an inherent property of that file: it
+/// depends on which ancestors happen to be active on THIS call chain
+/// (codex review, PR #768, discussion r4039797387) — e.g. if `a.css`
+/// imports `x.css` and `x.css` imports `a.css`, resolving `x.css` while
+/// `a.css` is an active ancestor omits `a.css`'s content from `x.css`'s
+/// result, but a SIBLING stylesheet that imports `x.css` outside that
+/// ancestor chain would resolve it fully. A cut-short result is therefore
+/// never written to `cache` — only a result that finished on its own
+/// terms is safe to replay for an unrelated future reference.
+///
+/// `remaining_reads` is a budget shared across the WHOLE top-level
+/// resolution (decremented, never reset, at every recursion level) — see
+/// [`MAX_STYLE_IMPORT_TOTAL_READS`] for why this exists: a file inside a
+/// genuine cycle is never cached (per the above), so a cyclic subgraph
+/// with branching gets NO benefit from `cache` at all, and this budget is
+/// what actually bounds worst-case work for that shape.
+///
+/// The three fields are threaded together (rather than as separate
+/// `resolve_style_imports` parameters) purely to stay under
+/// `clippy::too_many_arguments` — they have no relationship beyond "state
+/// mutated across the whole recursive resolution," so this is a bundling
+/// struct, not a meaningful abstraction. See the doc comments above for
+/// what each field actually means and why it exists.
+struct ImportResolutionState {
+    in_progress: std::collections::HashSet<std::path::PathBuf>,
+    cache: std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
+    remaining_reads: usize,
+}
+
 fn resolve_style_imports(
     css: &str,
     security_base: &Path,
     resolve_dir: &Path,
     out: &mut crate::gcpm::GcpmContext,
     depth: usize,
-    in_progress: &mut std::collections::HashSet<std::path::PathBuf>,
-    cache: &mut std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
+    state: &mut ImportResolutionState,
 ) -> bool {
     if depth >= MAX_STYLE_IMPORT_DEPTH {
         return true;
@@ -1020,24 +1062,34 @@ fn resolve_style_imports(
         if !canonical.starts_with(security_base) {
             continue;
         }
-        if let Some(cached) = cache.get(&canonical) {
+        if let Some(cached) = state.cache.get(&canonical) {
             out.extend_from(cached.clone());
             continue;
         }
         // `HashSet::insert` returns `false` if the value is already an
         // ancestor on this chain — a genuine cycle, not merely a repeat.
-        if !in_progress.insert(canonical.clone()) {
+        if !state.in_progress.insert(canonical.clone()) {
             cut_short = true;
             continue;
         }
+        // The read budget is checked AFTER the cycle check (a cycle skip
+        // is free — no file read happens) but BEFORE actually reading —
+        // once exhausted, every further distinct file is treated the same
+        // as a depth-cap or cycle cut.
+        let Some(new_remaining) = state.remaining_reads.checked_sub(1) else {
+            state.in_progress.remove(&canonical);
+            cut_short = true;
+            continue;
+        };
+        state.remaining_reads = new_remaining;
         let Ok(bytes) =
             crate::asset::read_file_capped(&canonical, crate::asset::MAX_CSS_BYTES, "CSS file")
         else {
-            in_progress.remove(&canonical);
+            state.in_progress.remove(&canonical);
             continue;
         };
         let Ok(text) = String::from_utf8(bytes) else {
-            in_progress.remove(&canonical);
+            state.in_progress.remove(&canonical);
             continue;
         };
         let child_dir = canonical.parent().unwrap_or(resolve_dir);
@@ -1051,15 +1103,14 @@ fn resolve_style_imports(
             child_dir,
             &mut file_ctx,
             depth + 1,
-            in_progress,
-            cache,
+            state,
         );
         file_ctx.extend_from(crate::gcpm::parser::parse_gcpm(&text));
-        in_progress.remove(&canonical);
+        state.in_progress.remove(&canonical);
         if child_cut_short {
             cut_short = true;
         } else {
-            cache.insert(canonical.clone(), file_ctx.clone());
+            state.cache.insert(canonical.clone(), file_ctx.clone());
         }
         out.extend_from(file_ctx);
     }
@@ -5687,6 +5738,47 @@ mod tests {
              a.css import and once more via sibling.css -> x.css -> \
              a.css — got {:?}",
             ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039954605 — P1): a file inside
+    /// a genuine `@import` cycle is never cached (see
+    /// `resolve_style_imports_does_not_cache_cycle_truncated_result`
+    /// above), so `cache` gives a CYCLIC, branching subgraph no help at
+    /// all — reintroducing the exact `k^depth` blowup
+    /// `resolve_style_imports_bounds_combinatorial_self_reference`
+    /// already guards against for the acyclic case. Builds an 8-file
+    /// chain (`level0` -> `level1` -> ... -> `level7` -> `level0`, closing
+    /// the cycle) where EVERY level imports the next 3 times — with no
+    /// budget this is on the order of `3^8` (~6500) uncached
+    /// read+parse+recurse operations; `MAX_STYLE_IMPORT_TOTAL_READS`
+    /// must keep it fast regardless.
+    #[test]
+    fn resolve_style_imports_bounds_cyclic_branching_via_read_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        const CYCLE_LEN: usize = 8;
+        for i in 0..CYCLE_LEN {
+            let next = (i + 1) % CYCLE_LEN;
+            std::fs::write(
+                dir.path().join(format!("level{i}.css")),
+                format!(
+                    r#"@import "level{next}.css"; @import "level{next}.css"; @import "level{next}.css"; .level{i}-rule {{ bookmark-level: 1; bookmark-label: content(); }}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let css = r#"@import url("level0.css");"#;
+        let start = std::time::Instant::now();
+        let _ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cyclic branching import resolution took {elapsed:?} — expected \
+             MAX_STYLE_IMPORT_TOTAL_READS to bound total work even though \
+             every file in this cycle is uncacheable; a multi-second-or-more \
+             result means the read-budget guard regressed"
         );
     }
 
