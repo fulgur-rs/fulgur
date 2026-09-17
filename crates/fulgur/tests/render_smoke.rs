@@ -3703,6 +3703,60 @@ fn bookmark_label_string_appears_in_outline() {
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
 }
 
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the fulgur-smlr
+/// document-order GCPM cascade fold — the lower-level `blitz_adapter` unit
+/// tests and `tests/gcpm_cascade_order.rs`'s integration tests cover the
+/// fold walk / Part 0 remap directly, but neither drives it through the
+/// full `Engine::render` path with a real `AssetBundle`, so this pins that
+/// route too.
+///
+/// Two competing `bookmark-level`/`bookmark-label` rules from DIFFERENT
+/// sources (AssetBundle CSS and a `<link>`-loaded file) target the SAME
+/// element with DIFFERENT specificity tiers: AssetBundle declares a `Class`
+/// selector, the linked file declares an `Id` selector. Per
+/// `ParsedSelector`'s specificity ordering (`Tag < Class < Id`), the `Id`
+/// rule must win regardless of document order — even though AssetBundle's
+/// injected `<style>` lands LAST in `<head>` (and would win an
+/// equal-specificity tie, see `gcpm_cascade_order.rs`'s
+/// `assetbundle_vs_link_equal_specificity_assetbundle_wins`), specificity
+/// still takes priority over document order when the two differ.
+#[test]
+fn bookmark_specificity_wins_across_assetbundle_and_link_sources() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("link.css"),
+        r#"#intro { bookmark-level: 1; bookmark-label: "FROM_LINK_ID"; }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(r#".chapter { bookmark-level: 2; bookmark-label: "FROM_ASSETBUNDLE_CLASS"; }"#);
+
+    let html = r#"<!doctype html><html><head>
+        <link rel="stylesheet" href="link.css">
+    </head><body>
+        <div class="chapter" id="intro">Content</div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty(), "PDF must be non-empty");
+
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["FROM_LINK_ID".to_string()],
+        "the higher-specificity Id rule (from the <link>) must win over the \
+         lower-specificity Class rule (from AssetBundle), regardless of \
+         which source is later in document order, got {titles:?}"
+    );
+}
+
 /// End-to-end coverage-scope companion (CLAUDE.md "Coverage scope") for the
 /// `StringSetPass` per-node snapshot budget (`MAX_STRING_SNAPSHOT_BYTES`,
 /// unit-tested in `string_set_pass_snapshot_bounds_total_stored_bytes`). The

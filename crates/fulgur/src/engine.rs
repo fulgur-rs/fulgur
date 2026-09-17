@@ -199,7 +199,7 @@ impl Engine {
         // the margin-box renderer, so headers/footers would appear in
         // default browser styles even though their content resolved
         // correctly.
-        let (mut doc, link_gcpm, link_column_css, _link_gcpm_by_node) =
+        let (mut doc, link_gcpm, link_column_css, link_gcpm_by_node) =
             crate::blitz_adapter::parse_html_with_local_resources(
                 &html,
                 self.config.content_width().as_pt().in_px().to_f32(),
@@ -274,21 +274,18 @@ impl Engine {
             resolved_content_height_px,
         );
 
-        // Prepend UA CSS bookmark mappings so author-CSS rules (appearing
-        // later in `bookmark_mappings`) override them via last-match
-        // cascade. Skipped when bookmarks are disabled to avoid unnecessary
-        // CSS parsing and DOM traversal.
-        if self.config.effective_bookmarks() {
-            let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
-            let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
-            combined_bookmarks.extend(gcpm.bookmark_mappings);
-            gcpm.bookmark_mappings = combined_bookmarks;
-        }
-
         // Build and apply DOM passes
         let mut passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
 
-        if !css_to_inject.is_empty() {
+        // fulgur-smlr: AssetBundle's cleaned CSS, once injected below, lands
+        // as `<head>`'s LAST child (`InjectCssPass` appends, `insert_before:
+        // None`) — i.e. *after* any author `<link>`/inline `<style>` already
+        // in the document. `document_ordered_gcpm_mappings` needs to know
+        // whether that injection happened at all (an empty AssetBundle
+        // contributes no node to fold) captured before `css_to_inject`
+        // moves into the pass below.
+        let assetbundle_css_injected = !css_to_inject.is_empty();
+        if assetbundle_css_injected {
             passes.push(Box::new(crate::blitz_adapter::InjectCssPass {
                 css: css_to_inject,
             }));
@@ -304,6 +301,37 @@ impl Engine {
 
         let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        // fulgur-smlr Part A: recompute running/bookmark mapping order in
+        // true DOM document order (AssetBundle CSS's injected <style> lands
+        // *last* in <head> via InjectCssPass above, not first — see
+        // docs/plans/2026-09-17-fulgur-smlr-gcpm-cascade-design.md). This
+        // must run after `apply_passes` (so the injected node exists) and
+        // before any mapping consumer below. Only running/bookmark mappings
+        // are recomputed — `gcpm`'s other fields (cleaned_css, margin_boxes,
+        // page_settings, counter/string-set mappings) keep today's flat
+        // concatenation order; that's a separate, differently-shaped gap
+        // (see the design doc's "Related, deferred" section). This also
+        // supersedes the old UA-CSS-bookmark-prepend block that used to sit
+        // here — the prepend now happens inside
+        // `document_ordered_gcpm_mappings` itself, against the freshly
+        // document-ordered `bookmark_mappings` rather than the old flat
+        // ones.
+        let ua_bookmark_mappings = if self.config.effective_bookmarks() {
+            crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS).bookmark_mappings
+        } else {
+            Vec::new()
+        };
+        let (ordered_running, ordered_bookmarks) =
+            crate::blitz_adapter::document_ordered_gcpm_mappings(
+                &doc,
+                &combined_css,
+                assetbundle_css_injected,
+                &link_gcpm_by_node,
+                ua_bookmark_mappings,
+            );
+        gcpm.running_mappings = ordered_running;
+        gcpm.bookmark_mappings = ordered_bookmarks;
 
         // Extract running elements via DomPass (before resolve)
         let running_store = if !gcpm.running_mappings.is_empty() {

@@ -3076,13 +3076,15 @@ impl BookmarkPass {
     ) {
         // Overlay accumulator — iterate forward; each field cascades
         // independently by specificity, then by self.mappings's current
-        // order (Vec position) on ties (fulgur-smlr). Vec position is a
-        // stand-in for document order here — it's built from the fixed
-        // `UA → AssetBundle → link → inline` stylesheet concatenation, not
-        // true DOM source order yet; that lands with Task 7 of the
-        // fulgur-smlr plan. The `>=` guard makes a single forward pass
-        // sufficient: an equal-specificity match always overwrites
-        // (last-wins on ties, same as before this change), and a
+        // order (Vec position) on ties (fulgur-smlr). Vec position IS true
+        // DOM document order here — `self.mappings` arrives from
+        // `document_ordered_gcpm_mappings` (`blitz_adapter.rs`), which
+        // folds AssetBundle CSS, `<link>`/`@import` CSS, and inline
+        // `<style>` blocks by walking the DOM in source order (fulgur-smlr
+        // Part A/Task 7), not the old fixed `UA → AssetBundle → link →
+        // inline` stylesheet concatenation order. The `>=` guard makes a
+        // single forward pass sufficient: an equal-specificity match always
+        // overwrites (last-wins on ties, same as before this change), and a
         // lower-specificity match appearing later never overwrites an
         // earlier, higher-specificity winner.
         let mut level: Option<BookmarkLevel> = None;
