@@ -1385,8 +1385,22 @@ struct ImportHrefScanner<'a> {
     seen_non_import: bool,
 }
 
+/// [`ImportHrefScanner`]'s at-rule prelude, distinguishing the one case that
+/// needs to record data (`@import`) from the one case whose STATEMENT form
+/// (no block) must NOT count as terminating the valid `@import` zone
+/// (`@charset` / statement-form `@layer`) — see the `seen_non_import` doc
+/// comment. Both scanner-recognised at-rules other than `@import` share this
+/// second variant; `parse_prelude` decides which at-rule it was, and
+/// `rule_without_block`/`parse_block` decide (from which of the two the
+/// framework calls) whether a `@layer` was ultimately a statement or a
+/// block, since that can't be known until the prelude has been consumed.
+enum ScannedAtRulePrelude {
+    Import(String),
+    CharsetOrLayerStatement,
+}
+
 impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
-    type Prelude = String;
+    type Prelude = ScannedAtRulePrelude;
     type AtRule = ();
     type Error = ();
 
@@ -1395,38 +1409,52 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         name: CowRcStr<'i>,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
-        if !name.eq_ignore_ascii_case("import") {
-            self.seen_non_import = true;
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
-        }
-        input.skip_whitespace();
-        let href = match input.next()?.clone() {
-            Token::UnquotedUrl(ref u) => u.as_ref().to_string(),
-            Token::QuotedString(ref s) => s.as_ref().to_string(),
-            Token::Function(ref f) if f.eq_ignore_ascii_case("url") => {
-                let nested: Result<String, ParseError<'i, ()>> =
-                    input.parse_nested_block(|input| {
-                        input
-                            .expect_string()
-                            .map(|s| s.as_ref().to_string())
-                            .map_err(Into::into)
-                    });
-                match nested {
-                    Ok(href) => href,
-                    Err(_) => {
-                        return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+        if name.eq_ignore_ascii_case("import") {
+            input.skip_whitespace();
+            let href = match input.next()?.clone() {
+                Token::UnquotedUrl(ref u) => u.as_ref().to_string(),
+                Token::QuotedString(ref s) => s.as_ref().to_string(),
+                Token::Function(ref f) if f.eq_ignore_ascii_case("url") => {
+                    let nested: Result<String, ParseError<'i, ()>> =
+                        input.parse_nested_block(|input| {
+                            input
+                                .expect_string()
+                                .map(|s| s.as_ref().to_string())
+                                .map_err(Into::into)
+                        });
+                    match nested {
+                        Ok(href) => href,
+                        Err(_) => {
+                            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+                        }
                     }
                 }
-            }
-            _ => return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name))),
-        };
-        // Discard the rest of the prelude (media / layer() / supports()) —
-        // callers of `extract_top_level_import_hrefs` don't gate on media
-        // for this content, matching the existing flat `gcpm_contexts` fold
-        // (`net.rs`), which doesn't media-gate nested `@import`s reached
-        // through a `<link>`/`@import` chain either.
-        while input.next().is_ok() {}
-        Ok(href)
+                _ => return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name))),
+            };
+            // Discard the rest of the prelude (media / layer() / supports()) —
+            // callers of `extract_top_level_import_hrefs` don't gate on media
+            // for this content, matching the existing flat `gcpm_contexts` fold
+            // (`net.rs`), which doesn't media-gate nested `@import`s reached
+            // through a `<link>`/`@import` chain either.
+            while input.next().is_ok() {}
+            return Ok(ScannedAtRulePrelude::Import(href));
+        }
+        // `@charset "utf-8";` and statement-form `@layer <name>;` are the
+        // two exceptions the CSS spec carves out of "any other statement
+        // terminates the valid @import zone" — see the `seen_non_import`
+        // doc comment. Both are always followed by `;`, never `{ }`,
+        // EXCEPT `@layer` also has a block form (`@layer <name> { ... }`)
+        // that behaves like any other rule and DOES terminate the zone.
+        // Consume the prelude tokens (name list / charset string) — their
+        // content doesn't matter here — and let `rule_without_block` /
+        // `parse_block` (whichever the framework calls next, depending on
+        // whether a block actually follows) make that call.
+        if name.eq_ignore_ascii_case("charset") || name.eq_ignore_ascii_case("layer") {
+            while input.next().is_ok() {}
+            return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
+        }
+        self.seen_non_import = true;
+        Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
     }
 
     fn rule_without_block(
@@ -1434,13 +1462,37 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         prelude: Self::Prelude,
         _start: &cssparser::ParserState,
     ) -> Result<Self::AtRule, ()> {
-        // An `@import` reached after some other top-level statement is
-        // invalid per the CSS syntax and must be ignored — see the
-        // `seen_non_import` doc comment on the struct.
-        if !self.seen_non_import {
-            self.out.push(prelude);
+        match prelude {
+            ScannedAtRulePrelude::Import(href) => {
+                // An `@import` reached after some other top-level statement
+                // is invalid per the CSS syntax and must be ignored — see
+                // the `seen_non_import` doc comment on the struct.
+                if !self.seen_non_import {
+                    self.out.push(href);
+                }
+            }
+            // `@charset "...";` or statement-form `@layer <name>;` —
+            // neither terminates the valid `@import` zone.
+            ScannedAtRulePrelude::CharsetOrLayerStatement => {}
         }
         Ok(())
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        _prelude: Self::Prelude,
+        _start: &cssparser::ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        // Only a block-form `@layer <name> { ... }` can reach here (the
+        // only scanner-recognised at-rule with a block variant at all) —
+        // that DOES terminate the valid `@import` zone, unlike its
+        // statement form. Malformed input that somehow reaches this path
+        // for another prelude variant is conservatively treated the same
+        // way: not a valid `@import`/`@charset`/statement-`@layer`, so it
+        // counts as "some other rule" per spec.
+        self.seen_non_import = true;
+        Err(input.new_error(BasicParseErrorKind::AtRuleBodyInvalid))
     }
 }
 
@@ -1669,6 +1721,49 @@ mod tests {
             extract_top_level_import_hrefs(css),
             vec!["a.css".to_string()]
         );
+    }
+
+    /// CodeRabbit review (PR #768, comment 4039549227): a valid `@charset`
+    /// rule is one of the CSS spec's two carve-outs and must NOT terminate
+    /// the valid `@import` zone — an `@import` following it is still valid
+    /// and must be collected.
+    #[test]
+    fn extract_top_level_import_hrefs_allows_import_after_charset() {
+        let css = r#"@charset "UTF-8"; @import "gcpm.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["gcpm.css".to_string()]
+        );
+    }
+
+    /// Same carve-out for statement-form `@layer <name>;` (no block) — the
+    /// second spec exception. An `@import` after it is still valid.
+    #[test]
+    fn extract_top_level_import_hrefs_allows_import_after_layer_statement() {
+        let css = r#"@layer base; @import "gcpm.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["gcpm.css".to_string()]
+        );
+    }
+
+    /// Both carve-outs combine: `@charset` then a statement-form `@layer`
+    /// still allow a subsequent `@import`.
+    #[test]
+    fn extract_top_level_import_hrefs_allows_import_after_charset_and_layer_statement() {
+        let css = r#"@charset "UTF-8"; @layer base; @import "gcpm.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["gcpm.css".to_string()]
+        );
+    }
+
+    /// Block-form `@layer <name> { ... }`, unlike the statement form, is an
+    /// ordinary rule and DOES terminate the valid `@import` zone.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_layer_block() {
+        let css = r#"@layer base { .x { color: red; } } @import "gcpm.css";"#;
+        assert!(extract_top_level_import_hrefs(css).is_empty());
     }
 
     #[test]
