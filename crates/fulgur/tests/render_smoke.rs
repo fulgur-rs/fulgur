@@ -3760,31 +3760,34 @@ fn bookmark_specificity_wins_across_assetbundle_and_link_sources() {
 /// Coverage-scope companion (CLAUDE.md "Coverage scope") for the
 /// `Engine::render` gate around `document_ordered_gcpm_mappings`
 /// (`blitz_adapter::document_has_style_import`, codex review PR #768
-/// discussion r4039213856). AssetBundle's own CSS here declares ONLY an
-/// `@import` — no direct `position: running()` rule — so a bare,
-/// import-blind parse of that CSS text (what the gate used to check) finds
-/// nothing, and `bookmarks` is left at its default `false`. Before the fix
-/// this made the gate skip the whole document-order recompute, so the
-/// import was never resolved and `pageHeader`'s running mapping was never
-/// discovered: `RunningElementPass` never fired for it, it stayed in normal
-/// body flow, and the `@top-center` margin box stayed empty on every page.
-/// With the fix, the header is pulled out of flow and replayed via the
-/// margin box on each page, so it must appear more than once in the
-/// extracted PDF text of a multi-page document.
+/// discussion r4039213856). AssetBundle's own CSS here declares the
+/// `@top-center` margin box DIRECTLY (so `gcpm.margin_boxes` — which the
+/// gate's fix does not touch; that field still keeps the old flat
+/// concatenation order, a separate deferred gap — is populated regardless)
+/// but reaches `position: running()` ONLY through an `@import`. A bare,
+/// import-blind parse of the AssetBundle CSS text (what the gate used to
+/// check) therefore finds no direct running rule, and `bookmarks` is left
+/// at its default `false`. Before the fix this made the gate skip the
+/// whole document-order recompute, so the import was never resolved and
+/// `pageHeader`'s running mapping was never discovered: `RunningElementPass`
+/// never fired for it, it stayed in normal body flow, and the `@top-center`
+/// margin box stayed empty on every page. With the fix, the header is
+/// pulled out of flow and replayed via the margin box on each page, so it
+/// must appear more than once in the extracted PDF text of a multi-page
+/// document.
 #[test]
 fn assetbundle_import_only_running_mapping_is_discovered() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("header.css"),
-        r#"
-        .pageHeader { position: running(pageHeader); }
-        @page { @top-center { content: element(pageHeader); } }
-        "#,
+        r#".pageHeader { position: running(pageHeader); }"#,
     )
     .unwrap();
 
     let mut assets = AssetBundle::default();
-    assets.add_css(r#"@import "header.css";"#);
+    assets.add_css(
+        r#"@import "header.css"; @page { @top-center { content: element(pageHeader); } }"#,
+    );
 
     let mut html =
         String::from(r#"<!doctype html><html><body><div class="pageHeader">RUNNING TEXT</div>"#);
