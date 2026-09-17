@@ -328,10 +328,25 @@ fn assetbundle_css_top_level_import_content_survives() {
 
 /// The `@import` resolution must recurse: a `<style>` tag's top-level
 /// `@import` target can itself `@import` a further file, and that file's
-/// GCPM content must also survive (child-before-parent order, matching
-/// `net.rs`'s existing `<link>`/`@import`-subtree convention).
+/// GCPM content must also survive.
+///
+/// NOTE on what this test does and doesn't prove: the outline order here
+/// (`["Child", "Parent"]`) is consistent with genuine child-before-parent
+/// FOLD ordering, but it's equally consistent with plain DOM-order-driven
+/// placement independent of fold order entirely — `<p class="child-rule">`
+/// simply appears before `<p class="parent-rule">` in the DOM, and
+/// `BookmarkPass`'s tree walk emits one outline entry per matching element
+/// strictly in DOM order regardless of which CSS source contributed the
+/// winning mapping. What this test DOES isolate: recursion actually
+/// happened (drop the recursive `resolve_style_imports` call and you'd get
+/// `["Parent"]` only, since child.css's content would never be reached at
+/// all) and both files' content survives without being dropped or
+/// corrupted. For a test that isolates true fold order (which mapping
+/// wins a same-element, equal-specificity tie — the one thing DOM order
+/// can't explain), see
+/// `style_tag_nested_import_fold_order_parent_wins_tie_over_child` below.
 #[test]
-fn style_tag_nested_import_content_survives() {
+fn style_tag_nested_import_recursion_reaches_both_files() {
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("parent.css"),
@@ -361,7 +376,97 @@ fn style_tag_nested_import_content_survives() {
     assert_eq!(
         titles,
         vec!["Child".to_string(), "Parent".to_string()],
-        "both the direct import (parent.css) and its own nested import \
-         (child.css) must survive, child-before-parent, got {titles:?}"
+        "recursion must reach child.css through parent.css's own @import — \
+         both files' content must survive, got {titles:?}"
+    );
+}
+
+/// Isolates true fold order specifically (not DOM order, which
+/// `style_tag_nested_import_recursion_reaches_both_files` above cannot
+/// rule out): `child.css` and `parent.css` both declare a rule for the
+/// SAME selector — matching the SAME single element, so there is only one
+/// outline entry and no DOM-order confound — at EQUAL specificity, with
+/// different labels. Per CSS's "`@import` is equivalent to inlining at the
+/// top of the importing stylesheet" semantics, `parent.css`'s own rule
+/// (which, being valid CSS, can only appear textually AFTER its own
+/// `@import "child.css"`) must win the tie over `child.css`'s rule. If the
+/// fold instead placed imported content AFTER the importer's own direct
+/// declarations (the reverse, incorrect order), `child.css`'s rule would
+/// win instead — this test would then observe `"Child"`, not `"Parent"`.
+#[test]
+fn style_tag_nested_import_fold_order_parent_wins_tie_over_child() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("parent.css"),
+        r#"@import "child.css"; .shared { bookmark-level: 1; bookmark-label: "Parent"; }"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("child.css"),
+        r#".shared { bookmark-level: 1; bookmark-label: "Child"; }"#,
+    )
+    .unwrap();
+
+    let html = r#"<!doctype html><html><head>
+        <style>@import url("parent.css");</style>
+    </head><body>
+        <p class="shared">Content</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["Parent".to_string()],
+        "parent.css's own rule (later in cascade than its own @import) \
+         must win the equal-specificity tie over child.css's rule — proves \
+         genuine child-before-parent fold order, got {titles:?}"
+    );
+}
+
+/// Isolates a DIFFERENT instance of the same fold-order requirement: a
+/// `<style>` tag's OWN direct declaration versus content pulled in by that
+/// SAME tag's OWN top-level `@import` (not a nested file's declaration vs.
+/// a further nested import, which
+/// `style_tag_nested_import_fold_order_parent_wins_tie_over_child` above
+/// covers — this is `blitz_adapter::parse_gcpm_with_style_imports`'s own
+/// top-level merge order specifically, not
+/// `resolve_style_imports`'s recursive merge order). Since a valid
+/// `@import` must appear before any other rule in the same stylesheet, the
+/// `<style>` tag's own rule (textually after its own `@import`) must win
+/// an equal-specificity tie against the imported rule.
+#[test]
+fn style_tag_own_declaration_wins_tie_over_its_own_import() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("child.css"),
+        r#".shared { bookmark-level: 1; bookmark-label: "Child"; }"#,
+    )
+    .unwrap();
+
+    let html = r#"<!doctype html><html><head>
+        <style>@import url("child.css"); .shared { bookmark-level: 1; bookmark-label: "Own"; }</style>
+    </head><body>
+        <p class="shared">Content</p>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["Own".to_string()],
+        "the <style> tag's own direct rule (textually after its own \
+         @import) must win the equal-specificity tie over the imported \
+         rule, got {titles:?}"
     );
 }

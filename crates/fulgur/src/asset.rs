@@ -504,8 +504,10 @@ pub(crate) fn detect_font_format(bytes: &[u8]) -> FontFormat {
 
 /// Read `path` up to `max_bytes` (+1, to distinguish "exactly at the cap"
 /// from "over it") through a capped reader, shared by
-/// [`AssetBundle::add_css_file`], [`AssetBundle::add_image_file`], and
-/// [`AssetBundle::add_font_file`].
+/// [`AssetBundle::add_css_file`], [`AssetBundle::add_image_file`],
+/// [`AssetBundle::add_font_file`], and (fulgur-smlr)
+/// `blitz_adapter::resolve_style_imports`'s filesystem-based `@import`
+/// resolution for inline `<style>` tags.
 ///
 /// The prior implementation checked `fs::metadata(path)?.len()` and then
 /// read the file separately — a TOCTOU/FIFO gap. `stat` commonly reports
@@ -517,7 +519,7 @@ pub(crate) fn detect_font_format(bytes: &[u8]) -> FontFormat {
 /// files. Trade-off: an oversized *regular* file now costs up to
 /// `max_bytes + 1` bytes of read (vs. a free `stat`-only rejection before)
 /// to close that gap — bounded, not the unbounded read it replaces.
-fn read_file_capped(path: &Path, max_bytes: usize, kind: &str) -> Result<Vec<u8>> {
+pub(crate) fn read_file_capped(path: &Path, max_bytes: usize, kind: &str) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let mut data = Vec::new();
     file.take(max_bytes as u64 + 1).read_to_end(&mut data)?;
@@ -554,8 +556,10 @@ const MAX_TOTAL_FONT_BYTES: usize = 256 * 1024 * 1024;
 
 /// Upper bound on a single [`AssetBundle::add_css`] / [`AssetBundle::add_css_file`]
 /// call (16 MiB). A real-world stylesheet is KBs to low MBs; this is
-/// generous headroom, not a realistic ceiling.
-const MAX_CSS_BYTES: usize = 16 * 1024 * 1024;
+/// generous headroom, not a realistic ceiling. Also reused by
+/// `blitz_adapter::resolve_style_imports` (fulgur-smlr) to bound each file
+/// read while resolving a `<style>` tag's own `@import` chain.
+pub(crate) const MAX_CSS_BYTES: usize = 16 * 1024 * 1024;
 
 /// Aggregate ceiling across every stylesheet registered on one bundle
 /// (64 MiB). `AssetBundle::combined_css` allocates a fresh `String` this

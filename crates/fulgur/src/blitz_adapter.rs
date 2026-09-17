@@ -745,12 +745,26 @@ fn walk_for_inline_styles_by_node(
     }
 }
 
-/// Bound on recursive `@import` resolution depth for
+/// Bound on recursive `@import` resolution DEPTH for
 /// [`resolve_style_imports`]. This walks the filesystem following
 /// `@import` chains — outside the DOM tree structure entirely — so
-/// `MAX_DOM_DEPTH` isn't the right guard here. Generous enough for any
-/// realistic stylesheet `@import` chain while still bounding a cyclic one
-/// (`a.css` imports `b.css` imports `a.css`, ...).
+/// `MAX_DOM_DEPTH` isn't the right guard here.
+///
+/// **This alone is not a sufficient guard against adversarial input.** A
+/// depth cap only bounds a LINEAR chain (`a.css` imports `b.css` imports
+/// `a.css`, ...). It does nothing against BRANCHING: a file with `k`
+/// `@import` statements (e.g. all pointing at the same target) causes
+/// `resolve_style_imports` to recurse into that target `k` times at each
+/// level, so a self-referencing file with `k` imports produces on the
+/// order of `k^MAX_STYLE_IMPORT_DEPTH` recursive calls before the depth
+/// cap alone would stop it — at `k = 3` that is tens of millions of calls,
+/// confirmed in review to not complete within 60 seconds. The
+/// `visited`/`HashSet<PathBuf>` parameter threaded through
+/// [`resolve_style_imports`] is what actually bounds TOTAL work (to
+/// O(distinct files reachable under `security_base`), each visited at
+/// most once ever) — the depth cap here is a secondary, cheap backstop
+/// once the visited-set already makes runaway branching impossible, not
+/// the primary defense.
 const MAX_STYLE_IMPORT_DEPTH: usize = 16;
 
 /// Parse `css` for GCPM constructs via [`crate::gcpm::parser::parse_gcpm`],
@@ -758,7 +772,14 @@ const MAX_STYLE_IMPORT_DEPTH: usize = 16;
 /// declares, folding each imported file's own GCPM content in
 /// (child-before-parent, matching `net.rs`'s existing `<link>`/`@import`
 /// subtree fold convention — see `FulgurNetProvider::fetch`'s "post-order
-/// push" comment).
+/// push" comment). Imported content is folded in FIRST, then `css`'s own
+/// direct declarations LAST — per CSS's "`@import` is equivalent to
+/// inlining at the top of the importing stylesheet" semantics, `css`'s own
+/// rules (which, if valid, can only appear textually AFTER its `@import`s)
+/// must be able to override an imported rule at equal specificity, which
+/// requires them to be *last* in the merged `Vec` for the `>=`-guarded
+/// last-wins tie-break (`BookmarkPass::resolve_node`,
+/// `RunningElementPass::find_running_name`) to pick them correctly.
 ///
 /// # Why this exists (regression fix)
 ///
@@ -792,12 +813,21 @@ const MAX_STYLE_IMPORT_DEPTH: usize = 16;
 /// `FulgurNetProvider::resolve_local_path`'s own behavior of rejecting
 /// every fetch when no base path is configured.
 fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::gcpm::GcpmContext {
-    let mut ctx = crate::gcpm::parser::parse_gcpm(css);
+    let mut ctx = crate::gcpm::GcpmContext::default();
     if let Some(base) = base_path
         && let Ok(canonical_base) = base.canonicalize()
     {
-        resolve_style_imports(css, &canonical_base, &canonical_base, &mut ctx, 0);
+        let mut visited = std::collections::HashSet::new();
+        resolve_style_imports(
+            css,
+            &canonical_base,
+            &canonical_base,
+            &mut ctx,
+            0,
+            &mut visited,
+        );
     }
+    ctx.extend_from(crate::gcpm::parser::parse_gcpm(css));
     ctx
 }
 
@@ -813,12 +843,26 @@ fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::
 /// hrefs resolve against, per CSS's own "relative to the importing
 /// stylesheet" rule — it changes at each recursion level (to the imported
 /// file's own parent directory) while `security_base` never does.
+///
+/// `visited` collects every canonicalized path resolved so far across the
+/// WHOLE call tree (not just the current chain) and is the primary guard
+/// against combinatorial blowup: a file `@import`ing the same target `k`
+/// times only pays the read+parse+recursion cost for that target ONCE —
+/// every subsequent reference is a `HashSet` lookup that short-circuits
+/// immediately. Without this, `k` `@import`s of one target multiply at
+/// EVERY recursion level, so `MAX_STYLE_IMPORT_DEPTH` alone bounds a
+/// linear chain but not a branching one (see that constant's doc comment).
+/// This also incidentally makes `resolve_style_imports` immune to true
+/// cycles (`a.css` imports `b.css` imports `a.css`) regardless of the
+/// depth cap, since the second visit to any already-seen path is skipped
+/// outright.
 fn resolve_style_imports(
     css: &str,
     security_base: &Path,
     resolve_dir: &Path,
     out: &mut crate::gcpm::GcpmContext,
     depth: usize,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) {
     if depth >= MAX_STYLE_IMPORT_DEPTH {
         return;
@@ -830,14 +874,25 @@ fn resolve_style_imports(
         if !canonical.starts_with(security_base) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&canonical) else {
+        // `HashSet::insert` returns `false` if the value was already
+        // present — one check-and-mark for both the branching-blowup
+        // guard and the cycle guard.
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let Ok(bytes) =
+            crate::asset::read_file_capped(&canonical, crate::asset::MAX_CSS_BYTES, "CSS file")
+        else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
         let child_dir = canonical.parent().unwrap_or(resolve_dir);
         // Child-before-parent: recurse into this file's own @imports
         // FIRST, matching net.rs's post-order convention for <link>/
         // @import subtrees.
-        resolve_style_imports(&text, security_base, child_dir, out, depth + 1);
+        resolve_style_imports(&text, security_base, child_dir, out, depth + 1, visited);
         out.extend_from(crate::gcpm::parser::parse_gcpm(&text));
     }
 }
@@ -938,37 +993,42 @@ fn fold_gcpm_by_document_order(
 ///   `<style>` id, whose seed-map entry is always fully empty (see
 ///   above) — so `extend_from`-ing the real content into it never
 ///   double-counts anything.
-/// - The AssetBundle-injected `<style>` node (when present) is instead
-///   `insert`ed (overwritten), NOT `extend_from`-merged. Unlike
-///   `position: running(...)` (which `parse_gcpm`'s `cleaned_css` builder
-///   replaces with `display: none`), `bookmark-level` / `bookmark-label`
-///   declarations are **not** stripped from `cleaned_css` — only
-///   `running(...)`, `counter-*`, and multi-item `content:` are. So the
-///   seed map's own entry for the injected node (built from parsing its
-///   *cleaned* text) can already carry real `bookmark_mappings` whenever
-///   AssetBundle CSS declared any `bookmark-*` rule, and `extend_from`-ing
-///   a second, fresh parse of the pre-strip `combined_css` on top of that
-///   would append a duplicate of each such mapping into the map entry.
-///   **This is currently behaviorally inert for both downstream
-///   consumers**: `BookmarkPass` is winner-take-all per field (duplicating
-///   a subsequence never changes which mapping is *last*, i.e. wins ties —
-///   see `resolve_node`'s `>=`-guarded overlay accumulator), and
-///   `running_mappings` is never even duplicated here in the first place
-///   (AssetBundle's *cleaned* text can't contain `position: running(...)`
-///   — that construct IS stripped). So today, swapping this `insert` for
-///   `extend_from` would not flip any existing test. `insert` is chosen
-///   anyway as correctness hygiene that heads off a real bug the moment a
-///   future consumer applies every matching mapping *cumulatively* instead
-///   of picking one winner (`StringSetPass`/`CounterPass` already do this
-///   for their own mapping kinds — see the design doc's deferred-work
-///   section for why `running_mappings`/`bookmark_mappings` were chosen
-///   first) — at that point a silently-duplicated entry becomes a real,
-///   user-visible correctness bug instead of a documented no-op. See
-///   `document_ordered_gcpm_mappings_assetbundle_insert_does_not_duplicate_bookmark_mapping`
-///   in this module's test suite, which asserts the mapping COUNT directly
-///   (not through a winner-take-all consumer that would mask a
-///   regression), so this invariant has real coverage rather than relying
-///   on today's accidental inertness.
+/// - The AssetBundle-injected `<style>` node (when present) is handled
+///   with a TARGETED merge, not a plain `extend_from`. The seed map's own
+///   entry for this node — built from `collect_inline_gcpm_by_node`
+///   parsing the injected node's own text (`combined_css`'s *cleaned*
+///   form) via `parse_gcpm_with_style_imports` — is already complete for
+///   `bookmark_mappings`: unlike `position: running(...)` (which
+///   `parse_gcpm`'s `cleaned_css` builder replaces with `display: none`),
+///   neither `bookmark-level`/`bookmark-label` NOR `@import` statements
+///   are stripped from `cleaned_css`, so parsing the cleaned text finds
+///   the exact same direct declarations AND resolves the exact same
+///   `@import` chain (file I/O and all) that parsing the pre-strip
+///   `combined_css` would. Only `running_mappings` has a real gap: a
+///   DIRECT `position: running(...)` declaration in `combined_css`'s own
+///   body never reaches the seed map's entry at all, because `cleaned_css`
+///   replaced it with `display: none` before the walk ever saw the text.
+///   Recovering that gap needs only a bare `parse_gcpm(combined_css)` (NOT
+///   [`parse_gcpm_with_style_imports`] — `@import` resolution is already
+///   correctly captured by the seed entry, and a plain `parse_gcpm` call
+///   never resolves `@import` in the first place, so there is no risk of
+///   redoing that resolution here) with just its `running_mappings`
+///   folded in. `bookmark_mappings` is deliberately left untouched by this
+///   step — the seed entry's copy is already complete, and merging a
+///   second copy in would reintroduce the exact duplication a plain
+///   `extend_from` here used to risk. This also means the `@import` file
+///   I/O for this node's chain now runs exactly once per render, not
+///   twice (fulgur-smlr code review, Minor #1 — a prior version of this
+///   function `insert`ed a second, independent
+///   `parse_gcpm_with_style_imports(combined_css, base_path)` call here,
+///   which re-resolved the very same chain the seed-map walk had already
+///   resolved for this same node, paying the read+parse+recursion cost of
+///   every imported file twice for nothing). See
+///   `document_ordered_gcpm_mappings_assetbundle_merge_does_not_duplicate_bookmark_mapping`
+///   in this module's test suite, which asserts the `bookmark_mappings`
+///   COUNT directly (not through a winner-take-all consumer that would
+///   mask a regression back to a whole-context merge), so this invariant
+///   has real coverage.
 ///
 /// `base_path` is threaded through to [`parse_gcpm_with_style_imports`] so
 /// a `<style>` tag's own top-level `@import` targets get resolved too
@@ -976,8 +1036,7 @@ fn fold_gcpm_by_document_order(
 /// content that neither `link_gcpm_by_node` nor a plain `parse_gcpm` of a
 /// `<style>` tag's own literal text can see (see
 /// `parse_gcpm_with_style_imports`'s doc comment for the full story; this
-/// closes a real content-loss regression found in code review, not a
-/// hygiene concern like the `insert`-vs-`extend_from` point above).
+/// closes a real content-loss regression found in code review).
 pub(crate) fn document_ordered_gcpm_mappings(
     doc: &HtmlDocument,
     combined_css: &str,
@@ -998,10 +1057,20 @@ pub(crate) fn document_ordered_gcpm_mappings(
         && let Some(node) = doc.get_node(head_id)
         && let Some(&last_child) = node.children.last()
     {
-        node_gcpm.insert(
-            last_child,
-            parse_gcpm_with_style_imports(combined_css, base_path),
-        );
+        // See the "Merge strategy" doc comment above for why this reads
+        // `combined_css` with a BARE `parse_gcpm` (not
+        // `parse_gcpm_with_style_imports`) and only folds in
+        // `running_mappings` — the seed map's entry for this node already
+        // has correct `bookmark_mappings` AND correctly-resolved `@import`
+        // content, so redoing either here would be wasted work at best
+        // (re-reading every imported file) or a duplicate-mapping bug at
+        // worst.
+        let direct = crate::gcpm::parser::parse_gcpm(combined_css);
+        node_gcpm
+            .entry(last_child)
+            .or_default()
+            .running_mappings
+            .extend(direct.running_mappings);
     }
 
     let mut ordered = crate::gcpm::GcpmContext::default();
@@ -4941,30 +5010,31 @@ mod tests {
         );
     }
 
-    /// fulgur-smlr: guards the `insert` (not `extend_from`) choice for the
-    /// AssetBundle-injected `<style>` node's entry in
-    /// `document_ordered_gcpm_mappings` — see that function's doc comment
-    /// "Merge strategy" section. Asserts the RAW mapping COUNT directly
-    /// (not through a winner-take-all consumer like `BookmarkPass`, which
-    /// would mask a regression back to `extend_from` since duplicating a
-    /// subsequence doesn't change which mapping wins a last-write
-    /// cascade). Mirrors the real pipeline shape: `combined_css` is parsed
-    /// once (as `engine.rs` does at the top of `layout_to_drawables`) to
-    /// get `cleaned_css`, which is what actually gets injected via
-    /// `InjectCssPass` — `bookmark-level`/`bookmark-label` survive
-    /// verbatim in `cleaned_css` (unlike `position: running(...)`, which
-    /// IS stripped), so the seed map's own walk over the injected node
-    /// already produces one mapping before `document_ordered_gcpm_mappings`
-    /// even runs its `insert` step.
+    /// fulgur-smlr: guards the AssetBundle-injected `<style>` node's
+    /// TARGETED merge (folding in only `combined_css`'s DIRECT
+    /// `running_mappings`, never re-touching `bookmark_mappings`) against
+    /// regressing back to a whole-context `extend_from` — see
+    /// `document_ordered_gcpm_mappings`'s doc comment "Merge strategy"
+    /// section. Asserts the RAW `bookmark_mappings` COUNT directly (not
+    /// through a winner-take-all consumer like `BookmarkPass`, which would
+    /// mask a regression since duplicating a subsequence doesn't change
+    /// which mapping wins a last-write cascade). Mirrors the real pipeline
+    /// shape: `combined_css` is parsed once (as `engine.rs` does at the
+    /// top of `layout_to_drawables`) to get `cleaned_css`, which is what
+    /// actually gets injected via `InjectCssPass` — `bookmark-level`/
+    /// `bookmark-label` survive verbatim in `cleaned_css` (unlike
+    /// `position: running(...)`, which IS stripped), so the seed map's own
+    /// walk over the injected node already produces one mapping before
+    /// `document_ordered_gcpm_mappings`'s targeted-merge step runs at all.
     #[test]
-    fn document_ordered_gcpm_mappings_assetbundle_insert_does_not_duplicate_bookmark_mapping() {
+    fn document_ordered_gcpm_mappings_assetbundle_merge_does_not_duplicate_bookmark_mapping() {
         let combined_css = r#".target { bookmark-level: 1; bookmark-label: "X"; }"#;
         let gcpm = crate::gcpm::parser::parse_gcpm(combined_css);
         let css_to_inject = gcpm.cleaned_css.clone();
         assert!(
             css_to_inject.contains("bookmark-level"),
             "sanity: bookmark-level must survive verbatim in cleaned_css \
-             for this test to actually exercise the insert-vs-extend_from \
+             for this test to actually exercise the targeted-merge \
              distinction, got {css_to_inject:?}"
         );
 
@@ -4988,8 +5058,8 @@ mod tests {
             bookmarks.len(),
             1,
             "AssetBundle's bookmark-level rule must appear exactly once — \
-             duplicated to 2 if `insert` regresses back to `extend_from`, \
-             got {bookmarks:?}"
+             duplicated to 2 if the targeted merge regresses back to a \
+             whole-context extend_from, got {bookmarks:?}"
         );
         assert_eq!(
             bookmarks[0].selector,
@@ -4997,11 +5067,20 @@ mod tests {
         );
     }
 
-    /// Defensive guard for `resolve_style_imports`'s new filesystem-based
+    /// Defensive guard for `resolve_style_imports`'s filesystem-based
     /// recursion: a cyclic `@import` chain (`a.css` imports `b.css` imports
     /// `a.css`, ...) must not infinite-loop or stack overflow.
-    /// `MAX_STYLE_IMPORT_DEPTH` bounds it — the call must simply return,
-    /// having resolved whatever content it reached before the cap.
+    ///
+    /// Termination here is actually driven by the `visited` `HashSet`, not
+    /// `MAX_STYLE_IMPORT_DEPTH`: the third hop (`b.css`'s own `@import
+    /// "a.css"`) resolves to a path already in `visited` and is skipped
+    /// immediately, so recursion stops at depth 2 — the depth cap (16)
+    /// never comes into play for this LINEAR cycle at all. That's also
+    /// exactly why this test alone doesn't prove the visited-set guards
+    /// against BRANCHING (multiple `@import`s of the same target within
+    /// one file) — see
+    /// `resolve_style_imports_bounds_combinatorial_self_reference` for
+    /// that case, which a depth-only guard would not survive.
     #[test]
     fn resolve_style_imports_bounds_cyclic_import_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -5019,20 +5098,64 @@ mod tests {
         let css = r#"@import url("a.css");"#;
         let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
 
-        // Returning at all (not hanging / stack-overflowing) is the primary
-        // assertion. Some content must still have been resolved before the
-        // depth cap kicked in, and the total must stay bounded by it.
-        assert!(
-            !ctx.bookmark_mappings.is_empty(),
-            "expected at least some content resolved before the depth cap, \
-             got {:?}",
+        // Exactly one mapping per distinct file (a.css, b.css) — the
+        // visited-set means each is read and parsed exactly once, so this
+        // is now an exact count, not just a bound.
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            2,
+            "expected exactly one mapping each from a.css and b.css (each \
+             visited exactly once), got {:?}",
             ctx.bookmark_mappings
         );
+    }
+
+    /// Blocking regression guard (found in code review): `@import`
+    /// resolution must be immune to COMBINATORIAL, not just cyclic,
+    /// blowup. A file with `k` `@import` statements pointing at the same
+    /// (or a small set of) target(s) causes `resolve_style_imports` to
+    /// recurse into that target `k` times at EVERY level it's reachable
+    /// from — without the `visited` set, a self-referencing file with 3
+    /// imports of itself produces on the order of `3^MAX_STYLE_IMPORT_DEPTH`
+    /// recursive calls (confirmed in review to not complete within 60
+    /// seconds). The `visited` `HashSet` converts this to
+    /// O(distinct files) regardless of branching factor: the first
+    /// `@import "self.css"` visits and reads it; the other two (and every
+    /// subsequent reference at any depth) are `HashSet` lookups that skip
+    /// immediately. Asserts a generous-but-real wall-clock bound so a
+    /// regression back to depth-only bounding (which would hang for
+    /// minutes, not merely run slow) fails this test rather than the CI
+    /// timeout.
+    #[test]
+    fn resolve_style_imports_bounds_combinatorial_self_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("self.css"),
+            r#"@import "self.css"; @import "self.css"; @import "self.css"; .rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import url("self.css");"#;
+        let start = std::time::Instant::now();
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+        let elapsed = start.elapsed();
+
         assert!(
-            ctx.bookmark_mappings.len() <= MAX_STYLE_IMPORT_DEPTH * 2,
-            "cyclic import chain must be bounded by MAX_STYLE_IMPORT_DEPTH, \
-             got {} mappings",
-            ctx.bookmark_mappings.len()
+            elapsed < std::time::Duration::from_secs(5),
+            "combinatorial @import resolution took {elapsed:?} — expected \
+             near-instant (O(1) distinct files) with the visited-set guard \
+             in place; a multi-second-or-more result means the guard \
+             regressed back to depth-only bounding"
+        );
+        // self.css is visited exactly once (the first of the three
+        // identical @imports); its own rule appears exactly once, not
+        // three times and not zero times.
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "self.css must be visited exactly once despite being \
+             @import-ed 3 times, got {:?}",
+            ctx.bookmark_mappings
         );
     }
 
