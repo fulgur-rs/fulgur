@@ -964,16 +964,17 @@ fn resolve_import_href_as_url(_resolve_dir: &Path, _href: &str) -> Option<std::p
 /// tree) — a target already in it is a true cycle (`a.css` imports `b.css`
 /// imports `a.css`) and is skipped to avoid infinite recursion. `cache`
 /// holds the fully-resolved `GcpmContext` for every path that has FINISHED
-/// resolving anywhere in the whole call tree, keyed by canonical path, and
-/// is the primary guard against combinatorial blowup: a file `@import`ing
-/// the same target `k` times only pays the read+parse+recursion cost for
-/// that target ONCE (the first occurrence populates `cache`); every
-/// subsequent reference — including one reached from a completely
-/// different branch of the import graph — is a cheap `HashMap` lookup
-/// followed by a clone-and-extend, not a re-read/re-parse/re-recurse.
-/// Without this, `k` `@import`s of one target multiply at EVERY recursion
-/// level, so `MAX_STYLE_IMPORT_DEPTH` alone bounds a linear chain but not a
-/// branching one (see that constant's doc comment).
+/// resolving anywhere in the whole call tree WITHOUT being cut short, keyed
+/// by canonical path, and is the primary guard against combinatorial
+/// blowup: a file `@import`ing the same target `k` times only pays the
+/// read+parse+recursion cost for that target ONCE (the first occurrence
+/// populates `cache`); every subsequent reference — including one reached
+/// from a completely different branch of the import graph — is a cheap
+/// `HashMap` lookup followed by a clone-and-extend, not a
+/// re-read/re-parse/re-recurse. Without this, `k` `@import`s of one target
+/// multiply at EVERY recursion level, so `MAX_STYLE_IMPORT_DEPTH` alone
+/// bounds a linear chain but not a branching one (see that constant's doc
+/// comment).
 ///
 /// Splitting the old single `visited` set into these two pieces (rather
 /// than discarding every repeat outright) preserves CSS cascade order for
@@ -982,6 +983,20 @@ fn resolve_import_href_as_url(_resolve_dir: &Path, _href: &str) -> Option<std::p
 /// textual positions, so the final `a.css` occurrence can still win an
 /// equal-specificity tie over `b.css` — collapsing it to one occurrence
 /// (as a single shared `visited` set would) silently reorders the cascade.
+///
+/// Returns `true` if this call's own resolution (or any nested import it
+/// resolved) was CUT SHORT — either by hitting `MAX_STYLE_IMPORT_DEPTH` or
+/// by skipping an import that collided with the current `in_progress`
+/// ancestor chain. Whether a given target is "cut short" is NOT an
+/// inherent property of that file: it depends on which ancestors happen to
+/// be active on THIS call chain (codex review, PR #768, discussion
+/// r4039797387) — e.g. if `a.css` imports `x.css` and `x.css` imports
+/// `a.css`, resolving `x.css` while `a.css` is an active ancestor omits
+/// `a.css`'s content from `x.css`'s result, but a SIBLING stylesheet that
+/// imports `x.css` outside that ancestor chain would resolve it fully. A
+/// cut-short result is therefore never written to `cache` — only a result
+/// that finished on its own terms is safe to replay for an unrelated
+/// future reference.
 fn resolve_style_imports(
     css: &str,
     security_base: &Path,
@@ -989,11 +1004,12 @@ fn resolve_style_imports(
     out: &mut crate::gcpm::GcpmContext,
     depth: usize,
     in_progress: &mut std::collections::HashSet<std::path::PathBuf>,
-    cache: &mut std::collections::HashMap<(std::path::PathBuf, usize), crate::gcpm::GcpmContext>,
-) {
+    cache: &mut std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
+) -> bool {
     if depth >= MAX_STYLE_IMPORT_DEPTH {
-        return;
+        return true;
     }
+    let mut cut_short = false;
     for href in crate::gcpm::parser::extract_top_level_import_hrefs(css) {
         let Some(candidate) = resolve_import_href_as_url(resolve_dir, &href) else {
             continue;
@@ -1004,28 +1020,14 @@ fn resolve_style_imports(
         if !canonical.starts_with(security_base) {
             continue;
         }
-        // `child_depth` is the depth level this file's OWN recursion runs
-        // at — i.e. how much `MAX_STYLE_IMPORT_DEPTH` budget it has left
-        // to resolve its own nested `@import`s. The cache is keyed by
-        // `(canonical, child_depth)`, not just `canonical`: a file first
-        // reached near the depth cap gets its deeper imports cut short,
-        // and caching that truncated result under the bare path alone
-        // would incorrectly replay it for a LATER, shallower reference to
-        // the same file that actually has enough budget to resolve them
-        // (codex review, PR #768, discussion r4039620905). Keying by depth
-        // too still bounds total work — at most `MAX_STYLE_IMPORT_DEPTH`
-        // distinct cache entries per file — so this can't reintroduce the
-        // combinatorial blowup the cache exists to prevent (see the
-        // `in_progress` doc comment above for why that guard is separate
-        // from, and unaffected by, this key choice).
-        let child_depth = depth + 1;
-        if let Some(cached) = cache.get(&(canonical.clone(), child_depth)) {
+        if let Some(cached) = cache.get(&canonical) {
             out.extend_from(cached.clone());
             continue;
         }
         // `HashSet::insert` returns `false` if the value is already an
         // ancestor on this chain — a genuine cycle, not merely a repeat.
         if !in_progress.insert(canonical.clone()) {
+            cut_short = true;
             continue;
         }
         let Ok(bytes) =
@@ -1043,20 +1045,25 @@ fn resolve_style_imports(
         // FIRST, matching net.rs's post-order convention for <link>/
         // @import subtrees.
         let mut file_ctx = crate::gcpm::GcpmContext::default();
-        resolve_style_imports(
+        let child_cut_short = resolve_style_imports(
             &text,
             security_base,
             child_dir,
             &mut file_ctx,
-            child_depth,
+            depth + 1,
             in_progress,
             cache,
         );
         file_ctx.extend_from(crate::gcpm::parser::parse_gcpm(&text));
         in_progress.remove(&canonical);
-        cache.insert((canonical.clone(), child_depth), file_ctx.clone());
+        if child_cut_short {
+            cut_short = true;
+        } else {
+            cache.insert(canonical.clone(), file_ctx.clone());
+        }
         out.extend_from(file_ctx);
     }
+    cut_short
 }
 
 /// Folds GCPM contexts from `<link>`/`<style>` nodes into `out` in true DOM
@@ -5627,6 +5634,58 @@ mod tests {
              shallow reference to shared.css even though an earlier deep \
              chain reference to the same file was truncated by the depth \
              cap — got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039797387): whether a file's
+    /// resolution is "cut short" depends on which ancestors are active on
+    /// the CURRENT call chain, not on the file itself — so a cut-short
+    /// result must never be cached, even when keyed by depth. `a.css`
+    /// imports `x.css`, and `x.css` imports `a.css` back (a genuine
+    /// cycle): resolving `x.css` while `a.css` is an active ancestor
+    /// cuts off `x.css`'s own attempt to re-enter `a.css`. A SEPARATE,
+    /// sibling reference to `x.css` (via `sibling.css`, never nested
+    /// under `a.css`) is not part of that cycle at all and must resolve
+    /// `x.css` -> `a.css` fully — a bug would instead replay the
+    /// first (incomplete) resolution's cached, `a.css`-omitting result.
+    #[test]
+    fn resolve_style_imports_does_not_cache_cycle_truncated_result() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#"@import "x.css"; .a-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("x.css"),
+            r#"@import "a.css"; .x-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sibling.css"),
+            r#"@import "x.css"; .sibling-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        // `a.css` is resolved FIRST (so a cache bug would seed a
+        // truncated entry for `x.css` before `sibling.css` ever gets a
+        // chance to reach it independently).
+        let css = r#"@import "a.css"; @import "sibling.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let a_rule_count = ctx
+            .bookmark_mappings
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("a-rule".to_string()))
+            .count();
+        assert!(
+            a_rule_count >= 2,
+            "sibling.css's independent reference to x.css must resolve \
+             a.css's content fresh (not part of the a.css<->x.css cycle \
+             in THIS context), so a-rule must appear once from the direct \
+             a.css import and once more via sibling.css -> x.css -> \
+             a.css — got {:?}",
             ctx.bookmark_mappings
         );
     }

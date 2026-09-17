@@ -1383,6 +1383,19 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
 struct ImportHrefScanner<'a> {
     out: &'a mut Vec<String>,
     seen_non_import: bool,
+    /// Whether no rule of any kind (not even an `@import`) has been
+    /// consumed yet. A real `@charset` is only ever valid as the
+    /// ABSOLUTE first thing in a stylesheet — before even an `@import`
+    /// or a `@layer` statement (codex review, PR #768, discussion
+    /// r4039797400: `@import "a.css"; @charset "UTF-8"; @import "b.css";`
+    /// has a `@charset` that is NOT a real encoding declaration, since an
+    /// `@import` already precedes it — it must be treated as an ordinary
+    /// invalid at-rule that terminates the valid `@import` zone, not as
+    /// the exempt case). Set to `false` the moment any rule is consumed,
+    /// checked only by the `@charset` branch (a `@layer` statement's
+    /// exemption is NOT position-sensitive this way — see its own call
+    /// site).
+    is_first_rule: bool,
 }
 
 /// [`ImportHrefScanner`]'s at-rule prelude, distinguishing the one case that
@@ -1409,6 +1422,12 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         name: CowRcStr<'i>,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        // Every at-rule consumes this "is it the very first rule" slot,
+        // regardless of what it turns out to be — only a real `@charset`
+        // cares about the value, and only if it's checked BEFORE this
+        // rule claims the slot for itself.
+        let was_first_rule = self.is_first_rule;
+        self.is_first_rule = false;
         if name.eq_ignore_ascii_case("import") {
             input.skip_whitespace();
             let href = match input.next()?.clone() {
@@ -1439,16 +1458,26 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
             while input.next().is_ok() {}
             return Ok(ScannedAtRulePrelude::Import(href));
         }
-        // `@charset "utf-8";` and statement-form `@layer <name>;` are the
-        // two exceptions the CSS spec carves out of "any other statement
-        // terminates the valid @import zone" — see the `seen_non_import`
-        // doc comment. Both are always followed by `;`, never `{ }`,
-        // EXCEPT `@layer` also has a block form (`@layer <name> { ... }`)
-        // that behaves like any other rule and DOES terminate the zone.
-        // Consume the prelude tokens (name list / charset string) — their
-        // content doesn't matter here — and let `rule_without_block` /
-        // `parse_block` (whichever the framework calls next, depending on
-        // whether a block actually follows) make that call.
+        // A real `@charset` is only ever valid as the ABSOLUTE first thing
+        // in a stylesheet — before even an `@import` or a `@layer`
+        // statement. One that appears anywhere else is not a genuine
+        // encoding declaration; it's an ordinary (invalid) at-rule that
+        // DOES terminate the valid `@import` zone like any other.
+        if name.eq_ignore_ascii_case("charset") && !was_first_rule {
+            self.seen_non_import = true;
+            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+        }
+        // `@charset "utf-8";` (when first) and statement-form
+        // `@layer <name>;` are the two exceptions the CSS spec carves out
+        // of "any other statement terminates the valid @import zone" —
+        // see the `seen_non_import` doc comment. Both are always followed
+        // by `;`, never `{ }`, EXCEPT `@layer` also has a block form
+        // (`@layer <name> { ... }`) that behaves like any other rule and
+        // DOES terminate the zone. Consume the prelude tokens (name list /
+        // charset string) — their content doesn't matter here — and let
+        // `rule_without_block` / `parse_block` (whichever the framework
+        // calls next, depending on whether a block actually follows) make
+        // that call.
         if name.eq_ignore_ascii_case("charset") || name.eq_ignore_ascii_case("layer") {
             while input.next().is_ok() {}
             return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
@@ -1507,7 +1536,10 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
         // A qualified (style) rule at top level always terminates the
         // valid `@import` zone, even though this scanner otherwise
-        // ignores its contents entirely.
+        // ignores its contents entirely. Also claims the "is this the
+        // first rule" slot, so a `@charset` after a qualified rule is
+        // correctly treated as non-exempt too (see `is_first_rule`).
+        self.is_first_rule = false;
         self.seen_non_import = true;
         Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
     }
@@ -1535,6 +1567,7 @@ pub(crate) fn extract_top_level_import_hrefs(css: &str) -> Vec<String> {
     let mut scanner = ImportHrefScanner {
         out: &mut out,
         seen_non_import: false,
+        is_first_rule: true,
     };
     let mut input = ParserInput::new(css);
     let mut input = Parser::new(&mut input);
@@ -1764,6 +1797,35 @@ mod tests {
     fn extract_top_level_import_hrefs_ignores_import_after_layer_block() {
         let css = r#"@layer base { .x { color: red; } } @import "gcpm.css";"#;
         assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// Codex review (PR #768, discussion r4039797400): a real `@charset`
+    /// is only ever valid as the ABSOLUTE first thing in a stylesheet —
+    /// one that appears after an `@import` (or anything else) is not a
+    /// genuine encoding declaration and must be treated as an ordinary
+    /// invalid at-rule, terminating the valid `@import` zone like any
+    /// other. Only the FIRST `@import` (before the misplaced `@charset`)
+    /// must be collected.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_charset_after_import() {
+        let css = r#"@import "a.css"; @charset "UTF-8"; @import "b.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string()]
+        );
+    }
+
+    /// A genuinely leading `@charset` (nothing before it at all) keeps
+    /// its exemption — this is the same case
+    /// `extract_top_level_import_hrefs_allows_import_after_charset`
+    /// covers, repeated here for contrast with the misplaced case above.
+    #[test]
+    fn extract_top_level_import_hrefs_allows_import_after_leading_charset() {
+        let css = r#"@charset "UTF-8"; @import "a.css"; @import "b.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string(), "b.css".to_string()]
+        );
     }
 
     #[test]
