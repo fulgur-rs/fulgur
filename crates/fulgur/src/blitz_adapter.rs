@@ -2714,12 +2714,14 @@ pub struct BookmarkInfo {
 ///
 /// # Cascade semantics
 ///
-/// Mappings are iterated in the order they were collected from the CSS
-/// stylesheet(s). For each matching mapping, the pass overlays its
-/// `level` / `label` fields onto a per-node accumulator — later matches
-/// overwrite earlier ones per field. This mirrors CSS property cascade
-/// ("last declaration wins") while letting an author split a selector's
-/// level and label into separate rules.
+/// `bookmark-level` and `bookmark-label` cascade independently, as two
+/// separate CSS properties would: for each field, the matching mapping
+/// with the highest selector specificity wins; among mappings tied on
+/// specificity, the one later in `self.mappings`'s order wins ("last
+/// declaration wins" on ties, same as real CSS). This lets an author
+/// split a selector's level and label into separate rules of different
+/// specificity and still get correct per-field resolution — not just
+/// "the last matching mapping wins outright".
 ///
 /// # Suppression
 ///
@@ -2830,11 +2832,16 @@ impl BookmarkPass {
         elem: &blitz_dom::node::ElementData,
     ) {
         // Overlay accumulator — iterate forward; each field cascades
-        // independently by specificity, then by document order (fulgur-smlr).
-        // The `>=` guard makes a single forward pass sufficient: an
-        // equal-specificity match always overwrites (last-wins on ties, same
-        // as before this change), and a lower-specificity match appearing
-        // later never overwrites an earlier, higher-specificity winner.
+        // independently by specificity, then by self.mappings's current
+        // order (Vec position) on ties (fulgur-smlr). Vec position is a
+        // stand-in for document order here — it's built from the fixed
+        // `UA → AssetBundle → link → inline` stylesheet concatenation, not
+        // true DOM source order yet; that lands with Task 7 of the
+        // fulgur-smlr plan. The `>=` guard makes a single forward pass
+        // sufficient: an equal-specificity match always overwrites
+        // (last-wins on ties, same as before this change), and a
+        // lower-specificity match appearing later never overwrites an
+        // earlier, higher-specificity winner.
         let mut level: Option<BookmarkLevel> = None;
         let mut level_specificity: Option<crate::gcpm::SelectorSpecificity> = None;
         let mut label: Option<Vec<ContentItem>> = None;
@@ -7461,6 +7468,42 @@ li::marker { content: url("star.png"); }
         );
         assert_eq!(results[0].1.level, 3);
         assert_eq!(results[0].1.label, "Heading");
+    }
+
+    #[test]
+    fn bookmark_pass_label_specificity_wins_regardless_of_mapping_order() {
+        // Mirror image of `bookmark_pass_level_specificity_wins_regardless_of_mapping_order`,
+        // but for `label`: the lower-specificity Tag mapping (which also
+        // sets `level`, so an entry is actually emitted) comes FIRST, and
+        // a STRICTLY higher-specificity Id mapping overwrites `label`
+        // SECOND. `level`'s and `label`'s guards in `resolve_node` are
+        // structurally identical — this closes the coverage gap for
+        // `label` symmetric to the existing `level` test, guarding
+        // against a specificity implementation that is secretly just
+        // order-dependent for one field but not the other.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: Some(vec![ContentItem::String("FromTag".into())]),
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: None,
+                    label: Some(vec![ContentItem::String("FromId".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.level, 1, "level-only Tag mapping must win");
+        assert_eq!(
+            results[0].1.label, "FromId",
+            "strictly higher-specificity Id mapping must win the label \
+             field regardless of Vec order"
+        );
     }
 
     #[test]
