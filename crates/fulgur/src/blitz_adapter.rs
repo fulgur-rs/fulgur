@@ -2829,20 +2829,34 @@ impl BookmarkPass {
         node_id: usize,
         elem: &blitz_dom::node::ElementData,
     ) {
-        // Overlay accumulator — iterate forward; each matching mapping
-        // overwrites the fields it sets.
+        // Overlay accumulator — iterate forward; each field cascades
+        // independently by specificity, then by document order (fulgur-smlr).
+        // The `>=` guard makes a single forward pass sufficient: an
+        // equal-specificity match always overwrites (last-wins on ties, same
+        // as before this change), and a lower-specificity match appearing
+        // later never overwrites an earlier, higher-specificity winner.
         let mut level: Option<BookmarkLevel> = None;
+        let mut level_specificity: Option<crate::gcpm::SelectorSpecificity> = None;
         let mut label: Option<Vec<ContentItem>> = None;
+        let mut label_specificity: Option<crate::gcpm::SelectorSpecificity> = None;
         let mut any_match = false;
         for mapping in &self.mappings {
-            if selector_matches(&mapping.selector, elem) {
-                any_match = true;
-                if let Some(l) = &mapping.level {
-                    level = Some(l.clone());
-                }
-                if let Some(lbl) = &mapping.label {
-                    label = Some(lbl.clone());
-                }
+            if !selector_matches(&mapping.selector, elem) {
+                continue;
+            }
+            any_match = true;
+            let spec = crate::gcpm::specificity(&mapping.selector);
+            if let Some(l) = &mapping.level
+                && level_specificity.is_none_or(|cur| spec >= cur)
+            {
+                level = Some(l.clone());
+                level_specificity = Some(spec);
+            }
+            if let Some(lbl) = &mapping.label
+                && label_specificity.is_none_or(|cur| spec >= cur)
+            {
+                label = Some(lbl.clone());
+                label_specificity = Some(spec);
             }
         }
         if !any_match {
@@ -7294,6 +7308,121 @@ li::marker { content: url("star.png"); }
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.level, 2);
         assert_eq!(results[0].1.label, "B");
+    }
+
+    #[test]
+    fn bookmark_pass_level_specificity_beats_later_lower_specificity_mapping() {
+        // Id mapping (higher specificity) sets `level` only and comes
+        // FIRST. Tag mapping (lower specificity) comes SECOND and tries to
+        // override `level` while also setting `label` (a field the Id
+        // mapping left untouched).
+        //
+        // Under the OLD code (pure forward field overlay, ignoring
+        // specificity), the later Tag mapping would win the `level` field
+        // since it iterates last — wrong. The new code must let the
+        // higher-specificity Id mapping's `level` survive, while still
+        // picking up the Tag mapping's `label` (fields cascade
+        // independently).
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(5)),
+                    label: Some(vec![ContentItem::String("Overridden".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "higher-specificity Id mapping's level must survive the later, \
+             lower-specificity Tag mapping's attempt to override it"
+        );
+        assert_eq!(
+            results[0].1.label, "Overridden",
+            "label must still cascade from the Tag mapping — level and \
+             label cascade independently per field"
+        );
+    }
+
+    #[test]
+    fn bookmark_pass_label_specificity_beats_later_lower_specificity_mapping() {
+        // Mirror image of the level test above, but for `label`: Id mapping
+        // (higher specificity) sets BOTH `level` and `label` and comes
+        // FIRST. Tag mapping (lower specificity) comes SECOND and tries to
+        // override `label` only (leaving `level` untouched).
+        //
+        // Under the OLD code (pure forward field overlay), the later Tag
+        // mapping would win the `label` field — wrong. This also proves
+        // `label` cascades BY specificity, not merely independently of
+        // `level`: every other test in this suite leaves
+        // `label_specificity` at `None` when the winning label is set, so
+        // none of them exercise the reject branch of the label guard.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: Some(vec![ContentItem::String("FromId".into())]),
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: None,
+                    label: Some(vec![ContentItem::String("FromTag".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "label-only Tag mapping must not disturb level"
+        );
+        assert_eq!(
+            results[0].1.label, "FromId",
+            "higher-specificity Id mapping's label must survive the later, \
+             lower-specificity Tag mapping's attempt to override it"
+        );
+    }
+
+    #[test]
+    fn bookmark_pass_level_specificity_wins_regardless_of_mapping_order() {
+        // Mirror image of the test above: the lower-specificity Tag
+        // mapping now comes FIRST and the higher-specificity Id mapping
+        // comes SECOND. Both the old and new code happen to agree here
+        // (forward "last wins" already matches "higher specificity wins"
+        // when the higher-specificity mapping is later) — this test
+        // guards against a specificity implementation that is secretly
+        // just order-dependent.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(5)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: None,
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "higher-specificity Id mapping must win regardless of Vec order"
+        );
     }
 
     #[test]
