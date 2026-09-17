@@ -3757,6 +3757,71 @@ fn bookmark_specificity_wins_across_assetbundle_and_link_sources() {
     );
 }
 
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the
+/// `Engine::render` gate around `document_ordered_gcpm_mappings`
+/// (`blitz_adapter::document_has_style_import`, codex review PR #768
+/// discussion r4039213856). AssetBundle's own CSS here declares ONLY an
+/// `@import` — no direct `position: running()` rule — so a bare,
+/// import-blind parse of that CSS text (what the gate used to check) finds
+/// nothing, and `bookmarks` is left at its default `false`. Before the fix
+/// this made the gate skip the whole document-order recompute, so the
+/// import was never resolved and `pageHeader`'s running mapping was never
+/// discovered: `RunningElementPass` never fired for it, it stayed in normal
+/// body flow, and the `@top-center` margin box stayed empty on every page.
+/// With the fix, the header is pulled out of flow and replayed via the
+/// margin box on each page, so it must appear more than once in the
+/// extracted PDF text of a multi-page document.
+#[test]
+fn assetbundle_import_only_running_mapping_is_discovered() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("header.css"),
+        r#"
+        .pageHeader { position: running(pageHeader); }
+        @page { @top-center { content: element(pageHeader); } }
+        "#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::default();
+    assets.add_css(r#"@import "header.css";"#);
+
+    let mut html =
+        String::from(r#"<!doctype html><html><body><div class="pageHeader">RUNNING TEXT</div>"#);
+    for i in 0..200 {
+        html.push_str(&format!(
+            "<p>Paragraph {i} filler content to force pagination.</p>"
+        ));
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(&html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+    let pages = page_count(&pdf);
+    assert!(
+        pages >= 2,
+        "expected filler content to force pagination to >=2 pages, got {pages}"
+    );
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    let occurrences = text.matches("RUNNING TEXT").count();
+    assert!(
+        occurrences >= 2,
+        "expected the running header (mapping only reachable through \
+         AssetBundle's own @import) to repeat via the @top-center margin \
+         box on every page — got {occurrences} occurrence(s) in extracted \
+         text: {text:?}"
+    );
+}
+
 /// End-to-end coverage-scope companion (CLAUDE.md "Coverage scope") for the
 /// `StringSetPass` per-node snapshot budget (`MAX_STRING_SNAPSHOT_BYTES`,
 /// unit-tested in `string_set_pass_snapshot_bounds_total_stored_bytes`). The

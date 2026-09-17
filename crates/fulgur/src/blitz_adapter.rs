@@ -218,19 +218,54 @@ pub fn canonical_directory_url(path: &Path) -> Option<String> {
     }
 }
 
-/// Return type of [`parse_html_with_local_resources`]: the parsed
-/// document, the merged flat GCPM context, the column-CSS side-table
-/// texts, and (fulgur-smlr) the per-top-level-`<link>` node-id-tagged
-/// GCPM contexts. A named alias avoids `clippy::type_complexity` on the
-/// bare 4-tuple; see the function's own doc comment for what each part
-/// means and its "Known limitation" sections for caveats specific to
-/// media-restricted `<link>`s.
-pub type ParsedWithLocalResources = (
+/// Return type of [`parse_html_with_local_resources_with_link_nodes`]: the
+/// parsed document, the merged flat GCPM context, the column-CSS
+/// side-table texts, and (fulgur-smlr) the per-top-level-`<link>`
+/// node-id-tagged GCPM contexts. A named alias avoids
+/// `clippy::type_complexity` on the bare 4-tuple; see that function's own
+/// doc comment for what each part means and its "Known limitation"
+/// sections for caveats specific to media-restricted `<link>`s.
+///
+/// This is `pub(crate)`, not `pub`, on purpose: the 4th element is an
+/// implementation detail this crate's own document-order GCPM fold needs
+/// (see `document_ordered_gcpm_mappings`), not part of the stable public
+/// contract. [`parse_html_with_local_resources`] is the public entry point
+/// and keeps the original 3-tuple shape (codex review, PR #768, discussion
+/// r4039213862 — a downstream caller destructuring that documented 3-tuple
+/// would otherwise silently fail to compile against a 4-tuple with no
+/// deprecation period).
+pub(crate) type ParsedWithLocalResources = (
     HtmlDocument,
     crate::gcpm::GcpmContext,
     Vec<(usize, String)>,
     Vec<(usize, crate::gcpm::GcpmContext)>,
 );
+
+/// Public, stable-shape entry point: parse `html` and return the document,
+/// merged flat GCPM context, and column-CSS side-table texts — the
+/// original 3-tuple contract predating fulgur-smlr. Thin wrapper over
+/// [`parse_html_with_local_resources_with_link_nodes`] that drops the 4th,
+/// crate-internal element (see that function's doc comment for what it
+/// carries and why it isn't part of this public signature).
+pub fn parse_html_with_local_resources(
+    html: &str,
+    viewport_width: f32,
+    viewport_height_px: u32,
+    font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
+    base_path: Option<&Path>,
+) -> (HtmlDocument, crate::gcpm::GcpmContext, Vec<(usize, String)>) {
+    let (doc, gcpm, column_css_texts, _link_gcpm_by_node) =
+        parse_html_with_local_resources_with_link_nodes(
+            html,
+            viewport_width,
+            viewport_height_px,
+            font_data,
+            system_fonts,
+            base_path,
+        );
+    (doc, gcpm, column_css_texts)
+}
 
 /// # Known limitation (tracked as beads fulgur-owa)
 ///
@@ -256,7 +291,7 @@ pub type ParsedWithLocalResources = (
 /// the original `<link>`'s node id, carrying content extracted while
 /// ignoring `media` (same content the flat path above carries
 /// unconditionally today).
-pub fn parse_html_with_local_resources(
+pub(crate) fn parse_html_with_local_resources_with_link_nodes(
     html: &str,
     viewport_width: f32,
     viewport_height_px: u32,
@@ -745,6 +780,59 @@ fn walk_for_inline_styles_by_node(
     }
 }
 
+/// Cheap presence check: does any `<style>` element in `doc` declare a
+/// top-level `@import`? Pure text scanning via
+/// [`crate::gcpm::parser::extract_top_level_import_hrefs`] — no filesystem
+/// access, so this is safe to call regardless of whether a `base_path` is
+/// configured (unlike [`parse_gcpm_with_style_imports`], which needs one to
+/// actually resolve a target).
+///
+/// Used by `Engine::render`'s gate around `document_ordered_gcpm_mappings`
+/// (fulgur-smlr code review, discussion r4039213856): that gate used to
+/// skip the whole document-order recompute whenever a bare, import-blind
+/// `parse_gcpm` on `combined_css` found no direct `position: running()`
+/// rule. But a `<style>` block's own `@import` target can carry that rule
+/// even when the `<style>` tag's own literal text does not — see
+/// `parse_gcpm_with_style_imports`'s doc comment — and this bare-parse gate
+/// runs BEFORE any import is resolved, so it can never see that content.
+/// This check restores correctness cheaply: it forces the recompute (which
+/// does resolve the import, via `collect_inline_gcpm_by_node`) whenever an
+/// `@import` is merely PRESENT, without needing to resolve it here just to
+/// decide whether to bother. Note this only needs to check `<style>`
+/// elements, never `<link>`: a real `<link>`'s `@import` chain is already
+/// resolved through Blitz's own `NetProvider` fetch path and folded into
+/// `gcpm.running_mappings` before this gate runs (see
+/// `parse_html_with_local_resources`'s `link_gcpm`), so the
+/// `!gcpm.running_mappings.is_empty()` half of the gate already covers it.
+pub(crate) fn document_has_style_import(doc: &HtmlDocument) -> bool {
+    walk_for_style_import_presence(doc, doc.root_element().id, 0)
+}
+
+fn walk_for_style_import_presence(doc: &HtmlDocument, node_id: usize, depth: usize) -> bool {
+    if depth >= MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        let mut css = String::new();
+        for &child_id in &node.children {
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Text(t) = &child.data
+            {
+                css.push_str(&t.content);
+            }
+        }
+        return !crate::gcpm::parser::extract_top_level_import_hrefs(&css).is_empty();
+    }
+    node.children
+        .iter()
+        .any(|&child_id| walk_for_style_import_presence(doc, child_id, depth + 1))
+}
+
 /// Bound on recursive `@import` resolution DEPTH for
 /// [`resolve_style_imports`]. This walks the filesystem following
 /// `@import` chains — outside the DOM tree structure entirely — so
@@ -817,14 +905,16 @@ fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::
     if let Some(base) = base_path
         && let Ok(canonical_base) = base.canonicalize()
     {
-        let mut visited = std::collections::HashSet::new();
+        let mut in_progress = std::collections::HashSet::new();
+        let mut cache = std::collections::HashMap::new();
         resolve_style_imports(
             css,
             &canonical_base,
             &canonical_base,
             &mut ctx,
             0,
-            &mut visited,
+            &mut in_progress,
+            &mut cache,
         );
     }
     ctx.extend_from(crate::gcpm::parser::parse_gcpm(css));
@@ -844,56 +934,99 @@ fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::
 /// stylesheet" rule — it changes at each recursion level (to the imported
 /// file's own parent directory) while `security_base` never does.
 ///
-/// `visited` collects every canonicalized path resolved so far across the
-/// WHOLE call tree (not just the current chain) and is the primary guard
-/// against combinatorial blowup: a file `@import`ing the same target `k`
-/// times only pays the read+parse+recursion cost for that target ONCE —
-/// every subsequent reference is a `HashSet` lookup that short-circuits
-/// immediately. Without this, `k` `@import`s of one target multiply at
-/// EVERY recursion level, so `MAX_STYLE_IMPORT_DEPTH` alone bounds a
-/// linear chain but not a branching one (see that constant's doc comment).
-/// This also incidentally makes `resolve_style_imports` immune to true
-/// cycles (`a.css` imports `b.css` imports `a.css`) regardless of the
-/// depth cap, since the second visit to any already-seen path is skipped
-/// outright.
+/// `in_progress` holds every canonicalized path currently being resolved on
+/// the CURRENT recursion chain (an ancestor stack, not the whole call
+/// tree) — a target already in it is a true cycle (`a.css` imports `b.css`
+/// imports `a.css`) and is skipped to avoid infinite recursion. `cache`
+/// holds the fully-resolved `GcpmContext` for every path that has FINISHED
+/// resolving anywhere in the whole call tree, keyed by canonical path, and
+/// is the primary guard against combinatorial blowup: a file `@import`ing
+/// the same target `k` times only pays the read+parse+recursion cost for
+/// that target ONCE (the first occurrence populates `cache`); every
+/// subsequent reference — including one reached from a completely
+/// different branch of the import graph — is a cheap `HashMap` lookup
+/// followed by a clone-and-extend, not a re-read/re-parse/re-recurse.
+/// Without this, `k` `@import`s of one target multiply at EVERY recursion
+/// level, so `MAX_STYLE_IMPORT_DEPTH` alone bounds a linear chain but not a
+/// branching one (see that constant's doc comment).
+///
+/// Splitting the old single `visited` set into these two pieces (rather
+/// than discarding every repeat outright) preserves CSS cascade order for
+/// legitimately-repeated imports: `@import "a.css"; @import "b.css";
+/// @import "a.css";` must fold `a`'s content in twice, at its two distinct
+/// textual positions, so the final `a.css` occurrence can still win an
+/// equal-specificity tie over `b.css` — collapsing it to one occurrence
+/// (as a single shared `visited` set would) silently reorders the cascade.
 fn resolve_style_imports(
     css: &str,
     security_base: &Path,
     resolve_dir: &Path,
     out: &mut crate::gcpm::GcpmContext,
     depth: usize,
-    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    in_progress: &mut std::collections::HashSet<std::path::PathBuf>,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
 ) {
     if depth >= MAX_STYLE_IMPORT_DEPTH {
         return;
     }
+    // Resolve hrefs as URLs against the importing stylesheet's own
+    // directory, not as raw filesystem path components — an href like
+    // `chapters.css?v=1` or `chapter%20one.css` is a URL Blitz's own
+    // fetch path resolves and decodes, not a literal filename containing
+    // `?v=1` or `%20`.
+    let Ok(resolve_dir_url) = Url::from_directory_path(resolve_dir) else {
+        return;
+    };
     for href in crate::gcpm::parser::extract_top_level_import_hrefs(css) {
-        let Ok(canonical) = resolve_dir.join(&href).canonicalize() else {
+        let Ok(joined) = resolve_dir_url.join(&href) else {
+            continue;
+        };
+        let Ok(candidate) = joined.to_file_path() else {
+            continue;
+        };
+        let Ok(canonical) = candidate.canonicalize() else {
             continue;
         };
         if !canonical.starts_with(security_base) {
             continue;
         }
-        // `HashSet::insert` returns `false` if the value was already
-        // present — one check-and-mark for both the branching-blowup
-        // guard and the cycle guard.
-        if !visited.insert(canonical.clone()) {
+        if let Some(cached) = cache.get(&canonical) {
+            out.extend_from(cached.clone());
+            continue;
+        }
+        // `HashSet::insert` returns `false` if the value is already an
+        // ancestor on this chain — a genuine cycle, not merely a repeat.
+        if !in_progress.insert(canonical.clone()) {
             continue;
         }
         let Ok(bytes) =
             crate::asset::read_file_capped(&canonical, crate::asset::MAX_CSS_BYTES, "CSS file")
         else {
+            in_progress.remove(&canonical);
             continue;
         };
         let Ok(text) = String::from_utf8(bytes) else {
+            in_progress.remove(&canonical);
             continue;
         };
         let child_dir = canonical.parent().unwrap_or(resolve_dir);
         // Child-before-parent: recurse into this file's own @imports
         // FIRST, matching net.rs's post-order convention for <link>/
         // @import subtrees.
-        resolve_style_imports(&text, security_base, child_dir, out, depth + 1, visited);
-        out.extend_from(crate::gcpm::parser::parse_gcpm(&text));
+        let mut file_ctx = crate::gcpm::GcpmContext::default();
+        resolve_style_imports(
+            &text,
+            security_base,
+            child_dir,
+            &mut file_ctx,
+            depth + 1,
+            in_progress,
+            cache,
+        );
+        file_ctx.extend_from(crate::gcpm::parser::parse_gcpm(&text));
+        in_progress.remove(&canonical);
+        cache.insert(canonical.clone(), file_ctx.clone());
+        out.extend_from(file_ctx);
     }
 }
 
@@ -4450,7 +4583,14 @@ mod tests {
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
         let (_doc, gcpm, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         let cleaned = &gcpm.cleaned_css;
         let child_pos = cleaned
@@ -4487,7 +4627,14 @@ mod tests {
 <body><p class="single-rule">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -4539,7 +4686,14 @@ mod tests {
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -4601,7 +4755,14 @@ mod tests {
 <body><p class="a-rule b-rule">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -4666,7 +4827,14 @@ mod tests {
 <body><p class="print-rule">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -4734,7 +4902,14 @@ mod tests {
 <body><p class="rule-a rule-b">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -4902,7 +5077,14 @@ mod tests {
 <body><p class="rule-a rule-b rule-c">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         assert_eq!(
             link_gcpm_by_node.len(),
@@ -5129,7 +5311,14 @@ mod tests {
 <body><p class="direct-rule nested-rule">x</p></body></html>"#;
 
         let (doc, _gcpm, _column_css, link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         let (running, bookmarks) = document_ordered_gcpm_mappings(
             &doc,
@@ -5259,6 +5448,131 @@ mod tests {
              @import-ed 3 times, got {:?}",
             ctx.bookmark_mappings
         );
+    }
+
+    /// Codex review (PR #768, discussion r4039213840): a LEGITIMATE repeat
+    /// of the same import target (not a cycle — `a.css` never itself
+    /// imports anything) must still be replayed at each of its textual
+    /// positions, not collapsed to one occurrence. `@import "a.css";
+    /// @import "b.css"; @import "a.css";` must fold `a`'s content in
+    /// TWICE, so the final `a.css` occurrence can still win an
+    /// equal-specificity cascade tie over `b.css` — collapsing it (the old
+    /// single shared `visited` set's behavior) would silently make `b.css`
+    /// win instead.
+    #[test]
+    fn resolve_style_imports_replays_repeated_non_cyclic_import() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".other { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "a.css"; @import "b.css"; @import "a.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let selectors: Vec<_> = ctx
+            .bookmark_mappings
+            .iter()
+            .map(|m| m.selector.clone())
+            .collect();
+        assert_eq!(
+            selectors,
+            vec![
+                ParsedSelector::Class("rule".to_string()),
+                ParsedSelector::Class("other".to_string()),
+                ParsedSelector::Class("rule".to_string()),
+            ],
+            "expected a, b, a in cascade order, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213844): an `@import` href
+    /// must be resolved as a URL against the importing stylesheet's own
+    /// directory, not joined as a raw filesystem path component. A query
+    /// string (`?v=1`) is part of the URL, not the filename, and a
+    /// percent-escape (`%20`) must be decoded — Blitz's own fetch path
+    /// resolves both the same way, so `resolve_style_imports` must match
+    /// it or silently drop the imported GCPM content.
+    #[test]
+    fn resolve_style_imports_resolves_href_with_query_string() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chapters.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "chapters.css?v=1";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "a query string on the href must not prevent resolving the \
+             underlying file, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn resolve_style_imports_resolves_percent_encoded_href() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chapter one.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "chapter%20one.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "a percent-encoded href must decode to the real filename, \
+             got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213856): `document_has_style_import`
+    /// is the cheap presence check `Engine::render`'s gate now consults so it
+    /// doesn't skip `document_ordered_gcpm_mappings` (and therefore never
+    /// resolve the import) just because a bare, import-blind parse found no
+    /// direct `position: running()` rule.
+    #[test]
+    fn document_has_style_import_detects_top_level_import() {
+        let html = r#"<!doctype html><html><head>
+            <style>@import "foo.css";</style>
+        </head><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(document_has_style_import(&doc));
+    }
+
+    #[test]
+    fn document_has_style_import_false_for_no_style_import() {
+        let html = r#"<!doctype html><html><head>
+            <style>.x { color: red; }</style>
+        </head><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(!document_has_style_import(&doc));
+    }
+
+    #[test]
+    fn document_has_style_import_false_for_no_style_tag_at_all() {
+        let html = r#"<!doctype html><html><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(!document_has_style_import(&doc));
     }
 
     #[test]
@@ -7528,6 +7842,22 @@ mod tests {
         );
     }
 
+    /// Codex review (PR #768, discussion r4039213862): the public
+    /// `parse_html_with_local_resources` must keep its original 3-tuple
+    /// return shape — a downstream caller destructuring `(doc, gcpm,
+    /// column_css)` should still compile against this crate version. The
+    /// 4th, node-id-tagged piece fulgur-smlr added lives only on the
+    /// crate-internal `parse_html_with_local_resources_with_link_nodes`.
+    #[test]
+    fn parse_html_with_local_resources_keeps_three_tuple_public_contract() {
+        let html = "<!doctype html><html><head></head><body>x</body></html>";
+        let (_doc, _gcpm, _column_css): (
+            HtmlDocument,
+            crate::gcpm::GcpmContext,
+            Vec<(usize, String)>,
+        ) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+    }
+
     #[test]
     fn element_text_does_not_stack_overflow_on_deep_nesting() {
         // Regression guard: element_text used to recurse without a depth
@@ -7546,7 +7876,7 @@ mod tests {
         html.push_str("</body></html>");
 
         let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(&html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(&html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let root = doc.root_element();
         let _ = element_text(doc.deref(), root.id);
@@ -7585,7 +7915,7 @@ mod tests {
     fn element_text_inserts_space_between_block_children() {
         let html = "<html><body><a id='x'><div>foo</div><div>bar</div></a></body></html>";
         let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -7596,7 +7926,7 @@ mod tests {
     fn element_text_inserts_space_for_br() {
         let html = "<html><body><a id='x'>foo<br>bar</a></body></html>";
         let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -7609,7 +7939,7 @@ mod tests {
         // not add another space.
         let html = "<html><body><a id='x'>foo <div>bar</div></a></body></html>";
         let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -7626,7 +7956,7 @@ mod tests {
             <style>@page { size: A4 landscape; }</style>
         </head><body>x</body></html>"#;
         let (doc, _, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -7639,7 +7969,7 @@ mod tests {
     fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
         let html = r#"<!doctype html><html><body>x</body></html>"#;
         let (doc, _, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert!(gcpm.page_settings.is_empty());
     }
@@ -7655,7 +7985,7 @@ mod tests {
             <style>@page { margin: 2cm; }</style>
         </head><body>x</body></html>"#;
         let (doc, _, _column_css, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -7817,7 +8147,14 @@ mod tests {
 <body><div class="callout" id="c"></div></body></html>"#;
 
         let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
         assert!(
             !column_css_texts.is_empty(),
             "expected the linked stylesheet's text to be drained"
@@ -7858,7 +8195,14 @@ mod tests {
 <body><div class="callout" id="c"></div></body></html>"#;
 
         let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
         assert!(
             !column_css_texts.is_empty(),
             "expected the extensionless linked stylesheet's text to be drained"

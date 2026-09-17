@@ -1371,8 +1371,18 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
 /// Everything except `@import` is rejected, which makes cssparser's own
 /// built-in error-recovery skip it (the same recovery `GcpmSheetParser`
 /// already relies on to ignore any at-rule other than `@page`).
+///
+/// `seen_non_import` tracks whether a top-level statement other than
+/// `@import` has already been encountered. Per the CSS syntax, `@import`
+/// is only valid while it (and `@charset`) is the only kind of statement
+/// seen so far in the stylesheet — once any other rule (valid or not)
+/// appears, every subsequent `@import` is invalid and must be ignored, the
+/// same way a real cascade would. Both trait impls below flip this flag
+/// the moment they see a non-`@import` prelude, and `rule_without_block`
+/// consults it before recording an `@import`'s href.
 struct ImportHrefScanner<'a> {
     out: &'a mut Vec<String>,
+    seen_non_import: bool,
 }
 
 impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
@@ -1386,6 +1396,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
         if !name.eq_ignore_ascii_case("import") {
+            self.seen_non_import = true;
             return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
         }
         input.skip_whitespace();
@@ -1423,7 +1434,12 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         prelude: Self::Prelude,
         _start: &cssparser::ParserState,
     ) -> Result<Self::AtRule, ()> {
-        self.out.push(prelude);
+        // An `@import` reached after some other top-level statement is
+        // invalid per the CSS syntax and must be ignored — see the
+        // `seen_non_import` doc comment on the struct.
+        if !self.seen_non_import {
+            self.out.push(prelude);
+        }
         Ok(())
     }
 }
@@ -1432,6 +1448,17 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
     type Prelude = ();
     type QualifiedRule = ();
     type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        // A qualified (style) rule at top level always terminates the
+        // valid `@import` zone, even though this scanner otherwise
+        // ignores its contents entirely.
+        self.seen_non_import = true;
+        Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+    }
 }
 
 /// Extract every top-level `@import` statement's target URL from raw CSS
@@ -1453,7 +1480,10 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
 /// hand-rolled string scan).
 pub(crate) fn extract_top_level_import_hrefs(css: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut scanner = ImportHrefScanner { out: &mut out };
+    let mut scanner = ImportHrefScanner {
+        out: &mut out,
+        seen_non_import: false,
+    };
     let mut input = ParserInput::new(css);
     let mut input = Parser::new(&mut input);
     let iter = StyleSheetParser::new(&mut input, &mut scanner);
@@ -1609,6 +1639,36 @@ mod tests {
         // invariant.
         let css = "@import ; body { color: red; }";
         assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// Codex review (PR #768, discussion r4039213850): CSS syntax makes an
+    /// `@import` that comes after any other top-level statement invalid —
+    /// it must be ignored, not resolved. `.x { color: red }` here is a
+    /// qualified (style) rule preceding `@import "bookmarks.css"`, so the
+    /// import must NOT be reported despite tokenizing cleanly on its own.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_qualified_rule() {
+        let css = r#".x { color: red } @import "bookmarks.css";"#;
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// Same rule, but the terminating statement is another (non-import)
+    /// at-rule rather than a qualified rule.
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_after_other_at_rule() {
+        let css = r#"@page { size: A4; } @import "bookmarks.css";"#;
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
+    /// Imports preceding the terminating statement are still collected —
+    /// only imports that come AFTER it are dropped.
+    #[test]
+    fn extract_top_level_import_hrefs_keeps_imports_before_terminator() {
+        let css = r#"@import "a.css"; .x { color: red } @import "b.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["a.css".to_string()]
+        );
     }
 
     #[test]

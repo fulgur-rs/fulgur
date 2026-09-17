@@ -200,7 +200,7 @@ impl Engine {
         // default browser styles even though their content resolved
         // correctly.
         let (mut doc, link_gcpm, link_column_css, link_gcpm_by_node) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 &html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
@@ -333,7 +333,24 @@ impl Engine {
         // bookmarks-related CSS and doesn't opt into the bookmarks/PDF-UA
         // flags pays zero extra DOM-walk cost here — restoring the "zero
         // net new traversal cost for the common case" property.
-        if self.config.effective_bookmarks() || !gcpm.running_mappings.is_empty() {
+        //
+        // `gcpm.running_mappings` at this point only reflects a DIRECT
+        // `position: running()` rule (or one reached through a real
+        // `<link>`'s own `@import` chain, already folded in above) — a
+        // `<style>` tag whose OWN `@import` target declares the rule is
+        // invisible to it, because that import is only ever resolved
+        // inside the walk this gate guards
+        // (`document_ordered_gcpm_mappings` → `collect_inline_gcpm_by_node`
+        // → `parse_gcpm_with_style_imports`). So an empty
+        // `gcpm.running_mappings` here is NOT proof the recompute is
+        // unneeded when such an import is merely present (codex review,
+        // discussion r4039213856) — `document_has_style_import` is a cheap,
+        // filesystem-free presence check that forces the recompute in
+        // exactly that case, without resolving the import just to decide.
+        if self.config.effective_bookmarks()
+            || !gcpm.running_mappings.is_empty()
+            || crate::blitz_adapter::document_has_style_import(&doc)
+        {
             let ua_bookmark_mappings = if self.config.effective_bookmarks() {
                 crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS)
                     .bookmark_mappings
@@ -901,7 +918,7 @@ impl Engine {
         let fonts = self.fonts();
 
         let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
@@ -968,7 +985,7 @@ impl Engine {
         let fonts = self.fonts();
 
         let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
