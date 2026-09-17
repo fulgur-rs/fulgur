@@ -974,25 +974,45 @@ fn fold_gcpm_by_document_order(
 /// document-order walk, but the three sources are combined with two
 /// *different* merge rules, not uniformly:
 ///
-/// - `collect_inline_gcpm_by_node(doc)` seeds the map first. This walk
-///   runs over the FINAL `doc` (after `apply_passes`), so it also visits
-///   two kinds of node whose *own* text is a near-duplicate of content
-///   that belongs to a different source: a media-rewritten `<link>`'s
-///   synthetic `<style>@import url(...) media;</style>` replacement (its
-///   own text carries no GCPM construct — `parse_gcpm` on bare `@import`
-///   text returns a fully empty [`crate::gcpm::GcpmContext`], verified in
-///   `blitz_adapter`'s test suite), and — when `assetbundle_css_injected`
-///   — `InjectCssPass`'s injected `<style>` (its own text is
-///   `combined_css` with GCPM constructs ALREADY stripped by the earlier
-///   `parse_gcpm` call in `engine.rs`, so `bookmark-level`/`bookmark-label`
-///   *would* still be present verbatim there — see below).
-/// - `link_gcpm_by_node` entries are merged into that seed via
-///   `extend_from` (append, not overwrite). This is safe specifically
-///   because the only node id a `link_gcpm_by_node` entry can ever share
-///   with the seed map is a media-rewritten `<link>`'s replacement
-///   `<style>` id, whose seed-map entry is always fully empty (see
-///   above) — so `extend_from`-ing the real content into it never
-///   double-counts anything.
+/// - `collect_inline_gcpm_by_node(doc, base_path)` seeds the map first.
+///   This walk runs over the FINAL `doc` (after `apply_passes`), calling
+///   [`parse_gcpm_with_style_imports`] on every `<style>` node's own text
+///   — which, since the round-2 `@import`-resolution fix, ALSO resolves
+///   any `@import` that text itself declares (ignoring media, since
+///   [`crate::gcpm::parser::extract_top_level_import_hrefs`] doesn't check
+///   it). That includes TWO kinds of node whose *own* text ends up a
+///   near-duplicate of content that belongs to a different source: a
+///   media-rewritten `<link>`'s synthetic
+///   `<style>@import url(...) media;</style>` replacement (its `@import`
+///   now resolves to the SAME file `link_gcpm_by_node`'s entry for this
+///   same, remapped node id already carries in full — this is no longer
+///   the "fully empty" case it used to be pre-round-2, see below), and —
+///   when `assetbundle_css_injected` — `InjectCssPass`'s injected `<style>`
+///   (its own text is `combined_css` with GCPM constructs ALREADY stripped
+///   by the earlier `parse_gcpm` call in `engine.rs`, so
+///   `bookmark-level`/`bookmark-label` *would* still be present verbatim
+///   there — see below).
+/// - `link_gcpm_by_node` entries are merged into that seed via `insert`
+///   (overwrite, NOT `extend_from`/append). A live, non-rewritten `<link>`
+///   node id never collides with the seed map at all (the seed only ever
+///   contains `<style>` entries), so `insert` behaves identically to
+///   `extend_from` there. For a media-rewritten `<link>`, the ONLY node id
+///   `link_gcpm_by_node`'s (remapped) entry can collide with is that
+///   `<link>`'s own synthetic `<style>@import>` replacement — whose seed
+///   entry, per the point above, is now a duplicate (not empty) of
+///   `link_gcpm_by_node`'s entry for the same content. `extend_from` here
+///   used to append both, silently doubling every media-restricted
+///   `<link>`'s mappings (harmless for the winner-take-all
+///   `BookmarkPass`/`RunningElementPass` consumers today, but real wasted
+///   `@import` file I/O per render, a live coverage gap, and this exact
+///   doc comment's own stale claim — found in code review across the
+///   whole fulgur-smlr range). `insert` discards the seed's redundant
+///   duplicate outright and keeps `link_gcpm_by_node`'s copy — which is
+///   authoritative anyway, being resolved via `net.rs`'s real per-file
+///   fetch and its own child-before-parent `@import`-subtree fold, not a
+///   filesystem re-walk from this function. See
+///   `document_ordered_gcpm_mappings_media_link_merge_does_not_duplicate_bookmark_mapping`
+///   in this module's test suite for the count-based regression guard.
 /// - The AssetBundle-injected `<style>` node (when present) is handled
 ///   with a TARGETED merge, not a plain `extend_from`. The seed map's own
 ///   entry for this node — built from `collect_inline_gcpm_by_node`
@@ -1050,7 +1070,11 @@ pub(crate) fn document_ordered_gcpm_mappings(
 ) {
     let mut node_gcpm = collect_inline_gcpm_by_node(doc, base_path);
     for (node_id, ctx) in link_gcpm_by_node.iter().cloned() {
-        node_gcpm.entry(node_id).or_default().extend_from(ctx);
+        // `insert`, not `extend_from` — see the "Merge strategy" doc
+        // comment above for why a media-rewritten `<link>`'s remapped
+        // node id can collide with an already-non-empty seed entry now,
+        // and why overwriting (not appending) is correct there.
+        node_gcpm.insert(node_id, ctx);
     }
     if assetbundle_css_injected
         && let Some(head_id) = find_element_by_tag(doc, "head")
@@ -5064,6 +5088,84 @@ mod tests {
         assert_eq!(
             bookmarks[0].selector,
             ParsedSelector::Class("target".to_string())
+        );
+    }
+
+    /// fulgur-smlr code review (final pass across the whole
+    /// bbcd3e98..cf8dfb8f range): guards the `link_gcpm_by_node` merge
+    /// (`insert`, not `extend_from`) against the media-rewritten `<link>`
+    /// case specifically — see `document_ordered_gcpm_mappings`'s doc
+    /// comment "Merge strategy" section. Since round 2's
+    /// `parse_gcpm_with_style_imports` fix, `collect_inline_gcpm_by_node`'s
+    /// seed walk now resolves the media-rewrite replacement
+    /// `<style>@import url(...) media;</style>` node's own `@import` too
+    /// (ignoring the media qualifier) — producing a duplicate of the SAME
+    /// content `link_gcpm_by_node`'s (remapped) entry for that same node
+    /// id already carries via `net.rs`'s real fetch. Asserts the RAW
+    /// mapping count directly (not PDF outline titles — outline-title
+    /// assertions are exactly what let this slip through undetected
+    /// across two prior review rounds, since `BookmarkPass`/
+    /// `RunningElementPass` are winner-take-all and mask exact-duplicate
+    /// mappings). Covers a media-restricted `<link>` whose file has a
+    /// NESTED `@import` (`direct.css` imports `nested.css`), so this test
+    /// catches duplication in both the direct and the nested content, not
+    /// just the top-level file.
+    #[test]
+    fn document_ordered_gcpm_mappings_media_link_merge_does_not_duplicate_bookmark_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("direct.css"),
+            r#"@import "nested.css"; .direct-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("nested.css"),
+            r#".nested-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="direct.css" media="print"></head>
+<body><p class="direct-rule nested-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+
+        let (running, bookmarks) = document_ordered_gcpm_mappings(
+            &doc,
+            "",    // combined_css — no AssetBundle CSS in this scenario
+            false, // assetbundle_css_injected
+            &link_gcpm_by_node,
+            Vec::new(),
+            Some(dir.path()),
+        );
+
+        assert!(running.is_empty());
+        assert_eq!(
+            bookmarks.len(),
+            2,
+            "expected exactly one mapping each from direct.css and \
+             nested.css — a media-restricted <link>'s content must not be \
+             duplicated by the seed map's own (now non-empty since round \
+             2) @import resolution of the media-rewrite replacement \
+             <style> node, got {bookmarks:?}"
+        );
+        let direct_count = bookmarks
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("direct-rule".to_string()))
+            .count();
+        let nested_count = bookmarks
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("nested-rule".to_string()))
+            .count();
+        assert_eq!(
+            direct_count, 1,
+            "direct.css's own rule must appear exactly once, got {bookmarks:?}"
+        );
+        assert_eq!(
+            nested_count, 1,
+            "nested.css's rule (reached via direct.css's own @import) must \
+             appear exactly once, got {bookmarks:?}"
         );
     }
 
