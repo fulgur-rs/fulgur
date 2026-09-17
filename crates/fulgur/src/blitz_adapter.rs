@@ -3738,6 +3738,17 @@ fn escape_css_url(raw: &str) -> String {
 /// integration) must filter any stylesheet resources that blitz already
 /// fetched for the `<link>` node before DOM mutation, otherwise the
 /// empty-media copy would also apply.
+///
+/// **Node id reuse hazard** (fulgur-smlr): `mutator.remove_and_drop_node`
+/// frees the original `<link>`'s slot in the DOM's `slab::Slab` node
+/// arena, and the very next `mutator.create_element` (for this or a
+/// later rewrite in the same batch) can reuse that freed id for an
+/// unrelated `<style>` node. With 2+ media-restricted `<link>`s in one
+/// document, a node id captured *before* this function runs (e.g.
+/// `FulgurNetProvider`'s `gcpm_by_link_node`, keyed at fetch time) can
+/// therefore end up identifying a *different* `<link>`'s replacement
+/// `<style>` once this function returns. Anything consuming such
+/// pre-rewrite ids against the post-rewrite `doc` must account for this.
 pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[LinkMediaRewrite]) {
     for rw in rewrites {
         let css = format!(

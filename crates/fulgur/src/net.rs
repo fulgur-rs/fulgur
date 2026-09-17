@@ -70,6 +70,17 @@ struct Inner {
     /// `page_settings`/etc. This new field feeds only the document-order
     /// `running_mappings`/`bookmark_mappings` recompute (fulgur-smlr, a
     /// later task in that plan).
+    ///
+    /// **Landmine for that later task**: keys are captured at fetch time,
+    /// *before* `apply_link_media_rewrites` runs. That function removes
+    /// media-rewritten `<link>` nodes and creates new `<style>` nodes in
+    /// the same `doc`; since the DOM's node arena is a `slab::Slab`
+    /// (LIFO free list), a freed `<link>`'s id can be immediately reused
+    /// by a *different* `<link>`'s replacement `<style>` node when 2+
+    /// media-restricted `<link>`s appear in one document. A consumer
+    /// walking the post-rewrite `doc` must not assume a key here still
+    /// identifies the same node for a media-restricted `<link>` — see
+    /// `apply_link_media_rewrites`'s doc comment in `blitz_adapter.rs`.
     gcpm_by_link_node: Vec<(usize, GcpmContext)>,
     /// Recursion depth through nested `@import` fetches — 0 outside any
     /// fetch, incremented on entry to `fetch()`, decremented on exit. A
