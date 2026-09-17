@@ -2006,11 +2006,17 @@ impl RunningElementPass {
         }
     }
 
+    /// Picks the winning `position: running(name)` mapping for `elem` by
+    /// specificity, then by `self.mappings` position (later wins ties) —
+    /// see fulgur-smlr. The enumerate index doubles as the source-order
+    /// key without needing a separate field on `RunningMapping`.
     fn find_running_name(&self, elem: &blitz_dom::node::ElementData) -> Option<String> {
         self.mappings
             .iter()
-            .find(|m| selector_matches(&m.parsed, elem))
-            .map(|m| m.running_name.clone())
+            .enumerate()
+            .filter(|(_, m)| selector_matches(&m.parsed, elem))
+            .max_by_key(|(i, m)| (crate::gcpm::specificity(&m.parsed), *i))
+            .map(|(_, m)| m.running_name.clone())
     }
 }
 
@@ -4067,6 +4073,114 @@ mod tests {
         assert_eq!(store.instance_count(), 1);
         assert_eq!(store.name_of(0), Some("pageTitle"));
         assert!(store.get_html(0).unwrap().contains("Doc Title"));
+    }
+
+    #[test]
+    fn find_running_name_prefers_higher_specificity_over_vec_position() {
+        // Class mapping is FIRST in the Vec (would win under the old
+        // first-match rule). Id mapping is SECOND but must win because it
+        // has higher specificity.
+        let html = r#"<html><head></head><body>
+            <div id="main-hdr" class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "fromClass".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("main-hdr".to_string()),
+                running_name: "fromId".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("fromId"),
+            "Id selector (higher specificity) must win over Class selector \
+             despite appearing later in the mappings Vec"
+        );
+    }
+
+    #[test]
+    fn find_running_name_prefers_higher_specificity_when_it_comes_first() {
+        // Mirror image of the test above: Id is FIRST, so a naive
+        // "last match wins" rule (ignoring specificity entirely) would
+        // pick the Class mapping. Specificity must still win regardless
+        // of which mapping comes first or last in the Vec.
+        let html = r#"<html><head></head><body>
+            <div id="main-hdr" class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("main-hdr".to_string()),
+                running_name: "fromId".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "fromClass".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("fromId"),
+            "specificity must outrank Vec position: Id wins even though \
+             the lower-specificity Class mapping comes later"
+        );
+    }
+
+    #[test]
+    fn find_running_name_breaks_specificity_ties_by_later_vec_position() {
+        // Both mappings are Class selectors (equal specificity) and both
+        // match the same element. The one later in the Vec must win, same
+        // as real CSS "last rule wins" behavior for equal specificity.
+        let html = r#"<html><head></head><body>
+            <div class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "firstClass".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "secondClass".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("secondClass"),
+            "On equal specificity, the later mapping in the Vec must win the tie"
+        );
     }
 
     #[test]

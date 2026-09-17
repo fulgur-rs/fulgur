@@ -28,14 +28,6 @@ pub enum ParsedSelector {
 /// collapses to one tier instead of the full `(id, class, type)` triple
 /// real CSS specificity uses. Declaration order gives `Tag < Class < Id`,
 /// matching the CSS specification's precedence.
-///
-/// Not yet called outside tests — wired up by `RunningElementPass` (Task 2)
-/// and `BookmarkPass` (Task 3) of fulgur-smlr. Plain `#[allow(dead_code)]`
-/// rather than `#[expect(dead_code)]`: the lint only fires in the
-/// non-`cfg(test)` build (the unit test below exercises this function, so
-/// `#[expect]` would itself fail as an unfulfilled expectation in the test
-/// build). Remove this attribute once Task 2 adds a real call site.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SelectorSpecificity {
     Tag,
@@ -45,7 +37,6 @@ pub(crate) enum SelectorSpecificity {
 
 /// The specificity tier of a single simple selector (see
 /// [`SelectorSpecificity`]).
-#[allow(dead_code)]
 pub(crate) fn specificity(selector: &ParsedSelector) -> SelectorSpecificity {
     match selector {
         ParsedSelector::Tag(_) => SelectorSpecificity::Tag,
