@@ -3847,4 +3847,113 @@ mod tests {
             ]
         );
     }
+
+    // ── PageRuleParser::parse_prelude: unknown at-rule keyword (line 471) ───────
+
+    #[test]
+    fn test_page_inner_unknown_at_rule_silently_ignored() {
+        // `@unknown {}` inside `@page {}` is not a recognised margin-box
+        // at-rule. `PageRuleParser::parse_prelude` returns `Err` via the
+        // `.ok_or_else(|| ...)` closure (line 471). cssparser drains the block
+        // and continues; the subsequent `size: A4` declaration must still be
+        // recorded.
+        let ctx = parse_gcpm("@page { @unknown { content: 'x'; } size: A4; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        assert_eq!(
+            ctx.page_settings[0].size,
+            Some(PageSizeDecl::Keyword("A4".to_string())),
+            "size after unknown at-rule must still be recorded"
+        );
+        assert!(
+            ctx.margin_boxes.is_empty(),
+            "unknown at-rule must not produce a margin box"
+        );
+    }
+
+    // ── GcpmSheetParser::parse_prelude: colon with non-ident selector (line 77) ─
+
+    #[test]
+    fn test_page_selector_non_ident_after_colon_ignored() {
+        // `@page :123 {}` — colon is present but the next token is a Number,
+        // not an Ident. `expect_ident()` fails at line 77; `try_parse` rolls
+        // back, leaving `:123` unconsumed in the prelude. cssparser sees the
+        // unconsumed prelude tokens and drops the whole at-rule (does NOT call
+        // `parse_block`). A valid `@page` that follows must still be processed,
+        // proving that the parser recovered and continued.
+        let ctx = parse_gcpm("@page :123 { size: A4; } @page { size: A3; }");
+        assert_eq!(
+            ctx.page_settings.len(),
+            1,
+            "the valid @page rule must be stored; malformed one must be dropped"
+        );
+        assert_eq!(
+            ctx.page_settings[0].size,
+            Some(PageSizeDecl::Keyword("A3".to_string())),
+            "only the valid @page rule (A3) must survive"
+        );
+    }
+
+    // ── PageRuleParser::parse_value: standalone margin-right (lines 527-528) ───
+
+    #[test]
+    fn test_page_margin_right_standalone() {
+        // A dedicated test for `margin-right` alone confirms lines 527-528
+        // (`self.margin.right = Some(v)`) are exercised without the other
+        // longhands. The `test_page_margin_all_four_longhands` test covers all
+        // four together; this one proves the standalone path is also reachable.
+        let m = margin_rule("@page { margin-right: 22pt; }");
+        assert_eq!(m.top, None, "top must remain unset");
+        assert!(approx_eq(m.right.unwrap(), 22.0), "right={:?}", m.right);
+        assert_eq!(m.bottom, None, "bottom must remain unset");
+        assert_eq!(m.left, None, "left must remain unset");
+    }
+
+    // ── parse_policy_ident: split-token `first - except` (lines 927-928) ───────
+
+    #[test]
+    fn test_string_policy_first_except_split_token() {
+        // cssparser tokenises `first-except` as a single ident, but some
+        // contexts emit it as three separate tokens: `first` `-` `except`.
+        // Passing spaces around the hyphen (`first - except`) forces this
+        // split form. Lines 927-928 (`expect_delim('-')` and `expect_ident()`)
+        // must consume the `-` and `except` tokens and assemble "first-except".
+        let css = r#"@page { @top-center { content: string(title, first - except); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "title".to_string(),
+                policy: StringPolicy::FirstExcept,
+            }],
+            "split-token `first - except` must resolve to StringPolicy::FirstExcept"
+        );
+    }
+
+    // ── StyleRuleParser::parse_value: invalid bookmark-level drained (line 724) ─
+
+    #[test]
+    fn test_bookmark_level_invalid_value_drained() {
+        // `bookmark-level: invalid` — "invalid" is an ident but not "none",
+        // so `parse_bookmark_level_value` hits the catch-all `_ => Err(...)`.
+        // The else-drain at line 724 (`while input.next().is_ok() {}`) runs,
+        // and no bookmark mapping is recorded.
+        let ctx = parse_gcpm("h1 { bookmark-level: invalid; }");
+        assert!(
+            ctx.bookmark_mappings.is_empty(),
+            "invalid bookmark-level value must not produce a bookmark mapping"
+        );
+    }
+
+    #[test]
+    fn test_bookmark_level_zero_value_drained() {
+        // `bookmark-level: 0` — integer 0 does not satisfy `n >= 1`, so
+        // `parse_bookmark_level_value` falls through to `_ => Err(...)`.
+        // The else-drain at line 724 runs; no bookmark mapping is recorded.
+        let ctx = parse_gcpm("h1 { bookmark-level: 0; }");
+        assert!(
+            ctx.bookmark_mappings.is_empty(),
+            "bookmark-level: 0 must not produce a bookmark mapping"
+        );
+    }
 }
