@@ -199,8 +199,8 @@ impl Engine {
         // the margin-box renderer, so headers/footers would appear in
         // default browser styles even though their content resolved
         // correctly.
-        let (mut doc, link_gcpm, link_column_css) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+        let (mut doc, link_gcpm, link_column_css, link_gcpm_by_node) =
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 &html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
@@ -274,21 +274,18 @@ impl Engine {
             resolved_content_height_px,
         );
 
-        // Prepend UA CSS bookmark mappings so author-CSS rules (appearing
-        // later in `bookmark_mappings`) override them via last-match
-        // cascade. Skipped when bookmarks are disabled to avoid unnecessary
-        // CSS parsing and DOM traversal.
-        if self.config.effective_bookmarks() {
-            let ua_gcpm = crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS);
-            let mut combined_bookmarks = ua_gcpm.bookmark_mappings;
-            combined_bookmarks.extend(gcpm.bookmark_mappings);
-            gcpm.bookmark_mappings = combined_bookmarks;
-        }
-
         // Build and apply DOM passes
         let mut passes: Vec<Box<dyn crate::blitz_adapter::DomPass>> = Vec::new();
 
-        if !css_to_inject.is_empty() {
+        // fulgur-smlr: AssetBundle's cleaned CSS, once injected below, lands
+        // as `<head>`'s LAST child (`InjectCssPass` appends, `insert_before:
+        // None`) — i.e. *after* any author `<link>`/inline `<style>` already
+        // in the document. `document_ordered_gcpm_mappings` needs to know
+        // whether that injection happened at all (an empty AssetBundle
+        // contributes no node to fold) captured before `css_to_inject`
+        // moves into the pass below.
+        let assetbundle_css_injected = !css_to_inject.is_empty();
+        if assetbundle_css_injected {
             passes.push(Box::new(crate::blitz_adapter::InjectCssPass {
                 css: css_to_inject,
             }));
@@ -304,6 +301,74 @@ impl Engine {
 
         let ctx = crate::blitz_adapter::PassContext { font_data: fonts };
         crate::blitz_adapter::apply_passes(&mut doc, &passes, &ctx);
+
+        // fulgur-smlr Part A: recompute running/bookmark mapping order in
+        // true DOM document order (AssetBundle CSS's injected <style> lands
+        // *last* in <head> via InjectCssPass above, not first — see
+        // docs/plans/2026-09-17-fulgur-smlr-gcpm-cascade-design.md). This
+        // must run after `apply_passes` (so the injected node exists) and
+        // before any mapping consumer below. Only running/bookmark mappings
+        // are recomputed — `gcpm`'s other fields (cleaned_css, margin_boxes,
+        // page_settings, counter/string-set mappings) keep today's flat
+        // concatenation order; that's a separate, differently-shaped gap
+        // (see the design doc's "Related, deferred" section). This also
+        // supersedes the old UA-CSS-bookmark-prepend block that used to sit
+        // here — the prepend now happens inside
+        // `document_ordered_gcpm_mappings` itself, against the freshly
+        // document-ordered `bookmark_mappings` rather than the old flat
+        // ones.
+        //
+        // Skip both of `document_ordered_gcpm_mappings`'s DOM walks
+        // entirely when their output cannot affect anything downstream.
+        // `RunningElementPass` (below) runs whenever `gcpm.running_mappings`
+        // is non-empty, independent of the bookmarks feature — so a
+        // non-empty `running_mappings` always needs the reorder.
+        // `BookmarkPass`, in contrast, only ever runs when
+        // `effective_bookmarks()` is true (see `bookmark_active` below); if
+        // it's false, `gcpm.bookmark_mappings` is never read again no
+        // matter what it contains, so reordering it would be pure waste.
+        // `effective_bookmarks()` defaults to `false` (`bookmarks` is
+        // opt-in; `pdf_ua` also implies it — see `config.rs`), so a
+        // document that declares neither `position: running()` nor
+        // bookmarks-related CSS and doesn't opt into the bookmarks/PDF-UA
+        // flags pays zero extra DOM-walk cost here — restoring the "zero
+        // net new traversal cost for the common case" property.
+        //
+        // `gcpm.running_mappings` at this point only reflects a DIRECT
+        // `position: running()` rule (or one reached through a real
+        // `<link>`'s own `@import` chain, already folded in above) — a
+        // `<style>` tag whose OWN `@import` target declares the rule is
+        // invisible to it, because that import is only ever resolved
+        // inside the walk this gate guards
+        // (`document_ordered_gcpm_mappings` → `collect_inline_gcpm_by_node`
+        // → `parse_gcpm_with_style_imports`). So an empty
+        // `gcpm.running_mappings` here is NOT proof the recompute is
+        // unneeded when such an import is merely present (codex review,
+        // discussion r4039213856) — `document_has_style_import` is a cheap,
+        // filesystem-free presence check that forces the recompute in
+        // exactly that case, without resolving the import just to decide.
+        if self.config.effective_bookmarks()
+            || !gcpm.running_mappings.is_empty()
+            || crate::blitz_adapter::document_has_style_import(&doc)
+        {
+            let ua_bookmark_mappings = if self.config.effective_bookmarks() {
+                crate::gcpm::parser::parse_gcpm(crate::gcpm::ua_css::FULGUR_UA_CSS)
+                    .bookmark_mappings
+            } else {
+                Vec::new()
+            };
+            let (ordered_running, ordered_bookmarks) =
+                crate::blitz_adapter::document_ordered_gcpm_mappings(
+                    &doc,
+                    &combined_css,
+                    assetbundle_css_injected,
+                    &link_gcpm_by_node,
+                    ua_bookmark_mappings,
+                    self.base_path.as_deref(),
+                );
+            gcpm.running_mappings = ordered_running;
+            gcpm.bookmark_mappings = ordered_bookmarks;
+        }
 
         // Extract running elements via DomPass (before resolve)
         let running_store = if !gcpm.running_mappings.is_empty() {
@@ -852,8 +917,8 @@ impl Engine {
     pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm, link_column_css) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+        let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
@@ -919,8 +984,8 @@ impl Engine {
     ) {
         let fonts = self.fonts();
 
-        let (mut doc, _link_gcpm, link_column_css) =
-            crate::blitz_adapter::parse_html_with_local_resources(
+        let (mut doc, _link_gcpm, link_column_css, _link_gcpm_by_node) =
+            crate::blitz_adapter::parse_html_with_local_resources_with_link_nodes(
                 html,
                 self.config.content_width().as_pt().in_px().to_f32(),
                 self.config.page_height().as_pt().in_px().to_f32() as u32,
@@ -1902,6 +1967,36 @@ mod tests {
             .render(html)
             .unwrap();
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── GCPM: document_ordered_gcpm_mappings skip guard ────────────────────
+
+    #[test]
+    fn bookmark_rules_present_but_bookmarks_disabled_skips_reorder_safely() {
+        // fulgur-smlr: `document_ordered_gcpm_mappings`'s two DOM walks are
+        // skipped when `effective_bookmarks()` is false AND
+        // `gcpm.running_mappings` is empty — `bookmark-level` CSS is
+        // declared here but `.bookmarks(true)` is never called, so this
+        // hits the skip branch. `BookmarkPass` never runs either way when
+        // bookmarks are disabled, so the render must still succeed and
+        // produce no `/Outlines` — the skip must not corrupt anything
+        // downstream even though `gcpm.bookmark_mappings` is left
+        // un-reordered.
+        let mut assets = AssetBundle::new();
+        assets.add_css(r#".target { bookmark-level: 1; bookmark-label: "Should Not Appear"; }"#);
+        let html = r#"<body><p class="target">Content</p></body>"#;
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(
+            !s.contains("/Outlines"),
+            "bookmarks are disabled; no /Outlines should be emitted even \
+             though bookmark-level CSS is present"
+        );
     }
 
     // ���─ GCPM: string-set with snapshot recording (lines 272-279) ─────────

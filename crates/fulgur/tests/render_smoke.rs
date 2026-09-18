@@ -3703,6 +3703,128 @@ fn bookmark_label_string_appears_in_outline() {
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
 }
 
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the fulgur-smlr
+/// document-order GCPM cascade fold — the lower-level `blitz_adapter` unit
+/// tests and `tests/gcpm_cascade_order.rs`'s integration tests cover the
+/// fold walk / Part 0 remap directly, but neither drives it through the
+/// full `Engine::render` path with a real `AssetBundle`, so this pins that
+/// route too.
+///
+/// Two competing `bookmark-level`/`bookmark-label` rules from DIFFERENT
+/// sources (AssetBundle CSS and a `<link>`-loaded file) target the SAME
+/// element with DIFFERENT specificity tiers: AssetBundle declares a `Class`
+/// selector, the linked file declares an `Id` selector. Per
+/// `ParsedSelector`'s specificity ordering (`Tag < Class < Id`), the `Id`
+/// rule must win regardless of document order — even though AssetBundle's
+/// injected `<style>` lands LAST in `<head>` (and would win an
+/// equal-specificity tie, see `gcpm_cascade_order.rs`'s
+/// `assetbundle_vs_link_equal_specificity_assetbundle_wins`), specificity
+/// still takes priority over document order when the two differ.
+#[test]
+fn bookmark_specificity_wins_across_assetbundle_and_link_sources() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("link.css"),
+        r#"#intro { bookmark-level: 1; bookmark-label: "FROM_LINK_ID"; }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(r#".chapter { bookmark-level: 2; bookmark-label: "FROM_ASSETBUNDLE_CLASS"; }"#);
+
+    let html = r#"<!doctype html><html><head>
+        <link rel="stylesheet" href="link.css">
+    </head><body>
+        <div class="chapter" id="intro">Content</div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty(), "PDF must be non-empty");
+
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["FROM_LINK_ID".to_string()],
+        "the higher-specificity Id rule (from the <link>) must win over the \
+         lower-specificity Class rule (from AssetBundle), regardless of \
+         which source is later in document order, got {titles:?}"
+    );
+}
+
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the
+/// `Engine::render` gate around `document_ordered_gcpm_mappings`
+/// (`blitz_adapter::document_has_style_import`, codex review PR #768
+/// discussion r4039213856). AssetBundle's own CSS here declares the
+/// `@top-center` margin box DIRECTLY (so `gcpm.margin_boxes` — which the
+/// gate's fix does not touch; that field still keeps the old flat
+/// concatenation order, a separate deferred gap — is populated regardless)
+/// but reaches `position: running()` ONLY through an `@import`. A bare,
+/// import-blind parse of the AssetBundle CSS text (what the gate used to
+/// check) therefore finds no direct running rule, and `bookmarks` is left
+/// at its default `false`. Before the fix this made the gate skip the
+/// whole document-order recompute, so the import was never resolved and
+/// `pageHeader`'s running mapping was never discovered: `RunningElementPass`
+/// never fired for it, it stayed in normal body flow, and the `@top-center`
+/// margin box stayed empty on every page. With the fix, the header is
+/// pulled out of flow and replayed via the margin box on each page, so it
+/// must appear more than once in the extracted PDF text of a multi-page
+/// document.
+#[test]
+fn assetbundle_import_only_running_mapping_is_discovered() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("header.css"),
+        r#".pageHeader { position: running(pageHeader); }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::default();
+    assets.add_css(
+        r#"@import "header.css"; @page { @top-center { content: element(pageHeader); } }"#,
+    );
+
+    let mut html =
+        String::from(r#"<!doctype html><html><body><div class="pageHeader">RUNNING TEXT</div>"#);
+    for i in 0..200 {
+        html.push_str(&format!(
+            "<p>Paragraph {i} filler content to force pagination.</p>"
+        ));
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(&html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+    let pages = page_count(&pdf);
+    assert!(
+        pages >= 2,
+        "expected filler content to force pagination to >=2 pages, got {pages}"
+    );
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    let occurrences = text.matches("RUNNING TEXT").count();
+    assert!(
+        occurrences >= 2,
+        "expected the running header (mapping only reachable through \
+         AssetBundle's own @import) to repeat via the @top-center margin \
+         box on every page — got {occurrences} occurrence(s) in extracted \
+         text: {text:?}"
+    );
+}
+
 /// End-to-end coverage-scope companion (CLAUDE.md "Coverage scope") for the
 /// `StringSetPass` per-node snapshot budget (`MAX_STRING_SNAPSHOT_BYTES`,
 /// unit-tested in `string_set_pass_snapshot_bounds_total_stored_bytes`). The

@@ -218,6 +218,55 @@ pub fn canonical_directory_url(path: &Path) -> Option<String> {
     }
 }
 
+/// Return type of [`parse_html_with_local_resources_with_link_nodes`]: the
+/// parsed document, the merged flat GCPM context, the column-CSS
+/// side-table texts, and (fulgur-smlr) the per-top-level-`<link>`
+/// node-id-tagged GCPM contexts. A named alias avoids
+/// `clippy::type_complexity` on the bare 4-tuple; see that function's own
+/// doc comment for what each part means and its "Known limitation"
+/// sections for caveats specific to media-restricted `<link>`s.
+///
+/// This is `pub(crate)`, not `pub`, on purpose: the 4th element is an
+/// implementation detail this crate's own document-order GCPM fold needs
+/// (see `document_ordered_gcpm_mappings`), not part of the stable public
+/// contract. [`parse_html_with_local_resources`] is the public entry point
+/// and keeps the original 3-tuple shape (codex review, PR #768, discussion
+/// r4039213862 — a downstream caller destructuring that documented 3-tuple
+/// would otherwise silently fail to compile against a 4-tuple with no
+/// deprecation period).
+pub(crate) type ParsedWithLocalResources = (
+    HtmlDocument,
+    crate::gcpm::GcpmContext,
+    Vec<(usize, String)>,
+    Vec<(usize, crate::gcpm::GcpmContext)>,
+);
+
+/// Public, stable-shape entry point: parse `html` and return the document,
+/// merged flat GCPM context, and column-CSS side-table texts — the
+/// original 3-tuple contract predating fulgur-smlr. Thin wrapper over
+/// [`parse_html_with_local_resources_with_link_nodes`] that drops the 4th,
+/// crate-internal element (see that function's doc comment for what it
+/// carries and why it isn't part of this public signature).
+pub fn parse_html_with_local_resources(
+    html: &str,
+    viewport_width: f32,
+    viewport_height_px: u32,
+    font_data: &[Arc<Vec<u8>>],
+    system_fonts: bool,
+    base_path: Option<&Path>,
+) -> (HtmlDocument, crate::gcpm::GcpmContext, Vec<(usize, String)>) {
+    let (doc, gcpm, column_css_texts, _link_gcpm_by_node) =
+        parse_html_with_local_resources_with_link_nodes(
+            html,
+            viewport_width,
+            viewport_height_px,
+            font_data,
+            system_fonts,
+            base_path,
+        );
+    (doc, gcpm, column_css_texts)
+}
+
 /// # Known limitation (tracked as beads fulgur-owa)
 ///
 /// Each `<link rel=stylesheet media=X>` that is rewritten to
@@ -232,14 +281,25 @@ pub fn canonical_directory_url(path: &Path) -> Option<String> {
 /// stylesheets get registered twice. Fixing this requires
 /// URL-tagged GCPM drain semantics in `FulgurNetProvider`; see
 /// `bd show fulgur-owa`.
-pub fn parse_html_with_local_resources(
+///
+/// The node-id-tagged `link_gcpm_by_node` (4th return value, fulgur-smlr)
+/// is affected by the same double-fetch, but not doubled: `Resource::Css`
+/// only fires for a `<link>` element's own fetch, never for one reached
+/// via `@import` (see `net.rs`'s `fetch()`), so the second, correctly
+/// media-scoped fetch never produces its own entry. A media-restricted
+/// `<link>`'s single `link_gcpm_by_node` entry therefore ends up keyed by
+/// the original `<link>`'s node id, carrying content extracted while
+/// ignoring `media` (same content the flat path above carries
+/// unconditionally today).
+pub(crate) fn parse_html_with_local_resources_with_link_nodes(
     html: &str,
     viewport_width: f32,
     viewport_height_px: u32,
     font_data: &[Arc<Vec<u8>>],
     system_fonts: bool,
     base_path: Option<&Path>,
-) -> (HtmlDocument, crate::gcpm::GcpmContext, Vec<(usize, String)>) {
+) -> ParsedWithLocalResources {
+    use std::collections::HashMap;
     use std::collections::HashSet;
 
     let net_provider = Arc::new(crate::net::FulgurNetProvider::new(
@@ -282,7 +342,12 @@ pub fn parse_html_with_local_resources(
     // `process_style_element` for each new <style>, which parses the
     // @import, calls StylesheetLoader → NetProvider::fetch → CssHandler
     // with `MediaList` properly propagated, and pushes new Resources.
-    apply_link_media_rewrites(&mut doc, &rewrites);
+    //
+    // `link_rewrite_map` pairs each rewritten `<link>`'s original node id
+    // with its freshly created replacement `<style>` node's id — needed
+    // below to remap `link_gcpm_by_node`'s keys (see the "Node id reuse
+    // hazard" doc comment on `apply_link_media_rewrites`).
+    let link_rewrite_map = apply_link_media_rewrites(&mut doc, &rewrites);
 
     // Second drain: load the correctly-fetched stylesheets.
     for resource in net_provider.drain_pending_resources() {
@@ -295,6 +360,34 @@ pub fn parse_html_with_local_resources(
     for ctx in net_provider.drain_gcpm_contexts() {
         gcpm.extend_from(ctx);
     }
+
+    // fulgur-smlr: unlike `gcpm_contexts` above and `column_css_texts`
+    // below, a media-rewritten `<link>`'s double fetch does NOT produce a
+    // duplicate here — see this function's doc comment for why (only the
+    // wrong-media, original-`<link>`-node-id entry ever exists) — so no
+    // `rewrite_node_ids` filter is applied.
+    //
+    // Node id remap (fulgur-smlr Part 0): `gcpm_by_link_node`'s keys were
+    // captured at fetch time, *before* `apply_link_media_rewrites` ran.
+    // `doc`'s node arena is a `slab::Slab`, so a media-rewritten `<link>`'s
+    // freed id can be immediately reused for an unrelated `<link>`'s
+    // replacement `<style>` node when 2+ media-restricted `<link>`s exist
+    // in one document — a pre-rewrite key can therefore identify the
+    // *wrong* node (or no live node at all) once `doc` is mutated. Remap
+    // every entry whose key is a rewritten `<link>`'s original node id to
+    // that rewrite's replacement `<style>` node id instead, so downstream
+    // consumers walking the post-rewrite `doc` (Part 1/2 of this plan)
+    // always resolve a live node. A non-rewritten `<link>`'s key is never
+    // present in `link_rewrite_map` and passes through unchanged.
+    let rewrite_id_map: HashMap<usize, usize> = link_rewrite_map.into_iter().collect();
+    let link_gcpm_by_node: Vec<(usize, crate::gcpm::GcpmContext)> = net_provider
+        .drain_gcpm_by_link_node()
+        .into_iter()
+        .map(|(node_id, ctx)| {
+            let remapped_id = rewrite_id_map.get(&node_id).copied().unwrap_or(node_id);
+            (remapped_id, ctx)
+        })
+        .collect();
 
     // fulgur-s5ro: same dedup as the first resource drain above — a
     // media-rewritten `<link>`'s original (wrong-media) fetch pushed a
@@ -310,7 +403,7 @@ pub fn parse_html_with_local_resources(
         .into_iter()
         .filter(|(node_id, _)| !rewrite_node_ids.contains(node_id))
         .collect();
-    (doc, gcpm, column_css_texts)
+    (doc, gcpm, column_css_texts, link_gcpm_by_node)
 }
 
 /// The single primitive that actually constructs an `HtmlDocument`.
@@ -632,6 +725,605 @@ fn walk_for_inline_styles(
     for &child_id in &node.children {
         walk_for_inline_styles(doc, child_id, out, depth + 1);
     }
+}
+
+/// Like [`extract_gcpm_from_inline_styles`], but keyed by the `<style>`
+/// element's node id instead of flattened into one context — feeds the
+/// document-order GCPM cascade fold ([`document_ordered_gcpm_mappings`],
+/// fulgur-smlr Part A).
+///
+/// `base_path` is threaded through to [`parse_gcpm_with_style_imports`] so a
+/// `<style>` tag's own top-level `@import` targets get resolved too — see
+/// that function's doc comment for why a plain `parse_gcpm` call on the
+/// `<style>` tag's literal text alone is not enough.
+fn collect_inline_gcpm_by_node(
+    doc: &HtmlDocument,
+    base_path: Option<&Path>,
+) -> std::collections::BTreeMap<usize, crate::gcpm::GcpmContext> {
+    let mut out = std::collections::BTreeMap::new();
+    let root = doc.root_element();
+    walk_for_inline_styles_by_node(doc, root.id, &mut out, 0, base_path);
+    out
+}
+
+fn walk_for_inline_styles_by_node(
+    doc: &HtmlDocument,
+    node_id: usize,
+    out: &mut std::collections::BTreeMap<usize, crate::gcpm::GcpmContext>,
+    depth: usize,
+    base_path: Option<&Path>,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        let mut css = String::new();
+        for &child_id in &node.children {
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Text(t) = &child.data
+            {
+                css.push_str(&t.content);
+            }
+        }
+        if !css.is_empty() {
+            out.insert(node_id, parse_gcpm_with_style_imports(&css, base_path));
+        }
+        return;
+    }
+    for &child_id in &node.children {
+        walk_for_inline_styles_by_node(doc, child_id, out, depth + 1, base_path);
+    }
+}
+
+/// Cheap presence check: does any `<style>` element in `doc` declare a
+/// top-level `@import`? Pure text scanning via
+/// [`crate::gcpm::parser::extract_top_level_import_hrefs`] — no filesystem
+/// access, so this is safe to call regardless of whether a `base_path` is
+/// configured (unlike [`parse_gcpm_with_style_imports`], which needs one to
+/// actually resolve a target).
+///
+/// Used by `Engine::render`'s gate around `document_ordered_gcpm_mappings`
+/// (fulgur-smlr code review, discussion r4039213856): that gate used to
+/// skip the whole document-order recompute whenever a bare, import-blind
+/// `parse_gcpm` on `combined_css` found no direct `position: running()`
+/// rule. But a `<style>` block's own `@import` target can carry that rule
+/// even when the `<style>` tag's own literal text does not — see
+/// `parse_gcpm_with_style_imports`'s doc comment — and this bare-parse gate
+/// runs BEFORE any import is resolved, so it can never see that content.
+/// This check restores correctness cheaply: it forces the recompute (which
+/// does resolve the import, via `collect_inline_gcpm_by_node`) whenever an
+/// `@import` is merely PRESENT, without needing to resolve it here just to
+/// decide whether to bother. Note this only needs to check `<style>`
+/// elements, never `<link>`: a real `<link>`'s `@import` chain is already
+/// resolved through Blitz's own `NetProvider` fetch path and folded into
+/// `gcpm.running_mappings` before this gate runs (see
+/// `parse_html_with_local_resources`'s `link_gcpm`), so the
+/// `!gcpm.running_mappings.is_empty()` half of the gate already covers it.
+pub(crate) fn document_has_style_import(doc: &HtmlDocument) -> bool {
+    walk_for_style_import_presence(doc, doc.root_element().id, 0)
+}
+
+fn walk_for_style_import_presence(doc: &HtmlDocument, node_id: usize, depth: usize) -> bool {
+    if depth >= MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return false;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        let mut css = String::new();
+        for &child_id in &node.children {
+            if let Some(child) = doc.get_node(child_id)
+                && let blitz_dom::node::NodeData::Text(t) = &child.data
+            {
+                css.push_str(&t.content);
+            }
+        }
+        return !crate::gcpm::parser::extract_top_level_import_hrefs(&css).is_empty();
+    }
+    node.children
+        .iter()
+        .any(|&child_id| walk_for_style_import_presence(doc, child_id, depth + 1))
+}
+
+/// Bound on recursive `@import` resolution DEPTH for
+/// [`resolve_style_imports`]. This walks the filesystem following
+/// `@import` chains — outside the DOM tree structure entirely — so
+/// `MAX_DOM_DEPTH` isn't the right guard here.
+///
+/// **This alone is not a sufficient guard against adversarial input.** A
+/// depth cap only bounds a LINEAR chain (`a.css` imports `b.css` imports
+/// `a.css`, ...). It does nothing against BRANCHING: a file with `k`
+/// `@import` statements (e.g. all pointing at the same target) causes
+/// `resolve_style_imports` to recurse into that target `k` times at each
+/// level, so a self-referencing file with `k` imports produces on the
+/// order of `k^MAX_STYLE_IMPORT_DEPTH` recursive calls before the depth
+/// cap alone would stop it — at `k = 3` that is tens of millions of calls,
+/// confirmed in review to not complete within 60 seconds. The `cache`
+/// parameter threaded through [`resolve_style_imports`] is what actually
+/// bounds total work FOR AN ACYCLIC GRAPH (to O(distinct files reachable
+/// under `security_base`), each read+parsed at most once) — but a file
+/// that's part of a genuine cycle is never cached (see the
+/// `resolve_style_imports` doc comment on why), so branching inside a
+/// cyclic subgraph is NOT bounded by the cache at all. See
+/// [`MAX_STYLE_IMPORT_TOTAL_READS`] for the guard that covers that case.
+const MAX_STYLE_IMPORT_DEPTH: usize = 16;
+
+/// Hard ceiling on the TOTAL number of distinct file reads
+/// [`resolve_style_imports`] will perform across one whole top-level
+/// resolution, independent of caching, depth, or graph shape. This is the
+/// backstop for exactly the case the cache can't cover (codex review,
+/// PR #768, discussion r4039954605): a file that's part of a genuine
+/// import cycle is never cached (a cut-short result must not be replayed
+/// in an unrelated context — see the cache-safety doc comment), so a
+/// cyclic subgraph with branching (`k` `@import`s of the next file at
+/// every level, closing back on itself) reads and re-parses every branch
+/// from scratch on every reference, reproducing the SAME
+/// `k^MAX_STYLE_IMPORT_DEPTH` blowup the cache exists to prevent for the
+/// acyclic case. A hard read budget bounds worst-case work to a small
+/// constant regardless: once exhausted, every further `@import` is
+/// treated the same as a depth-cap or cycle cut (skipped, contributing
+/// nothing), so resolution always terminates quickly even for a
+/// pathological all-cyclic, high-fan-out graph. Legitimate real-world
+/// `@import` graphs are very unlikely to have anywhere near this many
+/// distinct files.
+const MAX_STYLE_IMPORT_TOTAL_READS: usize = 64;
+
+/// Parse `css` for GCPM constructs via [`crate::gcpm::parser::parse_gcpm`],
+/// then ALSO resolve any top-level `@import` statements `css` itself
+/// declares, folding each imported file's own GCPM content in
+/// (child-before-parent, matching `net.rs`'s existing `<link>`/`@import`
+/// subtree fold convention — see `FulgurNetProvider::fetch`'s "post-order
+/// push" comment). Imported content is folded in FIRST, then `css`'s own
+/// direct declarations LAST — per CSS's "`@import` is equivalent to
+/// inlining at the top of the importing stylesheet" semantics, `css`'s own
+/// rules (which, if valid, can only appear textually AFTER its `@import`s)
+/// must be able to override an imported rule at equal specificity, which
+/// requires them to be *last* in the merged `Vec` for the `>=`-guarded
+/// last-wins tie-break (`BookmarkPass::resolve_node`,
+/// `RunningElementPass::find_running_name`) to pick them correctly.
+///
+/// # Why this exists (regression fix)
+///
+/// A `<style>` tag's own literal text — e.g.
+/// `<style>@import url("chapters.css");</style>` — never triggers a
+/// `NetProvider` fetch that `FulgurNetProvider` can attribute back to that
+/// `<style>` DOM node. Blitz *does* fetch `chapters.css` (via
+/// `StylesheetLoader::request_stylesheet`, triggered while Blitz's own CSS
+/// engine parses the `<style>` tag's cascade), but the callback chain
+/// carries no per-node context for this path — verified against blitz-dom
+/// 0.2.4's `document.rs::make_stylesheet`, which passes `StylesheetLoader`
+/// the *document's* id (`self.id`), not any node id, for every `<style>`
+/// tag alike. So neither `link_gcpm_by_node` (keyed by `Resource::Css`'s
+/// node id, never populated for this path — see
+/// `parse_html_with_local_resources`'s doc comment) nor a plain
+/// `parse_gcpm` on the `<style>` tag's own text (which contains no GCPM
+/// declarations of its own — they're in the *imported* file, and
+/// `parse_gcpm` is a pure-text parser with no filesystem access) can see
+/// this content. Before the fulgur-smlr document-order fold existed, this
+/// content still reached `gcpm.running_mappings`/`bookmark_mappings` via
+/// the OLD flat `gcpm.extend_from(link_gcpm)` path (built from `net.rs`'s
+/// `drain_gcpm_contexts()`, which DOES capture it, just without a node
+/// id) — replacing that flat computation wholesale reintroduced a blind
+/// spot for exactly this case. This function closes it by resolving the
+/// `@import` ourselves, independently of `net.rs`.
+///
+/// `base_path` is the (uncanonicalized) directory `@import` hrefs resolve
+/// relative to — the same directory `parse_html_with_local_resources`'s
+/// `FulgurNetProvider` is rooted at. `None` (no base path configured)
+/// means `@import` targets simply cannot be resolved, matching
+/// `FulgurNetProvider::resolve_local_path`'s own behavior of rejecting
+/// every fetch when no base path is configured.
+fn parse_gcpm_with_style_imports(css: &str, base_path: Option<&Path>) -> crate::gcpm::GcpmContext {
+    let mut ctx = crate::gcpm::GcpmContext::default();
+    if let Some(base) = base_path
+        && let Ok(canonical_base) = base.canonicalize()
+    {
+        let mut state = ImportResolutionState {
+            in_progress: std::collections::HashSet::new(),
+            cache: std::collections::HashMap::new(),
+            remaining_reads: MAX_STYLE_IMPORT_TOTAL_READS,
+        };
+        resolve_style_imports(
+            css,
+            &canonical_base,
+            &canonical_base,
+            &mut ctx,
+            0,
+            &mut state,
+        );
+    }
+    ctx.extend_from(crate::gcpm::parser::parse_gcpm(css));
+    ctx
+}
+
+/// Resolve an `@import` href as a URL against `resolve_dir`, returning the
+/// local filesystem path it points at — NOT joined as a raw filesystem
+/// path component, so a query string (`chapters.css?v=1`) or a
+/// percent-escape (`chapter%20one.css`) resolves and decodes the same way
+/// Blitz's own fetch path does, instead of being treated as literal
+/// filename characters.
+///
+/// `Url` (`blitz_traits::net::Url`) is only imported on non-wasm targets
+/// (see its `use` site) — WASM has no real filesystem to resolve against
+/// (`FulgurNetProvider::resolve_local_path`'s WASM stub and
+/// `canonical_directory_url`'s WASM branch both unconditionally return
+/// `None`/reject for the same reason), so this returns `None` there too
+/// rather than pulling in the gated import.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_import_href_as_url(resolve_dir: &Path, href: &str) -> Option<std::path::PathBuf> {
+    let resolve_dir_url = Url::from_directory_path(resolve_dir).ok()?;
+    let joined = resolve_dir_url.join(href).ok()?;
+    joined.to_file_path().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resolve_import_href_as_url(_resolve_dir: &Path, _href: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Recursively resolve every `@import` reachable from `css`'s own top-level
+/// `@import` statements and fold each imported file's GCPM content into
+/// `out`. See [`parse_gcpm_with_style_imports`] for why this exists.
+///
+/// `security_base` is the ORIGINAL, fixed base directory (canonicalized
+/// once by the caller) — every resolved target must stay inside it
+/// regardless of recursion depth, mirroring
+/// `FulgurNetProvider::resolve_local_path`'s path-traversal protection.
+/// `resolve_dir` is the directory the CURRENT file's relative `@import`
+/// hrefs resolve against, per CSS's own "relative to the importing
+/// stylesheet" rule — it changes at each recursion level (to the imported
+/// file's own parent directory) while `security_base` never does.
+///
+/// `in_progress` holds every canonicalized path currently being resolved on
+/// the CURRENT recursion chain (an ancestor stack, not the whole call
+/// tree) — a target already in it is a true cycle (`a.css` imports `b.css`
+/// imports `a.css`) and is skipped to avoid infinite recursion. `cache`
+/// holds the fully-resolved `GcpmContext` for every path that has FINISHED
+/// resolving anywhere in the whole call tree WITHOUT being cut short, keyed
+/// by canonical path, and is the primary guard against combinatorial
+/// blowup: a file `@import`ing the same target `k` times only pays the
+/// read+parse+recursion cost for that target ONCE (the first occurrence
+/// populates `cache`); every subsequent reference — including one reached
+/// from a completely different branch of the import graph — is a cheap
+/// `HashMap` lookup followed by a clone-and-extend, not a
+/// re-read/re-parse/re-recurse. Without this, `k` `@import`s of one target
+/// multiply at EVERY recursion level, so `MAX_STYLE_IMPORT_DEPTH` alone
+/// bounds a linear chain but not a branching one (see that constant's doc
+/// comment).
+///
+/// Splitting the old single `visited` set into these two pieces (rather
+/// than discarding every repeat outright) preserves CSS cascade order for
+/// legitimately-repeated imports: `@import "a.css"; @import "b.css";
+/// @import "a.css";` must fold `a`'s content in twice, at its two distinct
+/// textual positions, so the final `a.css` occurrence can still win an
+/// equal-specificity tie over `b.css` — collapsing it to one occurrence
+/// (as a single shared `visited` set would) silently reorders the cascade.
+///
+/// Returns `true` if this call's own resolution (or any nested import it
+/// resolved) was CUT SHORT — by hitting `MAX_STYLE_IMPORT_DEPTH`, by
+/// skipping an import that collided with the current `in_progress`
+/// ancestor chain, or by exhausting `remaining_reads`. Whether a given
+/// target is "cut short" is NOT an inherent property of that file: it
+/// depends on which ancestors happen to be active on THIS call chain
+/// (codex review, PR #768, discussion r4039797387) — e.g. if `a.css`
+/// imports `x.css` and `x.css` imports `a.css`, resolving `x.css` while
+/// `a.css` is an active ancestor omits `a.css`'s content from `x.css`'s
+/// result, but a SIBLING stylesheet that imports `x.css` outside that
+/// ancestor chain would resolve it fully. A cut-short result is therefore
+/// never written to `cache` — only a result that finished on its own
+/// terms is safe to replay for an unrelated future reference.
+///
+/// `remaining_reads` is a budget shared across the WHOLE top-level
+/// resolution (decremented, never reset, at every recursion level) — see
+/// [`MAX_STYLE_IMPORT_TOTAL_READS`] for why this exists: a file inside a
+/// genuine cycle is never cached (per the above), so a cyclic subgraph
+/// with branching gets NO benefit from `cache` at all, and this budget is
+/// what actually bounds worst-case work for that shape.
+///
+/// The three fields are threaded together (rather than as separate
+/// `resolve_style_imports` parameters) purely to stay under
+/// `clippy::too_many_arguments` — they have no relationship beyond "state
+/// mutated across the whole recursive resolution," so this is a bundling
+/// struct, not a meaningful abstraction. See the doc comments above for
+/// what each field actually means and why it exists.
+struct ImportResolutionState {
+    in_progress: std::collections::HashSet<std::path::PathBuf>,
+    cache: std::collections::HashMap<std::path::PathBuf, crate::gcpm::GcpmContext>,
+    remaining_reads: usize,
+}
+
+fn resolve_style_imports(
+    css: &str,
+    security_base: &Path,
+    resolve_dir: &Path,
+    out: &mut crate::gcpm::GcpmContext,
+    depth: usize,
+    state: &mut ImportResolutionState,
+) -> bool {
+    if depth >= MAX_STYLE_IMPORT_DEPTH {
+        return true;
+    }
+    let mut cut_short = false;
+    for href in crate::gcpm::parser::extract_top_level_import_hrefs(css) {
+        let Some(candidate) = resolve_import_href_as_url(resolve_dir, &href) else {
+            continue;
+        };
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(security_base) {
+            continue;
+        }
+        if let Some(cached) = state.cache.get(&canonical) {
+            out.extend_from(cached.clone());
+            continue;
+        }
+        // `HashSet::insert` returns `false` if the value is already an
+        // ancestor on this chain — a genuine cycle, not merely a repeat.
+        if !state.in_progress.insert(canonical.clone()) {
+            cut_short = true;
+            continue;
+        }
+        // The read budget is checked AFTER the cycle check (a cycle skip
+        // is free — no file read happens) but BEFORE actually reading —
+        // once exhausted, every further distinct file is treated the same
+        // as a depth-cap or cycle cut.
+        let Some(new_remaining) = state.remaining_reads.checked_sub(1) else {
+            state.in_progress.remove(&canonical);
+            cut_short = true;
+            continue;
+        };
+        state.remaining_reads = new_remaining;
+        let Ok(bytes) =
+            crate::asset::read_file_capped(&canonical, crate::asset::MAX_CSS_BYTES, "CSS file")
+        else {
+            state.in_progress.remove(&canonical);
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            state.in_progress.remove(&canonical);
+            continue;
+        };
+        let child_dir = canonical.parent().unwrap_or(resolve_dir);
+        // Child-before-parent: recurse into this file's own @imports
+        // FIRST, matching net.rs's post-order convention for <link>/
+        // @import subtrees.
+        let mut file_ctx = crate::gcpm::GcpmContext::default();
+        let child_cut_short = resolve_style_imports(
+            &text,
+            security_base,
+            child_dir,
+            &mut file_ctx,
+            depth + 1,
+            state,
+        );
+        file_ctx.extend_from(crate::gcpm::parser::parse_gcpm(&text));
+        state.in_progress.remove(&canonical);
+        if child_cut_short {
+            cut_short = true;
+        } else {
+            state.cache.insert(canonical.clone(), file_ctx.clone());
+        }
+        out.extend_from(file_ctx);
+    }
+    cut_short
+}
+
+/// Folds GCPM contexts from `<link>`/`<style>` nodes into `out` in true DOM
+/// document order. Mirrors `walk_for_column_styles`'s node-matching shape.
+///
+/// Takes a SINGLE node-id-keyed map rather than the two-map (`link_gcpm` /
+/// `style_gcpm`) split an earlier sketch of this function used. A given
+/// node id in the live `doc` is unambiguously either a `<link>` or a
+/// `<style>` element — never both — and `document_ordered_gcpm_mappings`
+/// has already merged every source (real `<link>` fetches, remapped
+/// media-rewritten `<link>` fetches, inline `<style>` blocks, the
+/// AssetBundle-injected `<style>`) into that one map before calling this
+/// function. A two-map split would strand a media-rewritten `<link>`'s
+/// entry: after `parse_html_with_local_resources`'s Part 0 remap, that
+/// entry is keyed by its replacement `<style>` node's id, not any live
+/// `<link>` id — the two-map version left it sitting in the "link" map
+/// while only the `<style>` branch below would ever look it up. One
+/// shared map sidesteps that: whichever branch's node-type check matches
+/// at a given id is the only one that will ever consult it.
+fn fold_gcpm_by_document_order(
+    doc: &HtmlDocument,
+    node_id: usize,
+    node_gcpm: &std::collections::BTreeMap<usize, crate::gcpm::GcpmContext>,
+    out: &mut crate::gcpm::GcpmContext,
+    depth: usize,
+) {
+    if depth >= MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "link"
+        && el
+            .attr(blitz_dom::LocalName::from("rel"))
+            .is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|tok| tok.eq_ignore_ascii_case("stylesheet"))
+            })
+    {
+        if let Some(ctx) = node_gcpm.get(&node_id) {
+            out.extend_from(ctx.clone());
+        }
+        return;
+    }
+    if let Some(el) = node.element_data()
+        && el.name.local.as_ref() == "style"
+    {
+        if let Some(ctx) = node_gcpm.get(&node_id) {
+            out.extend_from(ctx.clone());
+        }
+        return;
+    }
+    for &child_id in &node.children {
+        fold_gcpm_by_document_order(doc, child_id, node_gcpm, out, depth + 1);
+    }
+}
+
+/// Recomputes `running_mappings`/`bookmark_mappings` in true DOM document
+/// order across AssetBundle CSS, `<link>`/`@import` CSS, and inline
+/// `<style>` blocks (fulgur-smlr Part A). Must run after the pass that
+/// injects AssetBundle's cleaned CSS as `<head>`'s last `<style>` child
+/// (`InjectCssPass`), so that synthetic node is discoverable at its real
+/// document position.
+///
+/// `link_gcpm_by_node` comes from [`parse_html_with_local_resources`]'s
+/// return value — real per-`<link>` contexts (with `@import` subtrees
+/// already folded in, and media-rewritten `<link>` keys already remapped
+/// to their replacement `<style>` node's id — see that function's Part 0
+/// doc comment and `apply_link_media_rewrites`'s "Node id reuse hazard"
+/// note).
+///
+/// # Merge strategy (why not a plain three-way `extend`)
+///
+/// Every node-keyed GCPM source is folded into ONE `BTreeMap` before the
+/// document-order walk, but the three sources are combined with two
+/// *different* merge rules, not uniformly:
+///
+/// - `collect_inline_gcpm_by_node(doc, base_path)` seeds the map first.
+///   This walk runs over the FINAL `doc` (after `apply_passes`), calling
+///   [`parse_gcpm_with_style_imports`] on every `<style>` node's own text
+///   — which, since the round-2 `@import`-resolution fix, ALSO resolves
+///   any `@import` that text itself declares (ignoring media, since
+///   [`crate::gcpm::parser::extract_top_level_import_hrefs`] doesn't check
+///   it). That includes TWO kinds of node whose *own* text ends up a
+///   near-duplicate of content that belongs to a different source: a
+///   media-rewritten `<link>`'s synthetic
+///   `<style>@import url(...) media;</style>` replacement (its `@import`
+///   now resolves to the SAME file `link_gcpm_by_node`'s entry for this
+///   same, remapped node id already carries in full — this is no longer
+///   the "fully empty" case it used to be pre-round-2, see below), and —
+///   when `assetbundle_css_injected` — `InjectCssPass`'s injected `<style>`
+///   (its own text is `combined_css` with GCPM constructs ALREADY stripped
+///   by the earlier `parse_gcpm` call in `engine.rs`, so
+///   `bookmark-level`/`bookmark-label` *would* still be present verbatim
+///   there — see below).
+/// - `link_gcpm_by_node` entries are merged into that seed via `insert`
+///   (overwrite, NOT `extend_from`/append). A live, non-rewritten `<link>`
+///   node id never collides with the seed map at all (the seed only ever
+///   contains `<style>` entries), so `insert` behaves identically to
+///   `extend_from` there. For a media-rewritten `<link>`, the ONLY node id
+///   `link_gcpm_by_node`'s (remapped) entry can collide with is that
+///   `<link>`'s own synthetic `<style>@import>` replacement — whose seed
+///   entry, per the point above, is now a duplicate (not empty) of
+///   `link_gcpm_by_node`'s entry for the same content. `extend_from` here
+///   used to append both, silently doubling every media-restricted
+///   `<link>`'s mappings (harmless for the winner-take-all
+///   `BookmarkPass`/`RunningElementPass` consumers today, but real wasted
+///   `@import` file I/O per render, a live coverage gap, and this exact
+///   doc comment's own stale claim — found in code review across the
+///   whole fulgur-smlr range). `insert` discards the seed's redundant
+///   duplicate outright and keeps `link_gcpm_by_node`'s copy — which is
+///   authoritative anyway, being resolved via `net.rs`'s real per-file
+///   fetch and its own child-before-parent `@import`-subtree fold, not a
+///   filesystem re-walk from this function. See
+///   `document_ordered_gcpm_mappings_media_link_merge_does_not_duplicate_bookmark_mapping`
+///   in this module's test suite for the count-based regression guard.
+/// - The AssetBundle-injected `<style>` node (when present) is handled
+///   with a TARGETED merge, not a plain `extend_from`. The seed map's own
+///   entry for this node — built from `collect_inline_gcpm_by_node`
+///   parsing the injected node's own text (`combined_css`'s *cleaned*
+///   form) via `parse_gcpm_with_style_imports` — is already complete for
+///   `bookmark_mappings`: unlike `position: running(...)` (which
+///   `parse_gcpm`'s `cleaned_css` builder replaces with `display: none`),
+///   neither `bookmark-level`/`bookmark-label` NOR `@import` statements
+///   are stripped from `cleaned_css`, so parsing the cleaned text finds
+///   the exact same direct declarations AND resolves the exact same
+///   `@import` chain (file I/O and all) that parsing the pre-strip
+///   `combined_css` would. Only `running_mappings` has a real gap: a
+///   DIRECT `position: running(...)` declaration in `combined_css`'s own
+///   body never reaches the seed map's entry at all, because `cleaned_css`
+///   replaced it with `display: none` before the walk ever saw the text.
+///   Recovering that gap needs only a bare `parse_gcpm(combined_css)` (NOT
+///   [`parse_gcpm_with_style_imports`] — `@import` resolution is already
+///   correctly captured by the seed entry, and a plain `parse_gcpm` call
+///   never resolves `@import` in the first place, so there is no risk of
+///   redoing that resolution here) with just its `running_mappings`
+///   folded in. `bookmark_mappings` is deliberately left untouched by this
+///   step — the seed entry's copy is already complete, and merging a
+///   second copy in would reintroduce the exact duplication a plain
+///   `extend_from` here used to risk. This also means the `@import` file
+///   I/O for this node's chain now runs exactly once per render, not
+///   twice (fulgur-smlr code review, Minor #1 — a prior version of this
+///   function `insert`ed a second, independent
+///   `parse_gcpm_with_style_imports(combined_css, base_path)` call here,
+///   which re-resolved the very same chain the seed-map walk had already
+///   resolved for this same node, paying the read+parse+recursion cost of
+///   every imported file twice for nothing). See
+///   `document_ordered_gcpm_mappings_assetbundle_merge_does_not_duplicate_bookmark_mapping`
+///   in this module's test suite, which asserts the `bookmark_mappings`
+///   COUNT directly (not through a winner-take-all consumer that would
+///   mask a regression back to a whole-context merge), so this invariant
+///   has real coverage.
+///
+/// `base_path` is threaded through to [`parse_gcpm_with_style_imports`] so
+/// a `<style>` tag's own top-level `@import` targets get resolved too
+/// (inline `<style>` blocks AND the AssetBundle-injected one alike) —
+/// content that neither `link_gcpm_by_node` nor a plain `parse_gcpm` of a
+/// `<style>` tag's own literal text can see (see
+/// `parse_gcpm_with_style_imports`'s doc comment for the full story; this
+/// closes a real content-loss regression found in code review).
+pub(crate) fn document_ordered_gcpm_mappings(
+    doc: &HtmlDocument,
+    combined_css: &str,
+    assetbundle_css_injected: bool,
+    link_gcpm_by_node: &[(usize, crate::gcpm::GcpmContext)],
+    ua_bookmark_mappings: Vec<crate::gcpm::bookmark::BookmarkMapping>,
+    base_path: Option<&Path>,
+) -> (
+    Vec<crate::gcpm::RunningMapping>,
+    Vec<crate::gcpm::bookmark::BookmarkMapping>,
+) {
+    let mut node_gcpm = collect_inline_gcpm_by_node(doc, base_path);
+    for (node_id, ctx) in link_gcpm_by_node.iter().cloned() {
+        // `insert`, not `extend_from` — see the "Merge strategy" doc
+        // comment above for why a media-rewritten `<link>`'s remapped
+        // node id can collide with an already-non-empty seed entry now,
+        // and why overwriting (not appending) is correct there.
+        node_gcpm.insert(node_id, ctx);
+    }
+    if assetbundle_css_injected
+        && let Some(head_id) = find_element_by_tag(doc, "head")
+        && let Some(node) = doc.get_node(head_id)
+        && let Some(&last_child) = node.children.last()
+    {
+        // See the "Merge strategy" doc comment above for why this reads
+        // `combined_css` with a BARE `parse_gcpm` (not
+        // `parse_gcpm_with_style_imports`) and only folds in
+        // `running_mappings` — the seed map's entry for this node already
+        // has correct `bookmark_mappings` AND correctly-resolved `@import`
+        // content, so redoing either here would be wasted work at best
+        // (re-reading every imported file) or a duplicate-mapping bug at
+        // worst.
+        let direct = crate::gcpm::parser::parse_gcpm(combined_css);
+        node_gcpm
+            .entry(last_child)
+            .or_default()
+            .running_mappings
+            .extend(direct.running_mappings);
+    }
+
+    let mut ordered = crate::gcpm::GcpmContext::default();
+    let root_id = doc.root_element().id;
+    fold_gcpm_by_document_order(doc, root_id, &node_gcpm, &mut ordered, 0);
+
+    let mut bookmark_mappings = ua_bookmark_mappings;
+    bookmark_mappings.extend(ordered.bookmark_mappings);
+    (ordered.running_mappings, bookmark_mappings)
 }
 
 /// Harvest the column-* properties that blitz/stylo (servo feature) does not
@@ -2006,11 +2698,17 @@ impl RunningElementPass {
         }
     }
 
+    /// Picks the winning `position: running(name)` mapping for `elem` by
+    /// specificity, then by `self.mappings` position (later wins ties) —
+    /// see fulgur-smlr. The enumerate index doubles as the source-order
+    /// key without needing a separate field on `RunningMapping`.
     fn find_running_name(&self, elem: &blitz_dom::node::ElementData) -> Option<String> {
         self.mappings
             .iter()
-            .find(|m| selector_matches(&m.parsed, elem))
-            .map(|m| m.running_name.clone())
+            .enumerate()
+            .filter(|(_, m)| selector_matches(&m.parsed, elem))
+            .max_by_key(|(i, m)| (crate::gcpm::specificity(&m.parsed), *i))
+            .map(|(_, m)| m.running_name.clone())
     }
 }
 
@@ -2708,12 +3406,14 @@ pub struct BookmarkInfo {
 ///
 /// # Cascade semantics
 ///
-/// Mappings are iterated in the order they were collected from the CSS
-/// stylesheet(s). For each matching mapping, the pass overlays its
-/// `level` / `label` fields onto a per-node accumulator — later matches
-/// overwrite earlier ones per field. This mirrors CSS property cascade
-/// ("last declaration wins") while letting an author split a selector's
-/// level and label into separate rules.
+/// `bookmark-level` and `bookmark-label` cascade independently, as two
+/// separate CSS properties would: for each field, the matching mapping
+/// with the highest selector specificity wins; among mappings tied on
+/// specificity, the one later in `self.mappings`'s order wins ("last
+/// declaration wins" on ties, same as real CSS). This lets an author
+/// split a selector's level and label into separate rules of different
+/// specificity and still get correct per-field resolution — not just
+/// "the last matching mapping wins outright".
 ///
 /// # Suppression
 ///
@@ -2823,20 +3523,41 @@ impl BookmarkPass {
         node_id: usize,
         elem: &blitz_dom::node::ElementData,
     ) {
-        // Overlay accumulator — iterate forward; each matching mapping
-        // overwrites the fields it sets.
+        // Overlay accumulator — iterate forward; each field cascades
+        // independently by specificity, then by self.mappings's current
+        // order (Vec position) on ties (fulgur-smlr). Vec position IS true
+        // DOM document order here — `self.mappings` arrives from
+        // `document_ordered_gcpm_mappings` (`blitz_adapter.rs`), which
+        // folds AssetBundle CSS, `<link>`/`@import` CSS, and inline
+        // `<style>` blocks by walking the DOM in source order (fulgur-smlr
+        // Part A/Task 7), not the old fixed `UA → AssetBundle → link →
+        // inline` stylesheet concatenation order. The `>=` guard makes a
+        // single forward pass sufficient: an equal-specificity match always
+        // overwrites (last-wins on ties, same as before this change), and a
+        // lower-specificity match appearing later never overwrites an
+        // earlier, higher-specificity winner.
         let mut level: Option<BookmarkLevel> = None;
+        let mut level_specificity: Option<crate::gcpm::SelectorSpecificity> = None;
         let mut label: Option<Vec<ContentItem>> = None;
+        let mut label_specificity: Option<crate::gcpm::SelectorSpecificity> = None;
         let mut any_match = false;
         for mapping in &self.mappings {
-            if selector_matches(&mapping.selector, elem) {
-                any_match = true;
-                if let Some(l) = &mapping.level {
-                    level = Some(l.clone());
-                }
-                if let Some(lbl) = &mapping.label {
-                    label = Some(lbl.clone());
-                }
+            if !selector_matches(&mapping.selector, elem) {
+                continue;
+            }
+            any_match = true;
+            let spec = crate::gcpm::specificity(&mapping.selector);
+            if let Some(l) = &mapping.level
+                && level_specificity.is_none_or(|cur| spec >= cur)
+            {
+                level = Some(l.clone());
+                level_specificity = Some(spec);
+            }
+            if let Some(lbl) = &mapping.label
+                && label_specificity.is_none_or(|cur| spec >= cur)
+            {
+                label = Some(lbl.clone());
+                label_specificity = Some(spec);
             }
         }
         if !any_match {
@@ -3680,7 +4401,30 @@ fn escape_css_url(raw: &str) -> String {
 /// integration) must filter any stylesheet resources that blitz already
 /// fetched for the `<link>` node before DOM mutation, otherwise the
 /// empty-media copy would also apply.
-pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[LinkMediaRewrite]) {
+///
+/// **Node id reuse hazard** (fulgur-smlr): `mutator.remove_and_drop_node`
+/// frees the original `<link>`'s slot in the DOM's `slab::Slab` node
+/// arena, and the very next `mutator.create_element` (for this or a
+/// later rewrite in the same batch) can reuse that freed id for an
+/// unrelated `<style>` node. With 2+ media-restricted `<link>`s in one
+/// document, a node id captured *before* this function runs (e.g.
+/// `FulgurNetProvider`'s `gcpm_by_link_node`, keyed at fetch time) can
+/// therefore end up identifying a *different* `<link>`'s replacement
+/// `<style>` once this function returns. Anything consuming such
+/// pre-rewrite ids against the post-rewrite `doc` must account for this.
+///
+/// Returns `(link_node_id, style_id)` pairs, one per rewrite, in the same
+/// order as `rewrites` — the id of the removed original `<link>` paired
+/// with the id of its freshly created replacement `<style>`. Callers that
+/// captured a `<link>`'s node id *before* this function ran (e.g.
+/// `FulgurNetProvider::drain_gcpm_by_link_node`) must remap through this
+/// mapping afterward per the "Node id reuse hazard" note above —
+/// `parse_html_with_local_resources` does exactly that.
+pub(crate) fn apply_link_media_rewrites(
+    doc: &mut HtmlDocument,
+    rewrites: &[LinkMediaRewrite],
+) -> Vec<(usize, usize)> {
+    let mut id_map = Vec::with_capacity(rewrites.len());
     for rw in rewrites {
         let css = format!(
             r#"@import url("{}") {};"#,
@@ -3694,7 +4438,9 @@ pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[Link
         mutator.append_children(style_id, &[text_id]);
         mutator.insert_nodes_before(rw.link_node_id, &[style_id]);
         mutator.remove_and_drop_node(rw.link_node_id);
+        id_map.push((rw.link_node_id, style_id));
     }
+    id_map
 }
 
 #[cfg(test)]
@@ -3923,8 +4669,15 @@ mod tests {
 <html><head><link rel="stylesheet" href="parent.css"></head>
 <body><p class="parent-rule child-rule">x</p></body></html>"#;
 
-        let (_doc, gcpm, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+        let (_doc, gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
 
         let cleaned = &gcpm.cleaned_css;
         let child_pos = cleaned
@@ -3939,6 +4692,561 @@ mod tests {
              to preserve CSS cascade. child at {child_pos}, parent at {parent_pos}.\n\
              cleaned_css:\n{cleaned}"
         );
+    }
+
+    // ── `link_gcpm_by_node` (fulgur-smlr) ──────────────────────────
+
+    #[test]
+    fn parse_html_with_local_resources_tags_single_link_by_node_id() {
+        // A single `<link>` with no `@import` must produce exactly one
+        // `link_gcpm_by_node` entry, keyed by that `<link>` element's own
+        // node id, whose GCPM mappings mirror what that one file
+        // declared.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("style.css"),
+            r#".single-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="style.css"></head>
+<body><p class="single-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "expected exactly one top-level <link> entry, got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_node_id = find_element_by_attr_id(doc.deref(), "the-link");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_eq!(
+            *node_id, link_node_id,
+            "entry must be keyed by the <link> element's own node id"
+        );
+        assert!(
+            ctx.bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("single-rule".to_string())),
+            "expected the bookmark mapping declared in style.css, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_folds_import_subtree_into_one_link_entry() {
+        // `<link href="parent.css">` where parent.css has
+        // `@import "child.css"` must fold BOTH files' GCPM content into a
+        // SINGLE `link_gcpm_by_node` entry keyed by the <link>'s own node
+        // id (not two — child.css never gets its own entry, mirroring
+        // `parse_html_with_local_resources_orders_imports_before_parent`
+        // for the flat `cleaned_css` path). The child's mapping must
+        // appear before the parent's own mapping in `bookmark_mappings`,
+        // preserving the same child-before-parent post-order the
+        // existing `cleaned_css` ordering test asserts.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("parent.css"),
+            r#"@import "child.css"; .parent-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.css"),
+            r#".child-rule { bookmark-level: 2; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="parent.css"></head>
+<body><p class="parent-rule child-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "expected the whole @import subtree folded into ONE entry \
+             (keyed by the top-level <link>), got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_node_id = find_element_by_attr_id(doc.deref(), "the-link");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_eq!(
+            *node_id, link_node_id,
+            "the single folded entry must be keyed by the <link>'s node id, \
+             not child.css (which has no node id of its own)"
+        );
+
+        let child_pos = ctx
+            .bookmark_mappings
+            .iter()
+            .position(|m| m.selector == ParsedSelector::Class("child-rule".to_string()))
+            .expect("child.css's bookmark mapping must be present");
+        let parent_pos = ctx
+            .bookmark_mappings
+            .iter()
+            .position(|m| m.selector == ParsedSelector::Class("parent-rule".to_string()))
+            .expect("parent.css's own bookmark mapping must be present");
+        assert!(
+            child_pos < parent_pos,
+            "child @import mapping must precede parent's own mapping (post-order), \
+             child at {child_pos}, parent at {parent_pos}: {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_tags_two_independent_links_separately() {
+        // Two independent top-level `<link>` tags (no `@import`) must
+        // produce TWO `link_gcpm_by_node` entries, keyed by two DIFFERENT
+        // node ids — node ids must not be accidentally shared between
+        // unrelated `<link>` elements.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".a-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".b-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link id="link-a" rel="stylesheet" href="a.css">
+<link id="link-b" rel="stylesheet" href="b.css">
+</head>
+<body><p class="a-rule b-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            2,
+            "expected two independent <link> entries, got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        let link_a_id = find_element_by_attr_id(doc.deref(), "link-a");
+        let link_b_id = find_element_by_attr_id(doc.deref(), "link-b");
+        assert_ne!(
+            link_a_id, link_b_id,
+            "sanity: the two <link> elements must have distinct DOM node ids"
+        );
+
+        let node_ids: Vec<usize> = link_gcpm_by_node.iter().map(|(id, _)| *id).collect();
+        assert!(
+            node_ids.contains(&link_a_id) && node_ids.contains(&link_b_id),
+            "expected entries keyed by both link-a's ({link_a_id}) and link-b's \
+             ({link_b_id}) node ids, got {node_ids:?}"
+        );
+        assert_ne!(
+            node_ids[0], node_ids[1],
+            "the two entries must not share a node id"
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_media_restricted_link_remaps_key_to_live_style_node() {
+        // fulgur-smlr Part 0: a `<link rel=stylesheet media=X>` (X neither
+        // empty nor "all") is fetched TWICE internally (see the "Known
+        // limitation" doc comment on `parse_html_with_local_resources`) —
+        // once directly for the original `<link>` node, ignoring `media`,
+        // and once via the synthetic `<style>@import url(...) X;</style>`
+        // that `apply_link_media_rewrites` creates. `Resource::Css` is
+        // only ever reported for the first (a `<link>` element's own
+        // fetch, never one reached via `@import`), so there is exactly
+        // ONE `gcpm_by_link_node` entry — not two, and not zero.
+        //
+        // That entry is captured at fetch time keyed by the original
+        // `<link>`'s node id, but `apply_link_media_rewrites` then removes
+        // that `<link>` from `doc` and replaces it with the synthetic
+        // `<style>` at a node id that can be a completely different slab
+        // slot. Without a remap, the entry's key would dangle (or, with
+        // 2+ media-restricted `<link>`s, silently point at a DIFFERENT
+        // link's replacement node — see
+        // `parse_html_with_local_resources_media_restricted_links_do_not_cross_attribute_after_remap`
+        // below for that scenario). `parse_html_with_local_resources`
+        // remaps the key through `apply_link_media_rewrites`'s returned
+        // `(link_node_id, style_id)` pairs before returning, so the entry
+        // here must now be keyed by the LIVE synthetic `<style>` node's
+        // id, not the removed original `<link>`'s.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("print.css"),
+            r#".print-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link id="the-link" rel="stylesheet" href="print.css" media="print"></head>
+<body><p class="print-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            1,
+            "a media-restricted <link> must contribute exactly one \
+             gcpm_by_link_node entry, got {link_gcpm_by_node:?}"
+        );
+
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "the original <link> must have been removed by the media rewrite"
+        );
+        let style_node_id =
+            find_element_by_tag(&doc, "style").expect("synthetic <style> must exist");
+        let (node_id, ctx) = &link_gcpm_by_node[0];
+        assert_eq!(
+            *node_id, style_node_id,
+            "after the Part 0 remap, the entry must be keyed by the LIVE \
+             synthetic <style>'s node id, not the removed original <link>'s \
+             (possibly dangling or reused-by-someone-else) id"
+        );
+        assert!(
+            ctx.bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("print-rule".to_string())),
+            "expected print.css's bookmark mapping, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_media_restricted_links_do_not_cross_attribute_after_remap() {
+        // fulgur-smlr Part 0: the exact regression this fix targets. Two
+        // `<link media=print>` tags in one document, each media-rewritten
+        // to a synthetic `<style>@import ...>`. `doc`'s node arena is a
+        // `slab::Slab` (LIFO free list): the first rewrite frees link A's
+        // slot, and the second rewrite's `create_element` (for link B's
+        // replacement `<style>`) can immediately reuse that freed slot.
+        // Without the Part 0 remap, `link_gcpm_by_node`'s pre-rewrite keys
+        // (captured at fetch time) would then be wrong: link A's entry
+        // would dangle or resolve to link B's replacement node, and vice
+        // versa, silently cross-attributing or dropping GCPM content.
+        //
+        // Assert BOTH entries survive, each keyed by a LIVE `<style>` node
+        // in the final `doc`, and that each one's own content (a distinct
+        // `bookmark-level` selector) is attributed to the correct
+        // `@import` target — not swapped, not dropped, not duplicated.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".rule-a { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".rule-b { bookmark-level: 2; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link rel="stylesheet" href="a.css" media="print">
+<link rel="stylesheet" href="b.css" media="print">
+</head>
+<body><p class="rule-a rule-b">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            2,
+            "two media-restricted <link>s must contribute two entries, \
+             got {link_gcpm_by_node:?}"
+        );
+
+        use std::ops::Deref;
+        // Every live <style> node id in the final doc, so we can confirm
+        // each entry's key resolves to a real, currently-live element
+        // (not a stale/dangling pre-rewrite id).
+        fn collect_style_ids(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            if let Some(el) = node.element_data()
+                && el.name.local.as_ref() == "style"
+            {
+                out.push(node_id);
+            }
+            for &child_id in &node.children {
+                collect_style_ids(doc, child_id, out);
+            }
+        }
+        let mut live_style_ids = Vec::new();
+        collect_style_ids(doc.deref(), doc.root_element().id, &mut live_style_ids);
+        assert_eq!(
+            live_style_ids.len(),
+            2,
+            "expected exactly two synthetic <style> nodes, got {live_style_ids:?}"
+        );
+
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "both original <link>s must have been removed by the media rewrite"
+        );
+
+        // Each entry's key must be one of the two LIVE <style> ids...
+        for (node_id, _) in &link_gcpm_by_node {
+            assert!(
+                live_style_ids.contains(node_id),
+                "entry key {node_id} must be a live <style> node id, got live ids \
+                 {live_style_ids:?} (this fails if the pre-remap dangling/stale key \
+                 leaked through)"
+            );
+        }
+        // ...and the two entries must not share a key (no cross-attribution
+        // collapsing them onto the same node).
+        assert_ne!(
+            link_gcpm_by_node[0].0, link_gcpm_by_node[1].0,
+            "the two entries must not share a node id after remap"
+        );
+
+        // Finally, confirm content: exactly one entry carries rule-a's
+        // mapping and the OTHER carries rule-b's — never both on one
+        // entry (which would mean the remap merged/duplicated) and never
+        // neither (which would mean one was silently dropped).
+        let has_rule_a: Vec<bool> = link_gcpm_by_node
+            .iter()
+            .map(|(_, ctx)| {
+                ctx.bookmark_mappings
+                    .iter()
+                    .any(|m| m.selector == ParsedSelector::Class("rule-a".to_string()))
+            })
+            .collect();
+        let has_rule_b: Vec<bool> = link_gcpm_by_node
+            .iter()
+            .map(|(_, ctx)| {
+                ctx.bookmark_mappings
+                    .iter()
+                    .any(|m| m.selector == ParsedSelector::Class("rule-b".to_string()))
+            })
+            .collect();
+        assert_eq!(
+            has_rule_a.iter().filter(|&&b| b).count(),
+            1,
+            "exactly one entry must carry rule-a's mapping, got {link_gcpm_by_node:?}"
+        );
+        assert_eq!(
+            has_rule_b.iter().filter(|&&b| b).count(),
+            1,
+            "exactly one entry must carry rule-b's mapping, got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            !(has_rule_a[0] && has_rule_b[0]),
+            "a single entry must not carry BOTH rules' mappings (cross-attribution), \
+             got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            !(has_rule_a[1] && has_rule_b[1]),
+            "a single entry must not carry BOTH rules' mappings (cross-attribution), \
+             got {link_gcpm_by_node:?}"
+        );
+
+        // Strongest check: correlate each entry's KEY (a live <style> node
+        // id) with that SAME node's own `@import url("X.css")` text, and
+        // confirm X.css is the file that actually declares the rule the
+        // entry's `ctx` carries. This is the one check a "both entries'
+        // content merely survived somewhere" style assertion would miss —
+        // without the Part 0 remap, a key can resolve to a live <style>
+        // node whose `@import` names the OTHER link's file while `ctx`
+        // still carries content read from the correct file at fetch time,
+        // i.e. content and key would point at two different links.
+        fn style_import_href(doc: &blitz_dom::BaseDocument, style_id: usize) -> String {
+            let node = doc.get_node(style_id).expect("style node");
+            let mut text = String::new();
+            for &child_id in &node.children {
+                if let Some(child) = doc.get_node(child_id)
+                    && let blitz_dom::node::NodeData::Text(t) = &child.data
+                {
+                    text.push_str(&t.content);
+                }
+            }
+            text
+        }
+        for (node_id, ctx) in &link_gcpm_by_node {
+            let import_text = style_import_href(doc.deref(), *node_id);
+            let carries_rule_a = ctx
+                .bookmark_mappings
+                .iter()
+                .any(|m| m.selector == ParsedSelector::Class("rule-a".to_string()));
+            if carries_rule_a {
+                assert!(
+                    import_text.contains(r#"url("a.css")"#),
+                    "entry keyed by node {node_id} carries rule-a's mapping but its \
+                     LIVE <style> node's @import is {import_text:?}, not a.css — \
+                     key and content point at different links"
+                );
+            } else {
+                assert!(
+                    import_text.contains(r#"url("b.css")"#),
+                    "entry keyed by node {node_id} carries rule-b's mapping but its \
+                     LIVE <style> node's @import is {import_text:?}, not b.css — \
+                     key and content point at different links"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_html_with_local_resources_three_media_restricted_links_all_survive_remap() {
+        // fulgur-smlr Part 0 edge case: 3+ media-restricted <link>s, not
+        // just 2. Each rewrite in `apply_link_media_rewrites`'s loop frees
+        // its own <link>'s slot right after creating its replacement
+        // <style>, so slot reuse can chain across more than one pair (e.g.
+        // link C's replacement could reuse link B's just-freed slot, which
+        // itself may have reused link A's). The remap must stay correct
+        // per-pair regardless of how many rewrites chain together.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, sel, level) in [("a", "rule-a", 1), ("b", "rule-b", 2), ("c", "rule-c", 3)] {
+            std::fs::write(
+                dir.path().join(format!("{name}.css")),
+                format!(".{sel} {{ bookmark-level: {level}; bookmark-label: content(); }}"),
+            )
+            .unwrap();
+        }
+
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<link rel="stylesheet" href="a.css" media="print">
+<link rel="stylesheet" href="b.css" media="print">
+<link rel="stylesheet" href="c.css" media="print">
+</head>
+<body><p class="rule-a rule-b rule-c">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        assert_eq!(
+            link_gcpm_by_node.len(),
+            3,
+            "three media-restricted <link>s must contribute three entries, \
+             got {link_gcpm_by_node:?}"
+        );
+        assert!(
+            find_element_by_tag(&doc, "link").is_none(),
+            "all three original <link>s must have been removed by the media rewrite"
+        );
+
+        use std::ops::Deref;
+        fn collect_style_ids(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
+            let Some(node) = doc.get_node(node_id) else {
+                return;
+            };
+            if let Some(el) = node.element_data()
+                && el.name.local.as_ref() == "style"
+            {
+                out.push(node_id);
+            }
+            for &child_id in &node.children {
+                collect_style_ids(doc, child_id, out);
+            }
+        }
+        let mut live_style_ids = Vec::new();
+        collect_style_ids(doc.deref(), doc.root_element().id, &mut live_style_ids);
+        assert_eq!(
+            live_style_ids.len(),
+            3,
+            "expected exactly three synthetic <style> nodes, got {live_style_ids:?}"
+        );
+
+        // Every entry's key must be a live <style> id, and no two entries
+        // may share a key.
+        let mut keys: Vec<usize> = Vec::new();
+        for (node_id, _) in &link_gcpm_by_node {
+            assert!(
+                live_style_ids.contains(node_id),
+                "entry key {node_id} must be a live <style> node id, got live ids \
+                 {live_style_ids:?}"
+            );
+            assert!(
+                !keys.contains(node_id),
+                "no two entries may share a node id, got {link_gcpm_by_node:?}"
+            );
+            keys.push(*node_id);
+        }
+
+        // Each of the three rules must appear in EXACTLY one entry, and no
+        // entry may carry more than one rule's mapping.
+        for sel in ["rule-a", "rule-b", "rule-c"] {
+            let count = link_gcpm_by_node
+                .iter()
+                .filter(|(_, ctx)| {
+                    ctx.bookmark_mappings
+                        .iter()
+                        .any(|m| m.selector == ParsedSelector::Class(sel.to_string()))
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "selector {sel} must appear in exactly one entry, got {link_gcpm_by_node:?}"
+            );
+        }
+        for (node_id, ctx) in &link_gcpm_by_node {
+            assert_eq!(
+                ctx.bookmark_mappings.len(),
+                1,
+                "entry keyed by {node_id} must carry exactly one rule's mapping \
+                 (no cross-attribution merge), got {:?}",
+                ctx.bookmark_mappings
+            );
+        }
     }
 
     struct NoOpPass;
@@ -3993,6 +5301,518 @@ mod tests {
             find_element_by_tag(&doc, "style").is_none(),
             "Expected no <style> element when CSS is empty"
         );
+    }
+
+    /// fulgur-smlr: guards the AssetBundle-injected `<style>` node's
+    /// TARGETED merge (folding in only `combined_css`'s DIRECT
+    /// `running_mappings`, never re-touching `bookmark_mappings`) against
+    /// regressing back to a whole-context `extend_from` — see
+    /// `document_ordered_gcpm_mappings`'s doc comment "Merge strategy"
+    /// section. Asserts the RAW `bookmark_mappings` COUNT directly (not
+    /// through a winner-take-all consumer like `BookmarkPass`, which would
+    /// mask a regression since duplicating a subsequence doesn't change
+    /// which mapping wins a last-write cascade). Mirrors the real pipeline
+    /// shape: `combined_css` is parsed once (as `engine.rs` does at the
+    /// top of `layout_to_drawables`) to get `cleaned_css`, which is what
+    /// actually gets injected via `InjectCssPass` — `bookmark-level`/
+    /// `bookmark-label` survive verbatim in `cleaned_css` (unlike
+    /// `position: running(...)`, which IS stripped), so the seed map's own
+    /// walk over the injected node already produces one mapping before
+    /// `document_ordered_gcpm_mappings`'s targeted-merge step runs at all.
+    #[test]
+    fn document_ordered_gcpm_mappings_assetbundle_merge_does_not_duplicate_bookmark_mapping() {
+        let combined_css = r#".target { bookmark-level: 1; bookmark-label: "X"; }"#;
+        let gcpm = crate::gcpm::parser::parse_gcpm(combined_css);
+        let css_to_inject = gcpm.cleaned_css.clone();
+        assert!(
+            css_to_inject.contains("bookmark-level"),
+            "sanity: bookmark-level must survive verbatim in cleaned_css \
+             for this test to actually exercise the targeted-merge \
+             distinction, got {css_to_inject:?}"
+        );
+
+        let html = "<html><head></head><body><p class=\"target\">Content</p></body></html>";
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = InjectCssPass { css: css_to_inject };
+        let ctx = PassContext { font_data: &[] };
+        apply_passes(&mut doc, &[Box::new(pass)], &ctx);
+
+        let (running, bookmarks) = document_ordered_gcpm_mappings(
+            &doc,
+            combined_css,
+            true, // assetbundle_css_injected
+            &[],  // link_gcpm_by_node
+            Vec::new(),
+            None, // base_path
+        );
+
+        assert!(running.is_empty());
+        assert_eq!(
+            bookmarks.len(),
+            1,
+            "AssetBundle's bookmark-level rule must appear exactly once — \
+             duplicated to 2 if the targeted merge regresses back to a \
+             whole-context extend_from, got {bookmarks:?}"
+        );
+        assert_eq!(
+            bookmarks[0].selector,
+            ParsedSelector::Class("target".to_string())
+        );
+    }
+
+    /// fulgur-smlr code review (final pass across the whole
+    /// bbcd3e98..cf8dfb8f range): guards the `link_gcpm_by_node` merge
+    /// (`insert`, not `extend_from`) against the media-rewritten `<link>`
+    /// case specifically — see `document_ordered_gcpm_mappings`'s doc
+    /// comment "Merge strategy" section. Since round 2's
+    /// `parse_gcpm_with_style_imports` fix, `collect_inline_gcpm_by_node`'s
+    /// seed walk now resolves the media-rewrite replacement
+    /// `<style>@import url(...) media;</style>` node's own `@import` too
+    /// (ignoring the media qualifier) — producing a duplicate of the SAME
+    /// content `link_gcpm_by_node`'s (remapped) entry for that same node
+    /// id already carries via `net.rs`'s real fetch. Asserts the RAW
+    /// mapping count directly (not PDF outline titles — outline-title
+    /// assertions are exactly what let this slip through undetected
+    /// across two prior review rounds, since `BookmarkPass`/
+    /// `RunningElementPass` are winner-take-all and mask exact-duplicate
+    /// mappings). Covers a media-restricted `<link>` whose file has a
+    /// NESTED `@import` (`direct.css` imports `nested.css`), so this test
+    /// catches duplication in both the direct and the nested content, not
+    /// just the top-level file.
+    #[test]
+    fn document_ordered_gcpm_mappings_media_link_merge_does_not_duplicate_bookmark_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("direct.css"),
+            r#"@import "nested.css"; .direct-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("nested.css"),
+            r#".nested-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let html = r#"<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="direct.css" media="print"></head>
+<body><p class="direct-rule nested-rule">x</p></body></html>"#;
+
+        let (doc, _gcpm, _column_css, link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
+
+        let (running, bookmarks) = document_ordered_gcpm_mappings(
+            &doc,
+            "",    // combined_css — no AssetBundle CSS in this scenario
+            false, // assetbundle_css_injected
+            &link_gcpm_by_node,
+            Vec::new(),
+            Some(dir.path()),
+        );
+
+        assert!(running.is_empty());
+        assert_eq!(
+            bookmarks.len(),
+            2,
+            "expected exactly one mapping each from direct.css and \
+             nested.css — a media-restricted <link>'s content must not be \
+             duplicated by the seed map's own (now non-empty since round \
+             2) @import resolution of the media-rewrite replacement \
+             <style> node, got {bookmarks:?}"
+        );
+        let direct_count = bookmarks
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("direct-rule".to_string()))
+            .count();
+        let nested_count = bookmarks
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("nested-rule".to_string()))
+            .count();
+        assert_eq!(
+            direct_count, 1,
+            "direct.css's own rule must appear exactly once, got {bookmarks:?}"
+        );
+        assert_eq!(
+            nested_count, 1,
+            "nested.css's rule (reached via direct.css's own @import) must \
+             appear exactly once, got {bookmarks:?}"
+        );
+    }
+
+    /// Defensive guard for `resolve_style_imports`'s filesystem-based
+    /// recursion: a cyclic `@import` chain (`a.css` imports `b.css` imports
+    /// `a.css`, ...) must not infinite-loop or stack overflow.
+    ///
+    /// Termination here is actually driven by the `visited` `HashSet`, not
+    /// `MAX_STYLE_IMPORT_DEPTH`: the third hop (`b.css`'s own `@import
+    /// "a.css"`) resolves to a path already in `visited` and is skipped
+    /// immediately, so recursion stops at depth 2 — the depth cap (16)
+    /// never comes into play for this LINEAR cycle at all. That's also
+    /// exactly why this test alone doesn't prove the visited-set guards
+    /// against BRANCHING (multiple `@import`s of the same target within
+    /// one file) — see
+    /// `resolve_style_imports_bounds_combinatorial_self_reference` for
+    /// that case, which a depth-only guard would not survive.
+    #[test]
+    fn resolve_style_imports_bounds_cyclic_import_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#"@import "b.css"; .rule-a { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#"@import "a.css"; .rule-b { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import url("a.css");"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        // Exactly one mapping per distinct file (a.css, b.css) — the
+        // visited-set means each is read and parsed exactly once, so this
+        // is now an exact count, not just a bound.
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            2,
+            "expected exactly one mapping each from a.css and b.css (each \
+             visited exactly once), got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Blocking regression guard (found in code review): `@import`
+    /// resolution must be immune to COMBINATORIAL, not just cyclic,
+    /// blowup. A file with `k` `@import` statements pointing at the same
+    /// (or a small set of) target(s) causes `resolve_style_imports` to
+    /// recurse into that target `k` times at EVERY level it's reachable
+    /// from — without the `visited` set, a self-referencing file with 3
+    /// imports of itself produces on the order of `3^MAX_STYLE_IMPORT_DEPTH`
+    /// recursive calls (confirmed in review to not complete within 60
+    /// seconds). The `visited` `HashSet` converts this to
+    /// O(distinct files) regardless of branching factor: the first
+    /// `@import "self.css"` visits and reads it; the other two (and every
+    /// subsequent reference at any depth) are `HashSet` lookups that skip
+    /// immediately. Asserts a generous-but-real wall-clock bound so a
+    /// regression back to depth-only bounding (which would hang for
+    /// minutes, not merely run slow) fails this test rather than the CI
+    /// timeout.
+    #[test]
+    fn resolve_style_imports_bounds_combinatorial_self_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("self.css"),
+            r#"@import "self.css"; @import "self.css"; @import "self.css"; .rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import url("self.css");"#;
+        let start = std::time::Instant::now();
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "combinatorial @import resolution took {elapsed:?} — expected \
+             near-instant (O(1) distinct files) with the visited-set guard \
+             in place; a multi-second-or-more result means the guard \
+             regressed back to depth-only bounding"
+        );
+        // self.css is visited exactly once (the first of the three
+        // identical @imports); its own rule appears exactly once, not
+        // three times and not zero times.
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "self.css must be visited exactly once despite being \
+             @import-ed 3 times, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213840): a LEGITIMATE repeat
+    /// of the same import target (not a cycle — `a.css` never itself
+    /// imports anything) must still be replayed at each of its textual
+    /// positions, not collapsed to one occurrence. `@import "a.css";
+    /// @import "b.css"; @import "a.css";` must fold `a`'s content in
+    /// TWICE, so the final `a.css` occurrence can still win an
+    /// equal-specificity cascade tie over `b.css` — collapsing it (the old
+    /// single shared `visited` set's behavior) would silently make `b.css`
+    /// win instead.
+    #[test]
+    fn resolve_style_imports_replays_repeated_non_cyclic_import() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.css"),
+            r#".other { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "a.css"; @import "b.css"; @import "a.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let selectors: Vec<_> = ctx
+            .bookmark_mappings
+            .iter()
+            .map(|m| m.selector.clone())
+            .collect();
+        assert_eq!(
+            selectors,
+            vec![
+                ParsedSelector::Class("rule".to_string()),
+                ParsedSelector::Class("other".to_string()),
+                ParsedSelector::Class("rule".to_string()),
+            ],
+            "expected a, b, a in cascade order, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213844): an `@import` href
+    /// must be resolved as a URL against the importing stylesheet's own
+    /// directory, not joined as a raw filesystem path component. A query
+    /// string (`?v=1`) is part of the URL, not the filename, and a
+    /// percent-escape (`%20`) must be decoded — Blitz's own fetch path
+    /// resolves both the same way, so `resolve_style_imports` must match
+    /// it or silently drop the imported GCPM content.
+    #[test]
+    fn resolve_style_imports_resolves_href_with_query_string() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chapters.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "chapters.css?v=1";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "a query string on the href must not prevent resolving the \
+             underlying file, got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    #[test]
+    fn resolve_style_imports_resolves_percent_encoded_href() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chapter one.css"),
+            r#".rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        let css = r#"@import "chapter%20one.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        assert_eq!(
+            ctx.bookmark_mappings.len(),
+            1,
+            "a percent-encoded href must decode to the real filename, \
+             got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039620905): the cache must not
+    /// replay a TRUNCATED result for a file first reached near
+    /// `MAX_STYLE_IMPORT_DEPTH`, when that same file is later reached
+    /// again from a shallower position with enough depth budget left to
+    /// resolve it fully. `shared.css` is reached twice: once through a
+    /// 15-level wrapper chain (landing it at depth 16 — the cap — so its
+    /// own `@import "child.css"` never resolves), and once directly at
+    /// depth 1 (plenty of budget left). Keying the cache by `(path, depth)`
+    /// instead of just `path` means the second reference is a cache MISS
+    /// and gets fully resolved, so `child.css`'s mapping must be present
+    /// — a bare-path-keyed cache would incorrectly replay the first,
+    /// truncated resolution and drop it entirely.
+    #[test]
+    fn resolve_style_imports_does_not_reuse_depth_truncated_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 15-level wrapper chain: level1.css -> level2.css -> ... ->
+        // level15.css -> shared.css. `shared.css` is processed at
+        // depth 15, so ITS OWN `@import "child.css"` computes
+        // child_depth = 16 == MAX_STYLE_IMPORT_DEPTH and never resolves.
+        for i in 1..15 {
+            std::fs::write(
+                dir.path().join(format!("level{i}.css")),
+                format!(r#"@import "level{}.css";"#, i + 1),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("level15.css"), r#"@import "shared.css";"#).unwrap();
+        std::fs::write(
+            dir.path().join("shared.css"),
+            r#"@import "child.css"; .shared-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.css"),
+            r#".child-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        // Root imports the deep chain FIRST (so shared.css's truncated
+        // resolution is cached before the direct reference is seen), then
+        // imports shared.css directly at depth 1.
+        let css = r#"@import "level1.css"; @import "shared.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let child_rule_count = ctx
+            .bookmark_mappings
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("child-rule".to_string()))
+            .count();
+        assert!(
+            child_rule_count >= 1,
+            "child.css's mapping must be resolved via the direct, \
+             shallow reference to shared.css even though an earlier deep \
+             chain reference to the same file was truncated by the depth \
+             cap — got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039797387): whether a file's
+    /// resolution is "cut short" depends on which ancestors are active on
+    /// the CURRENT call chain, not on the file itself — so a cut-short
+    /// result must never be cached, even when keyed by depth. `a.css`
+    /// imports `x.css`, and `x.css` imports `a.css` back (a genuine
+    /// cycle): resolving `x.css` while `a.css` is an active ancestor
+    /// cuts off `x.css`'s own attempt to re-enter `a.css`. A SEPARATE,
+    /// sibling reference to `x.css` (via `sibling.css`, never nested
+    /// under `a.css`) is not part of that cycle at all and must resolve
+    /// `x.css` -> `a.css` fully — a bug would instead replay the
+    /// first (incomplete) resolution's cached, `a.css`-omitting result.
+    #[test]
+    fn resolve_style_imports_does_not_cache_cycle_truncated_result() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.css"),
+            r#"@import "x.css"; .a-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("x.css"),
+            r#"@import "a.css"; .x-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sibling.css"),
+            r#"@import "x.css"; .sibling-rule { bookmark-level: 1; bookmark-label: content(); }"#,
+        )
+        .unwrap();
+
+        // `a.css` is resolved FIRST (so a cache bug would seed a
+        // truncated entry for `x.css` before `sibling.css` ever gets a
+        // chance to reach it independently).
+        let css = r#"@import "a.css"; @import "sibling.css";"#;
+        let ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+
+        let a_rule_count = ctx
+            .bookmark_mappings
+            .iter()
+            .filter(|m| m.selector == ParsedSelector::Class("a-rule".to_string()))
+            .count();
+        assert!(
+            a_rule_count >= 2,
+            "sibling.css's independent reference to x.css must resolve \
+             a.css's content fresh (not part of the a.css<->x.css cycle \
+             in THIS context), so a-rule must appear once from the direct \
+             a.css import and once more via sibling.css -> x.css -> \
+             a.css — got {:?}",
+            ctx.bookmark_mappings
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039954605 — P1): a file inside
+    /// a genuine `@import` cycle is never cached (see
+    /// `resolve_style_imports_does_not_cache_cycle_truncated_result`
+    /// above), so `cache` gives a CYCLIC, branching subgraph no help at
+    /// all — reintroducing the exact `k^depth` blowup
+    /// `resolve_style_imports_bounds_combinatorial_self_reference`
+    /// already guards against for the acyclic case. Builds an 8-file
+    /// chain (`level0` -> `level1` -> ... -> `level7` -> `level0`, closing
+    /// the cycle) where EVERY level imports the next 3 times — with no
+    /// budget this is on the order of `3^8` (~6500) uncached
+    /// read+parse+recurse operations; `MAX_STYLE_IMPORT_TOTAL_READS`
+    /// must keep it fast regardless.
+    #[test]
+    fn resolve_style_imports_bounds_cyclic_branching_via_read_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        const CYCLE_LEN: usize = 8;
+        for i in 0..CYCLE_LEN {
+            let next = (i + 1) % CYCLE_LEN;
+            std::fs::write(
+                dir.path().join(format!("level{i}.css")),
+                format!(
+                    r#"@import "level{next}.css"; @import "level{next}.css"; @import "level{next}.css"; .level{i}-rule {{ bookmark-level: 1; bookmark-label: content(); }}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let css = r#"@import url("level0.css");"#;
+        let start = std::time::Instant::now();
+        let _ctx = parse_gcpm_with_style_imports(css, Some(dir.path()));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cyclic branching import resolution took {elapsed:?} — expected \
+             MAX_STYLE_IMPORT_TOTAL_READS to bound total work even though \
+             every file in this cycle is uncacheable; a multi-second-or-more \
+             result means the read-budget guard regressed"
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213856): `document_has_style_import`
+    /// is the cheap presence check `Engine::render`'s gate now consults so it
+    /// doesn't skip `document_ordered_gcpm_mappings` (and therefore never
+    /// resolve the import) just because a bare, import-blind parse found no
+    /// direct `position: running()` rule.
+    #[test]
+    fn document_has_style_import_detects_top_level_import() {
+        let html = r#"<!doctype html><html><head>
+            <style>@import "foo.css";</style>
+        </head><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(document_has_style_import(&doc));
+    }
+
+    #[test]
+    fn document_has_style_import_false_for_no_style_import() {
+        let html = r#"<!doctype html><html><head>
+            <style>.x { color: red; }</style>
+        </head><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(!document_has_style_import(&doc));
+    }
+
+    #[test]
+    fn document_has_style_import_false_for_no_style_tag_at_all() {
+        let html = r#"<!doctype html><html><body>x</body></html>"#;
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
+        assert!(!document_has_style_import(&doc));
     }
 
     #[test]
@@ -4067,6 +5887,114 @@ mod tests {
         assert_eq!(store.instance_count(), 1);
         assert_eq!(store.name_of(0), Some("pageTitle"));
         assert!(store.get_html(0).unwrap().contains("Doc Title"));
+    }
+
+    #[test]
+    fn find_running_name_prefers_higher_specificity_over_vec_position() {
+        // Class mapping is FIRST in the Vec (would win under the old
+        // first-match rule). Id mapping is SECOND but must win because it
+        // has higher specificity.
+        let html = r#"<html><head></head><body>
+            <div id="main-hdr" class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "fromClass".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("main-hdr".to_string()),
+                running_name: "fromId".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("fromId"),
+            "Id selector (higher specificity) must win over Class selector \
+             despite appearing later in the mappings Vec"
+        );
+    }
+
+    #[test]
+    fn find_running_name_prefers_higher_specificity_when_it_comes_first() {
+        // Mirror image of the test above: Id is FIRST, so a naive
+        // "last match wins" rule (ignoring specificity entirely) would
+        // pick the Class mapping. Specificity must still win regardless
+        // of which mapping comes first or last in the Vec.
+        let html = r#"<html><head></head><body>
+            <div id="main-hdr" class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Id("main-hdr".to_string()),
+                running_name: "fromId".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "fromClass".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("fromId"),
+            "specificity must outrank Vec position: Id wins even though \
+             the lower-specificity Class mapping comes later"
+        );
+    }
+
+    #[test]
+    fn find_running_name_breaks_specificity_ties_by_later_vec_position() {
+        // Both mappings are Class selectors (equal specificity) and both
+        // match the same element. The one later in the Vec must win, same
+        // as real CSS "last rule wins" behavior for equal specificity.
+        let html = r#"<html><head></head><body>
+            <div class="hdr">Header Content</div>
+            <p>Body text</p>
+        </body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let mappings = vec![
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "firstClass".to_string(),
+            },
+            crate::gcpm::RunningMapping {
+                parsed: crate::gcpm::ParsedSelector::Class("hdr".to_string()),
+                running_name: "secondClass".to_string(),
+            },
+        ];
+
+        let pass = RunningElementPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        let store = pass.into_running_store();
+        assert_eq!(store.instance_count(), 1);
+        assert_eq!(
+            store.name_of(0),
+            Some("secondClass"),
+            "On equal specificity, the later mapping in the Vec must win the tie"
+        );
     }
 
     #[test]
@@ -6099,13 +8027,15 @@ mod tests {
         let mut doc = parse(html, 800.0, &[]);
         let rewrites = collect_link_media_rewrites(&doc);
         assert_eq!(rewrites.len(), 1);
+        let original_link_node_id = rewrites[0].link_node_id;
 
-        apply_link_media_rewrites(&mut doc, &rewrites);
+        let id_map = apply_link_media_rewrites(&mut doc, &rewrites);
 
         let head = find_element_by_tag(&doc, "head").expect("head exists");
         let head_node = doc.get_node(head).unwrap();
 
         let mut style_text_found: Option<String> = None;
+        let mut style_node_id_found: Option<usize> = None;
         let mut a_css_link_found = false;
         let mut b_css_link_found = false;
         for &cid in &head_node.children {
@@ -6113,6 +8043,7 @@ mod tests {
             if let Some(el) = child.element_data() {
                 match el.name.local.as_ref() {
                     "style" => {
+                        style_node_id_found = Some(cid);
                         for &gc in &child.children {
                             let gnode = doc.get_node(gc).unwrap();
                             if let blitz_dom::node::NodeData::Text(t) = &gnode.data {
@@ -6134,6 +8065,37 @@ mod tests {
         assert!(b_css_link_found, "<link href=b.css> must be preserved");
         let text = style_text_found.expect("<style> with @import must exist");
         assert_eq!(text, r#"@import url("a.css") print;"#);
+
+        // fulgur-smlr Part 0: the returned id map must pair the removed
+        // original <link>'s node id with the replacement <style>'s own
+        // (live) node id, so a caller holding a pre-rewrite key can remap
+        // it to something that still resolves in the post-rewrite `doc`.
+        assert_eq!(id_map.len(), 1, "one rewrite in, one mapping entry out");
+        assert_eq!(
+            id_map[0].0, original_link_node_id,
+            "mapping's first element must be the original <link>'s node id"
+        );
+        assert_eq!(
+            id_map[0].1,
+            style_node_id_found.expect("synthetic <style> node must exist"),
+            "mapping's second element must be the replacement <style>'s live node id"
+        );
+    }
+
+    /// Codex review (PR #768, discussion r4039213862): the public
+    /// `parse_html_with_local_resources` must keep its original 3-tuple
+    /// return shape — a downstream caller destructuring `(doc, gcpm,
+    /// column_css)` should still compile against this crate version. The
+    /// 4th, node-id-tagged piece fulgur-smlr added lives only on the
+    /// crate-internal `parse_html_with_local_resources_with_link_nodes`.
+    #[test]
+    fn parse_html_with_local_resources_keeps_three_tuple_public_contract() {
+        let html = "<!doctype html><html><head></head><body>x</body></html>";
+        let (_doc, _gcpm, _column_css): (
+            HtmlDocument,
+            crate::gcpm::GcpmContext,
+            Vec<(usize, String)>,
+        ) = parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
     }
 
     #[test]
@@ -6153,8 +8115,8 @@ mod tests {
         }
         html.push_str("</body></html>");
 
-        let (doc, _gcpm, _column_css) =
-            parse_html_with_local_resources(&html, 400.0, 10000, &[], true, None);
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(&html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let root = doc.root_element();
         let _ = element_text(doc.deref(), root.id);
@@ -6192,8 +8154,8 @@ mod tests {
     #[test]
     fn element_text_inserts_space_between_block_children() {
         let html = "<html><body><a id='x'><div>foo</div><div>bar</div></a></body></html>";
-        let (doc, _gcpm, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -6203,8 +8165,8 @@ mod tests {
     #[test]
     fn element_text_inserts_space_for_br() {
         let html = "<html><body><a id='x'>foo<br>bar</a></body></html>";
-        let (doc, _gcpm, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -6216,8 +8178,8 @@ mod tests {
         // If the text already ends in whitespace, a block boundary should
         // not add another space.
         let html = "<html><body><a id='x'>foo <div>bar</div></a></body></html>";
-        let (doc, _gcpm, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _gcpm, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         use std::ops::Deref;
         let a_id = find_element_by_attr_id(doc.deref(), "x");
         let text = element_text(doc.deref(), a_id);
@@ -6233,8 +8195,8 @@ mod tests {
         let html = r#"<!doctype html><html><head>
             <style>@page { size: A4 landscape; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -6246,8 +8208,8 @@ mod tests {
     #[test]
     fn extract_gcpm_from_inline_styles_returns_empty_for_no_style_tag() {
         let html = r#"<!doctype html><html><body>x</body></html>"#;
-        let (doc, _, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert!(gcpm.page_settings.is_empty());
     }
@@ -6262,8 +8224,8 @@ mod tests {
             <style>@page { size: A4 landscape; }</style>
             <style>@page { margin: 2cm; }</style>
         </head><body>x</body></html>"#;
-        let (doc, _, _column_css) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, None);
+        let (doc, _, _column_css, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(html, 400.0, 10000, &[], true, None);
         let gcpm = extract_gcpm_from_inline_styles(&doc);
         assert_eq!(
             gcpm.page_settings.len(),
@@ -6424,8 +8386,15 @@ mod tests {
 <html><head><link rel="stylesheet" href="style.css"></head>
 <body><div class="callout" id="c"></div></body></html>"#;
 
-        let (doc, _gcpm, column_css_texts) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+        let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
         assert!(
             !column_css_texts.is_empty(),
             "expected the linked stylesheet's text to be drained"
@@ -6465,8 +8434,15 @@ mod tests {
 <html><head><link rel="stylesheet" href="theme"></head>
 <body><div class="callout" id="c"></div></body></html>"#;
 
-        let (doc, _gcpm, column_css_texts) =
-            parse_html_with_local_resources(html, 400.0, 10000, &[], true, Some(dir.path()));
+        let (doc, _gcpm, column_css_texts, _link_gcpm_by_node) =
+            parse_html_with_local_resources_with_link_nodes(
+                html,
+                400.0,
+                10000,
+                &[],
+                true,
+                Some(dir.path()),
+            );
         assert!(
             !column_css_texts.is_empty(),
             "expected the extensionless linked stylesheet's text to be drained"
@@ -7180,6 +9156,195 @@ li::marker { content: url("star.png"); }
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.level, 2);
         assert_eq!(results[0].1.label, "B");
+    }
+
+    #[test]
+    fn bookmark_pass_level_specificity_beats_later_lower_specificity_mapping() {
+        // Id mapping (higher specificity) sets `level` only and comes
+        // FIRST. Tag mapping (lower specificity) comes SECOND and tries to
+        // override `level` while also setting `label` (a field the Id
+        // mapping left untouched).
+        //
+        // Under the OLD code (pure forward field overlay, ignoring
+        // specificity), the later Tag mapping would win the `level` field
+        // since it iterates last — wrong. The new code must let the
+        // higher-specificity Id mapping's `level` survive, while still
+        // picking up the Tag mapping's `label` (fields cascade
+        // independently).
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(5)),
+                    label: Some(vec![ContentItem::String("Overridden".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "higher-specificity Id mapping's level must survive the later, \
+             lower-specificity Tag mapping's attempt to override it"
+        );
+        assert_eq!(
+            results[0].1.label, "Overridden",
+            "label must still cascade from the Tag mapping — level and \
+             label cascade independently per field"
+        );
+    }
+
+    #[test]
+    fn bookmark_pass_label_specificity_beats_later_lower_specificity_mapping() {
+        // Mirror image of the level test above, but for `label`: Id mapping
+        // (higher specificity) sets BOTH `level` and `label` and comes
+        // FIRST. Tag mapping (lower specificity) comes SECOND and tries to
+        // override `label` only (leaving `level` untouched).
+        //
+        // Under the OLD code (pure forward field overlay), the later Tag
+        // mapping would win the `label` field — wrong. This also proves
+        // `label` cascades BY specificity, not merely independently of
+        // `level`: every other test in this suite leaves
+        // `label_specificity` at `None` when the winning label is set, so
+        // none of them exercise the reject branch of the label guard.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: Some(vec![ContentItem::String("FromId".into())]),
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: None,
+                    label: Some(vec![ContentItem::String("FromTag".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "label-only Tag mapping must not disturb level"
+        );
+        assert_eq!(
+            results[0].1.label, "FromId",
+            "higher-specificity Id mapping's label must survive the later, \
+             lower-specificity Tag mapping's attempt to override it"
+        );
+    }
+
+    #[test]
+    fn bookmark_pass_level_specificity_wins_regardless_of_mapping_order() {
+        // Mirror image of the test above: the lower-specificity Tag
+        // mapping now comes FIRST and the higher-specificity Id mapping
+        // comes SECOND. Both the old and new code happen to agree here
+        // (forward "last wins" already matches "higher specificity wins"
+        // when the higher-specificity mapping is later) — this test
+        // guards against a specificity implementation that is secretly
+        // just order-dependent.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(5)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: None,
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.level, 1,
+            "higher-specificity Id mapping must win regardless of Vec order"
+        );
+    }
+
+    #[test]
+    fn bookmark_pass_level_specificity_survives_later_lower_specificity_none() {
+        // `bookmark-level: none` is just another value competing in the
+        // same per-property `level` cascade — it is not a special
+        // out-of-band kill switch. A higher-specificity Id mapping sets a
+        // numeric level and comes FIRST; a lower-specificity Tag mapping
+        // sets `None_` and comes SECOND.
+        //
+        // Under the OLD code (pure forward field overlay, ignoring
+        // specificity), the later `None_` would unconditionally suppress
+        // the entry — wrong. The new code must let the higher-specificity
+        // numeric level survive, so the entry is emitted with level=3.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: Some(BookmarkLevel::Integer(3)),
+                    label: None,
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::None_),
+                    label: None,
+                },
+            ],
+        );
+        assert_eq!(
+            results.len(),
+            1,
+            "the lower-specificity Tag mapping's `none` must not suppress \
+             the entry set by the higher-specificity Id mapping"
+        );
+        assert_eq!(results[0].1.level, 3);
+        assert_eq!(results[0].1.label, "Heading");
+    }
+
+    #[test]
+    fn bookmark_pass_label_specificity_wins_regardless_of_mapping_order() {
+        // Mirror image of `bookmark_pass_level_specificity_wins_regardless_of_mapping_order`,
+        // but for `label`: the lower-specificity Tag mapping (which also
+        // sets `level`, so an entry is actually emitted) comes FIRST, and
+        // a STRICTLY higher-specificity Id mapping overwrites `label`
+        // SECOND. `level`'s and `label`'s guards in `resolve_node` are
+        // structurally identical — this closes the coverage gap for
+        // `label` symmetric to the existing `level` test, guarding
+        // against a specificity implementation that is secretly just
+        // order-dependent for one field but not the other.
+        let html = r#"<html><body><h1 id="hdr">Heading</h1></body></html>"#;
+        let results = run_bookmark_pass(
+            html,
+            vec![
+                BookmarkMapping {
+                    selector: ParsedSelector::Tag("h1".into()),
+                    level: Some(BookmarkLevel::Integer(1)),
+                    label: Some(vec![ContentItem::String("FromTag".into())]),
+                },
+                BookmarkMapping {
+                    selector: ParsedSelector::Id("hdr".into()),
+                    level: None,
+                    label: Some(vec![ContentItem::String("FromId".into())]),
+                },
+            ],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.level, 1, "level-only Tag mapping must win");
+        assert_eq!(
+            results[0].1.label, "FromId",
+            "strictly higher-specificity Id mapping must win the label \
+             field regardless of Vec order"
+        );
     }
 
     #[test]
