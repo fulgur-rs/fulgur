@@ -7321,6 +7321,99 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // --- tagged PDF: use_run_tagging = true paths ---
+    //
+    // These tests enable `Engine::builder().tagged(true)` and provide HTML with
+    // `<a href>` links inside paragraphs. When `tag_collector` is Some and the
+    // paragraph has link runs, `dispatch_fragment` (and `draw_under_clip`) set
+    // `use_run_tagging = true` instead of calling `try_start_tagged`, routing
+    // through the per-run tag path. Without these tests, those branches are
+    // never exercised by `cargo llvm-cov --lib`.
+
+    fn render_html_tagged(html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .tagged(true)
+            .build()
+            .render(html)
+            .expect("tagged render failed")
+    }
+
+    #[test]
+    fn render_smoke_tagged_standalone_paragraph_with_link() {
+        // dispatch_fragment standalone-paragraph branch (lines ~1217-1221):
+        // `use_run_tagging = true` fires when a plain <p> (no block_styles at the
+        // same node_id) contains an <a href> and tagged PDF mode is on.
+        let pdf = render_html_tagged(
+            r#"<!doctype html><html><body>
+            <p>Visit <a href="https://example.com">this page</a> for more.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_block_paragraph_with_link() {
+        // dispatch_fragment block+paragraph branch (lines ~1147-1158):
+        // `use_run_tagging = true` fires when the paragraph's block_styles and
+        // paragraphs share a node_id (e.g. <p> with background) and the
+        // paragraph contains an <a href> in tagged PDF mode.
+        let pdf = render_html_tagged(
+            r#"<!doctype html><html><body>
+            <p style="background:#e8f4f8;padding:8px">Text with
+              <a href="https://example.com">a link</a> here.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_overflow_hidden_paragraph_with_link() {
+        // draw_under_clip inner-content branch (lines ~1920-1927):
+        // `use_run_tagging = true` fires inside `draw_under_clip` when the
+        // clipped block is itself an inline root (<p style="overflow:hidden">)
+        // that has a linked text run and tagged PDF mode is on.
+        let pdf = render_html_tagged(
+            r#"<!doctype html><html><body>
+            <p style="overflow:hidden;background:#eef;width:300px">
+              Text with <a href="https://example.com">link inside clip</a>.
+            </p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_paragraph_containing_inline_block() {
+        // try_start_tagged in_marked_content guard (line 1000):
+        // When a tagged <p> sequence is open (`in_marked_content = true`),
+        // any nested dispatch_fragment call for an inline-block span inside
+        // the paragraph also calls try_start_tagged — which returns None at
+        // line 1000 to prevent a Krilla `can't start marked content twice` panic.
+        let pdf = render_html_tagged(
+            r#"<!doctype html><html><body>
+            <p>Outer text
+              <span style="display:inline-block;width:60px;height:24px;
+                           background:#eef">inner</span>
+            more text.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_tagged_heading_with_link() {
+        // dispatch_fragment standalone-paragraph branch for a heading:
+        // `use_run_tagging = true` also fires for <h1>–<h6> elements that
+        // contain <a href> links in tagged PDF mode (PdfTag::H{level}).
+        let pdf = render_html_tagged(
+            r#"<!doctype html><html><body>
+            <h1>Heading with <a href="https://example.com">a link</a></h1>
+            <p>Body text.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // --- paint_multicol_paragraph_slices: multi-page multicol partition (lines 1396-1401) ---
 
     #[test]
