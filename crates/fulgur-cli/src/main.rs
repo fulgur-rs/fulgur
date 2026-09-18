@@ -440,7 +440,83 @@ fn parse_margin(s: &str) -> Margin {
     }
 }
 
+/// Minimal `log` sink that writes to **stderr**.
+///
+/// `crates/fulgur` reports non-fatal problems through the `log` facade —
+/// missing assets (`asset.rs`), unparseable CSS (`column_css.rs`), and
+/// fragments placed past the page box (`pagination_layout.rs`). A
+/// facade with no installed logger silently drops every one of them, so
+/// until this existed the CLI showed the user nothing: a render that
+/// paints content off the paper and loses it exits `0` with no output.
+///
+/// stderr, not stdout: `-o -` writes PDF bytes to stdout and any other
+/// byte there corrupts the stream (see [`StdoutIsolator`]).
+///
+/// Deliberately not `env_logger` — that pulls a regex / ANSI stack in
+/// for what is one `writeln!`, and `RUST_LOG=<level>` covers the whole
+/// need here. Unrecognised values fall back to the default rather than
+/// erroring, since logging configuration must never fail a render.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            // `eprintln!` panics on a write failure (e.g. a broken pipe);
+            // a logging failure must never abort an otherwise-successful
+            // render (CodeRabbit review, PR #719), so write directly and
+            // ignore the `Result`.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}",
+                format_log_line(record.level(), record.args())
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install [`StderrLogger`], honouring `RUST_LOG` (default: `warn`).
+fn init_logging() {
+    let level = parse_log_level(std::env::var("RUST_LOG").ok().as_deref());
+    // Only fails if a logger is already installed, which cannot happen
+    // here — but a logging failure must never abort a render.
+    if log::set_logger(&StderrLogger).is_ok() {
+        log::set_max_level(level);
+    }
+}
+
+/// Render one log record as the line [`StderrLogger`] writes.
+///
+/// Split out from `log` so the formatting is testable without installing a
+/// global logger or capturing the process's stderr.
+fn format_log_line(level: log::Level, args: &std::fmt::Arguments<'_>) -> String {
+    format!("{}: {}", level.as_str().to_lowercase(), args)
+}
+
+/// Resolve the `RUST_LOG` value to a level filter.
+///
+/// Accepts exactly one level name (case-insensitive). Anything else —
+/// absent, empty, a target directive like `fulgur=debug`, or a
+/// multi-directive string like `warn,fulgur=debug` — falls back to `warn`
+/// rather than erroring, because logging configuration must never fail a
+/// render. Surrounding whitespace is tolerated.
+///
+/// Split out from [`init_logging`] so the contract is testable without
+/// mutating process-wide environment or logger state.
+fn parse_log_level(value: Option<&str>) -> log::LevelFilter {
+    value
+        .and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Warn)
+}
+
 fn main() {
+    init_logging();
     let cli = Cli::parse();
 
     match cli.command {
@@ -930,5 +1006,144 @@ mod tests {
     fn margin_rejects_one_bad_value_among_four() {
         let m = parse_margin("10 10 10 -10");
         assert_eq!(m, Margin::default());
+    }
+
+    // --- logging ---
+
+    /// `log::set_max_level` is process-global and `cargo test` runs these in
+    /// parallel, so every test that sets or asserts on the level takes this
+    /// lock. Without it, `init_logging` (which sets the level from `RUST_LOG`)
+    /// can land between another test's `set_max_level` and its assertion.
+    static LOG_LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`LOG_LEVEL_LOCK`], ignoring poisoning: a panic in one level test
+    /// must not cascade into spurious failures in the others.
+    fn log_level_guard() -> std::sync::MutexGuard<'static, ()> {
+        LOG_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The documented default: nothing set, or nothing parseable, is `warn`.
+    #[test]
+    fn parse_log_level_defaults_to_warn() {
+        assert_eq!(parse_log_level(None), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level(Some("")), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level(Some("nonsense")), log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn parse_log_level_accepts_each_single_level() {
+        for (text, expected) in [
+            ("error", log::LevelFilter::Error),
+            ("warn", log::LevelFilter::Warn),
+            ("info", log::LevelFilter::Info),
+            ("debug", log::LevelFilter::Debug),
+            ("trace", log::LevelFilter::Trace),
+            ("off", log::LevelFilter::Off),
+        ] {
+            assert_eq!(parse_log_level(Some(text)), expected, "level {text}");
+            assert_eq!(
+                parse_log_level(Some(&text.to_uppercase())),
+                expected,
+                "level {text} uppercased"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_log_level_tolerates_surrounding_whitespace() {
+        assert_eq!(parse_log_level(Some("  debug \n")), log::LevelFilter::Debug);
+    }
+
+    /// `env_logger`-style directives are NOT supported, and silently fall back
+    /// to the default rather than erroring. This is the documented contract
+    /// (README) and the likeliest user surprise, so pin it.
+    #[test]
+    fn parse_log_level_falls_back_on_target_directives() {
+        assert_eq!(
+            parse_log_level(Some("fulgur=debug")),
+            log::LevelFilter::Warn
+        );
+        assert_eq!(
+            parse_log_level(Some("warn,fulgur=debug")),
+            log::LevelFilter::Warn
+        );
+    }
+
+    #[test]
+    fn format_log_line_lowercases_the_level() {
+        assert_eq!(
+            format_log_line(log::Level::Warn, &format_args!("missing asset {}", 3)),
+            "warn: missing asset 3"
+        );
+        assert_eq!(
+            format_log_line(log::Level::Error, &format_args!("boom")),
+            "error: boom"
+        );
+    }
+
+    /// `enabled` gates on the globally installed max level. Set it explicitly
+    /// so the assertion does not depend on whether `init_logging` has run.
+    #[test]
+    fn stderr_logger_enabled_follows_max_level() {
+        use log::Log;
+        let _guard = log_level_guard();
+        log::set_max_level(log::LevelFilter::Warn);
+        let warn = log::Metadata::builder().level(log::Level::Warn).build();
+        let info = log::Metadata::builder().level(log::Level::Info).build();
+        assert!(StderrLogger.enabled(&warn));
+        assert!(
+            !StderrLogger.enabled(&info),
+            "info is below the warn filter"
+        );
+    }
+
+    /// `log` itself: exercise both arms of its `enabled` gate and `flush`.
+    /// Called directly on the unit struct rather than through the `log`
+    /// facade, so this needs no globally installed logger — the record it
+    /// writes goes to the test harness's captured stderr.
+    #[test]
+    fn stderr_logger_log_writes_only_when_enabled() {
+        use log::Log;
+        let _guard = log_level_guard();
+        log::set_max_level(log::LevelFilter::Warn);
+
+        // Enabled: at the filter level, so this takes the writing arm.
+        StderrLogger.log(
+            &log::Record::builder()
+                .level(log::Level::Warn)
+                .args(format_args!("covered warn line"))
+                .build(),
+        );
+        // Disabled: below the filter, so this takes the early-out arm.
+        StderrLogger.log(
+            &log::Record::builder()
+                .level(log::Level::Trace)
+                .args(format_args!("must not be written"))
+                .build(),
+        );
+
+        // A no-op, but it is part of the trait surface and must not panic.
+        StderrLogger.flush();
+    }
+
+    /// `init_logging` installs the process-global logger. It is idempotent by
+    /// construction — `set_logger` returns `Err` once a logger exists, and the
+    /// guard skips `set_max_level` — so calling it twice here is safe and
+    /// pins that a repeat call cannot panic or reset the filter.
+    ///
+    /// Deliberately does not assert a specific level: `RUST_LOG` may be set in
+    /// the surrounding environment, and mutating it would race the other tests
+    /// in this binary. The parsing contract is covered by `parse_log_level`.
+    #[test]
+    fn init_logging_installs_a_logger_and_is_idempotent() {
+        let _guard = log_level_guard();
+        init_logging();
+        let after_first = log::max_level();
+        init_logging();
+        assert_eq!(
+            log::max_level(),
+            after_first,
+            "a second init_logging must not change the filter"
+        );
     }
 }
