@@ -7455,4 +7455,54 @@ mod tests {
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- build_struct_tree: run_entry with no semantic entry (L4119 None branch) ---
+
+    #[test]
+    fn build_struct_tree_run_entry_node_absent_from_semantics_is_skipped() {
+        // A node recorded via record_run that has NO entry in drawables.semantics
+        // must be silently skipped by the backfill loop (the `if let Some(entry)`
+        // arm yields None → execution falls through to `}` at L4119 without
+        // inserting a heading_titles entry or panicking).
+        // Because drawables.semantics is also empty, no root groups are built and
+        // the tree stays empty.
+        let node_id: usize = 99;
+        let id = make_identifier();
+        let mut tc = crate::draw_primitives::TagCollector::new();
+        tc.record_run(
+            node_id,
+            crate::draw_primitives::ParagraphRunItem::Content(id),
+        );
+        // Intentionally leave drawables.semantics empty so get(&node_id) → None.
+        let d = Drawables::new();
+        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let mut tree = TagTree::new();
+        build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
+        assert!(
+            tree.children.is_empty(),
+            "run_entry node absent from semantics must not produce a tree group"
+        );
+    }
+
+    // --- paint_multicol_rule_for_page: L2511 early-return when page has no fragment ---
+
+    #[test]
+    fn render_smoke_multicol_column_rule_single_page_container_in_multipage_doc() {
+        // A multicol container with column-rule exists only on page 1.
+        // draw_v2_page is called for every page including page 2, so
+        // paint_multicol_rule_for_page is called with page_index=1 for a
+        // container whose fragments list only contains page_index=0 →
+        // the `let Some(target_pos) = target_pos else { return; }` guard fires.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="column-count:2;column-gap:20px;column-rule:2px solid #369;width:400px">
+              <p>Column A rule test.</p>
+              <p>Column B rule test.</p>
+            </div>
+            <div style="height:1200px"></div>
+            <p>Page two paragraph forces a second page.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
