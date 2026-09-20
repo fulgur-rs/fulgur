@@ -176,4 +176,51 @@ mod tests {
         svg.opacity = 0.0;
         draw_onto_surface(&svg);
     }
+
+    // --- with_node_id builder ---
+    //
+    // `image.rs` and `paragraph.rs` both test their parallel `with_node_id`
+    // builders; this section mirrors that coverage for `SvgRender`.
+
+    #[test]
+    fn test_new_node_id_defaults_to_none() {
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0);
+        assert!(
+            svg.node_id.is_none(),
+            "new() must initialise node_id to None"
+        );
+    }
+
+    #[test]
+    fn test_with_node_id_some_stores_value() {
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0).with_node_id(Some(42));
+        assert_eq!(svg.node_id, Some(42));
+    }
+
+    #[test]
+    fn test_with_node_id_none_stores_none() {
+        // Explicitly passing None must also work (e.g. to clear a previously set id).
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0).with_node_id(None);
+        assert!(svg.node_id.is_none());
+    }
+
+    #[test]
+    fn test_with_node_id_preserves_other_fields() {
+        // The builder must not clobber width, height, opacity, or visible.
+        let svg = SvgRender::new(parse_tree(), 120.0, 80.0).with_node_id(Some(7));
+        assert_eq!(svg.width, 120.0);
+        assert_eq!(svg.height, 80.0);
+        assert_eq!(svg.opacity, 1.0);
+        assert!(svg.visible);
+        assert_eq!(svg.node_id, Some(7));
+    }
+
+    #[test]
+    fn test_with_node_id_second_call_overrides_first() {
+        // Calling with_node_id a second time must replace the previous value.
+        let svg = SvgRender::new(parse_tree(), 100.0, 50.0)
+            .with_node_id(Some(1))
+            .with_node_id(Some(2));
+        assert_eq!(svg.node_id, Some(2));
+    }
 }
