@@ -31,6 +31,21 @@ details.
 
 ## Layout
 
+### `break-inside: avoid`
+
+`break-inside: avoid` is honoured by emitting the box as a single fragment.
+Per CSS Fragmentation 3 §4.4 it is a hint, not a guarantee: when honouring
+it would overflow the page, fulgur drops it and fragments normally.
+
+That fallback matters most for paragraphs. `avoid` on an inline root works
+by skipping the line-split path, and the block path it falls through to
+cannot split a box whose only children are text nodes. Until `fulgur-a3ek`
+the hint was honoured unconditionally, so a paragraph taller than one page
+was emitted as a single over-long fragment and every line past the page
+bottom was discarded — with no error, no warning and exit code 0.
+
+A paragraph that does fit on a page is still kept whole.
+
 ### `overflow` / `overflow-x` / `overflow-y`
 
 Supported:

@@ -735,10 +735,17 @@ impl<'a> PaginationLayoutTree<'a> {
             // fulgur-k0g0: when `break-inside: avoid` is set, fall
             // through to the block path below so the paragraph emits
             // whole instead of splitting between lines.
-            let line_metrics = if avoid_inside {
+            let line_metrics = collect_inline_line_metrics(child);
+            // fulgur-a3ek: only drop the metrics while `avoid` is actually
+            // satisfiable — see `avoid_inside_is_satisfiable`. An oversized
+            // paragraph keeps them and splits at line boundaries instead of
+            // losing the lines that fall past the page bottom.
+            let line_metrics = if avoid_inside
+                && avoid_inside_is_satisfiable(&line_metrics, child_h, self.page_height_px)
+            {
                 Vec::new()
             } else {
-                collect_inline_line_metrics(child)
+                line_metrics
             };
             if line_metrics.len() > 1 {
                 // fulgur-s67g Phase 2.2: if the paragraph cannot fit
@@ -2741,10 +2748,17 @@ fn fragment_block_subtree_inner(
         let has_transform = child
             .primary_styles()
             .is_some_and(|s| !s.get_box().transform.0.is_empty());
-        let line_metrics = if avoid_inside || has_transform {
+        // A transformed subtree stays atomic unconditionally (see above);
+        // `avoid` only does so while it is satisfiable (fulgur-a3ek).
+        let line_metrics = if has_transform {
             Vec::new()
         } else {
-            collect_inline_line_metrics(child)
+            let metrics = collect_inline_line_metrics(child);
+            if avoid_inside && avoid_inside_is_satisfiable(&metrics, child_h, page_height_px) {
+                Vec::new()
+            } else {
+                metrics
+            }
         };
         if line_metrics.len() > 1 {
             // Split-before fallback (CSS Fragmentation §4.2, class A
@@ -3380,6 +3394,38 @@ fn fragment_block_subtree_inner(
         });
 
     (page_index, cursor_y)
+}
+
+/// Vertical extent spanned by a paragraph's line boxes, in the same CSS-px
+/// space as `page_height_px`. Falls back to the node's own layout height
+/// when the node has no line metrics.
+fn inline_span_height(line_metrics: &[(f32, f32)], fallback: f32) -> f32 {
+    match (line_metrics.first(), line_metrics.last()) {
+        (Some(first), Some(last)) => last.1 - first.0,
+        _ => fallback,
+    }
+}
+
+/// Decide whether `break-inside: avoid` on an inline root can be honoured.
+///
+/// fulgur implements `avoid` on a paragraph by discarding its line metrics,
+/// which makes the caller fall through to the block path and emit the
+/// paragraph as one piece. That only works while the paragraph fits in a
+/// fragmentainer. The block path cannot split a box whose only children are
+/// text nodes, so an oversized paragraph came out as a single over-long
+/// fragment and every line below the page bottom was discarded — silently,
+/// with exit code 0 (fulgur-a3ek: a 700-word `<p>` lost its last 11 words).
+///
+/// CSS Fragmentation 3 §4.4 settles what to do: `avoid` is a hint, and a
+/// break is allowed at a forbidden point when the fragmentainer would
+/// otherwise overflow. So keep `avoid` while the paragraph fits on a page,
+/// and fall back to line splitting when it cannot.
+fn avoid_inside_is_satisfiable(
+    line_metrics: &[(f32, f32)],
+    fallback_height: f32,
+    page_height_px: f32,
+) -> bool {
+    inline_span_height(line_metrics, fallback_height) <= page_height_px
 }
 
 /// fulgur-p55h: read per-line `(min_coord, max_coord)` pairs from a
@@ -9766,6 +9812,49 @@ h2 { string-set: chapter-title content(text); }
             "two short avoid-inside paragraphs on an 800px page must land on page 0; \
              geom={geom:?}"
         );
+    }
+
+    // ── break-inside: avoid satisfiability (fulgur-a3ek) ────────────────────
+
+    #[test]
+    fn inline_span_height_measures_first_to_last_line() {
+        // Three 20px lines starting at y=10 span 60px, not 70 — the span is
+        // measured from the first line's top, not from the box origin.
+        let metrics = [(10.0, 30.0), (30.0, 50.0), (50.0, 70.0)];
+        assert!((super::inline_span_height(&metrics, 999.0) - 60.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn inline_span_height_falls_back_without_metrics() {
+        assert!((super::inline_span_height(&[], 42.0) - 42.0).abs() < 1e-4);
+    }
+
+    /// A paragraph that fits a page keeps `avoid`; one taller than a page
+    /// cannot, because the block path it would fall through to has no way to
+    /// split a box whose only children are text nodes. Before fulgur-a3ek
+    /// `avoid` was honoured unconditionally and the overflowing lines were
+    /// dropped without a diagnostic.
+    #[test]
+    fn avoid_inside_is_satisfiable_only_while_the_paragraph_fits() {
+        let fits = [(0.0, 20.0), (20.0, 40.0)];
+        assert!(super::avoid_inside_is_satisfiable(&fits, 0.0, 100.0));
+
+        let exactly_a_page = [(0.0, 50.0), (50.0, 100.0)];
+        assert!(
+            super::avoid_inside_is_satisfiable(&exactly_a_page, 0.0, 100.0),
+            "a paragraph exactly one page tall still fits"
+        );
+
+        let oversized = [(0.0, 60.0), (60.0, 120.0)];
+        assert!(!super::avoid_inside_is_satisfiable(&oversized, 0.0, 100.0));
+    }
+
+    /// With no line metrics the node's own layout height decides, so a
+    /// non-inline child is not accidentally treated as splittable.
+    #[test]
+    fn avoid_inside_is_satisfiable_uses_the_fallback_height() {
+        assert!(super::avoid_inside_is_satisfiable(&[], 80.0, 100.0));
+        assert!(!super::avoid_inside_is_satisfiable(&[], 180.0, 100.0));
     }
 
     // ── break-after: page after recursive split (lines 876-882) ──────────────
