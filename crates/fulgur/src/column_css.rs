@@ -119,7 +119,8 @@ pub enum PageName {
 pub struct ColumnStyleProps {
     pub rule: Option<ColumnRuleSpec>,
     pub fill: Option<ColumnFill>,
-    /// `break-inside` as resolved by the fulgur-ftp sniffer. `None` means the
+    /// `break-inside` / `page-break-inside` as resolved by the fulgur-ftp
+    /// sniffer. `None` means the
     /// author did not set the property — consumers should treat that as the
     /// initial value (`BreakInside::Auto`). Stored as `Option` for the same
     /// reason as the other fields: a later rule overwrites only the
@@ -615,7 +616,9 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
             if let Ok(fill) = input.parse_entirely(parse_column_fill_value) {
                 self.props.fill = Some(fill);
             }
-        } else if name.eq_ignore_ascii_case("break-inside") {
+        } else if name.eq_ignore_ascii_case("break-inside")
+            || name.eq_ignore_ascii_case("page-break-inside")
+        {
             // `break-inside` (CSS Fragmentation Level 3) maps
             // `avoid-page` / `avoid-column` / `avoid` all onto
             // [`BreakInside::Avoid`]: fulgur's fragmentation model only
@@ -623,6 +626,16 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
             // flavours collapse into a single lattice point. `auto` is the
             // initial value; unknown idents drop the declaration silently
             // so siblings keep applying.
+            //
+            // The CSS 2.1 `page-break-inside` alias is accepted alongside it,
+            // matching what the `break-before` / `break-after` arms below
+            // already do. Its absence was the whole of fulgur-bodp: legacy
+            // documents — the wkhtmltopdf-era ones most likely to be ported —
+            // write `page-break-inside: avoid` and it did nothing at all,
+            // while `page-break-before` / `-after` worked.
+            //
+            // The legacy property's value grammar (`auto | avoid`) is a
+            // subset of the modern one, so the same value parser serves both.
             if let Ok(bi) = input.parse_entirely(parse_break_inside_value) {
                 self.props.break_inside = Some(bi);
             }
@@ -1188,6 +1201,43 @@ mod tests {
     fn parse_break_inside_invalid_value_is_silently_dropped() {
         let props = parse_declaration_block("break-inside: banana;");
         assert_eq!(props.break_inside, None);
+    }
+
+    /// fulgur-bodp: the CSS 2.1 alias has to reach the same field as the
+    /// modern property. `page-break-before` / `page-break-after` were already
+    /// aliased; `page-break-inside` was the one that got left out, so legacy
+    /// documents silently lost their "keep this block together" hint.
+    #[test]
+    fn parse_page_break_inside_avoid_is_aliased_to_break_inside() {
+        assert_eq!(
+            parse_declaration_block("page-break-inside: avoid;").break_inside,
+            Some(BreakInside::Avoid)
+        );
+        assert_eq!(
+            parse_inline_style("page-break-inside: avoid").break_inside,
+            Some(BreakInside::Avoid)
+        );
+        assert_eq!(
+            parse_stylesheet(".keep { page-break-inside: avoid; }")[0]
+                .props
+                .break_inside,
+            Some(BreakInside::Avoid)
+        );
+    }
+
+    /// The alias must agree with the modern spelling on every value it
+    /// accepts, including the `auto` initial value and invalid input.
+    #[test]
+    fn page_break_inside_matches_break_inside_value_for_value() {
+        for value in ["avoid", "auto", "banana"] {
+            let modern = parse_declaration_block(&format!("break-inside: {value};")).break_inside;
+            let legacy =
+                parse_declaration_block(&format!("page-break-inside: {value};")).break_inside;
+            assert_eq!(
+                modern, legacy,
+                "`break-inside: {value}` and `page-break-inside: {value}` must agree"
+            );
+        }
     }
 
     #[test]

@@ -78,6 +78,29 @@ Related follow-ups:
 VRT goldens covering this feature live under
 `crates/fulgur-vrt/fixtures/layout/overflow-*.html`.
 
+### Fragmentation (`break-*`)
+
+Supported:
+
+- `break-before` / `break-after`: `always`, `page`, `left`, `right`, `recto`,
+  `verso` all force a page break; `auto` is the initial value.
+- `break-inside`: `avoid`, `avoid-page` and `avoid-column` all mean "do not
+  split this box"; fulgur's fragmentation model distinguishes only
+  "may split" from "atomic".
+- The CSS 2.1 aliases `page-break-before`, `page-break-after` and
+  `page-break-inside` are accepted and resolve to the modern properties.
+  `page-break-inside` was missing until `fulgur-bodp`, so documents ported
+  from older toolchains silently lost every "keep this together" hint while
+  their `page-break-before` / `-after` kept working.
+
+These properties are read by fulgur's own CSS sniffer (`column_css.rs`),
+not from Stylo's computed values — Stylo 0.8.0 gates the surrounding
+`column-*` properties to its Gecko engine, so they never reach
+`ComputedValues` under Blitz's `servo` feature. The sniffer only scans
+inline `style` attributes and top-level `<style>` blocks; see the
+`column-rule` note in the multicol tracking issue (`fulgur-s5ro`) for the
+limitation that follows from that.
+
 ### Tables
 
 Supported:
