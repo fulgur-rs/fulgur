@@ -148,42 +148,64 @@ fn numbered_words(count: usize) -> String {
         .join(" ")
 }
 
+/// One long paragraph on a deliberately small page.
+///
+/// The page is 200pt square so a few hundred words overflow several
+/// fragmentainers under *any* fallback font. fulgur does not bundle a font
+/// here, so the host decides glyph advances and therefore how many words fit
+/// on a line — a fixture tuned to fit A4 on one host overflows nothing on
+/// another (this test previously passed on Linux and failed on macOS with
+/// 44 lines, i.e. less than a single A4 page).
 fn oversized_paragraph(declaration: &str, words: usize) -> Vec<u8> {
     let html = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><style>
-            body {{ margin: 0; font-size: 16px; }}
-            p {{ {declaration} }}
+            body {{ margin: 0; font-size: 12px; }}
+            p {{ margin: 0; {declaration} }}
         </style></head><body><p>{}</p></body></html>"#,
         numbered_words(words)
     );
-    Engine::builder().build().render(&html).expect("render")
+    Engine::builder()
+        .page_size(PageSize::custom(70.5556, 70.5556))
+        .build()
+        .render(&html)
+        .expect("render")
 }
 
 /// fulgur-a3ek: `break-inside: avoid` on a paragraph taller than one page
-/// used to drop every line past the first page's bottom — silently, with
-/// exit code 0.
+/// used to corrupt the paragraph's line boxes.
 ///
 /// `avoid` suppresses the line-split path so the paragraph can be emitted
 /// whole. For an oversized paragraph there is no whole to emit: the block
 /// path it fell through to cannot split a box whose only children are text
-/// nodes, so the overflowing lines were simply discarded. CSS Fragmentation
-/// 3 §4.4 is explicit that `avoid` is dropped when honouring it would
-/// overflow the fragmentainer.
+/// nodes. The observed damage depends on the page geometry — lines past the
+/// first page bottom silently discarded on a large page, lines duplicated
+/// across slice boundaries on a small one — so this asserts the property
+/// that covers both: an `avoid` that cannot be honoured must leave the
+/// output identical to omitting it. CSS Fragmentation 3 §4.4 is explicit
+/// that `avoid` is dropped when honouring it would overflow the
+/// fragmentainer.
 #[test]
 fn oversized_paragraph_with_avoid_keeps_every_line() {
-    const WORDS: usize = 700;
-    let control = line_count(&oversized_paragraph("", WORDS));
-    let avoided = line_count(&oversized_paragraph("break-inside: avoid;", WORDS));
+    const WORDS: usize = 900;
+    let control_pdf = oversized_paragraph("", WORDS);
+    let avoided_pdf = oversized_paragraph("break-inside: avoid;", WORDS);
 
+    // The comparison below is only meaningful while the control paragraph
+    // really does overflow. Guard on *pages*, not on a line count: how many
+    // words fit on a line depends on the host's fallback font, but "900 words
+    // on a 200pt square page spans several pages" holds either way.
+    let control_pages = pages_with_text(&control_pdf);
     assert!(
-        control > 50,
-        "fixture should overflow several pages, got {control} lines"
+        control_pages.len() >= 3,
+        "fixture no longer overflows several pages, got {control_pages:?}"
     );
+
+    let control = line_count(&control_pdf);
+    let avoided = line_count(&avoided_pdf);
     assert_eq!(
-        avoided,
-        control,
-        "`break-inside: avoid` dropped {} of {control} lines",
-        control.saturating_sub(avoided)
+        avoided, control,
+        "an unsatisfiable `break-inside: avoid` changed the line boxes: \
+         {avoided} with `avoid` vs {control} without"
     );
 }
 
