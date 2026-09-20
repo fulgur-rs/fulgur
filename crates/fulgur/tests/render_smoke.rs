@@ -6926,3 +6926,28 @@ fn opacity_inline_root_with_pseudo_image_reaches_para_for_block_in_draw_under_op
         .expect("opacity inline root with pseudo image must render");
     assert!(!pdf.is_empty());
 }
+
+/// 非 sRGB 色空間 (`hsl()` / `hwb()` / `oklch()` / `lab()`) を background /
+/// color / border に指定した文書の end-to-end smoke test (fulgur-xfzo)。
+///
+/// 色の抽出は `convert/style/mod.rs` の `absolute_to_rgba` に集約されており、
+/// Stylo は著者が書いた色空間のまま成分を保持するため、sRGB へ変換してから
+/// 読まないと別の色が塗られる。等価性そのものは
+/// `crates/fulgur/tests/color_space_test.rs` が PDF byte 比較で検証しているが、
+/// CLAUDE.md "Coverage scope" の方針どおり描画経路の smoke test も
+/// ここに置いておく。
+#[test]
+fn test_render_non_srgb_color_spaces_smoke() {
+    let html = r#"<!doctype html>
+<html><body>
+<div style="width:120px;height:60px;background:hsl(120,100%,50%)"></div>
+<div style="width:120px;height:60px;background:hwb(240 0% 0%)"></div>
+<div style="width:120px;height:60px;border:8px solid oklch(62.8% 0.2577 29.23)"></div>
+<p style="color:lab(50% 40 -30);font-size:20px">colour</p>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render non-sRGB colour spaces");
+    assert!(!pdf.is_empty());
+}

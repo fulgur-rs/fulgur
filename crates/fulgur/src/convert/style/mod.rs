@@ -149,15 +149,34 @@ mod tests {
 
     /// A wide-gamut colour can convert to sRGB values outside 0..1; PDF
     /// device RGB cannot express those, so they clamp rather than wrap.
+    ///
+    /// `lab(100 120 -120)` is a vivid magenta far outside the sRGB gamut: the
+    /// red and blue channels overshoot 1.0 and clamp to 255, while green lands
+    /// mid-range. Reading the raw Lab components instead would clamp
+    /// `(100, 120, -120)` to `(1, 1, 0)` and paint yellow, so the `assert_ne!`
+    /// below is what makes this a regression guard rather than a smoke test.
+    /// Green is asserted as a range, not an exact value, because the Lab → sRGB
+    /// transfer function involves cube roots and a matrix multiply that can
+    /// differ by a channel step between architectures (CI covers amd64, arm64
+    /// and Windows).
     #[test]
     fn out_of_gamut_clamps_instead_of_wrapping() {
         let vivid = AbsoluteColor::new(ColorSpace::Lab, 100.0, 120.0, -120.0, 1.0);
         let [r, g, b, a] = absolute_to_rgba(vivid);
+        assert_ne!(
+            [r, g, b],
+            [255, 255, 0],
+            "raw Lab components were clamped as if they were RGB"
+        );
+        assert_eq!(
+            (r, b),
+            (255, 255),
+            "out-of-gamut channels must clamp to max"
+        );
+        assert!(
+            (120..=145).contains(&g),
+            "expected a mid-range green channel, got {g}"
+        );
         assert_eq!(a, 255);
-        for ch in [r, g, b] {
-            // `u8` cannot be out of range; the real assertion is that we got
-            // here at all rather than panicking or wrapping in the cast.
-            let _ = ch;
-        }
     }
 }
