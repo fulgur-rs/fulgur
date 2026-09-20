@@ -11,11 +11,15 @@ use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 /// noticed after the documents are printed.
 fn keyword_to_page_size(name: &str) -> PageSize {
     PageSize::from_css_keyword(name).unwrap_or_else(|| {
+        // Built outside the macro on purpose: `log::warn!` only evaluates its
+        // arguments when the level is enabled, and a library's callers often
+        // install no logger at all. Doing the join here keeps this cold
+        // fallback path executed (and therefore covered) either way.
+        let known = PageSize::CSS_KEYWORDS.join(", ");
         log::warn!(
             "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
-             Known keywords: {}. For any other sheet, give explicit dimensions \
-             (e.g. `size: 148mm 210mm`).",
-            PageSize::CSS_KEYWORDS.join(", ")
+             Known keywords: {known}. For any other sheet, give explicit dimensions \
+             (e.g. `size: 148mm 210mm`)."
         );
         PageSize::A4
     })

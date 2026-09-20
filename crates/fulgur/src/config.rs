@@ -728,6 +728,17 @@ mod tests {
         assert!((dash.width - underscore.width).abs() < 0.01);
     }
 
+    /// The `const fn` helpers only ever run at compile time in production,
+    /// so call them here as well — both to pin the conversion factors and to
+    /// keep them out of the "never executed" bucket in coverage.
+    #[test]
+    fn mm_and_inch_convert_to_points() {
+        assert!((mm(25.4) - 72.0).abs() < 1e-4, "1 inch of mm is 72pt");
+        assert!((mm(0.0)).abs() < 1e-4);
+        assert!((inch(1.0) - 72.0).abs() < 1e-4);
+        assert!((inch(8.5) - 612.0).abs() < 1e-4, "Letter width");
+    }
+
     #[test]
     fn css_keyword_rejects_unknown_names() {
         for name in ["", "banana", "A99", "210mm"] {
