@@ -3,6 +3,36 @@
 This document tracks fulgur's CSS property support status and any
 version-specific limitations.
 
+## Colors
+
+Supported:
+
+- `rgb()` / `rgba()` / `#hex` / named colors
+- `hsl()` / `hsla()` / `hwb()`
+- `lab()` / `lch()` / `oklab()` / `oklch()`
+- `color(srgb ...)` and the other `color()` predefined spaces
+- `color-mix()`
+- `currentColor`
+
+Stylo keeps a computed color in whatever space the author wrote it in, so
+`AbsoluteColor::components` is only RGB for the sRGB-component spaces.
+`convert/style/mod.rs::absolute_to_rgba` converts to sRGB
+(`AbsoluteColor::into_srgb_legacy`) before reading the components; skipping
+that step rendered every non-sRGB space as a different color entirely — a
+regression tracked as `fulgur-xfzo`, where `hsl(0,100%,50%)` painted cyan and
+`hsl(120,100%,50%)` painted white and vanished against the page.
+
+Notes:
+
+- PDF output is device RGB, so a wide-gamut color (`lab()`,
+  `color(display-p3 ...)`) is clamped into sRGB rather than preserved.
+- Alpha is carried through; see the `opacity` notes below for how it
+  composites.
+
+Regression coverage lives in `crates/fulgur/tests/color_space_test.rs`,
+which byte-compares a document using a non-sRGB spelling against the same
+document written as `rgb()`.
+
 ## Effects
 
 ### `box-shadow` (v0.4.5+)
