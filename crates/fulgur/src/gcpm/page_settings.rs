@@ -2,14 +2,23 @@ use crate::config::{Config, Margin, PageSize};
 use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 
 /// Map a CSS page-size keyword (case-insensitive) to a [`PageSize`].
-/// Falls back to A4 for unrecognised keywords.
+///
+/// The keyword table lives on [`PageSize::from_css_keyword`] so this path and
+/// the CLI's `--size` cannot drift apart. An unrecognised keyword still falls
+/// back to A4 — there is no page to render otherwise — but it now says so
+/// (`fulgur-5oav`): the old silent fallback meant `size: A5` produced an A4
+/// sheet with no diagnostic anywhere, which is the kind of thing that is only
+/// noticed after the documents are printed.
 fn keyword_to_page_size(name: &str) -> PageSize {
-    match name.to_uppercase().as_str() {
-        "A4" => PageSize::A4,
-        "A3" => PageSize::A3,
-        "LETTER" => PageSize::LETTER,
-        _ => PageSize::A4,
-    }
+    PageSize::from_css_keyword(name).unwrap_or_else(|| {
+        log::warn!(
+            "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
+             Known keywords: {}. For any other sheet, give explicit dimensions \
+             (e.g. `size: 148mm 210mm`).",
+            PageSize::CSS_KEYWORDS.join(", ")
+        );
+        PageSize::A4
+    })
 }
 
 /// Returns `true` when `selector` matches the given page number.
