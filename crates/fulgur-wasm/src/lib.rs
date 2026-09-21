@@ -112,12 +112,9 @@ enum MarginOption {
 impl PageSizeOption {
     fn to_page_size(&self) -> Result<PageSize, String> {
         match self {
-            Self::Named(name) => match name.to_ascii_lowercase().as_str() {
-                "a4" => Ok(PageSize::A4),
-                "a3" => Ok(PageSize::A3),
-                "letter" => Ok(PageSize::LETTER),
-                other => Err(format!("unknown page size: {other}")),
-            },
+            Self::Named(name) => {
+                PageSize::from_css_keyword(name).ok_or_else(|| format!("unknown page size: {name}"))
+            }
             Self::Custom {
                 width_mm,
                 height_mm,
@@ -296,8 +293,10 @@ impl Engine {
     ///
     /// 受け付けるキーは `pageSize` / `margin` / `landscape` / `title` /
     /// `authors` / `description` / `keywords` / `creator` / `producer` /
-    /// `creationDate` / `lang` / `bookmarks`。`pageSize` は `"A4"` /
-    /// `"Letter"` / `"A3"` の文字列か `{ widthMm, heightMm }` object。
+    /// `creationDate` / `lang` / `bookmarks`。`pageSize` は CSS Paged Media
+    /// keyword 文字列 (`"A3"` / `"A4"` / `"A5"` / `"B4"` / `"B5"` /
+    /// `"JIS-B4"` / `"JIS-B5"` / `"Letter"` / `"Legal"` / `"Ledger"`、
+    /// 大文字小文字無視) か `{ widthMm, heightMm }` object。
     /// `margin` は `{ mm }` / `{ pt }` / `{ topMm, rightMm, bottomMm,
     /// leftMm }` のいずれか。未知のキーや不明な page size 名はエラー。
     /// 複数回呼び出すと後勝ちで partial merge される。
@@ -712,6 +711,25 @@ mod tests {
         assert!(
             (media_box.0 - 792.0).abs() < 1.0 && (media_box.1 - 612.0).abs() < 1.0,
             "expected Letter landscape (792 x 612), got {media_box:?}",
+        );
+    }
+
+    #[test]
+    fn configure_accepts_newly_added_page_size_keywords() {
+        // fulgur-5oav: the wasm binding's `PageSizeOption::to_page_size`
+        // used to only know A4/A3/Letter; it must accept the full CSS
+        // Paged Media keyword set like the core crate and other bindings.
+        let mm = |v: f32| v * 72.0 / 25.4;
+        let mut engine = Engine::new();
+        engine
+            .configure_json(serde_json::json!({ "pageSize": "A5" }))
+            .expect("configure should accept A5");
+        let pdf = engine.render("<p>x</p>").expect("render should succeed");
+        let doc = lopdf::Document::load_mem(&pdf).expect("PDF parses");
+        let media_box = find_media_box(&doc).expect("MediaBox missing");
+        assert!(
+            (media_box.0 - mm(148.0)).abs() < 1.0 && (media_box.1 - mm(210.0)).abs() < 1.0,
+            "expected A5 (148 x 210 mm), got {media_box:?}",
         );
     }
 

@@ -29,8 +29,10 @@ class RenderError(Exception):
 class PageSize:
     """Page size with dimensions in millimeters.
 
-    Use the predefined class attributes ``A4``, ``LETTER``, or ``A3``, or
-    `custom` for arbitrary sizes. ``PageSize`` is immutable.
+    Use one of the predefined class attributes (``A3``, ``A4``, ``A5``,
+    ``B4``, ``B5``, ``JIS_B4``, ``JIS_B5``, ``LETTER``, ``LEGAL``,
+    ``LEDGER``) covering the CSS Paged Media Level 3 page-size keyword set,
+    or `custom` for arbitrary sizes. ``PageSize`` is immutable.
 
     Example:
         ```python
@@ -41,9 +43,16 @@ class PageSize:
         ```
     """
 
-    A4: PageSize
-    LETTER: PageSize
     A3: PageSize
+    A4: PageSize
+    A5: PageSize
+    B4: PageSize
+    B5: PageSize
+    JIS_B4: PageSize
+    JIS_B5: PageSize
+    LETTER: PageSize
+    LEGAL: PageSize
+    LEDGER: PageSize
 
     @staticmethod
     def custom(width_mm: float, height_mm: float) -> PageSize:
@@ -252,8 +261,10 @@ class EngineBuilder:
         """Set the page size.
 
         Args:
-            value: Either a `PageSize` instance or a string name
-                (``"A4"``, ``"LETTER"``, ``"A3"``; case-insensitive).
+            value: Either a `PageSize` instance or a CSS page-size keyword
+                (``"A3"``, ``"A4"``, ``"A5"``, ``"B4"``, ``"B5"``,
+                ``"JIS-B4"``, ``"JIS-B5"``, ``"Letter"``, ``"Legal"``,
+                ``"Ledger"``; case-insensitive).
 
         Returns:
             ``self`` for method chaining.
@@ -376,8 +387,9 @@ class Engine:
         """
         Args:
             page_size: Page dimensions, either a `PageSize` or a
-                case-insensitive string name (``"A4"``, ``"LETTER"``,
-                ``"A3"``).
+                case-insensitive CSS page-size keyword (``"A3"``, ``"A4"``,
+                ``"A5"``, ``"B4"``, ``"B5"``, ``"JIS-B4"``, ``"JIS-B5"``,
+                ``"Letter"``, ``"Legal"``, ``"Ledger"``).
             margin: Page margins.
             landscape: ``True`` for landscape orientation.
             title: PDF title metadata.

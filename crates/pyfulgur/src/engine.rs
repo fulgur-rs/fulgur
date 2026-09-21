@@ -45,12 +45,8 @@ impl PyEngineBuilder {
 }
 
 pub(crate) fn parse_page_size_str(name: &str) -> PyResult<PageSize> {
-    match name.to_ascii_uppercase().as_str() {
-        "A4" => Ok(PageSize::A4),
-        "LETTER" => Ok(PageSize::LETTER),
-        "A3" => Ok(PageSize::A3),
-        other => Err(PyValueError::new_err(format!("unknown page size: {other}"))),
-    }
+    PageSize::from_css_keyword(name)
+        .ok_or_else(|| PyValueError::new_err(format!("unknown page size: {name}")))
 }
 
 /// `PageSize` オブジェクトまたは文字列名 (大文字小文字無視) を `fulgur::PageSize` に解決する。
@@ -76,8 +72,10 @@ impl PyEngineBuilder {
     /// Set the page size.
     ///
     /// Args:
-    ///     value: Either a `PageSize` instance or a string name
-    ///         (``"A4"``, ``"LETTER"``, ``"A3"``; case-insensitive).
+    ///     value: Either a `PageSize` instance or a CSS page-size keyword
+    ///         (``"A3"``, ``"A4"``, ``"A5"``, ``"B4"``, ``"B5"``,
+    ///         ``"JIS-B4"``, ``"JIS-B5"``, ``"Letter"``, ``"Legal"``,
+    ///         ``"Ledger"``; case-insensitive).
     ///
     /// Returns:
     ///     ``self`` for method chaining.
@@ -215,8 +213,9 @@ pub struct PyEngine {
 impl PyEngine {
     /// Args:
     ///     page_size: Page dimensions, either a `PageSize` or a
-    ///         case-insensitive string name (``"A4"``, ``"LETTER"``,
-    ///         ``"A3"``).
+    ///         case-insensitive CSS page-size keyword (``"A3"``, ``"A4"``,
+    ///         ``"A5"``, ``"B4"``, ``"B5"``, ``"JIS-B4"``, ``"JIS-B5"``,
+    ///         ``"Letter"``, ``"Legal"``, ``"Ledger"``).
     ///     margin: Page margins.
     ///     landscape: ``True`` for landscape orientation.
     ///     title: PDF title metadata.

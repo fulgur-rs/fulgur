@@ -3,8 +3,10 @@ use pyo3::prelude::*;
 
 /// Page size with dimensions in millimeters.
 ///
-/// Use the predefined class attributes ``A4``, ``LETTER``, or ``A3``, or
-/// `custom` for arbitrary sizes. ``PageSize`` is immutable.
+/// Use one of the predefined class attributes (``A3``, ``A4``, ``A5``,
+/// ``B4``, ``B5``, ``JIS_B4``, ``JIS_B5``, ``LETTER``, ``LEGAL``,
+/// ``LEDGER``) covering the CSS Paged Media Level 3 page-size keyword set,
+/// or `custom` for arbitrary sizes. ``PageSize`` is immutable.
 ///
 /// Example:
 ///     ```python
@@ -34,6 +36,41 @@ impl PyPageSize {
     #[classattr]
     const A3: PyPageSize = PyPageSize {
         inner: PageSize::A3,
+    };
+
+    #[classattr]
+    const A5: PyPageSize = PyPageSize {
+        inner: PageSize::A5,
+    };
+
+    #[classattr]
+    const B4: PyPageSize = PyPageSize {
+        inner: PageSize::B4,
+    };
+
+    #[classattr]
+    const B5: PyPageSize = PyPageSize {
+        inner: PageSize::B5,
+    };
+
+    #[classattr]
+    const JIS_B4: PyPageSize = PyPageSize {
+        inner: PageSize::JIS_B4,
+    };
+
+    #[classattr]
+    const JIS_B5: PyPageSize = PyPageSize {
+        inner: PageSize::JIS_B5,
+    };
+
+    #[classattr]
+    const LEGAL: PyPageSize = PyPageSize {
+        inner: PageSize::LEGAL,
+    };
+
+    #[classattr]
+    const LEDGER: PyPageSize = PyPageSize {
+        inner: PageSize::LEDGER,
     };
 
     /// Create a page size with arbitrary dimensions.

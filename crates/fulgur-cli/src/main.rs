@@ -7,6 +7,46 @@ use std::path::PathBuf;
 
 mod plugin;
 
+/// Forwards `log::warn!` / `log::error!` from `fulgur` (e.g. the unknown
+/// CSS page-size keyword diagnostic in `gcpm::page_settings`) to stderr.
+///
+/// Without a logger installed, `log`'s facade discards every record: the
+/// CLI would otherwise silently drop diagnostics the library goes out of
+/// its way to emit. This mirrors the existing `eprintln!("Warning: ...")` /
+/// `eprintln!("Error: ...")` style used elsewhere in this file rather than
+/// pulling in a formatting-heavy crate like `env_logger` for two levels.
+struct CliLogger;
+
+impl log::Log for CliLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let label = match record.level() {
+                log::Level::Error => "Error",
+                _ => "Warning",
+            };
+            eprintln!("{label}: {}", record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static CLI_LOGGER: CliLogger = CliLogger;
+
+/// Installs [`CliLogger`] as the global logger, at `Warn` level. Safe to
+/// call even if a logger is somehow already installed (e.g. under a test
+/// harness that ran `main` more than once in-process) — `set_logger`
+/// failing just means diagnostics keep going wherever they already were.
+fn init_logging() {
+    if log::set_logger(&CLI_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+}
+
 /// Isolate the real stdout from noise emitted by the render pipeline so that
 /// PDF bytes written to stdout (`-o -`) cannot be corrupted by incidental
 /// output from dependencies.
@@ -445,6 +485,7 @@ fn parse_margin(s: &str) -> Margin {
 }
 
 fn main() {
+    init_logging();
     let cli = Cli::parse();
 
     match cli.command {

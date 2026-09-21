@@ -11,18 +11,43 @@ use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 /// noticed after the documents are printed.
 fn keyword_to_page_size(name: &str) -> PageSize {
     PageSize::from_css_keyword(name).unwrap_or_else(|| {
-        // Built outside the macro on purpose: `log::warn!` only evaluates its
-        // arguments when the level is enabled, and a library's callers often
-        // install no logger at all. Doing the join here keeps this cold
-        // fallback path executed (and therefore covered) either way.
-        let known = PageSize::CSS_KEYWORDS.join(", ");
-        log::warn!(
-            "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
-             Known keywords: {known}. For any other sheet, give explicit dimensions \
-             (e.g. `size: 148mm 210mm`)."
-        );
+        // `resolve_page_settings` runs once per page (and more than once per
+        // page across setup / per-page / destination passes — see
+        // render.rs:98, render.rs:190, engine.rs:238), so a document with an
+        // unrecognised keyword would otherwise log the same warning hundreds
+        // of times. Dedup process-wide so each distinct bad keyword is
+        // reported once per process rather than once per resolve call.
+        if should_warn_once(name) {
+            // Built outside the macro on purpose: `log::warn!` only
+            // evaluates its arguments when the level is enabled, and a
+            // library's callers often install no logger at all. Doing the
+            // join here keeps this cold fallback path executed (and
+            // therefore covered) either way.
+            let known = PageSize::CSS_KEYWORDS.join(", ");
+            log::warn!(
+                "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
+                 Known keywords: {known}. For any other sheet, give explicit dimensions \
+                 (e.g. `size: 148mm 210mm`)."
+            );
+        }
         PageSize::A4
     })
+}
+
+/// Returns `true` the first time a given (normalised) unknown keyword is
+/// seen, `false` on every subsequent call — the dedup key for the
+/// once-per-process warning in [`keyword_to_page_size`].
+fn should_warn_once(name: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let normalised = name.trim().replace('_', "-").to_ascii_uppercase();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(normalised)
 }
 
 /// Returns `true` when `selector` matches the given page number.
@@ -169,6 +194,28 @@ mod tests {
     use super::*;
     use crate::config::{Config, PageSize};
     use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
+
+    /// The unknown-keyword warning must fire once per distinct (normalised)
+    /// keyword and never again — otherwise a document with hundreds of pages
+    /// and one typo'd `@page { size }` would log hundreds of identical
+    /// warnings (see `keyword_to_page_size`'s call sites in render.rs /
+    /// engine.rs). Unique keyword strings per assertion keep this
+    /// independent of test execution order against the shared process-wide
+    /// dedup set.
+    #[test]
+    fn should_warn_once_dedupes_per_normalised_keyword() {
+        assert!(should_warn_once("totally-unique-test-keyword-1"));
+        assert!(!should_warn_once("totally-unique-test-keyword-1"));
+        assert!(
+            !should_warn_once("TOTALLY-UNIQUE-TEST-KEYWORD-1"),
+            "dedup key must be case-insensitive"
+        );
+        assert!(
+            !should_warn_once("totally_unique_test_keyword_1"),
+            "dedup key must treat `_` and `-` the same, like `from_css_keyword`"
+        );
+        assert!(should_warn_once("totally-unique-test-keyword-2"));
+    }
 
     #[test]
     fn test_no_page_settings_uses_config() {

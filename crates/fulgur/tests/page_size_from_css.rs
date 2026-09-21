@@ -92,12 +92,13 @@ fn css_page_size_keywords_resolve_to_distinct_sheets() {
     let inch = |v: f32| v * 72.0;
 
     // (keyword, expected width pt, expected height pt)
-    let cases: [(&str, f32, f32); 9] = [
+    let cases: [(&str, f32, f32); 10] = [
         ("A3", 841.89, 1190.55),
         ("A4", 595.28, 841.89),
         ("A5", mm(148.0), mm(210.0)),
         ("B4", mm(250.0), mm(353.0)),
         ("B5", mm(176.0), mm(250.0)),
+        ("JIS-B4", mm(257.0), mm(364.0)),
         ("JIS-B5", mm(182.0), mm(257.0)),
         ("letter", 612.0, 792.0),
         ("legal", inch(8.5), inch(14.0)),
