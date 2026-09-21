@@ -40,24 +40,42 @@ fn keyword_to_page_size(name: &str) -> PageSize {
 /// library that may run inside a long-lived service rendering many
 /// untrusted documents. Bounding the set (and hashing rather than storing
 /// the raw string) keeps a stream of distinct garbage keywords from growing
-/// memory without limit; past the cap, dedup just degrades to warning every
-/// time instead of once.
+/// memory without limit.
+///
+/// Past the cap, `insert_bounded` evicts the oldest tracked key (FIFO)
+/// instead of simply refusing to track new ones: a document that keeps
+/// reusing the *same* keyword beyond the cap still gets it deduped, because
+/// that keyword is always the most-recently inserted and therefore the
+/// last one evicted. Only a genuinely wide spread of distinct bad keywords
+/// (more than the cap, each recurring) degrades to warning more than once —
+/// bounded degradation, not the unbounded-flood risk a "stop tracking past
+/// the cap" policy would reintroduce.
 const MAX_TRACKED_WARNING_KEYWORDS: usize = 256;
 
-/// Inserts `key` into `set` unless it's already present or `set` is at
-/// `max` capacity. Returns `true` when the caller should warn (first sight
-/// of `key`, or the set is full and can no longer track new keys) and
-/// `false` when `key` was already tracked. Pure and side-effect-free apart
-/// from `set` itself, so the capacity behavior is unit-testable without
-/// touching the process-global set in [`should_warn_once`].
-fn insert_bounded(set: &mut std::collections::HashSet<u64>, key: u64, max: usize) -> bool {
-    if set.contains(&key) {
+/// Inserts `key` into `seen` (tracked with `order` for FIFO eviction)
+/// unless it's already present. Returns `true` when the caller should warn
+/// (first sight of `key`) and `false` when `key` was already tracked. When
+/// `seen` is at `max` capacity, the oldest key is evicted to make room —
+/// `key` itself is always inserted, so an immediate repeat of the same key
+/// still dedups. Pure and side-effect-free apart from its arguments, so the
+/// capacity/eviction behavior is unit-testable without touching the
+/// process-global state in [`should_warn_once`].
+fn insert_bounded(
+    seen: &mut std::collections::HashSet<u64>,
+    order: &mut std::collections::VecDeque<u64>,
+    key: u64,
+    max: usize,
+) -> bool {
+    if seen.contains(&key) {
         return false;
     }
-    if set.len() >= max {
-        return true;
+    if seen.len() >= max {
+        if let Some(oldest) = order.pop_front() {
+            seen.remove(&oldest);
+        }
     }
-    set.insert(key);
+    seen.insert(key);
+    order.push_back(key);
     true
 }
 
@@ -65,22 +83,23 @@ fn insert_bounded(set: &mut std::collections::HashSet<u64>, key: u64, max: usize
 /// seen, `false` on every subsequent call — the dedup key for the
 /// once-per-process warning in [`keyword_to_page_size`].
 fn should_warn_once(name: &str) -> bool {
-    use std::collections::HashSet;
     use std::collections::hash_map::DefaultHasher;
+    use std::collections::{HashSet, VecDeque};
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, OnceLock};
 
-    static WARNED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    static WARNED: OnceLock<Mutex<(HashSet<u64>, VecDeque<u64>)>> = OnceLock::new();
     let normalised = name.trim().replace('_', "-").to_ascii_uppercase();
     let mut hasher = DefaultHasher::new();
     normalised.hash(&mut hasher);
     let key = hasher.finish();
 
-    let mut warned = WARNED
+    let mut guard = WARNED
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    insert_bounded(&mut warned, key, MAX_TRACKED_WARNING_KEYWORDS)
+    let (seen, order) = &mut *guard;
+    insert_bounded(seen, order, key, MAX_TRACKED_WARNING_KEYWORDS)
 }
 
 /// Returns `true` when `selector` matches the given page number.
@@ -254,39 +273,57 @@ mod tests {
     /// memory growth from a stream of distinct attacker-controlled keywords
     /// (`should_warn_once` is process-global, so exercising the cap through
     /// it directly would permanently pollute shared state for every other
-    /// test in this binary — testing the pure helper against a local set
-    /// avoids that).
+    /// test in this binary — testing the pure helper against local
+    /// collections avoids that).
     #[test]
     fn insert_bounded_caps_growth_and_keeps_deduping_existing_keys() {
-        use std::collections::HashSet;
+        use std::collections::{HashSet, VecDeque};
 
-        let mut set: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<u64> = HashSet::new();
+        let mut order: VecDeque<u64> = VecDeque::new();
         let max = 3;
 
-        assert!(insert_bounded(&mut set, 1, max), "first sight of 1 warns");
-        assert!(insert_bounded(&mut set, 2, max), "first sight of 2 warns");
-        assert!(insert_bounded(&mut set, 3, max), "first sight of 3 warns");
-        assert_eq!(set.len(), max, "set stops growing at the cap");
+        assert!(
+            insert_bounded(&mut seen, &mut order, 1, max),
+            "first sight of 1 warns"
+        );
+        assert!(
+            insert_bounded(&mut seen, &mut order, 2, max),
+            "first sight of 2 warns"
+        );
+        assert!(
+            insert_bounded(&mut seen, &mut order, 3, max),
+            "first sight of 3 warns"
+        );
+        assert_eq!(seen.len(), max, "set stops growing at the cap");
 
         assert!(
-            !insert_bounded(&mut set, 1, max),
+            !insert_bounded(&mut seen, &mut order, 1, max),
             "1 is still tracked and dedups"
         );
         assert!(
-            !insert_bounded(&mut set, 2, max),
+            !insert_bounded(&mut seen, &mut order, 2, max),
             "2 is still tracked and dedups"
         );
 
-        // The set is full: a brand-new key is reported (never silently
-        // dropped) but not inserted, so it is not tracked for dedup either.
+        // The set is full: inserting a brand-new key 4 evicts the oldest
+        // still-tracked key by insertion order (1 — eviction is FIFO, not
+        // LRU, so the repeat lookups above did not move 1 or 2 to the
+        // back) rather than refusing to track 4 at all.
         assert!(
-            insert_bounded(&mut set, 4, max),
-            "new key past the cap still warns instead of being dropped"
+            insert_bounded(&mut seen, &mut order, 4, max),
+            "new key past the cap still warns"
         );
-        assert_eq!(set.len(), max, "set does not grow past the cap");
+        assert_eq!(seen.len(), max, "set does not grow past the cap");
         assert!(
-            insert_bounded(&mut set, 4, max),
-            "past the cap, the same new key warns every time instead of deduping"
+            !insert_bounded(&mut seen, &mut order, 4, max),
+            "an immediate repeat of the newly inserted key still dedups — \
+             this is what prevents a single reused bad keyword from \
+             re-flooding the log once the cache is full"
+        );
+        assert!(
+            insert_bounded(&mut seen, &mut order, 1, max),
+            "1 was evicted to make room for 4, so it is treated as new again"
         );
     }
 
