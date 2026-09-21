@@ -24,6 +24,7 @@ fn keyword_to_page_size(name: &str) -> PageSize {
             // join here keeps this cold fallback path executed (and
             // therefore covered) either way.
             let known = PageSize::CSS_KEYWORDS.join(", ");
+            let name = sanitize_for_log(name);
             log::warn!(
                 "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
                  Known keywords: {known}. For any other sheet, give explicit dimensions \
@@ -32,6 +33,32 @@ fn keyword_to_page_size(name: &str) -> PageSize {
         }
         PageSize::A4
     })
+}
+
+/// Longest keyword shown verbatim in the unknown-page-size-keyword log
+/// message before [`sanitize_for_log`] truncates it.
+const MAX_LOGGED_KEYWORD_LEN: usize = 100;
+
+/// Makes an untrusted CSS identifier safe to interpolate into a log message.
+///
+/// `name` comes straight from the document's `@page { size }` declaration:
+/// CSS escapes such as `\A` / `\D` decode to a literal newline / carriage
+/// return by the time it reaches here, so printing it with `{name}` would
+/// let a crafted stylesheet forge additional log lines (e.g.
+/// `size: bad\A [ERROR] forged-entry` could make it look like a second,
+/// unrelated log record). Truncating first keeps a pathologically long
+/// identifier from blowing up a single log line even though the dedup
+/// cache in [`should_warn_once`] bounds how many *distinct* keywords get
+/// logged, not how long any one of them is; formatting with `{:?}` (Debug)
+/// afterwards escapes control characters the same way a Rust string
+/// literal would, so a decoded newline/CR/etc. becomes the visible
+/// two-character sequence `\n` / `\r` rather than an actual line break.
+fn sanitize_for_log(name: &str) -> String {
+    let truncated = match name.char_indices().nth(MAX_LOGGED_KEYWORD_LEN) {
+        Some((byte_idx, _)) => format!("{}…", &name[..byte_idx]),
+        None => name.to_string(),
+    };
+    format!("{truncated:?}")
 }
 
 /// Cap on distinct unknown keywords tracked for the once-per-process warning
@@ -246,6 +273,51 @@ mod tests {
     use super::*;
     use crate::config::{Config, PageSize};
     use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
+
+    /// A CSS `\A` / `\D` escape in a `@page { size }` keyword decodes to a
+    /// literal newline / carriage return by the time it reaches
+    /// `keyword_to_page_size`. `sanitize_for_log` must neutralize that
+    /// (fulgur-5oav follow-up: log injection via crafted page-size names)
+    /// so a crafted stylesheet cannot forge extra log lines, and must bound
+    /// the length of a pathologically long identifier.
+    #[test]
+    fn sanitize_for_log_escapes_control_characters() {
+        let forged = "bad\nERROR: forged-entry";
+        let sanitized = sanitize_for_log(forged);
+        assert!(
+            !sanitized.contains('\n'),
+            "a literal newline must not survive sanitisation: {sanitized:?}"
+        );
+        assert!(
+            sanitized.contains("\\n"),
+            "the newline must show up as the escaped two-character sequence: {sanitized:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_for_log_truncates_long_keywords() {
+        let long = "a".repeat(MAX_LOGGED_KEYWORD_LEN * 3);
+        let sanitized = sanitize_for_log(&long);
+        assert!(
+            sanitized.len() < long.len(),
+            "an oversized keyword must be shortened: got {} chars for a {}-char input",
+            sanitized.len(),
+            long.len()
+        );
+        assert!(
+            sanitized.contains('…'),
+            "truncation must be visible in the output: {sanitized:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_for_log_leaves_short_plain_keywords_readable() {
+        let sanitized = sanitize_for_log("banana");
+        assert!(
+            sanitized.contains("banana"),
+            "an ordinary keyword must still be readable: {sanitized:?}"
+        );
+    }
 
     /// The unknown-keyword warning must fire once per distinct (normalised)
     /// keyword and never again — otherwise a document with hundreds of pages
