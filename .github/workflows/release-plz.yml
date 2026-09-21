@@ -128,13 +128,13 @@ jobs:
 
       - name: Run release-plz release-pr
         id: release-plz
-        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f  # v0.5.133
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc  # v0.5.137
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c  # v1.322.0
         if: fromJSON(steps.release-plz.outputs.pr).number
         with:
           ruby-version: '3.3'
@@ -378,7 +378,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
 
       - name: Run release-plz release
-        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f  # v0.5.133
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc  # v0.5.137
         with:
           command: release
         env:
