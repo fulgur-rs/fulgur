@@ -11,22 +11,32 @@ use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 /// noticed after the documents are printed.
 fn keyword_to_page_size(name: &str) -> PageSize {
     PageSize::from_css_keyword(name).unwrap_or_else(|| {
-        // `resolve_page_settings` runs once per page (and more than once per
-        // page across setup / per-page / destination passes — see
-        // render.rs:98, render.rs:190, engine.rs:238), so a document with an
-        // unrecognised keyword would otherwise log the same warning hundreds
-        // of times. Dedup process-wide so each distinct bad keyword is
-        // reported once per process rather than once per resolve call.
-        if should_warn_once(name) {
+        // Bound how much of `name` gets processed at all — before the
+        // O(n) normalise-and-hash work in `should_warn_once`, not just
+        // before display in `sanitize_for_log`. `name` is
+        // attacker-controlled and `resolve_page_settings` resolves it
+        // repeatedly across pages (see render.rs:98, render.rs:190,
+        // engine.rs:238), so without this a single pathologically long
+        // keyword would cost allocation/CPU proportional to its length on
+        // every one of those calls, not just once when finally logged.
+        let (bounded, truncated) = bound_keyword(name);
+
+        // `resolve_page_settings` runs once per page (and more than once
+        // per page across setup / per-page / destination passes), so a
+        // document with an unrecognised keyword would otherwise log the
+        // same warning hundreds of times. Dedup process-wide so each
+        // distinct bad keyword is reported once per process rather than
+        // once per resolve call.
+        if should_warn_once(bounded) {
             // Built outside the macro on purpose: `log::warn!` only
             // evaluates its arguments when the level is enabled, and a
             // library's callers often install no logger at all. Doing the
             // join here keeps this cold fallback path executed (and
             // therefore covered) either way.
             let known = PageSize::CSS_KEYWORDS.join(", ");
-            let name = sanitize_for_log(name);
+            let shown = sanitize_for_log(bounded, truncated);
             log::warn!(
-                "@page {{ size: {name} }}: unknown page-size keyword, falling back to A4. \
+                "@page {{ size: {shown} }}: unknown page-size keyword, falling back to A4. \
                  Known keywords: {known}. For any other sheet, give explicit dimensions \
                  (e.g. `size: 148mm 210mm`)."
             );
@@ -35,30 +45,41 @@ fn keyword_to_page_size(name: &str) -> PageSize {
     })
 }
 
-/// Longest keyword shown verbatim in the unknown-page-size-keyword log
-/// message before [`sanitize_for_log`] truncates it.
+/// Longest prefix of an untrusted `@page { size }` keyword this module ever
+/// processes — for [`sanitize_for_log`] and the warning-dedup key alike.
 const MAX_LOGGED_KEYWORD_LEN: usize = 100;
 
-/// Makes an untrusted CSS identifier safe to interpolate into a log message.
+/// Bounds how much of `name` the caller processes further, returning the
+/// (possibly shortened) prefix plus whether it was actually shortened.
+/// Cheap and independent of `name`'s length beyond the cutoff — `nth`
+/// stops walking `char_indices` as soon as it finds the boundary, so an
+/// oversized `name` costs the same either way.
+fn bound_keyword(name: &str) -> (&str, bool) {
+    match name.char_indices().nth(MAX_LOGGED_KEYWORD_LEN) {
+        Some((byte_idx, _)) => (&name[..byte_idx], true),
+        None => (name, false),
+    }
+}
+
+/// Makes an already-[`bound_keyword`]-ed, untrusted CSS identifier safe to
+/// interpolate into a log message.
 ///
-/// `name` comes straight from the document's `@page { size }` declaration:
-/// CSS escapes such as `\A` / `\D` decode to a literal newline / carriage
-/// return by the time it reaches here, so printing it with `{name}` would
-/// let a crafted stylesheet forge additional log lines (e.g.
-/// `size: bad\A [ERROR] forged-entry` could make it look like a second,
-/// unrelated log record). Truncating first keeps a pathologically long
-/// identifier from blowing up a single log line even though the dedup
-/// cache in [`should_warn_once`] bounds how many *distinct* keywords get
-/// logged, not how long any one of them is; formatting with `{:?}` (Debug)
-/// afterwards escapes control characters the same way a Rust string
-/// literal would, so a decoded newline/CR/etc. becomes the visible
-/// two-character sequence `\n` / `\r` rather than an actual line break.
-fn sanitize_for_log(name: &str) -> String {
-    let truncated = match name.char_indices().nth(MAX_LOGGED_KEYWORD_LEN) {
-        Some((byte_idx, _)) => format!("{}…", &name[..byte_idx]),
-        None => name.to_string(),
-    };
-    format!("{truncated:?}")
+/// `bounded` comes (by way of `bound_keyword`) from the document's
+/// `@page { size }` declaration: CSS escapes such as `\A` / `\D` decode to
+/// a literal newline / carriage return by the time it reaches here, so
+/// printing it with `{bounded}` would let a crafted stylesheet forge
+/// additional log lines (e.g. `size: bad\A [ERROR] forged-entry` could make
+/// it look like a second, unrelated log record). Formatting with `{:?}`
+/// (Debug) escapes control characters the same way a Rust string literal
+/// would, so a decoded newline/CR/etc. becomes the visible two-character
+/// sequence `\n` / `\r` rather than an actual line break. `truncated`
+/// appends a trailing `…` to make the earlier shortening visible.
+fn sanitize_for_log(bounded: &str, truncated: bool) -> String {
+    let mut shown = format!("{bounded:?}");
+    if truncated {
+        shown.push('…');
+    }
+    shown
 }
 
 /// Cap on distinct unknown keywords tracked for the once-per-process warning
@@ -108,7 +129,11 @@ fn insert_bounded(
 
 /// Returns `true` the first time a given (normalised) unknown keyword is
 /// seen, `false` on every subsequent call — the dedup key for the
-/// once-per-process warning in [`keyword_to_page_size`].
+/// once-per-process warning in [`keyword_to_page_size`]. Callers should
+/// pass an already-[`bound_keyword`]-ed `name`: the normalise-and-hash work
+/// here is `O(name.len())`, run on every `resolve_page_settings` call
+/// regardless of cache hit/miss, so an unbounded `name` would cost
+/// allocation/CPU proportional to its length on every one of those calls.
 fn should_warn_once(name: &str) -> bool {
     use std::collections::hash_map::DefaultHasher;
     use std::collections::{HashSet, VecDeque};
@@ -274,16 +299,47 @@ mod tests {
     use crate::config::{Config, PageSize};
     use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 
+    /// `bound_keyword` has to shorten a pathologically long keyword using
+    /// only cheap, length-bounded work (fulgur-5oav follow-up: the
+    /// normalise-and-hash work downstream in `should_warn_once` runs on
+    /// every `resolve_page_settings` call, so leaving that unbounded would
+    /// let a single long keyword cost CPU/allocation proportional to its
+    /// length on every page).
+    #[test]
+    fn bound_keyword_truncates_long_keywords_and_reports_it() {
+        let long = "a".repeat(MAX_LOGGED_KEYWORD_LEN * 3);
+        let (bounded, truncated) = bound_keyword(&long);
+        assert!(
+            truncated,
+            "an oversized keyword must be reported as bounded"
+        );
+        assert!(
+            bounded.len() < long.len(),
+            "an oversized keyword must be shortened: got {} chars for a {}-char input",
+            bounded.len(),
+            long.len()
+        );
+    }
+
+    #[test]
+    fn bound_keyword_leaves_short_keywords_untouched() {
+        let (bounded, truncated) = bound_keyword("banana");
+        assert_eq!(bounded, "banana");
+        assert!(
+            !truncated,
+            "a short keyword must not be reported as bounded"
+        );
+    }
+
     /// A CSS `\A` / `\D` escape in a `@page { size }` keyword decodes to a
     /// literal newline / carriage return by the time it reaches
     /// `keyword_to_page_size`. `sanitize_for_log` must neutralize that
     /// (fulgur-5oav follow-up: log injection via crafted page-size names)
-    /// so a crafted stylesheet cannot forge extra log lines, and must bound
-    /// the length of a pathologically long identifier.
+    /// so a crafted stylesheet cannot forge extra log lines.
     #[test]
     fn sanitize_for_log_escapes_control_characters() {
         let forged = "bad\nERROR: forged-entry";
-        let sanitized = sanitize_for_log(forged);
+        let sanitized = sanitize_for_log(forged, false);
         assert!(
             !sanitized.contains('\n'),
             "a literal newline must not survive sanitisation: {sanitized:?}"
@@ -295,24 +351,17 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_for_log_truncates_long_keywords() {
-        let long = "a".repeat(MAX_LOGGED_KEYWORD_LEN * 3);
-        let sanitized = sanitize_for_log(&long);
+    fn sanitize_for_log_marks_truncation_when_told_to() {
+        let sanitized = sanitize_for_log("banana", true);
         assert!(
-            sanitized.len() < long.len(),
-            "an oversized keyword must be shortened: got {} chars for a {}-char input",
-            sanitized.len(),
-            long.len()
-        );
-        assert!(
-            sanitized.contains('…'),
-            "truncation must be visible in the output: {sanitized:?}"
+            sanitized.ends_with('…'),
+            "the caller-reported truncation must be visible in the output: {sanitized:?}"
         );
     }
 
     #[test]
     fn sanitize_for_log_leaves_short_plain_keywords_readable() {
-        let sanitized = sanitize_for_log("banana");
+        let sanitized = sanitize_for_log("banana", false);
         assert!(
             sanitized.contains("banana"),
             "an ordinary keyword must still be readable: {sanitized:?}"
