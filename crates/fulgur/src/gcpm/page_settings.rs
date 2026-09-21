@@ -10,17 +10,22 @@ use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 /// sheet with no diagnostic anywhere, which is the kind of thing that is only
 /// noticed after the documents are printed.
 fn keyword_to_page_size(name: &str) -> PageSize {
-    PageSize::from_css_keyword(name).unwrap_or_else(|| {
-        // Bound how much of `name` gets processed at all — before the
-        // O(n) normalise-and-hash work in `should_warn_once`, not just
-        // before display in `sanitize_for_log`. `name` is
-        // attacker-controlled and `resolve_page_settings` resolves it
-        // repeatedly across pages (see render.rs:98, render.rs:190,
-        // engine.rs:238), so without this a single pathologically long
-        // keyword would cost allocation/CPU proportional to its length on
-        // every one of those calls, not just once when finally logged.
-        let (bounded, truncated) = bound_keyword(name);
-
+    // Bound how much of `name` gets processed at all, *before* even the
+    // first resolution attempt: `PageSize::from_css_keyword` itself
+    // normalises the whole string (trim/replace/uppercase) before
+    // comparing it against the known-keyword table, so calling it with an
+    // unbounded `name` would already do `O(name.len())` work on every
+    // call, success or failure. `name` is attacker-controlled and
+    // `resolve_page_settings` resolves it repeatedly across pages (see
+    // render.rs:98, render.rs:190, engine.rs:238), so a single
+    // pathologically long keyword would otherwise cost allocation/CPU
+    // proportional to its length on every one of those calls. Every entry
+    // in `PageSize::CSS_KEYWORDS` is well under `MAX_LOGGED_KEYWORD_LEN`
+    // characters, so bounding first cannot change the outcome for a
+    // legitimate keyword — only a keyword that was already going to fail
+    // to resolve is ever affected.
+    let (bounded, truncated) = bound_keyword(name);
+    PageSize::from_css_keyword(bounded).unwrap_or_else(|| {
         // `resolve_page_settings` runs once per page (and more than once
         // per page across setup / per-page / destination passes), so a
         // document with an unrecognised keyword would otherwise log the
@@ -329,6 +334,39 @@ mod tests {
             !truncated,
             "a short keyword must not be reported as bounded"
         );
+    }
+
+    /// `keyword_to_page_size` must bound `name` *before* the first
+    /// `PageSize::from_css_keyword` resolution attempt, not only inside the
+    /// `unwrap_or_else` fallback: `from_css_keyword` itself normalises the
+    /// whole string before comparing it against the keyword table, so an
+    /// unbounded `name` would cost `O(name.len())` on every call whether or
+    /// not it ends up being invalid. This is a behavioral check (still
+    /// falls back to A4 for an oversized invalid keyword) standing in for
+    /// that ordering, since the ordering itself isn't independently
+    /// observable from outside `keyword_to_page_size`.
+    #[test]
+    fn keyword_to_page_size_falls_back_to_a4_for_oversized_invalid_keyword() {
+        let huge_garbage = "z".repeat(MAX_LOGGED_KEYWORD_LEN * 10);
+        assert_eq!(
+            keyword_to_page_size(&huge_garbage).width,
+            PageSize::A4.width
+        );
+        assert_eq!(
+            keyword_to_page_size(&huge_garbage).height,
+            PageSize::A4.height
+        );
+    }
+
+    /// A legitimate keyword must still resolve correctly regardless of
+    /// `keyword_to_page_size` now bounding `name` before resolving it —
+    /// every `PageSize::CSS_KEYWORDS` entry is far shorter than the bound,
+    /// so this must be a no-op for real keywords.
+    #[test]
+    fn keyword_to_page_size_still_resolves_real_keywords() {
+        let a5 = keyword_to_page_size("A5");
+        assert_eq!(a5.width, PageSize::A5.width);
+        assert_eq!(a5.height, PageSize::A5.height);
     }
 
     /// A CSS `\A` / `\D` escape in a `@page { size }` keyword decodes to a
