@@ -1757,6 +1757,26 @@ mod debug_print_tree_tests {
         let root_id = doc.root_element().id;
         super::debug_print_tree(doc.deref(), root_id, crate::MAX_DOM_DEPTH);
     }
+
+    #[test]
+    fn debug_print_tree_invalid_node_id_returns_early() {
+        // Passing a non-existent node_id causes get_node to return None,
+        // exercising the `let Some(node) = doc.get_node(node_id) else { return; }`
+        // early-return path at the top of debug_print_tree.
+        let doc = parsed_doc("<!DOCTYPE html><html><body><p>x</p></body></html>");
+        super::debug_print_tree(doc.deref(), 999_999, 0);
+    }
+
+    #[test]
+    fn debug_print_tree_document_node_covers_other_arm() {
+        // Node id 0 is the Document root in Blitz (NodeData::Document), which
+        // does not match the Element / Text / Comment arms and falls through to
+        // the `_ => "#other"` catch-all in debug_print_tree's match statement.
+        // Calling from depth 0 also recurses into the full DOM tree, exercising
+        // the child-traversal loop.
+        let doc = parsed_doc("<!DOCTYPE html><html><body><p>text</p><!-- c --></body></html>");
+        super::debug_print_tree(doc.deref(), 0, 0);
+    }
 }
 
 #[cfg(test)]
