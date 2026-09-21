@@ -1,12 +1,14 @@
 use fulgur::PageSize;
 use pyo3::prelude::*;
 
-/// Page size with dimensions in millimeters.
+/// A page size.
 ///
 /// Use one of the predefined class attributes (``A3``, ``A4``, ``A5``,
 /// ``B4``, ``B5``, ``JIS_B4``, ``JIS_B5``, ``LETTER``, ``LEGAL``,
 /// ``LEDGER``) covering the CSS Paged Media Level 3 page-size keyword set,
-/// or `custom` for arbitrary sizes. ``PageSize`` is immutable.
+/// or `custom` for arbitrary sizes (given in millimeters). ``width`` and
+/// ``height`` return the resolved size in PDF points (1 pt = 1/72 inch),
+/// not millimeters. ``PageSize`` is immutable.
 ///
 /// Example:
 ///     ```python
@@ -98,13 +100,13 @@ impl PyPageSize {
         }
     }
 
-    /// Page width in millimeters.
+    /// Page width in PDF points (1 pt = 1/72 inch).
     #[getter]
     fn width(&self) -> f32 {
         self.inner.width
     }
 
-    /// Page height in millimeters.
+    /// Page height in PDF points (1 pt = 1/72 inch).
     #[getter]
     fn height(&self) -> f32 {
         self.inner.height
