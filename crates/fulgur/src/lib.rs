@@ -567,6 +567,8 @@ pub mod pagination_layout;
 pub mod paragraph;
 #[cfg(feature = "raikiri-page-fragments")]
 pub mod raikiri_adapter;
+#[cfg(feature = "raikiri-engine")]
+mod raikiri_pipeline;
 pub mod render;
 pub mod schema;
 pub mod svg;

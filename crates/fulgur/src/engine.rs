@@ -60,6 +60,8 @@ pub struct LayoutOutput {
 /// needs. `fonts` / `system_fonts` are intentionally absent: both are re-derived
 /// from `&self` at the render call site, byte-identically to the old inline path.
 struct LayoutArtifacts {
+    #[cfg(feature = "raikiri-engine")]
+    raikiri_stage: Option<crate::raikiri_pipeline::RaikiriLayoutStage>,
     drawables: crate::drawables::Drawables,
     pagination_geometry: crate::pagination_layout::PaginationGeometryTable,
     gcpm: crate::gcpm::GcpmContext,
@@ -268,6 +270,44 @@ impl Engine {
         // it needs for its layout cache.
         let resolved_content_width_px = resolved_content_width_pt.as_pt().in_px().to_f32();
         let resolved_content_height_px = resolved_content_height_pt.as_pt().in_px().to_f32();
+
+        // Run the Raikiri migration stage on the same source document and
+        // resolved page box before the legacy Drawables converter. Until the
+        // PageFragment-to-Drawables adapter lands, the stage is retained beside
+        // (not substituted for) the Blitz conversion result. A failure here is
+        // reported and falls back to the still-supported legacy PDF path.
+        #[cfg(feature = "raikiri-engine")]
+        let raikiri_stage = match crate::raikiri_pipeline::layout_document(
+            &html,
+            &css_to_inject,
+            self.assets.as_ref(),
+            self.base_path.as_deref(),
+            self.system_fonts,
+            fonts,
+            resolved_page_size,
+            resolved_page_margin,
+            resolved_content_width_px,
+            resolved_content_height_px,
+        ) {
+            Ok(stage) => {
+                log::debug!(
+                    "Raikiri registered {} @font-face families ({} skipped)",
+                    stage.font_face_report.applied.len(),
+                    stage.font_face_report.skipped.len(),
+                );
+                for warning in &stage.warnings {
+                    log::warn!("Raikiri resource/parse warning: {warning:?}");
+                }
+                Some(stage)
+            }
+            Err(error) => {
+                log::warn!(
+                    "Raikiri layout stage failed; using the legacy PDF conversion path: {error}"
+                );
+                None
+            }
+        };
+
         crate::blitz_adapter::set_viewport_size_px(
             &mut doc,
             resolved_content_width_px,
@@ -743,6 +783,8 @@ impl Engine {
         let pagination_geometry = std::mem::take(&mut convert_ctx.pagination_geometry);
         drop(convert_ctx);
         Ok(LayoutArtifacts {
+            #[cfg(feature = "raikiri-engine")]
+            raikiri_stage,
             drawables,
             pagination_geometry,
             gcpm,
@@ -765,6 +807,21 @@ impl Engine {
         artifacts: LayoutArtifacts,
         anchor_map: Option<&AnchorMap>,
     ) -> Result<Vec<u8>> {
+        #[cfg(feature = "raikiri-engine")]
+        if let Some(stage) = artifacts.raikiri_stage.as_ref() {
+            debug_assert_eq!(
+                stage.cascade.computed.len(),
+                stage.document.node_count(),
+                "Raikiri Document and CascadeResult must remain paired",
+            );
+            debug_assert!(!stage.pages.is_empty() || stage.document.node_count() == 0);
+            let _layout_context = (
+                stage.page_box,
+                stage.effective_base_url.as_ref(),
+                &stage.resources,
+                stage.warnings.len(),
+            );
+        }
         let LayoutArtifacts {
             drawables,
             pagination_geometry,
@@ -1464,6 +1521,22 @@ mod tests {
         </body></html>"##;
         let pdf = Engine::builder().build().render(html).unwrap();
         assert!(!pdf.is_empty());
+    }
+
+    #[cfg(feature = "raikiri-engine")]
+    #[test]
+    fn engine_runs_raikiri_layout_stage_and_keeps_single_page_pdf_smoke() {
+        let engine = Engine::builder().build();
+        let html = "<!doctype html><html><head></head><body><p>Raikiri smoke</p></body></html>";
+        let artifacts = engine.layout_to_drawables(html, None).unwrap();
+        let stage = artifacts
+            .raikiri_stage
+            .as_ref()
+            .expect("Raikiri stage is active by default");
+        assert_eq!(stage.pages.len(), 1);
+        assert_eq!(stage.cascade.computed.len(), stage.document.node_count());
+        assert!(!artifacts.drawables.is_empty());
+        assert!(!engine.render(html).unwrap().is_empty());
     }
 
     #[test]

@@ -12,10 +12,22 @@ keywords = ["pdf", "html", "css", "converter"]
 categories = ["text-processing", "command-line-utilities"]
 
 [features]
+default = ["raikiri-engine"]
 ## Enable rayon-based thread parallelism in `Engine::render_batch`.
 parallel = ["dep:rayon"]
 ## Enable the optional adapter for neutral Raikiri page snapshots.
 raikiri-page-fragments = ["dep:raikiri-traits"]
+## Run Raikiri's parse/resource/cascade/page-layout stage from Engine.
+raikiri-engine = [
+    "dep:raikiri-dom",
+    "dep:raikiri-html",
+    "dep:raikiri-style",
+    "dep:raikiri-traits",
+    "dep:parley-engine",
+    "dep:base64",
+    "dep:fontique-engine",
+    "dep:url",
+]
 
 [dependencies]
 rayon = { version = "1", optional = true }
@@ -44,11 +56,20 @@ unicode-properties = "0.1"
 # false }` makes PNG decoding depend on which other workspace member is built
 # alongside fulgur, producing different page-count outputs in CLI vs WPT runner
 # (fulgur-zsn8).
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 serde = { version = "1", features = ["derive"] }
 # Optional migration bridge: the adapter consumes only Raikiri's neutral page
 # vocabulary, never its layout or renderer implementation types.
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "c1d4976d62cd133d5c2f4af86930d7103529a0a9", optional = true }
+raikiri-dom = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "b87d92c0035823f691e48ff8a064955fc5955263", optional = true }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "b87d92c0035823f691e48ff8a064955fc5955263", optional = true }
+raikiri-style = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "b87d92c0035823f691e48ff8a064955fc5955263", optional = true }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "b87d92c0035823f691e48ff8a064955fc5955263", optional = true }
+parley-engine = { package = "parley", version = "0.11", default-features = false, features = ["std", "system"], optional = true }
+base64 = { version = "0.22", optional = true }
+# Raikiri's parley 0.11 selects the dynamic fontconfig backend through this
+# feature; Fulgur's existing parley 0.6 dependency already does so.
+fontique-engine = { package = "fontique", version = "0.11", features = ["fontconfig-dlopen"], optional = true }
+url = { version = "2", optional = true }
 
 # WASM (wasm32-unknown-unknown) build support: pulled in transitively by lopdf/rand.
 # Feature unification propagates `wasm_js` to the lopdf-side dependency so the
