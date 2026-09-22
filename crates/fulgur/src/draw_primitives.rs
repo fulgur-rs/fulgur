@@ -2987,6 +2987,176 @@ mod dp_unit_tests {
             draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
         });
     }
+
+    // ── apply_border_style: None arm and fallback arm ─────────────────────
+
+    #[test]
+    fn apply_border_style_none_returns_none() {
+        // None is filtered by draw_border_line before apply_border_style is
+        // reached — this direct call covers the `None => None` arm.
+        let stroke = krilla::paint::Stroke::default();
+        assert!(
+            apply_border_style(stroke, BorderStyleValue::None, 4.0).is_none(),
+            "None border style must produce no stroke"
+        );
+    }
+
+    #[test]
+    fn apply_border_style_solid_returns_stroke_unchanged() {
+        let stroke = krilla::paint::Stroke::default();
+        let result = apply_border_style(stroke.clone(), BorderStyleValue::Solid, 4.0);
+        let returned = result.expect("Solid returns Some");
+        assert!((returned.width - stroke.width).abs() < 1e-6);
+        assert!(returned.dash.is_none());
+    }
+
+    #[test]
+    fn apply_border_style_fallback_variants_return_stroke_unchanged() {
+        // Double (any width), Groove, Ridge, Inset and Outset are all "handled
+        // specially at the draw_border_line call site". In apply_border_style they
+        // just pass the stroke through. Groove/Ridge/Inset/Outset never reach
+        // apply_border_style via draw_border_line (handled by earlier arms), so
+        // these cases can only be driven by a direct call.
+        for style in [
+            BorderStyleValue::Double,
+            BorderStyleValue::Groove,
+            BorderStyleValue::Ridge,
+            BorderStyleValue::Inset,
+            BorderStyleValue::Outset,
+        ] {
+            let stroke = krilla::paint::Stroke::default();
+            let returned = apply_border_style(stroke, style, 4.0)
+                .unwrap_or_else(|| panic!("fallback style {style:?} must return Some"));
+            assert!(
+                returned.dash.is_none(),
+                "fallback {style:?} must not set a dash pattern"
+            );
+        }
+    }
+
+    // ── TagCollector::default ─────────────────────────────────────────────
+
+    #[test]
+    fn tag_collector_default_matches_new() {
+        // Default impl calls Self::new(); verify the result is empty.
+        let tc = TagCollector::default();
+        let (entries, run_entries) = tc.into_parts();
+        assert!(
+            entries.is_empty(),
+            "default TagCollector must have no entries"
+        );
+        assert!(
+            run_entries.is_empty(),
+            "default TagCollector must have no run_entries"
+        );
+    }
+
+    // ── LinkCollector::push_rect dedup (non-stale index) ──────────────────
+
+    #[test]
+    fn link_collector_dedup_same_page_same_link_merges_quads() {
+        // Pushing the same Arc<LinkSpan> twice on the same page (without draining)
+        // must merge both rects into a single LinkOccurrence. This exercises the
+        // `occ.quads.push(quad); return;` branch (the non-stale dedup path).
+        let mut collector = LinkCollector::new();
+        let link = make_test_link();
+        collector.set_current_page(0);
+
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 5.0.as_pt(),
+            },
+        );
+        // Second push to the same (page, Arc<LinkSpan>): dedup branch fires.
+        collector.push_rect(
+            &link,
+            Rect {
+                x: 0.0.as_pt(),
+                y: 10.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 5.0.as_pt(),
+            },
+        );
+
+        let all = collector.into_occurrences();
+        assert_eq!(all.len(), 1, "same link on same page → one occurrence");
+        assert_eq!(all[0].quads.len(), 2, "both rects must appear as quads");
+    }
+
+    // ── build_rounded_rect_path: radius-scaling branch ───────────────────
+
+    #[test]
+    fn build_rounded_rect_path_overlapping_radii_scale_proportionally() {
+        // A 10×10 box with TL=6 and TR=6 corner radii sums to 12 on the top edge
+        // (> 10), triggering the `edge / sum` scaling branch. The function must
+        // still produce a valid path rather than panicking or returning None.
+        let large_r = 6.0_f32;
+        let radii = [[large_r, large_r]; 4];
+        let path = build_rounded_rect_path(0.0, 0.0, 10.0, 10.0, &radii);
+        assert!(
+            path.is_some(),
+            "build_rounded_rect_path must produce a valid path with overlapping radii"
+        );
+    }
+
+    // ── draw_border_line: early-return guards ─────────────────────────────
+
+    #[test]
+    fn draw_border_line_zero_width_side_returns_early() {
+        // A non-uniform border with top width = 0 causes draw_border_line to
+        // hit `if width <= 0.0 { return; }`. Must not panic.
+        let style = BlockStyle {
+            border_color: [0, 0, 0, 255],
+            // top = 0 makes widths non-uniform and exercises the guard.
+            border_widths: [0.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Solid; 4],
+            ..Default::default()
+        };
+        with_canvas_smoke(|canvas| {
+            draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
+        });
+    }
+
+    #[test]
+    fn draw_border_line_zero_length_double_border_returns_early() {
+        // A box with w = 0 makes top/bottom segments zero-length. The Double arm
+        // in draw_border_line checks `if len == 0.0 { return; }`. Non-uniform
+        // widths force the per-side path. Must not panic or divide by zero.
+        let style = BlockStyle {
+            border_color: [0, 0, 0, 255],
+            border_widths: [6.0, 2.0, 6.0, 2.0].map(|v| v.as_pt()),
+            border_styles: [
+                BorderStyleValue::Double,
+                BorderStyleValue::Solid,
+                BorderStyleValue::Double,
+                BorderStyleValue::Solid,
+            ],
+            ..Default::default()
+        };
+        with_canvas_smoke(|canvas| {
+            draw_block_border(canvas, &style, 0.0, 0.0, 0.0, 80.0);
+        });
+    }
+
+    #[test]
+    fn draw_border_line_zero_length_groove_border_returns_early() {
+        // Same geometry as above but Groove style (the Groove|Ridge arm also
+        // guards `if len == 0.0 { return; }`). Uniform widths + Groove are not in
+        // the Solid|Double fast path, so the per-side fallback is always used.
+        let style = BlockStyle {
+            border_color: [128, 128, 128, 255],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Groove; 4],
+            ..Default::default()
+        };
+        with_canvas_smoke(|canvas| {
+            draw_block_border(canvas, &style, 0.0, 0.0, 0.0, 80.0);
+        });
+    }
 }
 
 #[cfg(test)]
