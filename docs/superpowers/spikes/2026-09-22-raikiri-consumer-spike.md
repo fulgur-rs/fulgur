@@ -152,3 +152,19 @@ All four issues were read back after creation and are open in
 - [#191: add generic resolved consumer-property observer](https://github.com/mitsuru/raikiri/issues/191)
 - [#192: implement render completion for page consumers](https://github.com/mitsuru/raikiri/issues/192)
 - [#193: define consumer resource and font handoff](https://github.com/mitsuru/raikiri/issues/193)
+
+## Final verification
+
+The `.worktrees/raikiri-consumer-spike` checkout completed the following fresh
+checks:
+
+```text
+cargo test -p fulgur --lib --locked       2251 passed, 0 failed
+cargo fmt --all -- --check                passed
+probe Cargo tests                           3 passed, 0 failed
+probe CLI                                  exit 0
+git status                                 clean
+```
+
+The default fulgur renderer was not changed. The only external writes were the
+four explicitly requested raikiri GitHub issues listed above.
