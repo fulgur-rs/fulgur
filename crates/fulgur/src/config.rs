@@ -5,7 +5,22 @@ pub struct PageSize {
     pub height: f32,
 }
 
+/// Millimetres to PDF points, usable in a `const` initialiser.
+const fn mm(v: f32) -> f32 {
+    v * 72.0 / 25.4
+}
+
+/// Inches to PDF points, usable in a `const` initialiser.
+const fn inch(v: f32) -> f32 {
+    v * 72.0
+}
+
 impl PageSize {
+    // A4 / LETTER / A3 keep their historical two-decimal literals rather than
+    // being re-expressed through `mm()` / `inch()`: the rounded values are
+    // baked into every VRT golden, and shifting them by a few thousandths of
+    // a point would re-bless the whole suite for no visual gain. The sizes
+    // added below have no goldens yet, so they are written exactly.
     pub const A4: Self = Self {
         width: 595.28,
         height: 841.89,
@@ -18,6 +33,69 @@ impl PageSize {
         width: 841.89,
         height: 1190.55,
     };
+    pub const A5: Self = Self {
+        width: mm(148.0),
+        height: mm(210.0),
+    };
+    /// ISO B4 (250 × 353 mm) — distinct from `JIS_B4`.
+    pub const B4: Self = Self {
+        width: mm(250.0),
+        height: mm(353.0),
+    };
+    /// ISO B5 (176 × 250 mm) — distinct from `JIS_B5`.
+    pub const B5: Self = Self {
+        width: mm(176.0),
+        height: mm(250.0),
+    };
+    pub const JIS_B4: Self = Self {
+        width: mm(257.0),
+        height: mm(364.0),
+    };
+    pub const JIS_B5: Self = Self {
+        width: mm(182.0),
+        height: mm(257.0),
+    };
+    pub const LEGAL: Self = Self {
+        width: inch(8.5),
+        height: inch(14.0),
+    };
+    pub const LEDGER: Self = Self {
+        width: inch(11.0),
+        height: inch(17.0),
+    };
+
+    /// Resolve a CSS `@page { size: <page-size> }` keyword, case-insensitively.
+    ///
+    /// Covers the full keyword set of CSS Paged Media Level 3 §4.1.1. Returns
+    /// `None` for anything else so the caller can decide how to report it —
+    /// silently substituting a different sheet of paper is the failure mode
+    /// this function exists to prevent (`fulgur-5oav`: `size: A5` used to come
+    /// out as A4 with no diagnostic).
+    ///
+    /// `JIS-B4` / `JIS-B5` are also accepted spelled with an underscore, since
+    /// that is how the constants are named.
+    pub fn from_css_keyword(name: &str) -> Option<Self> {
+        let normalised = name.trim().replace('_', "-").to_ascii_uppercase();
+        Some(match normalised.as_str() {
+            "A3" => Self::A3,
+            "A4" => Self::A4,
+            "A5" => Self::A5,
+            "B4" => Self::B4,
+            "B5" => Self::B5,
+            "JIS-B4" => Self::JIS_B4,
+            "JIS-B5" => Self::JIS_B5,
+            "LETTER" => Self::LETTER,
+            "LEGAL" => Self::LEGAL,
+            "LEDGER" => Self::LEDGER,
+            _ => return None,
+        })
+    }
+
+    /// The keyword spellings [`Self::from_css_keyword`] accepts, for help
+    /// text and diagnostics.
+    pub const CSS_KEYWORDS: [&'static str; 10] = [
+        "A3", "A4", "A5", "B4", "B5", "JIS-B4", "JIS-B5", "Letter", "Legal", "Ledger",
+    ];
 
     pub fn custom(width_mm: f32, height_mm: f32) -> Self {
         Self {
@@ -600,5 +678,84 @@ mod tests {
             .build();
         // Letter portrait width=612, height=792; landscape flips them
         assert!((config.page_height() - PageSize::LETTER.width).abs() < 0.01);
+    }
+
+    /// fulgur-5oav: the keyword table has to cover CSS Paged Media Level 3
+    /// §4.1.1, and unknown keywords have to be distinguishable from known
+    /// ones so the caller can warn instead of silently substituting A4.
+    #[test]
+    fn css_keyword_table_covers_the_spec_set() {
+        let mm = |v: f32| v * 72.0 / 25.4;
+        let cases: [(&str, PageSize); 10] = [
+            ("A3", PageSize::A3),
+            ("A4", PageSize::A4),
+            ("A5", PageSize::A5),
+            ("B4", PageSize::B4),
+            ("B5", PageSize::B5),
+            ("JIS-B4", PageSize::JIS_B4),
+            ("JIS-B5", PageSize::JIS_B5),
+            ("Letter", PageSize::LETTER),
+            ("Legal", PageSize::LEGAL),
+            ("Ledger", PageSize::LEDGER),
+        ];
+        for (keyword, want) in cases {
+            let got = PageSize::from_css_keyword(keyword)
+                .unwrap_or_else(|| panic!("`{keyword}` should be a known keyword"));
+            assert!(
+                (got.width - want.width).abs() < 0.01 && (got.height - want.height).abs() < 0.01,
+                "`{keyword}` resolved to {} x {}",
+                got.width,
+                got.height
+            );
+        }
+        // Spot-check one dimension against the spec rather than against our
+        // own constant, so a typo in the constant is still caught.
+        let a5 = PageSize::from_css_keyword("A5").expect("A5");
+        assert!((a5.width - mm(148.0)).abs() < 0.01);
+        assert!((a5.height - mm(210.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn css_keyword_is_case_and_separator_insensitive() {
+        let a5 = PageSize::from_css_keyword("A5").expect("A5");
+        for spelling in ["a5", "  A5  ", "a5"] {
+            let got = PageSize::from_css_keyword(spelling).expect(spelling);
+            assert!((got.width - a5.width).abs() < 0.01);
+        }
+        // `JIS_B5` matches the constant's spelling; `JIS-B5` the CSS one.
+        let dash = PageSize::from_css_keyword("JIS-B5").expect("JIS-B5");
+        let underscore = PageSize::from_css_keyword("jis_b5").expect("jis_b5");
+        assert!((dash.width - underscore.width).abs() < 0.01);
+    }
+
+    /// The `const fn` helpers only ever run at compile time in production,
+    /// so call them here as well — both to pin the conversion factors and to
+    /// keep them out of the "never executed" bucket in coverage.
+    #[test]
+    fn mm_and_inch_convert_to_points() {
+        assert!((mm(25.4) - 72.0).abs() < 1e-4, "1 inch of mm is 72pt");
+        assert!((mm(0.0)).abs() < 1e-4);
+        assert!((inch(1.0) - 72.0).abs() < 1e-4);
+        assert!((inch(8.5) - 612.0).abs() < 1e-4, "Letter width");
+    }
+
+    #[test]
+    fn css_keyword_rejects_unknown_names() {
+        for name in ["", "banana", "A99", "210mm"] {
+            assert!(
+                PageSize::from_css_keyword(name).is_none(),
+                "`{name}` should not resolve to a page size"
+            );
+        }
+    }
+
+    #[test]
+    fn css_keywords_list_matches_the_resolver() {
+        for keyword in PageSize::CSS_KEYWORDS {
+            assert!(
+                PageSize::from_css_keyword(keyword).is_some(),
+                "`{keyword}` is advertised in CSS_KEYWORDS but does not resolve"
+            );
+        }
     }
 }

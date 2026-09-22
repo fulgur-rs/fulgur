@@ -1157,6 +1157,7 @@ dependencies = [
  "clap",
  "fulgur",
  "libc",
+ "log",
  "serde_json",
  "tempfile",
  "which",

@@ -67,18 +67,13 @@ pub fn extract(value: Value) -> Result<PageSize, Error> {
 }
 
 fn parse_name(name: &str) -> Result<PageSize, Error> {
-    match name.to_ascii_uppercase().as_str() {
-        "A4" => Ok(PageSize::A4),
-        "LETTER" => Ok(PageSize::LETTER),
-        "A3" => Ok(PageSize::A3),
-        other => {
-            let ruby = Ruby::get().expect("ruby vm");
-            Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("unknown page size: {other}"),
-            ))
-        }
-    }
+    PageSize::from_css_keyword(name).ok_or_else(|| {
+        let ruby = Ruby::get().expect("ruby vm");
+        Error::new(
+            ruby.exception_arg_error(),
+            format!("unknown page size: {name}"),
+        )
+    })
 }
 
 pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
@@ -90,8 +85,15 @@ pub fn define(ruby: &Ruby, fulgur: &RModule) -> Result<(), Error> {
     class.define_method("inspect", method!(RbPageSize::inspect, 0))?;
     class.define_method("to_s", method!(RbPageSize::inspect, 0))?;
 
-    class.const_set("A4", RbPageSize::new(PageSize::A4))?;
-    class.const_set("LETTER", RbPageSize::new(PageSize::LETTER))?;
     class.const_set("A3", RbPageSize::new(PageSize::A3))?;
+    class.const_set("A4", RbPageSize::new(PageSize::A4))?;
+    class.const_set("A5", RbPageSize::new(PageSize::A5))?;
+    class.const_set("B4", RbPageSize::new(PageSize::B4))?;
+    class.const_set("B5", RbPageSize::new(PageSize::B5))?;
+    class.const_set("JIS_B4", RbPageSize::new(PageSize::JIS_B4))?;
+    class.const_set("JIS_B5", RbPageSize::new(PageSize::JIS_B5))?;
+    class.const_set("LETTER", RbPageSize::new(PageSize::LETTER))?;
+    class.const_set("LEGAL", RbPageSize::new(PageSize::LEGAL))?;
+    class.const_set("LEDGER", RbPageSize::new(PageSize::LEDGER))?;
     Ok(())
 }

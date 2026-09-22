@@ -18,6 +18,13 @@ RSpec.describe Fulgur::Engine do
       expect { described_class.new(page_size: :a4) }.not_to raise_error
     end
 
+    it "accepts newly added page-size keywords as symbol or string" do
+      # fulgur-5oav: bindings must route through the full CSS keyword set,
+      # not just A4/LETTER/A3.
+      expect { described_class.new(page_size: :a5) }.not_to raise_error
+      expect { described_class.new(page_size: "JIS-B4") }.not_to raise_error
+    end
+
     it "accepts page_size as PageSize constant" do
       expect { described_class.new(page_size: Fulgur::PageSize::A4) }.not_to raise_error
     end

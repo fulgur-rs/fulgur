@@ -161,3 +161,34 @@ for this area therefore lives in fulgur's own geometry probes
 See `docs/plans/2026-08-11-repeating-table-headers.md` for the
 fragmentation coordinator. The VRT golden lives at
 `crates/fulgur-vrt/fixtures/layout/repeating-table-header.html`.
+
+## Paged Media
+
+### `@page { size: <keyword> }`
+
+Supported keywords (CSS Paged Media Level 3 §4.1.1, case-insensitive):
+
+| Keyword | Dimensions |
+|---|---|
+| `A3` | 297 × 420 mm |
+| `A4` | 210 × 297 mm |
+| `A5` | 148 × 210 mm |
+| `B4` | 250 × 353 mm (ISO) |
+| `B5` | 176 × 250 mm (ISO) |
+| `JIS-B4` | 257 × 364 mm |
+| `JIS-B5` | 182 × 257 mm |
+| `letter` | 8.5 × 11 in |
+| `legal` | 8.5 × 14 in |
+| `ledger` | 11 × 17 in |
+
+Explicit dimensions (`size: 148mm 210mm`) and the `portrait` / `landscape`
+suffix work alongside any of these.
+
+An unrecognised keyword still falls back to A4 — a document has to be laid
+out on some sheet — but it now emits a `log::warn!` naming the keyword.
+Before `fulgur-5oav` the table stopped at A4/A3/Letter and the fallback was
+silent, so `size: A5` produced A4 output with no diagnostic anywhere.
+
+The same table backs the CLI's `--size`, via `PageSize::from_css_keyword`,
+so the two cannot drift apart again. `--size` still takes priority over
+`@page { size }` when both are present.
