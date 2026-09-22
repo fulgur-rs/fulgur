@@ -14,6 +14,8 @@ categories = ["text-processing", "command-line-utilities"]
 [features]
 ## Enable rayon-based thread parallelism in `Engine::render_batch`.
 parallel = ["dep:rayon"]
+## Enable the optional adapter for neutral Raikiri page snapshots.
+raikiri-page-fragments = ["dep:raikiri-traits"]
 
 [dependencies]
 rayon = { version = "1", optional = true }
@@ -44,6 +46,9 @@ unicode-properties = "0.1"
 # (fulgur-zsn8).
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
+# Optional migration bridge: the adapter consumes only Raikiri's neutral page
+# vocabulary, never its layout or renderer implementation types.
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "c1d4976d62cd133d5c2f4af86930d7103529a0a9", optional = true }
 
 # WASM (wasm32-unknown-unknown) build support: pulled in transitively by lopdf/rand.
 # Feature unification propagates `wasm_js` to the lopdf-side dependency so the
