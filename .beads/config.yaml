@@ -66,4 +66,4 @@ sync-branch: "beads-sync"
 # - github.org
 # - github.repo
 
-sync.remote: "https://github.com/fulgur-rs/beads-fulgur.git"
+sync.remote: "git+https://github.com/fulgur-rs/fulgur.git"
