@@ -142,3 +142,13 @@ output. Fulgur should own PDF policy, including whether to collect bookmarks,
 Outline hierarchy construction, Outline label budgets, and Krilla
 serialization. The missing raikiri work is an output/observer contract, not a
 request to move PDF semantics into raikiri.
+
+## Filed raikiri proposals
+
+All four issues were read back after creation and are open in
+`mitsuru/raikiri`:
+
+- [#190: expose neutral page fragments to render consumers](https://github.com/mitsuru/raikiri/issues/190)
+- [#191: add generic resolved consumer-property observer](https://github.com/mitsuru/raikiri/issues/191)
+- [#192: implement render completion for page consumers](https://github.com/mitsuru/raikiri/issues/192)
+- [#193: define consumer resource and font handoff](https://github.com/mitsuru/raikiri/issues/193)
