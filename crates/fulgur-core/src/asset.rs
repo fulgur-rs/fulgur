@@ -402,8 +402,12 @@ impl AssetBundle {
     ) -> std::result::Result<(), String> {
         debug_assert!(key.len() <= MAX_IMAGE_KEY_BYTES);
         if data.len() > MAX_IMAGE_BYTES {
+            // The message deliberately omits `key`: it is caller-supplied (and
+            // attacker-controlled when an embedding forwards tenant input), and
+            // `add_image` logs this string. Callers of `add_image_file` already
+            // know which name they passed.
             return Err(format!(
-                "image {key:?} exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
+                "image exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
                 data.len()
             ));
         }
@@ -432,7 +436,8 @@ impl AssetBundle {
         if projected > MAX_TOTAL_IMAGE_BYTES {
             return Err(format!(
                 "aggregate registered image bytes would exceed {MAX_TOTAL_IMAGE_BYTES} byte \
-                 budget; dropping {key:?}"
+                 budget; dropping {} bytes",
+                data.len()
             ));
         }
         // See `try_push_css`'s `shrink_to_fit` comment — same rationale for
@@ -1412,6 +1417,30 @@ mod tests {
             bundle.images.is_empty(),
             "oversized key must be dropped, not stored"
         );
+    }
+
+    #[test]
+    fn image_rejection_messages_do_not_echo_the_key() {
+        // CodeQL rust/cleartext-logging (fulgur-j0k6): `add_image` logs the
+        // `try_insert_image` error, and the image name is caller-controlled,
+        // so neither rejection message may contain it.
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let key = "tenant-secret-name.png";
+
+        let mut bundle = AssetBundle::new();
+        let msg = bundle
+            .try_insert_image(key.to_string(), vec![0u8; MAX_IMAGE_BYTES + 1])
+            .expect_err("oversized image must be rejected");
+        assert!(msg.contains("limit"), "msg: {msg}");
+        assert!(!msg.contains(key), "msg must not echo the key: {msg}");
+
+        let mut bundle = AssetBundle::new();
+        bundle.image_total_bytes = MAX_TOTAL_IMAGE_BYTES;
+        let msg = bundle
+            .try_insert_image(key.to_string(), vec![1, 2, 3])
+            .expect_err("image past the aggregate budget must be rejected");
+        assert!(msg.contains("budget"), "msg: {msg}");
+        assert!(!msg.contains(key), "msg must not echo the key: {msg}");
     }
 
     #[test]
