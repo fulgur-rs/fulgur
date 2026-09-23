@@ -1,6 +1,6 @@
 {
   "name": "@fulgur-rs/cli",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "description": "HTML to PDF conversion CLI",
   "keywords": [
     "html",
@@ -20,11 +20,11 @@
     "bin/"
   ],
   "optionalDependencies": {
-    "@fulgur-rs/cli-linux-x64": "0.40.0",
-    "@fulgur-rs/cli-linux-x64-musl": "0.40.0",
-    "@fulgur-rs/cli-linux-arm64": "0.40.0",
-    "@fulgur-rs/cli-darwin-arm64": "0.40.0",
-    "@fulgur-rs/cli-darwin-x64": "0.40.0",
-    "@fulgur-rs/cli-win32-x64": "0.40.0"
+    "@fulgur-rs/cli-linux-x64": "0.41.0",
+    "@fulgur-rs/cli-linux-x64-musl": "0.41.0",
+    "@fulgur-rs/cli-linux-arm64": "0.41.0",
+    "@fulgur-rs/cli-darwin-arm64": "0.41.0",
+    "@fulgur-rs/cli-darwin-x64": "0.41.0",
+    "@fulgur-rs/cli-win32-x64": "0.41.0"
   }
 }
