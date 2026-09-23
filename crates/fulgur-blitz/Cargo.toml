@@ -1,0 +1,50 @@
+[package]
+name = "fulgur-blitz"
+version = "0.40.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Blitz-based HTML/CSS layout and PDF rendering backend for fulgur"
+readme = "README.md"
+keywords = ["pdf", "html", "css", "converter"]
+categories = ["text-processing"]
+
+[features]
+## Enable rayon-based thread parallelism in `Engine::render_batch`.
+parallel = ["dep:rayon"]
+
+[dependencies]
+fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
+rayon = { version = "1", optional = true }
+cssparser = "0.37"
+krilla = "0.7.0"
+krilla-svg = "0.7.0"
+usvg = "0.45"
+blitz-html = "0.2"
+blitz-dom = "0.2"
+blitz-traits = "0.2"
+taffy = "0.9"
+parley = "0.6"
+skrifa = "0.45"
+stylo = "0.8.0"
+thiserror = "2"
+minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
+serde_json = "1"
+log = "0.4"
+lopdf = "0.42.0"
+unicode-segmentation = "1.13"
+unicode-properties = "0.1"
+# Force-enable `image`'s `png` feature so PNG decoding (used by blitz-dom for
+# `<img>` tags and CSS background-image) works consistently across every fulgur
+# build target. Without this, `blitz-dom-0.2.4`'s `image = { default-features =
+# false }` makes PNG decoding depend on which other workspace member is built
+# alongside fulgur, producing different page-count outputs in CLI vs WPT runner
+# (fulgur-zsn8).
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+image = { version = "0.25", default-features = false, features = ["png"] }

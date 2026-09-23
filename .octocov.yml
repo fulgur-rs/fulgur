@@ -5,8 +5,14 @@ codeToTestRatio:
   code:
     - "crates/fulgur/src/**/*.rs"
     - "!crates/fulgur/src/**/*test*"
+    - "crates/fulgur-core/src/**/*.rs"
+    - "!crates/fulgur-core/src/**/*test*"
+    - "crates/fulgur-blitz/src/**/*.rs"
+    - "!crates/fulgur-blitz/src/**/*test*"
   test:
     - "crates/fulgur/src/**/*test*"
+    - "crates/fulgur-core/src/**/*test*"
+    - "crates/fulgur-blitz/src/**/*test*"
     - "crates/fulgur/tests/**/*.rs"
 comment:
   if: is_pull_request

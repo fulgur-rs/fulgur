@@ -950,10 +950,10 @@ mod tests {
     /// the fallback (12.0), which would indicate the font branch was entered.
     #[test]
     fn metrics_from_line_real_font_returns_font_metrics() {
-        const NOTO_SANS: &[u8] = include_bytes!("../../../../examples/.fonts/NotoSans-Regular.ttf");
+        let noto_sans = crate::test_fonts::noto_sans_regular_ttf();
 
         let mut line = text_line(16.0, 12.0);
-        line.items.push(make_text_run(NOTO_SANS.to_vec()));
+        line.items.push(make_text_run(noto_sans.to_vec()));
         let m = metrics_from_line(&line);
 
         // The real font branch was taken, so values differ from the fallback.
@@ -975,14 +975,14 @@ mod tests {
     /// must skip non-text items and continue to find the first parseable font.
     #[test]
     fn metrics_from_line_real_font_skips_non_text_items_before_it() {
-        const NOTO_SANS: &[u8] = include_bytes!("../../../../examples/.fonts/NotoSans-Regular.ttf");
+        let noto_sans = crate::test_fonts::noto_sans_regular_ttf();
 
         let mut line = text_line(16.0, 12.0);
         // image and inline-box come first, then a valid-font text run.
         line.items
             .push(make_image(5.0, 5.0, VerticalAlign::Baseline));
         line.items.push(make_inline_box());
-        line.items.push(make_text_run(NOTO_SANS.to_vec()));
+        line.items.push(make_text_run(noto_sans.to_vec()));
         let m = metrics_from_line(&line);
 
         assert!(m.ascent != DEF_ASCENT, "expected real font, got default");

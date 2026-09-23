@@ -167,7 +167,7 @@ Locate the fulgur source for that feature:
 
 ```bash
 # Find the relevant convert path
-grep -rn "<feature>" crates/fulgur/src/convert/ | head
+grep -rn "<feature>" crates/fulgur-blitz/src/convert/ | head
 ```
 
 For non-trivial root causes, **call `advisor()` before committing to a
@@ -206,7 +206,8 @@ Create a worktree (`superpowers:using-git-worktrees`) and:
 4. Run the full suite locally:
 
    ```bash
-   cargo test -p fulgur --lib --quiet | tail -3
+   cargo test -p fulgur-blitz --lib --quiet | tail -3
+   cargo test -p fulgur-core --lib --quiet | tail -3
    cargo test -p fulgur 2>&1 | grep "test result:"
    ```
 
@@ -301,7 +302,7 @@ unflipped.
 cargo fmt
 cargo fmt --check         # must be clean
 cargo clippy --all-targets 2>&1 | grep "^warning:"  # must be empty
-cargo test -p fulgur 2>&1 | grep -c "FAILED"        # must be 0
+cargo test -p fulgur -p fulgur-blitz -p fulgur-core 2>&1 | grep -c "FAILED"  # must be 0
 cargo test -p fulgur-vrt --release 2>&1 | grep -c "FAILED"  # must be 0
 cargo test -p fulgur-cli 2>&1 | grep -c "FAILED"    # must be 0
 ```

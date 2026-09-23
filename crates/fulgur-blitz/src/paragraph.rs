@@ -1995,15 +1995,16 @@ mod text_decoration_tests {
 mod decoration_metrics_real_font_tests {
     use super::*;
 
-    const NOTO_SANS_REGULAR: &[u8] =
-        include_bytes!("../../../examples/.fonts/NotoSans-Regular.ttf");
+    fn noto_sans_regular() -> std::sync::Arc<Vec<u8>> {
+        crate::test_fonts::noto_sans_regular_ttf()
+    }
 
     /// Passing valid TTF bytes causes `skrifa::FontRef::from_index` to succeed,
     /// executing the main branch of `get_decoration_metrics` rather than the
     /// empty-data fallback that the existing tests exercise.
     #[test]
     fn real_font_enters_skrifa_main_branch() {
-        let m = get_decoration_metrics(NOTO_SANS_REGULAR, 0, 12.0);
+        let m = get_decoration_metrics(&noto_sans_regular(), 0, 12.0);
         assert!(
             m.underline_offset > 0.0,
             "underline_offset={}",
@@ -2032,7 +2033,7 @@ mod decoration_metrics_real_font_tests {
     #[test]
     fn real_font_underline_offset_meets_minimum() {
         let font_size = 12.0_f32;
-        let m = get_decoration_metrics(NOTO_SANS_REGULAR, 0, font_size);
+        let m = get_decoration_metrics(&noto_sans_regular(), 0, font_size);
         assert!(
             m.underline_offset >= font_size * 0.075,
             "expected >= {:.4}, got {:.4}",
@@ -2047,7 +2048,7 @@ mod decoration_metrics_real_font_tests {
     fn real_font_min_thickness_is_enforced() {
         let font_size = 12.0_f32;
         let min = font_size * 0.02;
-        let m = get_decoration_metrics(NOTO_SANS_REGULAR, 0, font_size);
+        let m = get_decoration_metrics(&noto_sans_regular(), 0, font_size);
         assert!(
             m.underline_thickness >= min,
             "underline_thickness {:.4} < min {:.4}",
@@ -2066,7 +2067,7 @@ mod decoration_metrics_real_font_tests {
     /// For any real font both operands are positive, so the result must be > 0.
     #[test]
     fn real_font_strikethrough_offset_is_positive() {
-        let m = get_decoration_metrics(NOTO_SANS_REGULAR, 0, 12.0);
+        let m = get_decoration_metrics(&noto_sans_regular(), 0, 12.0);
         assert!(
             m.strikethrough_offset > 0.0,
             "strikethrough_offset={}",
@@ -2079,8 +2080,8 @@ mod decoration_metrics_real_font_tests {
     /// `font_size` multiples.
     #[test]
     fn real_font_metrics_grow_with_font_size() {
-        let m1 = get_decoration_metrics(NOTO_SANS_REGULAR, 0, 12.0);
-        let m2 = get_decoration_metrics(NOTO_SANS_REGULAR, 0, 24.0);
+        let m1 = get_decoration_metrics(&noto_sans_regular(), 0, 12.0);
+        let m2 = get_decoration_metrics(&noto_sans_regular(), 0, 24.0);
         assert!(
             m2.underline_offset > m1.underline_offset,
             "larger font_size should increase underline_offset"

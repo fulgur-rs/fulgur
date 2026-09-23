@@ -22,12 +22,12 @@
 //! Cross-unit arithmetic does not compile:
 //!
 //! ```compile_fail
-//! use fulgur::units::F32Units;
+//! use fulgur_core::units::F32Units;
 //! let _ = 1.0_f32.as_px() + 1.0_f32.as_pt();
 //! ```
 //!
 //! ```compile_fail
-//! use fulgur::units::F32Units;
+//! use fulgur_core::units::F32Units;
 //! let _ = 1.0_f32.as_pt() + 1.0_f32.as_px();
 //! ```
 //!
@@ -55,7 +55,7 @@
 //! no such method and no `Deref` to `f32`):
 //!
 //! ```compile_fail
-//! use fulgur::units::F32Units;
+//! use fulgur_core::units::F32Units;
 //! // `.as_px()` exists on `f32` only — never on an already-typed `Pt`.
 //! let _ = 1.0_f32.as_pt().as_px();
 //! ```

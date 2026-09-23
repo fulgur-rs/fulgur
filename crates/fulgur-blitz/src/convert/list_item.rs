@@ -1100,12 +1100,7 @@ mod tests {
     /// Decode NotoSans-Regular WOFF2 fixture into the TTF bytes that
     /// `AssetBundle::fonts` stores after `add_font_bytes`.
     fn load_noto_sans_ttf() -> Arc<Vec<u8>> {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/fonts/NotoSans-Regular.woff2");
-        let woff2 = std::fs::read(&fixture).expect("NotoSans-Regular.woff2 missing");
-        let mut bundle = crate::asset::AssetBundle::new();
-        bundle.add_font_bytes(woff2).expect("WOFF2 decode failed");
-        Arc::clone(&bundle.fonts[0])
+        crate::test_fonts::noto_sans_regular_ttf()
     }
 
     // try_convert branch 3 (inside marker, non-inline-root, non-empty children):

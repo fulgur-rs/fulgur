@@ -1106,11 +1106,26 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 name = "fulgur"
 version = "0.40.0"
 dependencies = [
+ "fulgur-blitz",
+ "fulgur-core",
+ "image",
+ "krilla",
+ "lopdf",
+ "parley",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "fulgur-blitz"
+version = "0.40.0"
+dependencies = [
  "blitz-dom",
  "blitz-html",
  "blitz-traits",
  "cssparser 0.37.0",
- "getrandom 0.4.3",
+ "fulgur-core",
  "image",
  "krilla",
  "krilla-svg",
@@ -1126,11 +1141,9 @@ dependencies = [
  "taffy",
  "tempfile",
  "thiserror 2.0.20",
- "toml",
  "unicode-properties",
  "unicode-segmentation",
  "usvg",
- "woff2-patched",
 ]
 
 [[package]]
@@ -1144,6 +1157,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "which",
+]
+
+[[package]]
+name = "fulgur-core"
+version = "0.40.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "image",
+ "krilla",
+ "log",
+ "lopdf",
+ "minijinja",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "woff2-patched",
 ]
 
 [[package]]

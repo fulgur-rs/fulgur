@@ -87,11 +87,11 @@ warranted because:
   - `javascript:`, `vbscript:`, `data:text/html` URLs in `href`/`src`/`action`
 - **[Existing]** MiniJinja auto-escaping (`AutoEscape::Html`) escapes
   `<`, `>`, `&`, `"` in all `{{ variable }}` output
-  (`crates/fulgur/src/template.rs:90`)
+  (`crates/fulgur-blitz/src/template.rs:90`)
 - **[Existing]** GCPM running elements are serialized back to HTML and
   reparsed for their margin box, so that round trip must preserve the
   escaping above. `gcpm::running::serialize_node` re-encodes text nodes
-  (`crates/fulgur/src/gcpm/running.rs`); without it, escaped data reaching
+  (`crates/fulgur-blitz/src/gcpm/running.rs`); without it, escaped data reaching
   a header/footer via `position: running()` + `content: element()` would
   come back as live markup. `<style>` / `<script>` children are exempt
   because the parser never decoded references inside them
@@ -107,7 +107,7 @@ endpoints.
 
 **Mitigations:**
 
-- **[Existing]** `FulgurNetProvider` (`crates/fulgur/src/net.rs`) only
+- **[Existing]** `FulgurNetProvider` (`crates/fulgur-blitz/src/net.rs`) only
   accepts `file://` URLs; all other schemes are silently dropped
 - **[Existing]** Path traversal protection: resolved file paths must
   canonicalise inside the configured `base_path`
@@ -125,7 +125,7 @@ paths like `../../secrets/key.pem` to exfiltrate server files.
 **Mitigations:**
 
 - **[Existing]** `FulgurNetProvider::resolve_local_path`
-  (`crates/fulgur/src/net.rs:90-101`) canonicalises paths and rejects
+  (`crates/fulgur-blitz/src/net.rs:90-101`) canonicalises paths and rejects
   anything outside `base_path`; symlink traversal is also blocked by
   `canonicalize()`
 - **[Existing]** `AssetBundle` image lookup uses explicit name→data
@@ -142,7 +142,7 @@ consumption:
 - Recursive `{% include %}` / `{% import %}` (if enabled)
 
 **Current state:** MiniJinja `Environment::new()` has no resource limits
-by default (`crates/fulgur/src/template.rs:89`).
+by default (`crates/fulgur-blitz/src/template.rs:89`).
 
 **Mitigations:**
 
