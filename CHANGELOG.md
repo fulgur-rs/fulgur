@@ -14,7 +14,6 @@ All notable changes to this project will be documented in this file.
 * harden(asset): cap unbounded raw font-byte registration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/697
 ### Features
 * feat(pagination): repeat table headers by @vsevolod in https://github.com/fulgur-rs/fulgur/pull/710
-* feat: add optional Raikiri page fragment adapter by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/781
 ### Bug Fixes
 * fix(gradient): harden stop resolution against non-finite geometry by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/684
 * fix: bump workspace MSRV to 1.89.0 to match dependency floor by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/701
@@ -25,8 +24,6 @@ All notable changes to this project will be documented in this file.
 * fix(gcpm): specificity-aware, document-order-consistent GCPM selector cascade by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/768
 * fix(convert): convert colors to sRGB before reading components by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/772
 * fix(config): support the full CSS page-size keyword set by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/773
-### Other Changes
-* Revert "feat: add optional Raikiri page fragment adapter" (#781) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/783
 
 ## New Contributors
 * @vsevolod made their first contribution in https://github.com/fulgur-rs/fulgur/pull/710
