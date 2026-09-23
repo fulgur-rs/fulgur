@@ -71,7 +71,8 @@ OIDC token を取得し、`release-plz release` 経由で crates.io に publish 
 (`CARGO_REGISTRY_TOKEN`) を secrets に持つ必要はない。この job は
 `environment: crates-io`（required reviewers 付き＝リリース実行承認 ②、後述）で走る。
 
-各 crate (`fulgur`, `fulgur-cli`) で Trusted Publisher を登録する:
+公開 crate (`fulgur`, `fulgur-cli`, `fulgur-core`, `fulgur-blitz`) それぞれで Trusted
+Publisher を登録する:
 
 1. <https://crates.io/> にログイン (crate owner アカウント)
 2. 各 crate の Settings → "Trusted Publishing" タブを開く
@@ -81,7 +82,7 @@ OIDC token を取得し、`release-plz release` 経由で crates.io に publish 
    - Repository name: `fulgur`
    - Workflow filename: `release-plz.yml`
    - Environment: `crates-io`
-4. `fulgur-cli` も同様に登録
+4. `fulgur-cli`、`fulgur-core`、`fulgur-blitz` も同様に登録
 
 > 移行メモ (`release` → `crates-io`, ゼロダウンタイム): 既存 TP は `Environment:
 > release` のまま。**この env 変更が `main` に出る前に** `crates-io` の TP を**追加**する
@@ -90,9 +91,44 @@ OIDC token を取得し、`release-plz release` 経由で crates.io に publish 
 > 通るのを確認してから、古い `release` の TP を削除する。crates.io は crate ごとに複数 TP を
 > 持てるので無停止で移行できる。
 
-新規 crate の場合は先に <https://crates.io/settings/tokens> 的に
-"Pending Trusted Publisher" で名前を予約してから初回 publish で
-OIDC 経由の採用が確定する。
+### 新規 crate の初回 publish
+
+crates.io の Trusted Publisher は **既に存在する crate にしか登録できない**
+([RFC 3691](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html):
+"A Trusted Publisher Configuration can only be created after an initial manual
+publishing of a crate.")。PyPI の pending publisher に相当する事前登録はないため、
+新しい公開 crate を workspace に追加したときは、その変更を `main` に merge する **前に**
+次の手順で初回 publish と TP 登録を済ませる。順序を誤ると次回の `release-plz release`
+がその crate の publish で失敗する。
+
+1. <https://crates.io/settings/tokens> で API token を作成する。
+   - Scopes: `publish-new` のみ
+   - Crates: 新しい crate 名だけに限定
+   - Expiration: 1 日など短く
+2. token を credentials ファイルに保存しないよう、`cargo login` は使わずシェル内の
+   環境変数で渡す:
+
+   ```bash
+   read -rs CARGO_REGISTRY_TOKEN && export CARGO_REGISTRY_TOKEN
+   ```
+
+3. 新 crate を追加する PR のブランチ (差分なし、origin と一致) から、依存される側から順に
+   publish する。既に公開済みの crate (`fulgur`, `fulgur-cli` 等) は publish しない:
+
+   ```bash
+   cargo publish -p <crate> --dry-run
+   cargo publish -p <crate>
+   ```
+
+   `cargo publish` は index への反映を待ってから終了するので、依存する crate を続けて
+   publish してよい。crates.io の版は削除できない (yank のみ) が、次回リリースで minor が
+   上がるため、PR がレビューで変わっても実害はない。
+4. 上記の手順で各 crate に Trusted Publisher を登録する。
+5. `unset CARGO_REGISTRY_TOKEN` し、crates.io で token を revoke する。
+6. 新 crate を `release-plz.toml` に `version_group = "core"` / `publish = true` で
+   追加した PR を merge する。
+
+`fulgur-core` / `fulgur-blitz` (fulgur-hgro) はこの手順で追加した (fulgur-vsnz)。
 
 登録完了後、旧 secret `CARGO_REGISTRY_TOKEN` は不要なので Settings →
 Secrets and variables → Actions から削除してよい。
