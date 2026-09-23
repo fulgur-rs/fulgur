@@ -310,7 +310,7 @@ dependencies = [
  "http",
  "keyboard-types",
  "serde",
- "smol_str 0.2.2",
+ "smol_str",
  "url",
 ]
 
@@ -330,16 +330,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "borsh"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
-dependencies = [
- "bytes",
- "cfg_aliases",
 ]
 
 [[package]]
@@ -459,12 +449,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
@@ -1134,7 +1118,6 @@ dependencies = [
  "lopdf",
  "minijinja",
  "parley",
- "raikiri-traits",
  "rayon",
  "serde",
  "serde_json",
@@ -2739,31 +2722,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
-name = "raikiri-style"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=c1d4976d62cd133d5c2f4af86930d7103529a0a9#c1d4976d62cd133d5c2f4af86930d7103529a0a9"
-dependencies = [
- "cssparser 0.37.0",
- "precomputed-hash",
- "rustc-hash",
- "selectors 0.40.0",
- "smol_str 0.3.6",
-]
-
-[[package]]
-name = "raikiri-traits"
-version = "0.2.0"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=c1d4976d62cd133d5c2f4af86930d7103529a0a9#c1d4976d62cd133d5c2f4af86930d7103529a0a9"
-dependencies = [
- "bytes",
- "libc",
- "raikiri-style",
- "rustc-hash",
- "smol_str 0.3.6",
- "url",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3155,25 +3113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "selectors"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eeee001a77567bb05e71652718d3ff76d8697c151ac523e68e9513194eb2b75a"
-dependencies = [
- "bitflags 2.11.0",
- "cssparser 0.37.0",
- "derive_more",
- "log",
- "new_debug_unreachable",
- "phf 0.13.1",
- "phf_codegen 0.13.1",
- "precomputed-hash",
- "rustc-hash",
- "servo_arc",
- "smallvec",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3378,16 +3317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "smol_str"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
-dependencies = [
- "borsh",
- "serde_core",
 ]
 
 [[package]]

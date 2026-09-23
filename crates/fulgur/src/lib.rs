@@ -565,8 +565,6 @@ pub mod outline;
 #[doc(hidden)]
 pub mod pagination_layout;
 pub mod paragraph;
-#[cfg(feature = "raikiri-page-fragments")]
-pub mod raikiri_adapter;
 pub mod render;
 pub mod schema;
 pub mod svg;
