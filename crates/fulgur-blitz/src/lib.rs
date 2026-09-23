@@ -335,6 +335,8 @@ pub mod schema;
 pub mod svg;
 pub mod tagging;
 pub mod template;
+#[cfg(test)]
+mod test_fonts;
 
 pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};

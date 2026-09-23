@@ -770,7 +770,7 @@ mod tests {
     fn test_add_font_bytes_woff2_decodes_to_ttf_or_otf() {
         let data = std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../fulgur/tests/fixtures/fonts/NotoSans-Regular.woff2"),
+                .join("tests/fixtures/fonts/NotoSans-Regular.woff2"),
         )
         .expect("fixture must exist");
         assert_eq!(detect_font_format(&data), FontFormat::Woff2);
