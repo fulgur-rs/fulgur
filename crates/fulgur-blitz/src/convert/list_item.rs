@@ -1101,7 +1101,7 @@ mod tests {
     /// `AssetBundle::fonts` stores after `add_font_bytes`.
     fn load_noto_sans_ttf() -> Arc<Vec<u8>> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/fonts/NotoSans-Regular.woff2");
+            .join("../fulgur/tests/fixtures/fonts/NotoSans-Regular.woff2");
         let woff2 = std::fs::read(&fixture).expect("NotoSans-Regular.woff2 missing");
         let mut bundle = crate::asset::AssetBundle::new();
         bundle.add_font_bytes(woff2).expect("WOFF2 decode failed");

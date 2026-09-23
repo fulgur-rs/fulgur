@@ -263,7 +263,8 @@ impl Config {
     /// (`Engine::layout_to_drawables`) so bad values fail fast with a clear
     /// error instead of reaching Blitz/Taffy as e.g. a saturated `u32::MAX`
     /// viewport height.
-    pub(crate) fn validate(&self) -> crate::Result<()> {
+    #[doc(hidden)]
+    pub fn validate(&self) -> crate::Result<()> {
         let ps = if self.landscape {
             self.page_size.landscape()
         } else {

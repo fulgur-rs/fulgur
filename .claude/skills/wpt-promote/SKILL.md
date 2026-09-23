@@ -167,7 +167,7 @@ Locate the fulgur source for that feature:
 
 ```bash
 # Find the relevant convert path
-grep -rn "<feature>" crates/fulgur/src/convert/ | head
+grep -rn "<feature>" crates/fulgur-blitz/src/convert/ | head
 ```
 
 For non-trivial root causes, **call `advisor()` before committing to a

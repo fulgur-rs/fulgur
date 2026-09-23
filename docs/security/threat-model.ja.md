@@ -83,11 +83,11 @@ URL が含まれ、fulgur が JS ランタイムを獲得した場合や、生�
   - `href`/`src`/`action` 内の `javascript:`, `vbscript:`, `data:text/html` URL
 - **[既存]** MiniJinja 自動エスケープ (`AutoEscape::Html`) が
   `{{ variable }}` 出力の `<`, `>`, `&`, `"` をエスケープ
-  (`crates/fulgur/src/template.rs:90`)
+  (`crates/fulgur-blitz/src/template.rs:90`)
 - **[既存]** GCPM running element は HTML に再シリアライズしてマージンボックス
   で再パースされるため、この往復で上記のエスケープが保存される必要がある。
   `gcpm::running::serialize_node` がテキストノードを再エンコードする
-  (`crates/fulgur/src/gcpm/running.rs`)。これが無いと、
+  (`crates/fulgur-blitz/src/gcpm/running.rs`)。これが無いと、
   `position: running()` + `content: element()` でヘッダ / フッタに渡った
   エスケープ済みデータが生のマークアップとして復元される。
   `<style>` / `<script>` の子は
@@ -103,7 +103,7 @@ URL が含まれ、fulgur が JS ランタイムを獲得した場合や、生�
 
 **緩和策:**
 
-- **[既存]** `FulgurNetProvider` (`crates/fulgur/src/net.rs`) は `file://` URL
+- **[既存]** `FulgurNetProvider` (`crates/fulgur-blitz/src/net.rs`) は `file://` URL
   のみ受け付け、他のスキームはすべてサイレントにドロップ
 - **[既存]** パストラバーサル防御: 解決されたファイルパスは設定済み `base_path`
   内に正規化される必要がある
@@ -120,7 +120,7 @@ URL が含まれ、fulgur が JS ランタイムを獲得した場合や、生�
 **緩和策:**
 
 - **[既存]** `FulgurNetProvider::resolve_local_path`
-  (`crates/fulgur/src/net.rs:90-101`) がパスを正規化し、`base_path` 外のものを
+  (`crates/fulgur-blitz/src/net.rs:90-101`) がパスを正規化し、`base_path` 外のものを
   拒否。`canonicalize()` によりシンボリックリンクトラバーサルもブロック
 - **[既存]** `AssetBundle` の画像検索は明示的な name→data マッピングを使用。
   レンダリング時に画像のファイルシステム読み取りは行われない
@@ -135,7 +135,7 @@ URL が含まれ、fulgur が JS ランタイムを獲得した場合や、生�
 - 再帰的な `{% include %}` / `{% import %}` (有効な場合)
 
 **現状:** MiniJinja `Environment::new()` はデフォルトでリソース制限なし
-(`crates/fulgur/src/template.rs:89`)。
+(`crates/fulgur-blitz/src/template.rs:89`)。
 
 **緩和策:**
 

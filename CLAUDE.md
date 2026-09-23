@@ -15,8 +15,9 @@ cargo build --release
 
 # Test
 cargo test --lib                   # note: in the workspace root this runs only fulgur-vrt
-cargo test -p fulgur --lib         # fulgur unit tests (~340)
-cargo test -p fulgur
+cargo test -p fulgur-blitz --lib   # Blitz backend unit tests (the bulk of the pipeline)
+cargo test -p fulgur-core --lib    # backend-independent unit tests (config, assets, units, inspect)
+cargo test -p fulgur               # facade integration tests (crates/fulgur/tests)
 cargo test -p fulgur --test gcpm_integration
 
 # Lint
@@ -39,10 +40,14 @@ HTML string → Blitz (parse/style/layout) → Drawables / PaginationGeometryTab
 
 ### Workspace Structure
 
-- `crates/fulgur/` — Library crate with the conversion engine
+- `crates/fulgur/` — Public facade crate. Re-exports `fulgur-blitz` (and through it `fulgur-core`) so existing paths such as `fulgur::Engine` and `fulgur::asset::AssetBundle` stay stable. Holds the integration tests
+- `crates/fulgur-core/` — Backend-independent parts: `config`, `asset`, `units`, `error`, `image`, `inspect`. Must not depend on Blitz, Stylo, Taffy, Parley, or Raikiri
+- `crates/fulgur-blitz/` — The current Blitz-based pipeline (parse, layout, pagination, drawables, PDF rendering, GCPM, templates)
 - `crates/fulgur-cli/` — CLI binary using clap
 
-### Key Modules (fulgur)
+The contract between layout backends is "HTML + assets + config → PDF bytes"; backends do not share an intermediate representation. A Raikiri backend will be added later as an unpublished crate, so published crates must not depend on Raikiri.
+
+### Key Modules (fulgur-blitz unless noted)
 
 - **engine.rs** — `Engine` builder: configures and executes `render()`
 - **blitz_adapter.rs** — Thin adapter isolating Blitz API changes from the rest of the codebase
@@ -51,8 +56,8 @@ HTML string → Blitz (parse/style/layout) → Drawables / PaginationGeometryTab
 - **drawables.rs** — `Drawables` struct: flat per-node draw payloads (`BlockDraw`, `ParagraphDraw`, `ImageDraw`, etc.) used by the v2 render path
 - **paginate.rs** — Page splitting algorithm that walks the `PaginationGeometryTable`
 - **render.rs** — Draws paginated fragments onto Krilla surfaces via `render_v2`
-- **config.rs** — Page size, margins, orientation, metadata
-- **asset.rs** — `AssetBundle` manages CSS, fonts, and images (offline-first, all assets explicitly registered)
+- **config.rs** (fulgur-core) — Page size, margins, orientation, metadata
+- **asset.rs** (fulgur-core) — `AssetBundle` manages CSS, fonts, and images (offline-first, all assets explicitly registered)
 - **paragraph.rs** — Text line layout and drawing
 - **gcpm/** — CSS Generated Content for Paged Media: parser, margin boxes, running elements, counters
 
