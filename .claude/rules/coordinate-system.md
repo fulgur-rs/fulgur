@@ -17,7 +17,7 @@ Blitz/Taffy (CSS px) ──Px::in_pt()──► Pageable tree / Krilla (PDF pt)
 | Taffy `final_layout` | CSS px | extract via `layout_in_pt()` / `size_in_pt()` |
 | Pageable tree internals | PDF pt | |
 | Krilla Surface | PDF pt | |
-| `PageSize::custom(w, h)` | **mm** | `config.rs:22` — converted to pt internally |
+| `PageSize::custom(w, h)` | **mm** | `fulgur-core` `config.rs` — converted to pt internally |
 | `Margin::uniform(v)` | **pt** | |
 | `Margin::uniform_mm(v)` | **mm** | |
 
@@ -171,7 +171,8 @@ Track the CTM stack (`q`/`Q`) to obtain final page coordinates.
 
 ## References
 
-- `crates/fulgur-blitz/src/convert.rs:29-63` — conversion constants and helper definitions
-- `crates/fulgur-core/src/config.rs:22` — `PageSize::custom` mm definition
+- `crates/fulgur-blitz/src/convert/mod.rs` — `size_in_pt` / `layout_in_pt` helper definitions
+- `crates/fulgur-core/src/units.rs` — `PX_TO_PT` and the `Px::in_pt` / `Pt::in_px` conversions
+- `crates/fulgur-core/src/config.rs` — `PageSize::custom` mm definition
 - `docs/plans/2026-04-17-viewport-pt-to-css-px.md` — deep-dive on the px/pt boundary bug
 - PR #90 (superseded) / beads fulgur-9ul — history of the viewport pt/px misidentification fix
