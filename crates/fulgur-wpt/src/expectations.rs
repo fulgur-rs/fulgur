@@ -287,4 +287,44 @@ SKIP css/css-page/c.html  # manual
         let f = ExpectationFile::default();
         assert_eq!(f.paths().count(), 0);
     }
+
+    // ---- judge: arms not yet exercised ------------------------------------
+
+    // Declared FAIL, observed FAIL → the test met its expectation → Ok.
+    // This arm exists alongside (Some(Pass), Pass) but was previously untested.
+    #[test]
+    fn judge_fail_fail_is_ok() {
+        assert_eq!(
+            judge(Some(Expectation::Fail), Expectation::Fail),
+            Verdict::Ok
+        );
+    }
+
+    // Declared FAIL, observed SKIP → harness opted out; not a promotion.
+    // Mirrors (Some(Pass), Skip) which was already tested; FAIL side was not.
+    #[test]
+    fn judge_fail_declared_skip_observed_is_ok() {
+        assert_eq!(
+            judge(Some(Expectation::Fail), Expectation::Skip),
+            Verdict::Ok
+        );
+    }
+
+    // ---- load: file-backed constructor ------------------------------------
+
+    // `load` delegates to `parse` but adds a real disk read. This test
+    // exercises that path so the function body (lines 82-85) is covered.
+    // tempfile is a dev-dependency of fulgur-wpt.
+    #[test]
+    fn load_reads_expectation_file_from_disk() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        writeln!(tmp, "PASS css/page/a.html").expect("write");
+        writeln!(tmp, "FAIL css/page/b.html  # known regression").expect("write");
+        let f = ExpectationFile::load(tmp.path()).expect("load must succeed");
+        assert_eq!(f.len(), 2);
+        assert_eq!(f.get("css/page/a.html"), Some(Expectation::Pass));
+        assert_eq!(f.get("css/page/b.html"), Some(Expectation::Fail));
+        assert_eq!(f.comment("css/page/b.html"), Some("known regression"));
+    }
 }
