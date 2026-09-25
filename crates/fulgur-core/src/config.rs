@@ -759,4 +759,148 @@ mod tests {
             );
         }
     }
+
+    // --- ConfigBuilder metadata setters ---
+
+    #[test]
+    fn builder_title_sets_field() {
+        let config = Config::builder().title("My Document").build();
+        assert_eq!(config.title.as_deref(), Some("My Document"));
+    }
+
+    #[test]
+    fn builder_description_sets_field() {
+        let config = Config::builder().description("A description").build();
+        assert_eq!(config.description.as_deref(), Some("A description"));
+    }
+
+    #[test]
+    fn builder_creator_sets_field() {
+        let config = Config::builder().creator("My App").build();
+        assert_eq!(config.creator.as_deref(), Some("My App"));
+    }
+
+    #[test]
+    fn builder_producer_sets_field() {
+        // The builder method overwrites the default "fulgur" value.
+        let config = Config::builder().producer("custom-tool").build();
+        assert_eq!(config.producer.as_deref(), Some("custom-tool"));
+    }
+
+    #[test]
+    fn builder_creation_date_sets_field() {
+        let config = Config::builder().creation_date("2026-09-25").build();
+        assert_eq!(config.creation_date.as_deref(), Some("2026-09-25"));
+    }
+
+    #[test]
+    fn builder_lang_sets_field() {
+        let config = Config::builder().lang("ja").build();
+        assert_eq!(config.lang.as_deref(), Some("ja"));
+    }
+
+    #[test]
+    fn builder_author_appends_to_authors() {
+        let config = Config::builder().author("Alice").author("Bob").build();
+        assert_eq!(config.authors, ["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn builder_authors_extends_from_iterator() {
+        let names = vec!["Carol", "Dave", "Eve"];
+        let config = Config::builder().authors(names).build();
+        assert_eq!(config.authors, ["Carol", "Dave", "Eve"]);
+    }
+
+    #[test]
+    fn builder_author_and_authors_accumulate() {
+        // author() and authors() both push into the same Vec.
+        let config = Config::builder()
+            .author("Alpha")
+            .authors(["Beta", "Gamma"])
+            .author("Delta")
+            .build();
+        assert_eq!(config.authors, ["Alpha", "Beta", "Gamma", "Delta"]);
+    }
+
+    #[test]
+    fn builder_keywords_extends_from_iterator() {
+        let config = Config::builder().keywords(["rust", "pdf", "html"]).build();
+        assert_eq!(config.keywords, ["rust", "pdf", "html"]);
+    }
+
+    #[test]
+    fn builder_keywords_called_twice_accumulates() {
+        let config = Config::builder()
+            .keywords(["a", "b"])
+            .keywords(["c"])
+            .build();
+        assert_eq!(config.keywords, ["a", "b", "c"]);
+    }
+
+    // --- validate: individual margin field branches ---
+
+    #[test]
+    fn validate_rejects_nan_right_margin() {
+        // top is valid so the loop reaches right before returning an error.
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin {
+                top: 20.0,
+                right: f32::NAN,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .build();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("right"),
+            "error should name the 'right' field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nan_bottom_margin() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin {
+                top: 20.0,
+                right: 20.0,
+                bottom: f32::NAN,
+                left: 20.0,
+            })
+            .build();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("bottom"),
+            "error should name the 'bottom' field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nan_left_margin() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin {
+                top: 20.0,
+                right: 20.0,
+                bottom: 20.0,
+                left: f32::NAN,
+            })
+            .build();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("left"),
+            "error should name the 'left' field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_negative_height() {
+        // PageSize::custom converts mm to pt; negative mm → negative pt.
+        let config = Config::builder()
+            .page_size(PageSize::custom(210.0, -1.0))
+            .build();
+        assert!(config.validate().is_err());
+    }
 }
