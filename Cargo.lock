@@ -1214,6 +1214,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fulgur-dev"
+version = "0.40.0"
+dependencies = [
+ "clap",
+ "fontique 0.11.1",
+ "fulgur-blitz",
+ "fulgur-core",
+ "fulgur-raikiri",
+ "lopdf",
+ "tempfile",
+]
+
+[[package]]
 name = "fulgur-raikiri"
 version = "0.40.0"
 dependencies = [

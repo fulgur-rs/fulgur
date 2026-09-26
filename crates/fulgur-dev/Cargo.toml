@@ -1,0 +1,30 @@
+[package]
+name = "fulgur-dev"
+version = "0.40.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Development CLI for selecting Fulgur layout backends"
+readme = "README.md"
+
+[[bin]]
+name = "fulgur-dev"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
+fulgur-blitz = { version = "0.40.0", path = "../fulgur-blitz" }
+fulgur-raikiri = { path = "../fulgur-raikiri" }
+
+[dev-dependencies]
+tempfile = "3"
+lopdf = "0.42"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+# Blitz enables dynamic loading in the shared fontconfig-sys dependency.
+# The newer font stack must select the matching API when both backends link.
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
