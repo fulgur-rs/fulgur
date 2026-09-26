@@ -6,7 +6,7 @@
 
 use fulgur_core::{Error, Result};
 use raikiri_html::{
-    LayoutOptions, LayoutStatus, PageDefaults, RenderResources, StreamingConfig, layout,
+    LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources, layout,
     parse_html_with_resources,
 };
 use std::path::Path;
@@ -17,7 +17,7 @@ use std::path::Path;
 /// layout, returns a PDF generation error until PDF drawing is implemented.
 /// External resources are not loaded; styles must be embedded in the HTML.
 pub fn render(input: &Path) -> Result<Vec<u8>> {
-    match layout_file(input, StreamingConfig::default())? {
+    match layout_file(input, LayoutConfig::default())? {
         LayoutStatus::Completed(document) => {
             for page in document.pages() {
                 let _geometry = page.geometry();
@@ -34,7 +34,7 @@ pub fn render(input: &Path) -> Result<Vec<u8>> {
     }
 }
 
-fn layout_file(input: &Path, config: StreamingConfig) -> Result<LayoutStatus> {
+fn layout_file(input: &Path, config: LayoutConfig) -> Result<LayoutStatus> {
     let html = std::fs::read(input)?;
     let resources = RenderResources::new();
     let document = parse_html_with_resources(html.as_slice(), &resources)
