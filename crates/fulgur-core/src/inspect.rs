@@ -3393,4 +3393,209 @@ mod tests {
         let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["Undecoded"]);
     }
+
+    // --- TJ operator (array-form text show) ---
+    //
+    // fulgur-generated PDFs use `Tj` exclusively; `TJ` is emitted by many
+    // third-party PDF writers. The branch at lines 571-596 in inspect.rs is
+    // exercised only via synthetically crafted content streams.
+
+    /// Build a one-page PDF whose content stream uses the `TJ` operator with
+    /// the given array items, preceded by a font/position setup preamble.
+    fn make_pdf_with_tj_array(items: Vec<lopdf::Object>) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                Operation::new(
+                    "Tm",
+                    vec![
+                        Object::Real(1.0),
+                        Object::Real(0.0),
+                        Object::Real(0.0),
+                        Object::Real(1.0),
+                        Object::Real(10.0),
+                        Object::Real(700.0),
+                    ],
+                ),
+                Operation::new("TJ", vec![Object::Array(items)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    /// `TJ` with a mix of string elements and a kerning adjustment number.
+    /// The number element must be silently skipped; the strings must be
+    /// concatenated and emitted as a single `TextItem`.
+    #[test]
+    fn tj_operator_extracts_concatenated_strings() {
+        let buf = make_pdf_with_tj_array(vec![
+            lopdf::Object::string_literal("Hello"),
+            lopdf::Object::Integer(5), // kerning — ignored
+            lopdf::Object::string_literal(" World"),
+        ]);
+        let result = inspect_bytes(&buf);
+        assert_eq!(
+            result.text_items.len(),
+            1,
+            "TJ with two string elements must produce exactly one TextItem"
+        );
+        assert_eq!(
+            result.text_items[0].text, "Hello World",
+            "TJ must concatenate string elements in order"
+        );
+        assert_eq!(
+            result.text_items[0].font, "F1",
+            "TJ must record the active font resource name"
+        );
+        assert!(
+            (result.text_items[0].font_size - 12.0).abs() < 0.01,
+            "TJ must record the active font size"
+        );
+    }
+
+    /// `TJ` array whose string elements decode to only whitespace must not
+    /// produce a `TextItem` — the `!combined.trim().is_empty()` guard at
+    /// line 580 of inspect.rs must suppress the push.
+    #[test]
+    fn tj_operator_all_whitespace_produces_no_item() {
+        let buf = make_pdf_with_tj_array(vec![
+            lopdf::Object::string_literal("   "),
+            lopdf::Object::Integer(-10),
+            lopdf::Object::string_literal("  "),
+        ]);
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.text_items.is_empty(),
+            "TJ whose combined text is all whitespace must not produce a TextItem"
+        );
+    }
+
+    /// `TJ` array with only numeric (kerning) elements and no string elements
+    /// must produce no `TextItem`.
+    #[test]
+    fn tj_operator_only_numbers_produces_no_item() {
+        let buf =
+            make_pdf_with_tj_array(vec![lopdf::Object::Integer(10), lopdf::Object::Integer(-5)]);
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.text_items.is_empty(),
+            "TJ with only numeric elements must produce no TextItem"
+        );
+    }
+
+    /// `TJ` with a single string element (no kerning) must behave like `Tj`.
+    #[test]
+    fn tj_operator_single_string_element_matches_tj_behaviour() {
+        let buf = make_pdf_with_tj_array(vec![lopdf::Object::string_literal("Alone")]);
+        let result = inspect_bytes(&buf);
+        assert_eq!(result.text_items.len(), 1);
+        assert_eq!(result.text_items[0].text, "Alone");
+    }
+
+    // --- extract_metadata error paths ---
+    //
+    // Lines 331 and 337 of inspect.rs are reached when the `/Info` trailer
+    // entry is present but in an unexpected form.
+
+    /// When the `/Info` trailer entry is a direct (non-reference) object,
+    /// `as_reference()` fails and `extract_metadata` returns an empty
+    /// `Metadata` immediately (line 331).
+    #[test]
+    fn extract_metadata_info_not_a_reference_yields_empty_metadata() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => Object::Integer(0),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        // /Info is a direct string — not an indirect reference.
+        doc.trailer
+            .set("Info", Object::string_literal("not-a-reference"));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.metadata.title.is_none(),
+            "non-reference /Info must yield empty Metadata"
+        );
+        assert!(result.metadata.author.is_none());
+    }
+
+    /// When the `/Info` trailer entry is a valid indirect reference but the
+    /// referenced object is not a `/Info` dictionary (e.g. it is an integer),
+    /// `extract_metadata` returns an empty `Metadata` (line 337).
+    #[test]
+    fn extract_metadata_info_reference_to_non_dictionary_yields_empty_metadata() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => Object::Integer(0),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        // /Info points to an Integer — not a dictionary.
+        let non_dict_id = doc.add_object(Object::Integer(42));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.trailer.set("Info", Object::Reference(non_dict_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.metadata.title.is_none(),
+            "/Info pointing to a non-dictionary must yield empty Metadata"
+        );
+        assert!(result.metadata.author.is_none());
+    }
 }
