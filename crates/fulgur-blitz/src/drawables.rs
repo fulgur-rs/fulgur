@@ -602,6 +602,7 @@ impl Drawables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paragraph::ShapedLine;
     use crate::units::F32Units;
 
     #[test]
@@ -837,25 +838,35 @@ mod tests {
         assert!(s.contains('0'), "empty lines should report count 0: {s}");
     }
 
-    /// Verify the custom `Debug` impl reports count, not full Vec content,
-    /// by checking it's consistent across empty and non-empty slices and
-    /// that the struct name + all field labels appear in both cases.
+    /// Verify the custom `Debug` impl reports count, not full Vec content.
+    ///
+    /// Uses a non-empty `lines` vec so the count is verified dynamically —
+    /// a regression that hardcoded `0` would fail the `"lines: 1"` assertion.
+    /// An all-zero-coordinate slice could otherwise make `contains('0')` a
+    /// false positive even against a hardcoded constant.
     #[test]
     fn paragraph_slice_debug_reports_line_count_not_vec_content() {
-        // Empty lines.
-        let slice_empty = ParagraphSlice {
-            origin_pt: (0.0_f32.as_pt(), 0.0_f32.as_pt()),
-            size_pt: (0.0_f32.as_pt(), 0.0_f32.as_pt()),
-            lines: Vec::new(),
+        let one_line = ShapedLine {
+            height: 12.0_f32.as_pt(),
+            baseline: 10.0_f32.as_pt(),
+            items: Vec::new(),
         };
-        let s_empty = format!("{:?}", slice_empty);
-        assert!(s_empty.contains("ParagraphSlice"));
-        assert!(s_empty.contains("lines"));
-        // The count 0 must appear (not the full vec with brackets).
-        assert!(s_empty.contains('0'));
+        let slice = ParagraphSlice {
+            origin_pt: (5.0_f32.as_pt(), 8.0_f32.as_pt()),
+            size_pt: (200.0_f32.as_pt(), 15.0_f32.as_pt()),
+            lines: vec![one_line],
+        };
+        let s = format!("{:?}", slice);
+        assert!(s.contains("ParagraphSlice"));
+        assert!(s.contains("lines"));
+        // Exact count must appear as the number 1, not the full Vec.
         assert!(
-            !s_empty.contains("ShapedLine"),
-            "custom Debug must not dump full vec: {s_empty}"
+            s.contains("lines: 1"),
+            "custom Debug must report lines count as 1, got: {s}"
+        );
+        assert!(
+            !s.contains("ShapedLine"),
+            "custom Debug must not dump full vec: {s}"
         );
     }
 
