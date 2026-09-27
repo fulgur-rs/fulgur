@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 serde_json = "1"
 which = "8"
+log = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
