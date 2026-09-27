@@ -259,6 +259,8 @@ jobs:
         include:
           - phase: css-page
             test: wpt_css_page
+          - phase: css-break
+            test: wpt_css_break
           - phase: multicol-1
             test: wpt_lists
             filter: wpt_list_multicol_1
