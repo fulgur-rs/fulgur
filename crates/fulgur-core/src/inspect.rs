@@ -3393,4 +3393,216 @@ mod tests {
         let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["Undecoded"]);
     }
+
+    // --- TJ operator ---
+
+    /// `TJ` (array form) は `Tj` と同じ抽出ロジックを使うが、文字列の配列を受け取る。
+    /// 数値オフセットはスキップし、文字列要素を結合して1つの TextItem として出力する。
+    #[test]
+    fn tj_array_operator_extracts_text() {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                Operation::new("Td", vec![Object::Real(72.0), Object::Real(720.0)]),
+                // TJ: array with two strings and a numeric kern value between them.
+                // Numbers are ignored; strings are concatenated.
+                Operation::new(
+                    "TJ",
+                    vec![Object::Array(vec![
+                        Object::string_literal("Hello"),
+                        Object::Integer(-100), // kerning offset, ignored
+                        Object::string_literal(" World"),
+                    ])],
+                ),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(result.text_items.len(), 1, "TJ must produce one TextItem");
+        assert_eq!(result.text_items[0].text, "Hello World");
+        assert!((result.text_items[0].x - 72.0).abs() < 1e-3);
+    }
+
+    /// `TJ` 配列がホワイトスペースのみの文字列を含む場合、TextItem は生成されない。
+    #[test]
+    fn tj_array_whitespace_only_produces_no_item() {
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm [(   )] TJ ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "TJ with whitespace-only array must produce no text items"
+        );
+    }
+
+    // --- extract_metadata edge cases ---
+
+    /// `/Info` トレーラーエントリが参照ではなく直接オブジェクト（整数）のとき、
+    /// `as_reference()` が失敗し空のメタデータが返される（line 331 のパス）。
+    #[test]
+    fn extract_metadata_info_not_a_reference_returns_empty() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf (x) Tj ET".to_vec(),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        // Info は参照ではなく直接の整数オブジェクト → as_reference() が Err を返す
+        doc.trailer.set("Info", Object::Integer(999));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(
+            result.metadata.title, None,
+            "非参照 Info はメタデータを空にする"
+        );
+        assert_eq!(result.metadata.author, None);
+    }
+
+    /// `/Info` 参照先が辞書ではなく整数のとき、空のメタデータが返される（line 337 のパス）。
+    #[test]
+    fn extract_metadata_info_reference_to_non_dict_returns_empty() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf (x) Tj ET".to_vec(),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        // /Info が指すオブジェクトを辞書ではなく整数にする
+        let non_dict_id = doc.add_object(Object::Integer(42));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.trailer.set("Info", Object::Reference(non_dict_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(
+            result.metadata.title, None,
+            "非辞書 Info オブジェクトはメタデータを空にする"
+        );
+        assert_eq!(result.metadata.author, None);
+    }
+
+    // --- transform_point ---
+
+    /// `transform_point` は 3×2 アフィン変換行列でスカラー座標を変換する純粋関数。
+    #[test]
+    fn transform_point_identity_leaves_point_unchanged() {
+        // identity: [1, 0, 0, 1, 0, 0]
+        let identity = [1.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let (x, y) = transform_point(&identity, 100.0, 200.0);
+        assert!((x - 100.0).abs() < 1e-5);
+        assert!((y - 200.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn transform_point_translation_shifts_point() {
+        // translation by (50, 30): [1, 0, 0, 1, 50, 30]
+        let m = [1.0_f32, 0.0, 0.0, 1.0, 50.0, 30.0];
+        let (x, y) = transform_point(&m, 10.0, 20.0);
+        assert!((x - 60.0).abs() < 1e-5, "x {x}");
+        assert!((y - 50.0).abs() < 1e-5, "y {y}");
+    }
+
+    #[test]
+    fn transform_point_uniform_scale() {
+        // scale 2×: [2, 0, 0, 2, 0, 0]
+        let m = [2.0_f32, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let (x, y) = transform_point(&m, 3.0, 4.0);
+        assert!((x - 6.0).abs() < 1e-5, "x {x}");
+        assert!((y - 8.0).abs() < 1e-5, "y {y}");
+    }
 }
