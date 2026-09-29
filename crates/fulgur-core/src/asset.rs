@@ -1913,7 +1913,7 @@ mod tests {
         let missing = dir.path().join("missing.css");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_css_file(missing.to_str().unwrap())
+            .add_css_file(&missing)
             .expect_err("missing CSS file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
@@ -1928,7 +1928,7 @@ mod tests {
         let missing = dir.path().join("missing.ttf");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_font_file(missing.to_str().unwrap())
+            .add_font_file(&missing)
             .expect_err("missing font file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
@@ -1950,7 +1950,7 @@ mod tests {
         let missing = dir.path().join("missing.png");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_image_file("logo.png", missing.to_str().unwrap())
+            .add_image_file("logo.png", &missing)
             .expect_err("missing image file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
