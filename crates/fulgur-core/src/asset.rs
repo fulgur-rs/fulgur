@@ -1889,15 +1889,18 @@ mod tests {
     // name/budget rejection before reaching the file read, so this path was
     // previously uncovered. These tests use `assert!(matches!(...))` to avoid
     // adding new uncovered `other =>` arms.
+    //
+    // Each test builds a path inside a freshly-created temporary directory so
+    // the parent always exists (guaranteeing `NotFound` rather than
+    // `PermissionDenied` or accidental success if `/nonexistent` happened to
+    // exist on the runner).
 
     #[test]
     fn read_file_capped_returns_io_error_for_missing_file() {
-        let err = read_file_capped(
-            std::path::Path::new("/nonexistent/__fulgur_test_missing__.bin"),
-            1024,
-            "test file",
-        )
-        .expect_err("nonexistent file must return Err");
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.bin");
+        let err = read_file_capped(&missing, 1024, "test file")
+            .expect_err("nonexistent file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
             "expected Error::Io(NotFound), got {err:?}"
@@ -1906,9 +1909,11 @@ mod tests {
 
     #[test]
     fn add_css_file_returns_io_error_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.css");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_css_file("/nonexistent/__fulgur_test_missing__.css")
+            .add_css_file(missing.to_str().unwrap())
             .expect_err("missing CSS file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
@@ -1919,9 +1924,11 @@ mod tests {
 
     #[test]
     fn add_font_file_returns_io_error_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.ttf");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_font_file("/nonexistent/__fulgur_test_missing__.ttf")
+            .add_font_file(missing.to_str().unwrap())
             .expect_err("missing font file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
@@ -1939,9 +1946,11 @@ mod tests {
         // here the key is normal-sized so the name check passes and the failure
         // is the actual file-open attempt (Error::Io), not a name-length rejection
         // (Error::Asset).
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.png");
         let mut bundle = AssetBundle::new();
         let err = bundle
-            .add_image_file("logo.png", "/nonexistent/__fulgur_test_missing__.png")
+            .add_image_file("logo.png", missing.to_str().unwrap())
             .expect_err("missing image file must return Err");
         assert!(
             matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
