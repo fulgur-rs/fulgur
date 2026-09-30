@@ -817,26 +817,24 @@ mod tests {
     /// the keyword through `keyword_to_page_size`. This exercises line 259.
     #[test]
     fn resolve_page_settings_auto_keyword_uses_config_page_size() {
-        // Use A3 as the config page size so the assertion doesn't accidentally
-        // pass when falling back to A4.
-        let config = Config::builder()
-            .page_size(PageSize::A3)
-            .landscape(false)
-            .build();
-        // CLI --size is set (overrides.page_size = true), so we won't reach the
-        // CSS branch normally. Use a default config instead and set page_size
-        // only via the css rule.
-        let config_no_override = Config::default(); // A4, no overrides
+        // Use A3 as the config page size so the assertion distinguishes the
+        // "use config.page_size" branch from the "keyword_to_page_size("auto")"
+        // fallback, which would both produce A4 with Config::default().
+        let config = Config::builder().page_size(PageSize::A3).build();
+        // Clear overrides.page_size so the CSS rule's size declaration is used
+        // instead of the CLI override path.
+        let mut config_no_override = config;
+        config_no_override.overrides.page_size = false;
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), false)),
             margin: PartialMargin::default(),
         }];
-        // "auto" name → use config.page_size (A4 for default config).
+        // "auto" name → use config.page_size (A3 from config_no_override).
         let (size, _, _) = resolve_page_settings(&rules, 1, 1, &config_no_override, false);
         assert!(
-            (size.width - PageSize::A4.width).abs() < 0.01,
-            "size: auto must fall through to config.page_size (A4): width={}",
+            (size.width - PageSize::A3.width).abs() < 0.01,
+            "size: auto must fall through to config.page_size (A3): width={}",
             size.width
         );
     }
