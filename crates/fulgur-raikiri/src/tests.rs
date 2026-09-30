@@ -1,6 +1,6 @@
 use super::*;
 use fulgur_core::Error;
-use raikiri_html::{DocumentLayout, DomView, FragmentKind, LayoutStatus, NodeId, StreamingConfig};
+use raikiri_html::{DocumentLayout, DomView, FragmentKind, LayoutConfig, LayoutStatus, NodeId};
 use raikiri_traits::AbortController;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ fn input(html: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn completed(path: &Path) -> DocumentLayout {
-    match layout_file(path, StreamingConfig::default()).unwrap() {
+    match layout_file(path, LayoutConfig::default()).unwrap() {
         LayoutStatus::Completed(result) => result,
         _ => panic!("expected a completed layout"),
     }
@@ -90,7 +90,7 @@ fn already_aborted_layout_returns_aborted() {
     let (_dir, path) = input("<p>Hello</p>");
     let controller = AbortController::new();
     controller.abort();
-    let config = StreamingConfig::builder()
+    let config = LayoutConfig::builder()
         .signal(Some(controller.signal.clone()))
         .build();
     assert!(matches!(
