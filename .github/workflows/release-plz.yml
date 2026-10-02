@@ -11,9 +11,11 @@ on:
     branches:
       - main
   # Manual escape hatch if a real release wasn't detected from the push (e.g. the
-  # Release PR was squash-merged with a hand-edited subject). A workflow_dispatch
-  # run still pauses on the `crates-io` environment approval before publishing.
-  workflow_dispatch:
+  # Release PR was squash-merged with a hand-edited subject). repository_dispatch
+  # always runs the default-branch revision; the release still pauses on the
+  # `crates-io` environment approval before publishing.
+  repository_dispatch:
+    types: [release-plz-manual]
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,13 +47,12 @@ jobs:
           emit() { echo "has_releases=$1" >> "$GITHUB_OUTPUT"; echo "has_releases=$1 ($2)"; }
 
           # Real releases live on main only. This check MUST precede the
-          # workflow_dispatch hatch: a manual run can be dispatched from any
-          # branch/tag, and publishing from a non-main ref would bypass the
-          # Release PR (① content) gate and the main-branch ruleset.
+          # repository_dispatch hatch; it is defense in depth for the
+          # default-branch-only manual event.
           if [ "$REF" != "refs/heads/main" ]; then emit false "not main"; exit 0; fi
 
-          # Manual escape hatch (main only) — still gated by the crates-io env approval.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then emit true "workflow_dispatch"; exit 0; fi
+          # Manual escape hatch (default branch only) — still gated by the crates-io approval.
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then emit true "repository_dispatch"; exit 0; fi
 
           # Merge-commit path: the Release PR head branch is `release-plz-<date>`,
           # which appears in the default "Merge pull request …" commit subject.
@@ -77,6 +78,8 @@ jobs:
 
   release-pr:
     name: Release-plz PR
+    # Keep the Release App token on the trusted default branch.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write        # push the Release PR branch + aux-file-sync commit
