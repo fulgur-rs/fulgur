@@ -14,7 +14,10 @@ use pyo3::prelude::*;
 mod asset_bundle;
 mod engine;
 mod error;
+// PyO3 0.29.2's `from_py_object` expansion calls `clone()` on these `Copy` wrappers.
+#[allow(clippy::clone_on_copy)]
 mod margin;
+#[allow(clippy::clone_on_copy)]
 mod page_size;
 
 use asset_bundle::PyAssetBundle;

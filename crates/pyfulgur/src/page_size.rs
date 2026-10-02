@@ -17,8 +17,6 @@ use pyo3::prelude::*;
 ///     custom = PageSize.custom(210.0, 297.0)
 ///     landscape = a4.landscape()
 ///     ```
-// PyO3's from_py_object expansion clones this Copy wrapper.
-#[allow(clippy::clone_on_copy)]
 #[pyclass(name = "PageSize", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyPageSize {

@@ -13,8 +13,6 @@ use pyo3::prelude::*;
 ///     Margin(36.0, 36.0, 36.0, 36.0)
 ///     Margin.uniform_mm(20.0)
 ///     ```
-// PyO3's from_py_object expansion clones this Copy wrapper.
-#[allow(clippy::clone_on_copy)]
 #[pyclass(name = "Margin", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyMargin {
