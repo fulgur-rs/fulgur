@@ -974,11 +974,18 @@ mod tests {
     fn engine_default_is_equivalent_to_new() {
         // Default::default() が Engine::new() と同等に render できることを確認する。
         // impl Default for Engine の本体 (lines 333-335) がテストゼロだったため追加。
-        let engine = Engine::default();
-        let pdf = engine
-            .render_impl("<p>hello</p>")
+        let html = "<p>hello</p>";
+        let pdf_default = Engine::default()
+            .render_impl(html)
             .expect("Default engine should render successfully");
-        assert_eq!(&pdf[..4], b"%PDF", "PDF magic missing");
+        let pdf_new = Engine::new()
+            .render_impl(html)
+            .expect("Engine::new() should render successfully");
+        assert_eq!(&pdf_default[..4], b"%PDF", "PDF magic missing (default)");
+        assert_eq!(
+            pdf_default, pdf_new,
+            "Engine::default() and Engine::new() should produce identical output"
+        );
     }
 
     /// Returns true when the PDF catalog's /Outlines tree has at least one entry.

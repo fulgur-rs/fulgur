@@ -1,3 +1,9 @@
+// pyo3's `from_py_object` generates a separate `impl FromPyObject` block that
+// calls `.clone()` on `Copy` types. An item-level `#[allow]` only covers the
+// struct body, not proc-macro-generated top-level items; a module-level inner
+// attribute is needed to reach the generated impl.
+#![allow(clippy::clone_on_copy)]
+
 use fulgur::Margin;
 use pyo3::prelude::*;
 
@@ -13,11 +19,6 @@ use pyo3::prelude::*;
 ///     Margin(36.0, 36.0, 36.0, 36.0)
 ///     Margin.uniform_mm(20.0)
 ///     ```
-// pyo3's `from_py_object` derive generates `FromPyObject` via `.clone()`, which
-// triggers `clone_on_copy` on this `Copy` type. The generated clone is semantically
-// correct (Copy ⊆ Clone) and there is no user-visible code to change here; the
-// suppression targets the macro-generated expansion only.
-#[allow(clippy::clone_on_copy)]
 #[pyclass(name = "Margin", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyMargin {
