@@ -981,16 +981,44 @@ mod tests {
         assert_eq!(&pdf[..4], b"%PDF", "PDF magic missing");
     }
 
+    /// Returns true when the PDF catalog's /Outlines tree has at least one entry.
+    ///
+    /// A PDF with bookmarks has `/Root → /Outlines → /First` pointing to the
+    /// first outline item. When bookmarks are disabled krilla omits the Outlines
+    /// entry entirely, so the absence of /First is the reliable signal.
+    fn has_pdf_outlines(doc: &lopdf::Document) -> bool {
+        let Ok(root_ref) = doc.trailer.get(b"Root") else {
+            return false;
+        };
+        let Ok((_, catalog_obj)) = doc.dereference(root_ref) else {
+            return false;
+        };
+        let Ok(catalog) = catalog_obj.as_dict() else {
+            return false;
+        };
+        let Ok(outlines_ref) = catalog.get(b"Outlines") else {
+            return false;
+        };
+        let Ok((_, outlines_obj)) = doc.dereference(outlines_ref) else {
+            return false;
+        };
+        let Ok(outlines_dict) = outlines_obj.as_dict() else {
+            return false;
+        };
+        outlines_dict.get(b"First").is_ok()
+    }
+
     #[test]
     fn configure_json_applies_bookmarks_flag() {
         // bookmarks オプションが apply_options (line 189) と render_impl (line 230) の
         // 両方の分岐を通ることを確認する。
-        // PDF の Outlines エントリでブックマークツリーの有無を確認する。
+        // PDF の /Outlines エントリの有無でブックマークの実際の生成を検証する。
+        let html = r#"<h1>Chapter 1</h1><p>content</p><h2>Section 1.1</h2>"#;
+
         let mut engine_with = Engine::new();
         engine_with
             .configure_json(serde_json::json!({"bookmarks": true}))
             .expect("configure bookmarks:true should succeed");
-        let html = r#"<h1>Chapter 1</h1><p>content</p><h2>Section 1.1</h2>"#;
         let pdf_with = engine_with
             .render_impl(html)
             .expect("render with bookmarks should succeed");
@@ -998,6 +1026,11 @@ mod tests {
             &pdf_with[..4],
             b"%PDF",
             "PDF magic missing (bookmarks=true)"
+        );
+        let doc_with = lopdf::Document::load_mem(&pdf_with).expect("PDF parses (bookmarks=true)");
+        assert!(
+            has_pdf_outlines(&doc_with),
+            "bookmarks=true with h1/h2 headings should produce PDF /Outlines entries"
         );
 
         let mut engine_without = Engine::new();
@@ -1011,6 +1044,12 @@ mod tests {
             &pdf_without[..4],
             b"%PDF",
             "PDF magic missing (bookmarks=false)"
+        );
+        let doc_without =
+            lopdf::Document::load_mem(&pdf_without).expect("PDF parses (bookmarks=false)");
+        assert!(
+            !has_pdf_outlines(&doc_without),
+            "bookmarks=false should produce no PDF /Outlines entries"
         );
     }
 }
