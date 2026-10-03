@@ -1040,7 +1040,14 @@ mod tests {
             "bookmarks=true with h1/h2 headings should produce PDF /Outlines entries"
         );
 
+        // Enable bookmarks first, then override with false to verify that a
+        // last-write-wins configure_json call actually clears the flag rather
+        // than the false case merely testing a freshly constructed engine
+        // whose default is already bookmarks=false.
         let mut engine_without = Engine::new();
+        engine_without
+            .configure_json(serde_json::json!({"bookmarks": true}))
+            .expect("configure bookmarks:true (pre-condition) should succeed");
         engine_without
             .configure_json(serde_json::json!({"bookmarks": false}))
             .expect("configure bookmarks:false should succeed");
