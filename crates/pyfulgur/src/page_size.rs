@@ -17,6 +17,9 @@ use pyo3::prelude::*;
 ///     custom = PageSize.custom(210.0, 297.0)
 ///     landscape = a4.landscape()
 ///     ```
+// Same as PyMargin above: `from_py_object` derive generates a `.clone()` call on a
+// `Copy` type. Suppression is on the item, not module-wide.
+#[allow(clippy::clone_on_copy)]
 #[pyclass(name = "PageSize", module = "pyfulgur", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyPageSize {
