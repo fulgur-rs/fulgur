@@ -1,3 +1,9 @@
+// pyo3's `from_py_object` generates a separate `impl FromPyObject` block that
+// calls `.clone()` on `Copy` types. An item-level `#[allow]` only covers the
+// struct body, not proc-macro-generated top-level items; a module-level inner
+// attribute is needed to reach the generated impl.
+#![allow(clippy::clone_on_copy)]
+
 use fulgur::PageSize;
 use pyo3::prelude::*;
 
