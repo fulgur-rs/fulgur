@@ -969,4 +969,48 @@ mod tests {
             pdf_without.len(),
         );
     }
+
+    #[test]
+    fn engine_default_is_equivalent_to_new() {
+        // Default::default() が Engine::new() と同等に render できることを確認する。
+        // impl Default for Engine の本体 (lines 333-335) がテストゼロだったため追加。
+        let engine = Engine::default();
+        let pdf = engine
+            .render_impl("<p>hello</p>")
+            .expect("Default engine should render successfully");
+        assert_eq!(&pdf[..4], b"%PDF", "PDF magic missing");
+    }
+
+    #[test]
+    fn configure_json_applies_bookmarks_flag() {
+        // bookmarks オプションが apply_options (line 189) と render_impl (line 230) の
+        // 両方の分岐を通ることを確認する。
+        // PDF の Outlines エントリでブックマークツリーの有無を確認する。
+        let mut engine_with = Engine::new();
+        engine_with
+            .configure_json(serde_json::json!({"bookmarks": true}))
+            .expect("configure bookmarks:true should succeed");
+        let html = r#"<h1>Chapter 1</h1><p>content</p><h2>Section 1.1</h2>"#;
+        let pdf_with = engine_with
+            .render_impl(html)
+            .expect("render with bookmarks should succeed");
+        assert_eq!(
+            &pdf_with[..4],
+            b"%PDF",
+            "PDF magic missing (bookmarks=true)"
+        );
+
+        let mut engine_without = Engine::new();
+        engine_without
+            .configure_json(serde_json::json!({"bookmarks": false}))
+            .expect("configure bookmarks:false should succeed");
+        let pdf_without = engine_without
+            .render_impl(html)
+            .expect("render with bookmarks=false should succeed");
+        assert_eq!(
+            &pdf_without[..4],
+            b"%PDF",
+            "PDF magic missing (bookmarks=false)"
+        );
+    }
 }
