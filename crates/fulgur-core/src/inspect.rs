@@ -1600,6 +1600,58 @@ mod tests {
         make_pdf_with_raw_contents(vec![raw_content])
     }
 
+    /// Build a single-page PDF that contains one image XObject (`/Im0`, a 1×1
+    /// white RGB pixel) so `collect_image_xobjects` returns a non-empty map and
+    /// `extract_image_items` proceeds past the early `image_xobjects.is_empty()`
+    /// guard into the content stream.  The image XObject is in the resources but
+    /// the caller controls the content stream, so any `Do` in `raw_content` that
+    /// doesn't reference `/Im0` still produces no `ImageItem`.
+    fn make_pdf_with_image_xobject_and_raw_content(raw_content: Vec<u8>) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        // Minimal 1×1 white RGB image (1×1 pixel × 3 channels).
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => Object::Integer(1),
+                "Height" => Object::Integer(1),
+                "ColorSpace" => Object::Name(b"DeviceRGB".to_vec()),
+                "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![255u8, 255, 255],
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Im0" => Object::Reference(image_id),
+            },
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, raw_content));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
     /// Build a *single-page* PDF whose `/Contents` is an array of several
     /// streams, each carrying pre-encoded operator bytes.
     ///
@@ -3748,14 +3800,21 @@ mod tests {
     }
 
     // --- Do operator edge cases (extract_image_items) ---
+    //
+    // All three fixtures below use `make_pdf_with_image_xobject_and_raw_content`
+    // so that the page resources contain at least one image XObject (`/Im0`).
+    // Without it, `extract_image_items` would hit the
+    // `if image_xobjects.is_empty() { continue; }` guard at line 876 and skip
+    // content-stream parsing entirely, causing the assertions to pass vacuously.
 
     /// `Do` オペランドなし → ImageItem は生成されない
     /// （`op.operands.first()` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させる。
     #[test]
     fn do_operator_with_no_operands_produces_no_image() {
-        // Raw content stream: a bare "Do" operator with no operands.
+        // "Do" with zero operands: operands.first() == None → skipped.
         let content = b"q Do Q\n".to_vec();
-        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
         assert!(
             result.images.is_empty(),
             "Do without operands must produce no ImageItem"
@@ -3764,43 +3823,12 @@ mod tests {
 
     /// `Do` のオペランドが名前ではない（整数）とき ImageItem は生成されない
     /// （`obj_as_name_str` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させる。
     #[test]
     fn do_operator_with_non_name_operand_produces_no_image() {
-        use lopdf::content::{Content, Operation};
-        use lopdf::{Document, Object, Stream, dictionary};
-
-        let mut doc = Document::with_version("1.5");
-        let pages_id = doc.new_object_id();
-        let resources_id = doc.add_object(dictionary! {});
-        let content = Content {
-            operations: vec![
-                // Operand is Integer 42, not a Name — obj_as_name_str returns None.
-                Operation::new("Do", vec![Object::Integer(42)]),
-            ],
-        };
-        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
-        let page_id = doc.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id,
-            "Contents" => content_id, "Resources" => resources_id,
-            "MediaBox" => vec![
-                Object::Integer(0), Object::Integer(0),
-                Object::Integer(595), Object::Integer(842),
-            ],
-        });
-        doc.objects.insert(
-            pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Kids" => vec![Object::Reference(page_id)],
-                "Count" => Object::Integer(1),
-            }),
-        );
-        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-        doc.trailer.set("Root", Object::Reference(catalog_id));
-        let mut buf = Vec::new();
-        doc.save_to(&mut buf).unwrap();
-
-        let result = inspect_bytes(&buf);
+        // "42 Do": operand is Integer 42, not a Name — obj_as_name_str returns None.
+        let content = b"42 Do\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
         assert!(
             result.images.is_empty(),
             "Do with integer operand must produce no ImageItem"
@@ -3809,11 +3837,13 @@ mod tests {
 
     /// `Do /UnknownXO` の XObject 名がリソースに存在しない場合 ImageItem は生成されない
     /// （`image_xobjects.get(name)` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させるが、
+    /// `/UnknownXO` は登録されていないため lookup が None になる。
     #[test]
     fn do_operator_referencing_unknown_xobject_produces_no_image() {
-        // The content references /Im1, but the page resources have no XObject dict at all.
-        let content = b"q /Im1 Do Q\n".to_vec();
-        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        // Resources have /Im0 only; content references /UnknownXO → lookup miss.
+        let content = b"q /UnknownXO Do Q\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
         assert!(
             result.images.is_empty(),
             "Do referencing absent XObject must produce no ImageItem"
