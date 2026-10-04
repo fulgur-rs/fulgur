@@ -27,7 +27,7 @@ blitz-dom = "0.2"
 blitz-traits = "0.2"
 taffy = "0.9"
 parley = "0.6"
-skrifa = "0.45"
+skrifa = "0.47"
 stylo = "0.8.0"
 thiserror = "2"
 minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
