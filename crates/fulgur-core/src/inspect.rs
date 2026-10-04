@@ -1600,6 +1600,58 @@ mod tests {
         make_pdf_with_raw_contents(vec![raw_content])
     }
 
+    /// Build a single-page PDF that contains one image XObject (`/Im0`, a 1×1
+    /// white RGB pixel) so `collect_image_xobjects` returns a non-empty map and
+    /// `extract_image_items` proceeds past the early `image_xobjects.is_empty()`
+    /// guard into the content stream.  The image XObject is in the resources but
+    /// the caller controls the content stream, so any `Do` in `raw_content` that
+    /// doesn't reference `/Im0` still produces no `ImageItem`.
+    fn make_pdf_with_image_xobject_and_raw_content(raw_content: Vec<u8>) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        // Minimal 1×1 white RGB image (1×1 pixel × 3 channels).
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => Object::Integer(1),
+                "Height" => Object::Integer(1),
+                "ColorSpace" => Object::Name(b"DeviceRGB".to_vec()),
+                "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![255u8, 255, 255],
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Im0" => Object::Reference(image_id),
+            },
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, raw_content));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
     /// Build a *single-page* PDF whose `/Contents` is an array of several
     /// streams, each carrying pre-encoded operator bytes.
     ///
@@ -3604,5 +3656,197 @@ mod tests {
         let (x, y) = transform_point(&m, 3.0, 4.0);
         assert!((x - 6.0).abs() < 1e-5, "x {x}");
         assert!((y - 8.0).abs() < 1e-5, "y {y}");
+    }
+
+    // --- Tj/TJ edge cases ---
+
+    /// `Tj` オペランドなし → TextItem は生成されない（operands.first() が None を返すパス）。
+    #[test]
+    fn tj_with_no_operands_produces_no_item() {
+        // Raw content: BT sets text mode, Tj has zero operands, ET closes.
+        // The `if let Some(text_obj) = operands.first()` branch is not taken.
+        let content = b"BT Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tj without operands must produce no TextItem"
+        );
+    }
+
+    /// `Tj` のオペランドが非文字列（整数）のとき TextItem は生成されない
+    /// （`text_obj.as_str()` が Err を返すパス）。
+    #[test]
+    fn tj_with_non_string_operand_produces_no_item() {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                // Operand is an Integer, not a String/Bytes — as_str() returns Err.
+                Operation::new("Tj", vec![Object::Integer(42)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.text_items.is_empty(),
+            "Tj with integer operand must produce no TextItem"
+        );
+    }
+
+    /// `Tj` のテキストがホワイトスペースのみのとき TextItem は生成されない
+    /// （`!text.trim().is_empty()` が false になるパス）。
+    #[test]
+    fn tj_whitespace_only_text_produces_no_item() {
+        let content = b"BT /F1 12 Tf (   ) Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tj with whitespace-only text must produce no TextItem"
+        );
+    }
+
+    /// `TJ` のオペランドが配列ではない（整数）とき TextItem は生成されない
+    /// （`array_obj.as_array()` が Err を返すパス）。
+    #[test]
+    fn tj_with_non_array_operand_produces_no_item() {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                // TJ operand is an Integer, not an Array — as_array() returns Err.
+                Operation::new("TJ", vec![Object::Integer(99)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "Contents" => content_id, "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.text_items.is_empty(),
+            "TJ with integer operand must produce no TextItem"
+        );
+    }
+
+    // --- Do operator edge cases (extract_image_items) ---
+    //
+    // All three fixtures below use `make_pdf_with_image_xobject_and_raw_content`
+    // so that the page resources contain at least one image XObject (`/Im0`).
+    // Without it, `extract_image_items` would hit the
+    // `if image_xobjects.is_empty() { continue; }` guard at line 876 and skip
+    // content-stream parsing entirely, causing the assertions to pass vacuously.
+
+    /// `Do` オペランドなし → ImageItem は生成されない
+    /// （`op.operands.first()` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させる。
+    #[test]
+    fn do_operator_with_no_operands_produces_no_image() {
+        // "Do" with zero operands: operands.first() == None → skipped.
+        let content = b"q Do Q\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "Do without operands must produce no ImageItem"
+        );
+    }
+
+    /// `Do` のオペランドが名前ではない（整数）とき ImageItem は生成されない
+    /// （`obj_as_name_str` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させる。
+    #[test]
+    fn do_operator_with_non_name_operand_produces_no_image() {
+        // "42 Do": operand is Integer 42, not a Name — obj_as_name_str returns None.
+        let content = b"42 Do\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "Do with integer operand must produce no ImageItem"
+        );
+    }
+
+    /// `Do /UnknownXO` の XObject 名がリソースに存在しない場合 ImageItem は生成されない
+    /// （`image_xobjects.get(name)` が None を返すパス）。
+    /// resources に `/Im0` を含めて image_xobjects の空ガードを通過させるが、
+    /// `/UnknownXO` は登録されていないため lookup が None になる。
+    #[test]
+    fn do_operator_referencing_unknown_xobject_produces_no_image() {
+        // Resources have /Im0 only; content references /UnknownXO → lookup miss.
+        let content = b"q /UnknownXO Do Q\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_xobject_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "Do referencing absent XObject must produce no ImageItem"
+        );
     }
 }
