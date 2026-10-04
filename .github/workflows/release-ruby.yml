@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8  # v1.5.0
         with:
           ruby-version: "3.3"
           rustup-toolchain: stable
@@ -47,7 +47,7 @@ jobs:
       matrix:
         ruby: ["3.1", "3.4"]
     steps:
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8  # v1.5.0
         with:
           ruby-version: ${{ matrix.ruby }}
           rustup-toolchain: stable
@@ -106,7 +106,7 @@ jobs:
       # oxidize-rb/actions/cross-gem@v1 は `gem install rb_sys` を host 上で
       # 直接実行するので、user-writable な gem directory を持つ Ruby が必要。
       # 事前に ruby/setup-ruby で runner owned の Ruby を入れておく。
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9  # v1.325.0
         with:
           ruby-version: "3.3"
           bundler-cache: true
@@ -120,7 +120,7 @@ jobs:
       # install 不能。v0.7.0 で実際に発生)。
       # rb_sys upgrade 時は Gemfile.lock (`bundle update rb_sys`) と下記 `tag:` を
       # 同じ version に揃えて更新すること。
-      - uses: oxidize-rb/actions/cross-gem@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+      - uses: oxidize-rb/actions/cross-gem@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8  # v1.5.0
         with:
           platform: ${{ matrix.platform }}
           ruby-versions: "3.1,3.2,3.3,3.4"
@@ -158,7 +158,7 @@ jobs:
           # のコメント参照)。
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9  # v1.325.0
         with:
           ruby-version: ${{ matrix.ruby }}
       - uses: actions/download-artifact@v8
@@ -278,7 +278,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9  # v1.325.0
         with:
           ruby-version: "3.3"
       - uses: actions/download-artifact@v8
