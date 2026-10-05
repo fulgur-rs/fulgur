@@ -244,11 +244,10 @@ an unapproved Release PR from merging.
 Why ② doesn't pause ordinary merges: `release-plz.yml`'s `release` job (which
 carries the `crates-io` env) is reachable on every push to `main`, and an
 environment gate would otherwise pause *every* merge. A `check-releases` job
-detects whether the push is an actual release (`workflow_dispatch`, a
+detects whether the push is an actual release (a manual `repository_dispatch`, a
 `release-plz-<date>` merge commit, or any `chore: release …` commit in the push)
 and the `release` job is `if:`-gated on it, so ② prompts on real releases only.
-`workflow_dispatch` on `release-plz.yml` is a manual escape hatch (still gated
-by ②).
+The manual event is pinned to the default-branch workflow revision.
 
 Release flow:
 
@@ -402,7 +401,8 @@ Actions タブで `release-python.yml` / `release-ruby.yml` が自動的に `rel
 ### Normal release (minor bump)
 
 1. release-plz opens (or updates) a `release-plz-*` **Release PR** automatically
-   on pushes to `main` that warrant a release — there is no manual trigger.
+   on pushes to `main` that warrant a release. Use the recovery dispatch below
+   only when the push was not recognized as a release.
 2. Inspect the Release PR (CHANGELOG diff, `Cargo.toml` / aux version bumps).
 3. **① Approve** the Release PR — this satisfies the `release-pr-approval` required
    status check (content review) — and merge it.
@@ -418,6 +418,21 @@ Actions タブで `release-python.yml` / `release-ruby.yml` が自動的に `rel
 
 Two approvals per release: ① the Release PR, then ② the `crates-io` deployment
 (see [Approval model](#approval-model)).
+
+### Recovery when a release is not detected
+
+If a Release PR was squash-merged with an edited subject and the push was not
+recognized as a release, a maintainer can dispatch the trusted default-branch
+workflow with:
+
+```bash
+gh api --method POST repos/fulgur-rs/fulgur/dispatches \
+  -f event_type=release-plz-manual
+```
+
+The release still pauses for approval in the `crates-io` environment. This
+event runs the default-branch workflow revision and does not accept a branch
+ref from the dispatcher.
 
 ### Previewing release notes
 
