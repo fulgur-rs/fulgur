@@ -12,8 +12,8 @@ readme = "README.md"
 
 [dependencies]
 fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "2481d04962e4f96c795df1875d44022348b86c16" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "3b2d8a1f70f8bf8cccf7e0ada4db25a054b0350e" }
 
 [dev-dependencies]
 tempfile = "3"
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "2481d04962e4f96c795df1875d44022348b86c16" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "3b2d8a1f70f8bf8cccf7e0ada4db25a054b0350e" }

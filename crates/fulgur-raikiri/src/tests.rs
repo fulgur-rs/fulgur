@@ -119,7 +119,9 @@ fn render_preserves_input_io_error() {
     }
 }
 
-#[cfg(unix)]
+// macOS file systems (APFS) only accept UTF-8 file names, so a path with a
+// non-UTF-8 byte cannot be created there; other Unix systems store raw bytes.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_input_filename_is_accepted() {
     use std::os::unix::ffi::OsStringExt;
