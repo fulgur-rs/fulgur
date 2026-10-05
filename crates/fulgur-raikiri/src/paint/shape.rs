@@ -38,6 +38,38 @@ impl Edges {
     }
 }
 
+/// Which block-direction edges of a box fragment are fragmentation breaks
+/// rather than edges of the box. With the initial `box-decoration-break:
+/// slice` (CSS Fragmentation 3 §5.4), a fragment is a slice of one
+/// unbroken box: a broken edge has no border, padding or corner rounding.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Slice {
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Slice {
+    /// The broken edges of `fragment`: every edge but the start of the
+    /// first fragment and the end of the last one.
+    pub(super) fn of(fragment: &raikiri_html::Fragment<'_>) -> Self {
+        Self {
+            top: !fragment.is_first_fragment().unwrap_or(true),
+            bottom: !fragment.is_last_fragment().unwrap_or(true),
+        }
+    }
+
+    /// `edges` with the broken sides set to zero.
+    pub(super) fn edges(self, mut edges: Edges) -> Edges {
+        if self.top {
+            edges.top = 0.0;
+        }
+        if self.bottom {
+            edges.bottom = 0.0;
+        }
+        edges
+    }
+}
+
 /// A rectangle whose corners are quarter ellipses. `radii` holds
 /// `[horizontal, vertical]` radii for the top-left, top-right, bottom-right
 /// and bottom-left corners, in that order.
@@ -79,6 +111,19 @@ impl RoundedRect {
             ],
         }
         .clamped()
+    }
+
+    /// This shape with square corners along the broken edges of `slice`.
+    pub(super) fn sliced(mut self, slice: Slice) -> Self {
+        if slice.top {
+            self.radii[0] = [0.0; 2];
+            self.radii[1] = [0.0; 2];
+        }
+        if slice.bottom {
+            self.radii[2] = [0.0; 2];
+            self.radii[3] = [0.0; 2];
+        }
+        self
     }
 
     /// A plain rectangle.

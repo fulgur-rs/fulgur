@@ -775,23 +775,49 @@ fn repeating_radial_gradient_repeats_to_the_farthest_corner() {
 
 #[test]
 fn conic_gradients_sweep_from_the_start_angle_around_the_center() {
+    // The rotation, in degrees clockwise, that the pattern applies on top of
+    // the page transform (0.75, flipped).
+    let rotation = |pdf: &lopdf::Document| {
+        let matrix = pdf
+            .objects
+            .values()
+            .filter_map(|object| object.as_dict().ok())
+            .find(|dict| dict.has(b"PatternType"))
+            .map(|dict| floats(dict.get(b"Matrix").unwrap()))
+            .unwrap();
+        (-matrix[1]).atan2(matrix[0]).to_degrees()
+    };
     let (pdf, _, _) = gradient_box(
         "background-image: conic-gradient(from 45deg at 25% 50%, red 10%, blue 90deg)",
     );
     assert!(has_shading(&pdf, 1));
     let code = postscript(&pdf);
-    // Center (20 + 65, 20 + 15). 0deg points up, so the sweep starts a
-    // quarter turn earlier than the CSS angle: red at -45 + 36 = -9 and
-    // blue at -45 + 90 = 45 degrees.
+    // Center (20 + 65, 20 + 15). The sweep is rotated to start at the
+    // `from` angle (0deg points up, a quarter turn before the sweep's
+    // positive x axis), so its domain is the stops' own angles: red at 36
+    // and blue at 90 degrees, inside [0, 360) without crossing the wrap.
     assert!(code.contains("35.0 sub exch 85.0 sub"), "{code}");
-    assert!(code.contains("-9.0 le"), "{code}");
-    assert!(code.contains("45.0 le"), "{code}");
+    assert!(code.contains("dup 36.0 le"), "{code}");
+    assert!(code.contains("dup 90.0 le"), "{code}");
     assert!(!code.contains("floor"), "{code}");
+    assert!((rotation(&pdf) + 45.0).abs() < 1e-3, "{}", rotation(&pdf));
+    // From 0deg: one full turn from the top.
+    let (pdf, _, _) = gradient_box("background-image: conic-gradient(red, blue)");
+    let code = postscript(&pdf);
+    assert!(code.contains("dup 0.0 le"), "{code}");
+    assert!(code.contains("dup 360.0 le"), "{code}");
+    assert!((rotation(&pdf) + 90.0).abs() < 1e-3, "{}", rotation(&pdf));
+    // Stops beyond the turn are cut to it.
+    let (pdf, _, _) = gradient_box("background-image: conic-gradient(red -90deg, blue 450deg)");
+    let code = postscript(&pdf);
+    assert!(code.contains("dup 0.0 le"), "{code}");
+    assert!(code.contains("dup 360.0 le"), "{code}");
+    assert!(!code.contains("-90.0") && !code.contains("450.0"), "{code}");
     // A repeating conic repeats its 30 degree period in the function.
     let (pdf, _, _) =
         gradient_box("background-image: repeating-conic-gradient(red 0deg, blue 30deg)");
     let code = postscript(&pdf);
-    assert!(code.contains("30.0 -90.0"), "{code}");
+    assert!(code.contains("30.0 0.0"), "{code}");
     assert!(code.contains("floor"), "{code}");
 }
 
@@ -999,4 +1025,146 @@ fn generated_content_is_clipped_by_its_element() {
         .position(|op| op.operator == "BT")
         .unwrap();
     assert!(clip < text_start);
+}
+
+/// The `/ColorSpace /DeviceRGB` shading of a translucent gradient (the
+/// opacity goes to a separate gray shading in a soft mask).
+fn color_shading(pdf: &lopdf::Document) -> &lopdf::Dictionary {
+    let color: Vec<_> = shadings(pdf)
+        .into_iter()
+        .filter(|dict| {
+            dict.get(b"ColorSpace")
+                .is_ok_and(|space| space.as_name().is_ok_and(|name| name == b"DeviceRGB"))
+        })
+        .collect();
+    assert_eq!(color.len(), 1);
+    color[0]
+}
+
+#[test]
+fn translucent_gradients_interpolate_in_premultiplied_alpha() {
+    // Toward `transparent` (transparent black) the color stays red while
+    // only the opacity fades: no dark fringe.
+    let (pdf, _) = operations(&format!(
+        "{CSS}<p style=\"background-image: linear-gradient(to right, red, transparent)\"></p>"
+    ));
+    assert_eq!(
+        stop_colors(&pdf, color_shading(&pdf)),
+        [[255, 0, 0], [255, 0, 0]]
+    );
+    assert!(shadings(&pdf).len() > 1, "an opacity shading");
+    // A transparent stop between two colors takes each neighbor's color on
+    // its side.
+    let (pdf, _) = operations(&format!(
+        "{CSS}<p style=\"background-image: \
+         linear-gradient(to right, red, transparent, blue)\"></p>"
+    ));
+    assert_eq!(
+        stop_colors(&pdf, color_shading(&pdf)),
+        [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]]
+    );
+    // Two partial opacities: the color between them is sampled.
+    let (pdf, _) = operations(&format!(
+        "{CSS}<p style=\"background-image: linear-gradient(to right, \
+         rgba(255, 0, 0, 1), rgba(0, 0, 255, 0.2))\"></p>"
+    ));
+    let colors = stop_colors(&pdf, color_shading(&pdf));
+    assert_eq!(colors.len(), 9, "{colors:?}");
+    // Halfway, red weighs 1 against blue's 0.2: 255 * 0.5 / 0.6 = 212.5
+    // and 255 * 0.1 / 0.6 = 42.5.
+    let [r, g, b] = colors[4];
+    assert!(
+        r.abs_diff(212) <= 1 && g == 0 && b.abs_diff(42) <= 1,
+        "{colors:?}"
+    );
+}
+
+#[test]
+fn double_border_fallback_uses_each_side_width() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border-style: double; border-width: 2px 6px 6px 6px; \
+         border-color: rgb(0, 0, 255)\"></p>"
+    ));
+    // The 2px top side is one solid ring; the 6px sides two lines each.
+    assert_eq!(count(&operations, "W"), 4);
+    assert_eq!(count(&operations, "f*"), 1 + 3 * 2);
+}
+
+#[test]
+fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
+    let html = |root: &str| {
+        format!(
+            "<style>@page {{ size: 300px 200px; margin: 20px }} html {{ {root} }} \
+             body {{ margin: 0; border: 5px solid black; overflow: hidden }}</style>\
+             <p style=\"background-color: blue; height: 100px\"></p>"
+        )
+    };
+    // With a visible root, the body's overflow goes to the page.
+    let (_, propagated) = operations(&html(""));
+    assert_eq!(count(&propagated, "W"), 0);
+    // Otherwise the root's goes to the page and the body clips its own
+    // content to its padding box: its border box inset by the border.
+    let (_, clipped) = operations(&html("overflow: hidden"));
+    let (_dir, path) = input(&html("overflow: hidden"));
+    let layout = completed(&path);
+    let page = layout.page(0).unwrap();
+    let body = page
+        .fragments()
+        .find(|f| page.dom().local_name(f.node()) == Some("body"))
+        .unwrap()
+        .paint_rect();
+    assert_eq!(
+        clip_bounds(&clipped),
+        [[
+            body.x + 5.0,
+            body.y + 5.0,
+            body.x + body.width - 5.0,
+            body.y + body.height - 5.0
+        ]]
+    );
+}
+
+/// Decoded operations of one page's content stream.
+fn page_operations(pdf: &lopdf::Document, page: u32) -> Vec<lopdf::content::Operation> {
+    let id = *pdf.get_pages().get(&page).unwrap();
+    lopdf::content::Content::decode(&pdf.get_page_content(id).unwrap())
+        .unwrap()
+        .operations
+}
+
+/// The y coordinates of every curve point.
+fn curve_ys(operations: &[lopdf::content::Operation]) -> Vec<f32> {
+    operations
+        .iter()
+        .filter(|op| op.operator == "c")
+        .flat_map(|op| {
+            floats(&lopdf::Object::Array(op.operands.clone()))
+                .into_iter()
+                .skip(1)
+                .step_by(2)
+        })
+        .collect()
+}
+
+#[test]
+fn a_box_broken_across_pages_has_no_corners_or_borders_at_the_break() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<div style=\"height: 250px; border: 6px solid black; border-radius: 20px; \
+         background-color: rgb(0, 128, 0)\"></div>"
+    ));
+    let pdf = lopdf::Document::load_mem(&render(&path).unwrap()).unwrap();
+    assert_eq!(pdf.get_pages().len(), 2);
+    let first = page_operations(&pdf, 1);
+    let second = page_operations(&pdf, 2);
+    // The first fragment fills the page area (y 20 to 180) and keeps only
+    // its top corners; the second (from y 20) only its bottom ones.
+    let ys = curve_ys(&first);
+    assert!(!ys.is_empty() && ys.iter().all(|y| *y <= 40.0), "{ys:?}");
+    let ys = curve_ys(&second);
+    assert!(!ys.is_empty() && ys.iter().all(|y| *y >= 60.0), "{ys:?}");
+    // Three bordered sides on each page: no border along the break.
+    for operations in [&first, &second] {
+        assert_eq!(count(operations, "W"), 3);
+        assert_eq!(count(operations, "f*"), 3);
+    }
 }

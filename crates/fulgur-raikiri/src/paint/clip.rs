@@ -11,7 +11,7 @@
 //! cannot tell those descendants apart and clips them like in-flow ones.
 
 use super::border;
-use super::shape::RoundedRect;
+use super::shape::{RoundedRect, Slice};
 use krilla::geom::Path;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
@@ -27,7 +27,6 @@ pub(super) struct ClipMap {
 impl ClipMap {
     pub(super) fn new(page: &Page<'_>) -> Self {
         let bounds = page.geometry().page_box;
-        let dom = page.dom();
         let mut clips = HashMap::new();
         for fragment in page.fragments() {
             if fragment.kind() != FragmentKind::Box || clips.contains_key(&fragment.node()) {
@@ -37,15 +36,14 @@ impl ClipMap {
             let Some(style) = page.computed(node) else {
                 continue;
             };
-            // §3.3: the root's and the body's `overflow` apply to the
-            // viewport, which is the page here; they do not clip the
-            // document to the body's box.
-            if matches!(dom.local_name(node), Some("html" | "body")) {
+            if propagates_to_viewport(page, node) {
                 continue;
             }
             // A node split into several fragments on one page clips to its
             // first one.
-            if let Some(path) = clip_path(fragment.paint_rect(), style, bounds) {
+            if let Some(path) =
+                clip_path(fragment.paint_rect(), Slice::of(&fragment), style, bounds)
+            {
                 clips.insert(node, path);
             }
         }
@@ -73,11 +71,36 @@ impl ClipMap {
     }
 }
 
-/// The clip of one box, or `None` when it does not clip. §3.1: the
+/// CSS Overflow 3 §3.3: the root element's `overflow` applies to the
+/// viewport (the page here), and so does the `body` element's when the
+/// root's is `visible` on both axes. Such an `overflow` does not clip the
+/// element's own box.
+fn propagates_to_viewport(page: &Page<'_>, node: NodeId) -> bool {
+    let dom = page.dom();
+    let Some(parent) = dom.parent(node) else {
+        return false;
+    };
+    let is_root_element = |element: NodeId| {
+        dom.local_name(element) == Some("html") && dom.parent(element) == Some(dom.root())
+    };
+    if is_root_element(node) {
+        return true;
+    }
+    if !(is_root_element(parent) && dom.local_name(node) == Some("body")) {
+        return false;
+    }
+    page.computed(parent).is_some_and(|root| {
+        matches!(root.overflow.x, OverflowValue::Visible)
+            && matches!(root.overflow.y, OverflowValue::Visible)
+    })
+}
+
+/// The clip of one box fragment, or `None` when it does not clip. §3.1: the
 /// `hidden`, `clip`, `scroll` and `auto` values all clip; the cascade has
 /// already applied the rule that couples the two axes.
 fn clip_path(
     rect: raikiri_html::PaintRect,
+    slice: Slice,
     style: &ComputedValues,
     bounds: raikiri_html::PaintRect,
 ) -> Option<Path> {
@@ -88,8 +111,9 @@ fn clip_path(
     if !(clip_x || clip_y) || matches!(style.display, ComputedDisplay::Inline) {
         return None;
     }
-    let padding_box =
-        RoundedRect::border_box(rect, &style.border_radius).inset(border::widths(style));
+    let padding_box = RoundedRect::border_box(rect, &style.border_radius)
+        .sliced(slice)
+        .inset(slice.edges(border::widths(style)));
     if clip_x && clip_y {
         // §3.1 and CSS Backgrounds 3 §5.3: the clip follows the curve of
         // the padding edge.

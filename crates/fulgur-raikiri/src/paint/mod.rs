@@ -27,7 +27,7 @@ use raikiri_html::computed::{
 use raikiri_html::{
     DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun, RunSource,
 };
-use shape::{Edges, RoundedRect};
+use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
 /// Draw every page of `document` and return the PDF bytes.
@@ -69,7 +69,12 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
             // A box's own overflow clips its content, not its decorations.
             let chain = clips.chain(page, dom.parent(fragment.node()));
             active.apply(&mut surface, &clips, &chain);
-            paint_box(&mut surface, fragment.paint_rect(), style);
+            paint_box(
+                &mut surface,
+                fragment.paint_rect(),
+                Slice::of(&fragment),
+                style,
+            );
         }
     }
     // Text goes above every block background and border.
@@ -93,21 +98,31 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
 }
 
 /// Background and borders of one box fragment (`rect` is its border box).
-fn paint_box(surface: &mut Surface<'_>, rect: PaintRect, style: &ComputedValues) {
+///
+/// The fragment is drawn as its own box, apart from its broken edges: the
+/// corner radii (percentages and the §5.5 scaling) and the background
+/// positioning area refer to the fragment, because the fragment API does
+/// not give the size of the unbroken box or the fragment's offset in it.
+fn paint_box(surface: &mut Surface<'_>, rect: PaintRect, slice: Slice, style: &ComputedValues) {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
         return;
     }
-    let border_box = RoundedRect::border_box(rect, &style.border_radius);
-    paint_background(surface, &border_box, style);
-    border::paint_borders(surface, &border_box, style);
+    let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    paint_background(surface, &border_box, slice, style);
+    border::paint_borders(surface, &border_box, style, slice);
 }
 
 /// CSS Backgrounds 3 §2: the background color, then the background image
 /// over it, both clipped to the `background-clip` box with its corner
 /// curves (§5.3).
-fn paint_background(surface: &mut Surface<'_>, border_box: &RoundedRect, style: &ComputedValues) {
-    let borders = border::widths(style);
-    let padding = padding(style);
+fn paint_background(
+    surface: &mut Surface<'_>,
+    border_box: &RoundedRect,
+    slice: Slice,
+    style: &ComputedValues,
+) {
+    let borders = slice.edges(border::widths(style));
+    let padding = slice.edges(padding(style));
     let visual_box = |visual: ComputedVisualBox| match visual {
         ComputedVisualBox::PaddingBox => border_box.inset(borders),
         ComputedVisualBox::ContentBox => border_box.inset(borders.add(padding)),

@@ -6,7 +6,7 @@
 //! outer and inner rounded rectangles, so every style follows them.
 
 use super::fill;
-use super::shape::{Edges, RoundedRect, polygon, ring};
+use super::shape::{Edges, RoundedRect, Slice, polygon, ring};
 use krilla::color::rgb;
 use krilla::geom::{Path, PathBuilder};
 use krilla::num::NormalizedF32;
@@ -61,13 +61,15 @@ pub(super) fn widths(style: &ComputedValues) -> Edges {
     }
 }
 
-/// Draw the four borders of a box whose border box is `outer`.
+/// Draw the four borders of a box fragment whose border box is `outer`.
+/// The broken edges of `slice` have no border.
 pub(super) fn paint_borders(
     surface: &mut Surface<'_>,
     outer: &RoundedRect,
     style: &ComputedValues,
+    slice: Slice,
 ) {
-    let widths = widths(style);
+    let widths = slice.edges(widths(style));
     let side = |border: &raikiri_html::computed::ComputedBorder, width: f32| Side {
         width,
         style: border.style(),
@@ -90,7 +92,9 @@ pub(super) fn paint_borders(
     if sides.iter().all(|(_, side)| *side == first) {
         match first.style {
             BorderStyle::Solid => return fill_ring(surface, outer, &inner, first.color),
-            BorderStyle::Double => return paint_double(surface, outer, widths, first.color),
+            BorderStyle::Double => {
+                return paint_double(surface, outer, widths, first.width, first.color);
+            }
             BorderStyle::Dashed | BorderStyle::Dotted if outer.is_rounded() => {
                 return stroke_rounded(surface, outer, widths, first);
             }
@@ -145,7 +149,7 @@ fn paint_side(
     side: Side,
 ) {
     match side.style {
-        BorderStyle::Double => paint_double(surface, outer, widths, side.color),
+        BorderStyle::Double => paint_double(surface, outer, widths, side.width, side.color),
         // CSS Backgrounds 3 §3.2 leaves the colors of the 3D styles to the
         // UA; the lit and shaded halves follow common browser practice.
         BorderStyle::Groove | BorderStyle::Ridge => {
@@ -205,15 +209,17 @@ fn fill_ring(surface: &mut Surface<'_>, outer: &RoundedRect, inner: &RoundedRect
 
 /// `double`: two lines with a gap between them, the three taking a third of
 /// the border width each. Below 3px there is no room for a visible gap, so
-/// the side is drawn solid, as browsers do.
-fn paint_double(surface: &mut Surface<'_>, outer: &RoundedRect, widths: Edges, color: CssColor) {
+/// the side is drawn solid, as browsers do. `width` is the width of the
+/// side being painted (each side is painted inside its own region).
+fn paint_double(
+    surface: &mut Surface<'_>,
+    outer: &RoundedRect,
+    widths: Edges,
+    width: f32,
+    color: CssColor,
+) {
     let inner = outer.inset(widths);
-    let max_width = widths
-        .top
-        .max(widths.right)
-        .max(widths.bottom)
-        .max(widths.left);
-    if max_width < 3.0 {
+    if width < 3.0 {
         return fill_ring(surface, outer, &inner, color);
     }
     let first = outer.inset(widths.scale(1.0 / 3.0));

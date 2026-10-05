@@ -94,7 +94,7 @@ fn linear_paint(gradient: &LinearGradient, area: &RoundedRect, current: CssColor
     // The line runs from corner to corner, so one repetition of it covers
     // the box.
     let repeat = gradient.repeating.then_some((0.0, 1.0));
-    let line = ColorLine::new(&positions, &colors, repeat, None)?;
+    let line = ColorLine::new(&positions, &colors, repeat, ALL)?;
     let at = |t: f32| (start.0 + dx * length * t, start.1 + dy * length * t);
     let (x1, y1) = at(line.start);
     let (x2, y2) = at(line.end);
@@ -137,7 +137,7 @@ fn radial_paint(gradient: &RadialGradient, area: &RoundedRect, current: CssColor
         .map(|(x, y)| ((x - px) / rx).hypot((y - py) / ry))
         .fold(0.0, f32::max);
     let repeat = gradient.repeating.then_some((0.0, reach));
-    let line = ColorLine::new(&positions, &colors, repeat, Some(0.0))?;
+    let line = ColorLine::new(&positions, &colors, repeat, (0.0, f32::INFINITY))?;
     let (cx, cy) = (area.x + px, area.y + py);
     // Scale y by `ry / rx` about the center.
     let scale = ry / rx;
@@ -231,16 +231,20 @@ fn conic_paint(gradient: &ConicGradient, area: &RoundedRect, current: CssColor) 
         .collect();
     // Krilla draws every sweep with a PostScript function, which repeats
     // the stops itself; expanding them would exceed the stop count it
-    // supports.
-    let line = ColorLine::new(&positions, &colors, None, None)?;
-    let base = gradient.angle.0 - 90.0;
+    // supports. A non-repeating gradient shows one turn.
+    let visible = if gradient.repeating { ALL } else { (0.0, 1.0) };
+    let line = ColorLine::new(&positions, &colors, None, visible)?;
+    let (cx, cy) = (area.x + px, area.y + py);
     Some(
         SweepGradient {
-            cx: area.x + px,
-            cy: area.y + py,
-            start_angle: base + line.start * 360.0,
-            end_angle: base + line.end * 360.0,
-            transform: Transform::identity(),
+            cx,
+            cy,
+            // The sweep's angles run over [0, 360) from the positive x
+            // axis, so the gradient is rotated to start there instead of
+            // having a domain that crosses the wrap.
+            start_angle: line.start * 360.0,
+            end_angle: line.end * 360.0,
+            transform: Transform::from_rotate_at(gradient.angle.0 - 90.0, cx, cy),
             spread_method: if gradient.repeating {
                 SpreadMethod::Repeat
             } else {
@@ -313,6 +317,9 @@ fn resolve_angular_positions(stops: &[AngularColorStop]) -> Vec<Option<f32>> {
         .collect()
 }
 
+/// The whole gradient line.
+const ALL: (f32, f32) = (f32::NEG_INFINITY, f32::INFINITY);
+
 /// Color stops ready for a PDF shading: offsets in [0, 1] along the
 /// segment from `start` to `end`, expressed as fractions of the gradient
 /// line. The shading pads: its end colors extend beyond the segment.
@@ -336,13 +343,19 @@ impl ColorLine {
     /// functions, which PDF/A forbids and some viewers draw wrongly, and has
     /// none for radial shadings.
     ///
-    /// `floor`, when set, drops the part of the line before it, keeping the
-    /// color there: a radial gradient has no negative radii.
+    /// `visible` is the part of the line that can be seen; the stops are
+    /// cut to it, keeping the colors the line has at its ends. A radial
+    /// gradient has no negative radii, and a conic one no angle outside its
+    /// turn.
+    ///
+    /// Translucent stops are expanded so that the shading, which
+    /// interpolates color and opacity separately, reproduces interpolation
+    /// in premultiplied alpha (CSS Images 4 §3.4.4, CSS Color 4 §12.3).
     fn new(
         positions: &[Option<f32>],
         colors: &[CssColor],
         repeat: Option<(f32, f32)>,
-        floor: Option<f32>,
+        visible: (f32, f32),
     ) -> Option<Self> {
         if colors.is_empty() || positions.len() != colors.len() {
             return None;
@@ -378,9 +391,9 @@ impl ColorLine {
             fixed = expanded;
             colors = expanded_colors;
         }
-        if let Some(floor) = floor {
-            (fixed, colors) = trim_below(&fixed, &colors, floor);
-        }
+        (fixed, colors) = trim_below(&fixed, &colors, visible.0);
+        (fixed, colors) = trim_above(&fixed, &colors, visible.1);
+        (fixed, colors) = premultiplied(&fixed, &colors);
         let (mut start, mut end) = (fixed[0], fixed[fixed.len() - 1]);
         if end - start <= f32::EPSILON {
             // Every stop at one point: a hard edge from the first color to
@@ -439,19 +452,91 @@ fn trim_below(positions: &[f32], colors: &[CssColor], floor: f32) -> (Vec<f32>, 
     } else {
         1.0
     };
-    let (c0, c1) = (colors[index - 1], colors[index]);
-    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
-    let at_floor = CssColor {
-        r: mix(c0.r, c1.r),
-        g: mix(c0.g, c1.g),
-        b: mix(c0.b, c1.b),
-        a: mix(c0.a, c1.a),
-    };
+    let at_floor = mix_premultiplied(colors[index - 1], colors[index], t);
     let mut kept_positions = vec![floor];
     kept_positions.extend_from_slice(&positions[index..]);
     let mut kept_colors = vec![at_floor];
     kept_colors.extend_from_slice(&colors[index..]);
     (kept_positions, kept_colors)
+}
+
+/// The stops up to `ceiling`, with the color the line has at `ceiling` as
+/// the last one.
+fn trim_above(positions: &[f32], colors: &[CssColor], ceiling: f32) -> (Vec<f32>, Vec<CssColor>) {
+    // Trim the mirrored line from below.
+    let mirrored: Vec<f32> = positions.iter().rev().map(|position| -position).collect();
+    let reversed: Vec<CssColor> = colors.iter().rev().copied().collect();
+    let (positions, colors) = trim_below(&mirrored, &reversed, -ceiling);
+    (
+        positions.iter().rev().map(|position| -position).collect(),
+        colors.into_iter().rev().collect(),
+    )
+}
+
+/// Steps that approximate the color curve between two stops whose
+/// opacities differ and are both above zero.
+const ALPHA_STEPS: u8 = 8;
+
+/// Stops whose straight (color, opacity) interpolation matches the
+/// premultiplied interpolation of the given ones. Between stops of equal
+/// opacity the two agree. Next to a transparent stop the premultiplied
+/// color is the other stop's color, so the transparent stop takes that
+/// color, once for each side. Between two other opacities the color is not
+/// linear and is sampled.
+fn premultiplied(positions: &[f32], colors: &[CssColor]) -> (Vec<f32>, Vec<CssColor>) {
+    if colors.iter().all(|color| color.a == colors[0].a) {
+        return (positions.to_vec(), colors.to_vec());
+    }
+    let mut out_positions = vec![positions[0]];
+    let mut out_colors = vec![mix_premultiplied(colors[0], colors[1], 0.0)];
+    for index in 0..colors.len() - 1 {
+        let (a, b) = (colors[index], colors[index + 1]);
+        let (p0, p1) = (positions[index], positions[index + 1]);
+        let steps = if a.a == b.a || a.a == 0 || b.a == 0 {
+            1
+        } else {
+            ALPHA_STEPS
+        };
+        for step in 0..=steps {
+            let t = f32::from(step) / f32::from(steps);
+            let position = p0 + (p1 - p0) * t;
+            let color = mix_premultiplied(a, b, t);
+            let last = out_colors.len() - 1;
+            if out_positions[last] == position && out_colors[last] == color {
+                continue;
+            }
+            out_positions.push(position);
+            out_colors.push(color);
+        }
+    }
+    (out_positions, out_colors)
+}
+
+/// The color a fraction `t` of the way from `a` to `b`, interpolated with
+/// premultiplied alpha. Where the result is transparent next to an opaque
+/// end, it takes that end's color, the limit of the premultiplied color.
+fn mix_premultiplied(a: CssColor, b: CssColor, t: f32) -> CssColor {
+    let (alpha_a, alpha_b) = (f32::from(a.a) / 255.0, f32::from(b.a) / 255.0);
+    let alpha = alpha_a + (alpha_b - alpha_a) * t;
+    let channel = |ca: u8, cb: u8| {
+        let (ca, cb) = (f32::from(ca), f32::from(cb));
+        let value = if alpha > 0.0 {
+            (ca * alpha_a * (1.0 - t) + cb * alpha_b * t) / alpha
+        } else if alpha_a > 0.0 {
+            ca
+        } else if alpha_b > 0.0 {
+            cb
+        } else {
+            ca + (cb - ca) * t
+        };
+        value.round().clamp(0.0, 255.0) as u8
+    };
+    CssColor {
+        r: channel(a.r, b.r),
+        g: channel(a.g, b.g),
+        b: channel(a.b, b.b),
+        a: (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+    }
 }
 
 fn stop(offset: f32, color: CssColor) -> Stop {
@@ -525,7 +610,7 @@ mod tests {
             b: 0,
             a: 255,
         };
-        let line = ColorLine::new(&[Some(-0.5), Some(1.5)], &[red, red], None, None).unwrap();
+        let line = ColorLine::new(&[Some(-0.5), Some(1.5)], &[red, red], None, ALL).unwrap();
         assert_eq!((line.start, line.end), (-0.5, 1.5));
     }
 
@@ -538,13 +623,8 @@ mod tests {
             a: 255,
         };
         // A period of a quarter repeated over [0, 1] gives four copies.
-        let line = ColorLine::new(
-            &[Some(0.0), Some(0.25)],
-            &[red, red],
-            Some((0.0, 1.0)),
-            None,
-        )
-        .unwrap();
+        let line =
+            ColorLine::new(&[Some(0.0), Some(0.25)], &[red, red], Some((0.0, 1.0)), ALL).unwrap();
         assert_eq!(line.stops.len(), 8);
     }
 
@@ -560,7 +640,7 @@ mod tests {
             &[Some(0.0), Some(0.2), Some(0.2)],
             &[red, red, red],
             None,
-            None,
+            ALL,
         )
         .unwrap();
         let offsets: Vec<f32> = line.stops.iter().map(|stop| stop.offset.get()).collect();
@@ -602,5 +682,47 @@ mod tests {
         );
         assert!((rx - 50.0 * std::f32::consts::SQRT_2).abs() < 1e-3);
         assert!((ry - 25.0 * std::f32::consts::SQRT_2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_ceiling_keeps_the_color_the_line_has_there() {
+        let black = CssColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = CssColor {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let (positions, colors) = trim_above(&[0.0, 2.0], &[black, white], 1.0);
+        assert_eq!(positions, [0.0, 1.0]);
+        assert_eq!(colors[1].r, 128);
+    }
+
+    #[test]
+    fn premultiplied_mix_keeps_the_opaque_color_next_to_transparent() {
+        let red = CssColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let clear = CssColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        let half = mix_premultiplied(red, clear, 0.5);
+        assert_eq!((half.r, half.g, half.b, half.a), (255, 0, 0, 128));
+        assert_eq!(mix_premultiplied(red, clear, 1.0).r, 255);
+        assert_eq!(mix_premultiplied(clear, red, 0.0).r, 255);
+        // Two transparent ends interpolate their colors directly.
+        let blue_clear = CssColor { b: 255, ..clear };
+        assert_eq!(mix_premultiplied(clear, blue_clear, 0.5).b, 128);
     }
 }
