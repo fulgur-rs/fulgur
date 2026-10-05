@@ -13,9 +13,9 @@ readme = "README.md"
 [dependencies]
 krilla = "0.7.0"
 fulgur-core = { path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "a4fdcd44ca5ab97dd7dbb209307ed7a6b51a45b0" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "a36d35cf2b88ddd67a888ac70b9b252d72254e7e" }
 
 [dev-dependencies]
 tempfile = "3"
 lopdf = "0.42"
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "a4fdcd44ca5ab97dd7dbb209307ed7a6b51a45b0" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "a36d35cf2b88ddd67a888ac70b9b252d72254e7e" }
