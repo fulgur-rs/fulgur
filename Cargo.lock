@@ -1244,6 +1244,7 @@ dependencies = [
  "lopdf",
  "raikiri-html",
  "raikiri-traits",
+ "skrifa 0.45.1",
  "tempfile",
  "url",
 ]

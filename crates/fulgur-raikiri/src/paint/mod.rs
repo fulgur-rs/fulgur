@@ -6,18 +6,27 @@
 //! downward, which is also Krilla's orientation, so each page surface is
 //! scaled by [`PX_TO_PT`] once and everything below draws in px.
 
+mod border;
+mod clip;
+mod gradient;
+mod shape;
+mod text_clip;
+
+use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
 use krilla::color::rgb;
-use krilla::geom::{PathBuilder, Rect, Transform};
+use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
-use krilla::paint::Fill;
+use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
 use raikiri_html::computed::{
-    BorderColor, BorderStyle, ComputedBorder, ComputedValues, ComputedVisibility, CssColor,
+    ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
+    ComputedVisualBox, CssColor,
 };
 use raikiri_html::{DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun};
+use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
 /// Draw every page of `document` and return the PDF bytes.
@@ -39,6 +48,10 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
+    let clips = ClipMap::new(page);
+    let mut active = ClipStack::default();
+    let dom = page.dom();
+
     // CSS 2.1 Appendix E for normal flow: the backgrounds and borders of all
     // block boxes in tree order, then the inline content (text) of all of
     // them, so overflowing text stays above later blocks' backgrounds.
@@ -50,15 +63,36 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
         .filter(|fragment| fragment.kind() == FragmentKind::Box)
         .collect();
     boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
+    let runs = page.text_runs();
     for fragment in boxes {
         if let Some(style) = page.computed(fragment.node()) {
-            paint_box(&mut surface, fragment.paint_rect(), style);
+            // A box's own overflow clips its content, not its decorations.
+            let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
+            active.apply(&mut surface, &clips, &chain);
+            let text = || text_clip::outlines(dom, fragment.node(), &runs);
+            paint_box(
+                &mut surface,
+                fragment.paint_rect(),
+                Slice::of(&fragment),
+                style,
+                text,
+            );
         }
     }
     // Text goes above every block background and border.
-    for run in page.text_runs() {
-        paint_text_run(&mut surface, &run, fonts);
+    for run in &runs {
+        let element = text_clip::run_element(dom, run);
+        let area = PaintRect::new(
+            run.origin.0,
+            run.origin.1 - run.ascent,
+            run.advance,
+            run.ascent + run.descent,
+        );
+        let chain = clips.chain(page, element, area);
+        active.apply(&mut surface, &clips, &chain);
+        paint_text_run(&mut surface, run, fonts);
     }
+    active.clear(&mut surface);
 
     surface.pop();
     surface.finish();
@@ -66,72 +100,96 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
     Ok(())
 }
 
-/// Background color and borders of one box fragment (`rect` is its border
-/// box).
-fn paint_box(surface: &mut Surface<'_>, rect: PaintRect, style: &ComputedValues) {
+/// Background and borders of one box fragment (`rect` is its border box).
+///
+/// The fragment is drawn as its own box, apart from its broken edges: the
+/// corner radii (percentages and the §5.5 scaling) and the background
+/// positioning area refer to the fragment, because the fragment API does
+/// not give the size of the unbroken box or the fragment's offset in it.
+/// `text` gives the outlines of the element's text, for
+/// `background-clip: text`.
+fn paint_box(
+    surface: &mut Surface<'_>,
+    rect: PaintRect,
+    slice: Slice,
+    style: &ComputedValues,
+    text: impl FnOnce() -> Option<Path>,
+) {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
         return;
     }
-    fill_rect(
-        surface,
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-        style.background_color,
-    );
+    let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    paint_background(surface, &border_box, slice, style, text);
+    border::paint_borders(surface, &border_box, style, slice);
+}
 
-    let side = |border: &ComputedBorder| {
-        let visible = !matches!(border.style(), BorderStyle::None | BorderStyle::Hidden);
-        let width = if visible { border.width().px() } else { 0.0 };
-        (width, resolve_border_color(border.color, style.color))
+/// CSS Backgrounds 3 §2: the background color, then the background image
+/// over it, both clipped to the `background-clip` box with its corner
+/// curves (§5.3). CSS Backgrounds 4 §2.6 adds two painting areas:
+/// `border-area` (the area under the border) and `text` (the glyphs of the
+/// element's text).
+fn paint_background(
+    surface: &mut Surface<'_>,
+    border_box: &RoundedRect,
+    slice: Slice,
+    style: &ComputedValues,
+    text: impl FnOnce() -> Option<Path>,
+) {
+    let borders = slice.edges(border::widths(style));
+    let padding = slice.edges(padding(style));
+    let visual_box = |visual: ComputedVisualBox| match visual {
+        ComputedVisualBox::PaddingBox => border_box.inset(borders),
+        ComputedVisualBox::ContentBox => border_box.inset(borders.add(padding)),
+        // `border-box`, and the boxes this painter does not distinguish.
+        _ => *border_box,
     };
-    let (top, top_color) = side(&style.border.top);
-    let (right, right_color) = side(&style.border.right);
-    let (bottom, bottom_color) = side(&style.border.bottom);
-    let (left, left_color) = side(&style.border.left);
-    // Every line style is drawn solid for now.
-    fill_rect(surface, rect.x, rect.y, rect.width, top, top_color);
-    fill_rect(
-        surface,
-        rect.x + rect.width - right,
-        rect.y,
-        right,
-        rect.height,
-        right_color,
-    );
-    fill_rect(
-        surface,
-        rect.x,
-        rect.y + rect.height - bottom,
-        rect.width,
-        bottom,
-        bottom_color,
-    );
-    fill_rect(surface, rect.x, rect.y, left, rect.height, left_color);
-}
-
-fn resolve_border_color(color: BorderColor, current: CssColor) -> CssColor {
-    match color {
-        BorderColor::Resolved(color) => color,
-        // `currentcolor`, and any color form this painter does not know yet.
-        _ => current,
-    }
-}
-
-fn fill_rect(surface: &mut Surface<'_>, x: f32, y: f32, width: f32, height: f32, color: CssColor) {
-    if color.a == 0 || width <= 0.0 || height <= 0.0 {
+    let painting_area = match style.background_clip {
+        ComputedVisualBox::BorderArea => shape::ring(border_box, &border_box.inset(borders))
+            .map(|path| (path, FillRule::EvenOdd)),
+        ComputedVisualBox::Text => text().map(|path| (path, FillRule::NonZero)),
+        visual => visual_box(visual)
+            .path()
+            .map(|path| (path, FillRule::NonZero)),
+    };
+    let Some((area, rule)) = painting_area else {
         return;
+    };
+    if style.background_color.a > 0 {
+        surface.set_fill(Some(Fill {
+            rule,
+            ..fill(style.background_color)
+        }));
+        surface.draw_path(&area);
     }
-    // A positive, finite rectangle always yields a path.
-    let path = Rect::from_xywh(x, y, width, height).and_then(|rect| {
-        let mut builder = PathBuilder::new();
-        builder.push_rect(rect);
-        builder.finish()
-    });
-    if let Some(path) = path {
-        surface.set_fill(Some(fill(color)));
-        surface.draw_path(&path);
+    // One layer with the initial size, position and repeat: the gradient
+    // covers the positioning area and its end colors extend to the rest of
+    // the painting area. `url()` images are not drawn: the layout result
+    // carries no decoded image data.
+    if let ComputedBackgroundImage::Gradient(gradient) = &style.background_image {
+        let positioning_area = visual_box(style.background_origin);
+        if let Some(paint) = gradient::paint(gradient, &positioning_area, style.color) {
+            surface.set_fill(Some(Fill {
+                paint,
+                opacity: NormalizedF32::ONE,
+                rule,
+            }));
+            surface.draw_path(&area);
+        }
+    }
+}
+
+/// Used padding widths. A percentage refers to the containing block's
+/// width, which the fragment does not carry, so it counts as zero.
+fn padding(style: &ComputedValues) -> Edges {
+    let px = |value: ComputedLengthPercentage| match value {
+        ComputedLengthPercentage::Px(px) => px.max(0.0),
+        ComputedLengthPercentage::Percent(_) => 0.0,
+    };
+    Edges {
+        top: px(style.padding.top),
+        right: px(style.padding.right),
+        bottom: px(style.padding.bottom),
+        left: px(style.padding.left),
     }
 }
 
