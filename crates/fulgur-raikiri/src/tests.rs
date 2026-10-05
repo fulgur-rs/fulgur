@@ -487,3 +487,516 @@ fn double_and_three_d_borders_split_the_border_area() {
     // Each side has an outer and an inner half.
     assert_eq!(count(&groove, "f*"), 8);
 }
+
+/// Every shading dictionary in the document.
+fn shadings(pdf: &lopdf::Document) -> Vec<&lopdf::Dictionary> {
+    pdf.objects
+        .values()
+        .filter_map(|object| match object {
+            lopdf::Object::Dictionary(dict) => Some(dict),
+            lopdf::Object::Stream(stream) => Some(&stream.dict),
+            _ => None,
+        })
+        .filter(|dict| dict.has(b"ShadingType"))
+        .collect()
+}
+
+fn floats(object: &lopdf::Object) -> Vec<f32> {
+    object
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_float().unwrap())
+        .collect()
+}
+
+fn assert_close(got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() < 0.01, "{got:?} vs {want:?}");
+    }
+}
+
+/// Render one 260 x 30 px paragraph at (20, 20) with `style` and return the
+/// document and the `/Coords` of its only shading, if any.
+fn gradient_box(
+    style: &str,
+) -> (
+    lopdf::Document,
+    Vec<lopdf::content::Operation>,
+    Option<Vec<f32>>,
+) {
+    let (pdf, operations) = operations(&format!("{CSS}<p style=\"{style}\"></p>"));
+    let all = shadings(&pdf);
+    assert!(all.len() <= 1, "{all:?}");
+    let coords = all
+        .first()
+        .and_then(|dict| dict.get(b"Coords").ok())
+        .map(floats);
+    (pdf, operations, coords)
+}
+
+/// The stop colors of a shading's function, in 0-255: the start color of
+/// each stitched segment and the end color of the last one.
+fn stop_colors(pdf: &lopdf::Document, shading: &lopdf::Dictionary) -> Vec<[u8; 3]> {
+    let resolve = |object: &lopdf::Object| -> lopdf::Dictionary {
+        match object {
+            lopdf::Object::Reference(id) => match pdf.get_object(*id).unwrap() {
+                lopdf::Object::Stream(stream) => stream.dict.clone(),
+                other => other.as_dict().unwrap().clone(),
+            },
+            other => other.as_dict().unwrap().clone(),
+        }
+    };
+    let color = |dict: &lopdf::Dictionary, key: &[u8]| {
+        let values = floats(dict.get(key).unwrap());
+        [0, 1, 2].map(|index| (values[index] * 255.0).round() as u8)
+    };
+    let function = resolve(shading.get(b"Function").unwrap());
+    let parts: Vec<lopdf::Dictionary> = match function.get(b"Functions") {
+        Ok(functions) => functions.as_array().unwrap().iter().map(resolve).collect(),
+        Err(_) => vec![function],
+    };
+    let mut colors: Vec<[u8; 3]> = parts.iter().map(|part| color(part, b"C0")).collect();
+    colors.push(color(parts.last().unwrap(), b"C1"));
+    colors
+}
+
+/// The source of every PostScript (type 4) function in the document.
+fn postscript(pdf: &lopdf::Document) -> String {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_stream().ok())
+        .filter(|stream| {
+            stream
+                .dict
+                .get(b"FunctionType")
+                .is_ok_and(|kind| kind.as_i64().is_ok_and(|kind| kind == 4))
+        })
+        .map(|stream| String::from_utf8_lossy(&stream.get_plain_content().unwrap()).into_owned())
+        .collect()
+}
+
+/// Position of `point` along the gradient line `[x1, y1, x2, y2]`, as a
+/// fraction of the line.
+fn along(line: &[f32], point: (f32, f32)) -> f32 {
+    let (dx, dy) = (line[2] - line[0], line[3] - line[1]);
+    ((point.0 - line[0]) * dx + (point.1 - line[1]) * dy) / (dx * dx + dy * dy)
+}
+
+#[test]
+fn linear_gradient_lines_follow_sides_angles_and_corners() {
+    // Sides: the line spans the box from edge to edge through the center.
+    for (direction, want) in [
+        ("to right", [20.0, 35.0, 280.0, 35.0]),
+        ("to left", [280.0, 35.0, 20.0, 35.0]),
+        ("to top", [150.0, 50.0, 150.0, 20.0]),
+        ("180deg", [150.0, 20.0, 150.0, 50.0]),
+    ] {
+        let (_, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient({direction}, red, blue)"
+        ));
+        assert_close(&coords.unwrap(), &want);
+    }
+    // Corners and angles (CSS Images 3 §3.1.1): the corner the line points
+    // to is at 100% and the opposite one at 0%.
+    for (direction, start, end) in [
+        ("to top right", (20.0, 50.0), (280.0, 20.0)),
+        ("to bottom left", (280.0, 20.0), (20.0, 50.0)),
+        ("45deg", (20.0, 50.0), (280.0, 20.0)),
+        ("135deg", (20.0, 20.0), (280.0, 50.0)),
+    ] {
+        let (_, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient({direction}, red, blue)"
+        ));
+        let line = coords.unwrap();
+        assert!(along(&line, start).abs() < 1e-3, "{direction}: {line:?}");
+        assert!(
+            (along(&line, end) - 1.0).abs() < 1e-3,
+            "{direction}: {line:?}"
+        );
+    }
+    // A magic corner makes the 50% line join the two other corners, so the
+    // line is perpendicular to that diagonal (it is not 45 degrees here).
+    let (_, _, coords) = gradient_box("background-image: linear-gradient(to top right, red, blue)");
+    let line = coords.unwrap();
+    let (dx, dy) = (line[2] - line[0], line[3] - line[1]);
+    assert!((dx * 260.0 + dy * 30.0).abs() < 1e-2, "{line:?}");
+}
+
+#[test]
+fn linear_gradient_stop_positions_move_the_shading_ends() {
+    // 25% and 75% of the 260px line.
+    let (pdf, _, coords) =
+        gradient_box("background-image: linear-gradient(to right, red 25%, blue 75%)");
+    assert_close(&coords.unwrap(), &[85.0, 35.0, 215.0, 35.0]);
+    assert_eq!(
+        stop_colors(&pdf, shadings(&pdf)[0]),
+        [[255, 0, 0], [0, 0, 255]]
+    );
+    // Both stops at one point: a hard edge there, red before and blue after.
+    let (pdf, _, coords) =
+        gradient_box("background-image: linear-gradient(to right, red 50%, blue 50%)");
+    let coords = coords.unwrap();
+    assert!(coords[0] < 150.0 && coords[2] > 150.0, "{coords:?}");
+    assert!(coords[2] - coords[0] < 0.1, "{coords:?}");
+    let colors = stop_colors(&pdf, shadings(&pdf)[0]);
+    assert_eq!(colors.first(), Some(&[255, 0, 0]));
+    assert_eq!(colors.last(), Some(&[0, 0, 255]));
+}
+
+#[test]
+fn gradient_stops_resolve_currentcolor() {
+    let (pdf, _, _) = gradient_box(
+        "color: rgb(0, 128, 0); background-image: linear-gradient(currentcolor, blue)",
+    );
+    assert_eq!(
+        stop_colors(&pdf, shadings(&pdf)[0]),
+        [[0, 128, 0], [0, 0, 255]]
+    );
+}
+
+#[test]
+fn zero_length_repeating_gradient_draws_its_last_color() {
+    let (pdf, _, _) =
+        gradient_box("background-image: repeating-linear-gradient(red 10px, blue 10px)");
+    let colors = stop_colors(&pdf, shadings(&pdf)[0]);
+    assert!(
+        colors.iter().all(|color| *color == [0, 0, 255]),
+        "{colors:?}"
+    );
+}
+
+#[test]
+fn gradient_on_an_empty_box_draws_nothing() {
+    let (pdf, operations, _) =
+        gradient_box("height: 0; background-image: linear-gradient(red, blue)");
+    assert!(shadings(&pdf).is_empty());
+    assert_eq!(count(&operations, "f"), 0);
+    // A painting area with an empty positioning area: no gradient box.
+    let (pdf, _, _) = gradient_box(
+        "height: 0; padding: 10px; background-origin: content-box; \
+         background-image: linear-gradient(red, blue)",
+    );
+    assert!(shadings(&pdf).is_empty());
+}
+
+/// `/Coords` of a radial gradient on the test paragraph and the vertical
+/// scale its ellipse applies (`ry / rx`).
+fn radial(gradient: &str) -> (Vec<f32>, f32) {
+    let (pdf, _, coords) = gradient_box(&format!("background-image: {gradient}"));
+    let coords = coords.unwrap_or_else(|| panic!("no shading for {gradient}"));
+    assert_eq!(coords.len(), 6, "{coords:?}");
+    // The pattern matrix is the page transform (0.75, -0.75) times the
+    // ellipse scale.
+    let matrix = pdf
+        .objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .find(|dict| dict.has(b"PatternType"))
+        .map(|dict| floats(dict.get(b"Matrix").unwrap()))
+        .unwrap();
+    (coords, matrix[3] / -matrix[0])
+}
+
+#[test]
+fn radial_gradient_sizes_follow_the_extent_keywords() {
+    // Center at (30, 10) in the 260 x 30 box: sides 30 / 230 px away
+    // horizontally and 10 / 20 px vertically.
+    let at = "at 30px 10px";
+    let center = [50.0, 30.0];
+    let corner = 30f32.hypot(10.0);
+    let far_corner = 230f32.hypot(20.0);
+    let root2 = std::f32::consts::SQRT_2;
+    for (shape, radius, scale) in [
+        ("circle closest-side", 10.0, 1.0),
+        ("circle farthest-side", 230.0, 1.0),
+        ("circle closest-corner", corner, 1.0),
+        ("circle farthest-corner", far_corner, 1.0),
+        ("closest-side", 30.0, 10.0 / 30.0),
+        ("farthest-side", 230.0, 20.0 / 230.0),
+        ("closest-corner", 30.0 * root2, 10.0 / 30.0),
+        ("farthest-corner", 230.0 * root2, 20.0 / 230.0),
+    ] {
+        let (coords, got_scale) = radial(&format!("radial-gradient({shape} {at}, red, blue)"));
+        assert_close(
+            &coords,
+            &[center[0], center[1], 0.0, center[0], center[1], radius],
+        );
+        assert!((got_scale - scale).abs() < 1e-3, "{shape}: {got_scale}");
+    }
+}
+
+#[test]
+fn radial_gradient_explicit_sizes_and_positions() {
+    let (coords, scale) = radial("radial-gradient(circle 10px, red, blue)");
+    assert_close(&coords, &[150.0, 35.0, 0.0, 150.0, 35.0, 10.0]);
+    assert_eq!(scale, 1.0);
+    let (coords, scale) = radial("radial-gradient(20px 10px, red, blue)");
+    assert_eq!(coords[5], 20.0);
+    assert!((scale - 0.5).abs() < 1e-4);
+    // Percentages refer to the box: 50% of 260 and 25% of 30.
+    let (coords, scale) = radial("radial-gradient(50% 25%, red, blue)");
+    assert_eq!(coords[5], 130.0);
+    assert!((scale - 7.5 / 130.0).abs() < 1e-4);
+    // Offsets from the right and bottom edges.
+    let (coords, _) = radial("radial-gradient(at right 10px bottom 5px, red, blue)");
+    assert_close(&coords[..2], &[270.0, 45.0]);
+}
+
+#[test]
+fn degenerate_radial_gradients_draw_their_last_color() {
+    for gradient in [
+        // A zero-size ending shape (CSS Images 3 §3.2.3).
+        "radial-gradient(circle 0px, red, blue)",
+        // Every stop before the center, where no radius reaches.
+        "radial-gradient(red -20px, blue -10px)",
+    ] {
+        let (pdf, operations, _) = gradient_box(&format!("background-image: {gradient}"));
+        assert!(shadings(&pdf).is_empty(), "{gradient}");
+        assert!(
+            fill_colors(&operations).contains(&[0, 0, 255]),
+            "{gradient}"
+        );
+    }
+}
+
+#[test]
+fn repeating_radial_gradient_repeats_to_the_farthest_corner() {
+    let (pdf, _, coords) =
+        gradient_box("background-image: repeating-radial-gradient(circle, red 0px, blue 10px)");
+    let coords = coords.unwrap();
+    // The farthest corner is hypot(130, 15) px from the center; the stops
+    // repeat every 10px up to it.
+    assert!(coords[5] >= 130f32.hypot(15.0), "{coords:?}");
+    let colors = stop_colors(&pdf, shadings(&pdf)[0]);
+    assert!(colors.len() >= 2 * 14, "{}", colors.len());
+}
+
+#[test]
+fn conic_gradients_sweep_from_the_start_angle_around_the_center() {
+    let (pdf, _, _) = gradient_box(
+        "background-image: conic-gradient(from 45deg at 25% 50%, red 10%, blue 90deg)",
+    );
+    assert!(has_shading(&pdf, 1));
+    let code = postscript(&pdf);
+    // Center (20 + 65, 20 + 15). 0deg points up, so the sweep starts a
+    // quarter turn earlier than the CSS angle: red at -45 + 36 = -9 and
+    // blue at -45 + 90 = 45 degrees.
+    assert!(code.contains("35.0 sub exch 85.0 sub"), "{code}");
+    assert!(code.contains("-9.0 le"), "{code}");
+    assert!(code.contains("45.0 le"), "{code}");
+    assert!(!code.contains("floor"), "{code}");
+    // A repeating conic repeats its 30 degree period in the function.
+    let (pdf, _, _) =
+        gradient_box("background-image: repeating-conic-gradient(red 0deg, blue 30deg)");
+    let code = postscript(&pdf);
+    assert!(code.contains("30.0 -90.0"), "{code}");
+    assert!(code.contains("floor"), "{code}");
+}
+
+#[test]
+fn background_clip_selects_the_painting_area() {
+    let fills = |clip: &str| {
+        let (_, operations) = operations(&format!(
+            "{CSS}<p style=\"border: 5px solid transparent; padding: 10px; \
+             background-color: rgb(0, 128, 0); background-clip: {clip}\"></p>"
+        ));
+        // The background is the only fill: its path is the clip box.
+        let fill = operations.iter().position(|op| op.operator == "f").unwrap();
+        let start = operations[..fill]
+            .iter()
+            .rposition(|op| op.operator == "m")
+            .unwrap();
+        floats(&lopdf::Object::Array(operations[start].operands.clone()))
+    };
+    // The border box starts at (20, 20).
+    assert_eq!(fills("border-box"), [20.0, 20.0]);
+    assert_eq!(fills("padding-box"), [25.0, 25.0]);
+    assert_eq!(fills("content-box"), [35.0, 35.0]);
+    // A percentage padding has no containing block width here and counts as
+    // zero, leaving the padding box.
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border: 5px solid transparent; padding: 10%; \
+         background-color: rgb(0, 128, 0); background-clip: content-box\"></p>"
+    ));
+    let first_move = operations.iter().find(|op| op.operator == "m").unwrap();
+    assert_eq!(
+        floats(&lopdf::Object::Array(first_move.operands.clone())),
+        [25.0, 25.0]
+    );
+}
+
+/// Dash arrays of every `d` operator.
+fn dash_patterns(operations: &[lopdf::content::Operation]) -> Vec<Vec<f32>> {
+    operations
+        .iter()
+        .filter(|op| op.operator == "d")
+        .map(|op| floats(&op.operands[0]))
+        .collect()
+}
+
+#[test]
+fn rounded_dashed_and_dotted_borders_fit_the_outline() {
+    for style in ["dotted", "dashed"] {
+        let (_, operations) = operations(&format!(
+            "{CSS}<p style=\"border: 4px {style} rgb(0, 0, 255); border-radius: 10px\"></p>"
+        ));
+        // Four identical sides: one stroke of the whole center line.
+        let patterns = dash_patterns(&operations);
+        assert_eq!(patterns.len(), 1, "{style}: {patterns:?}");
+        assert_eq!(count(&operations, "S"), 1);
+        assert_eq!(count(&operations, "c"), 4);
+        // The center line is the 260 x 38 border box inset by 2px, with 8px
+        // corners: 2 * (256 + 34) - 8 * 8 + 2 * pi * 8 px around.
+        let perimeter = 2.0 * (256.0 + 34.0) - 64.0 + 2.0 * std::f32::consts::PI * 8.0;
+        let period = patterns[0][0] + patterns[0][1];
+        let repeats = perimeter / period;
+        assert!(
+            (repeats - repeats.round()).abs() < 1e-2,
+            "{style}: {repeats}"
+        );
+        if style == "dotted" {
+            assert_eq!(patterns[0][0], 0.0);
+        } else {
+            assert_eq!(patterns[0][0], patterns[0][1]);
+        }
+    }
+    // Sides that differ are each stroked inside their own region and the
+    // border ring.
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border: 4px dashed rgb(0, 0, 255); border-left-color: red; \
+         border-radius: 10px\"></p>"
+    ));
+    assert_eq!(dash_patterns(&operations).len(), 4);
+    assert_eq!(count(&operations, "W*"), 4);
+}
+
+#[test]
+fn a_dashed_side_too_short_for_two_dashes_is_one_dash() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"width: 4px; height: 4px; border: 2px dashed rgb(0, 0, 255)\"></p>"
+    ));
+    // Each side is 8px long and a dash is 6px: one dash over the whole side.
+    let patterns = dash_patterns(&operations);
+    assert_eq!(patterns.len(), 4);
+    assert!(
+        patterns.iter().all(|array| array == &[8.0, 0.0]),
+        "{patterns:?}"
+    );
+}
+
+#[test]
+fn sides_with_different_colors_are_painted_in_their_own_regions() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border: 4px solid rgb(255, 0, 0); border-top-color: rgb(0, 0, 255); \
+         border-bottom-style: none\"></p>"
+    ));
+    // Three visible sides, each clipped to its corner-mitred region.
+    assert_eq!(count(&operations, "W"), 3);
+    assert_eq!(count(&operations, "f*"), 3);
+    let colors = fill_colors(&operations);
+    assert_eq!(colors.iter().filter(|c| **c == [0, 0, 255]).count(), 1);
+    assert_eq!(colors.iter().filter(|c| **c == [255, 0, 0]).count(), 2);
+    // The top region runs from the outer corners to the inner ones.
+    assert_eq!(clip_bounds(&operations)[0], [20.0, 20.0, 280.0, 24.0]);
+}
+
+#[test]
+fn double_borders_are_solid_below_three_pixels_and_split_per_side() {
+    let (_, thin) = operations(&format!(
+        "{CSS}<p style=\"border: 2px double rgb(0, 0, 255)\"></p>"
+    ));
+    assert_eq!(count(&thin, "f*"), 1);
+    // Sides that differ in color: two lines per side, in four regions.
+    let (_, mixed) = operations(&format!(
+        "{CSS}<p style=\"border: 9px double rgb(0, 0, 255); border-top-color: red\"></p>"
+    ));
+    assert_eq!(count(&mixed, "W"), 4);
+    assert_eq!(count(&mixed, "f*"), 8);
+}
+
+#[test]
+fn three_d_borders_shade_by_side() {
+    let colors = |style: &str| {
+        let (_, operations) = operations(&format!(
+            "{CSS}<p style=\"border: 4px {style} rgb(200, 200, 200)\"></p>"
+        ));
+        fill_colors(&operations)
+    };
+    let (dark, light) = ([100, 100, 100], [227, 227, 227]);
+    // Sides are painted top, right, bottom, left.
+    assert_eq!(colors("outset"), [light, dark, dark, light]);
+    assert_eq!(colors("inset"), [dark, light, light, dark]);
+    // Groove: outer half then inner half of each side.
+    assert_eq!(
+        colors("groove"),
+        [dark, light, light, dark, light, dark, dark, light]
+    );
+    assert_eq!(
+        colors("ridge"),
+        [light, dark, dark, light, dark, light, light, dark]
+    );
+}
+
+#[test]
+fn clip_switches_between_sibling_overflow_boxes() {
+    let child = "<div style=\"height: 60px; background-color: blue\">x</div>";
+    let (_, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 20px; overflow: hidden\">{child}</div>\
+         <div style=\"height: 20px; overflow: hidden\">{child}</div>\
+         <p style=\"background-color: green\">after</p>"
+    ));
+    let bounds = clip_bounds(&operations);
+    // Boxes: the first clip, then the second (after popping the first);
+    // text: the first again, then the second.
+    assert_eq!(
+        bounds,
+        [
+            [20.0, 20.0, 280.0, 40.0],
+            [20.0, 40.0, 280.0, 60.0],
+            [20.0, 20.0, 280.0, 40.0],
+            [20.0, 40.0, 280.0, 60.0],
+        ]
+    );
+    // Every pushed clip is popped: the graphics states balance.
+    assert_eq!(count(&operations, "q"), count(&operations, "Q"));
+}
+
+#[test]
+fn overflow_clip_on_the_vertical_axis_leaves_the_horizontal_open() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<div style=\"width: 50px; height: 40px; overflow-y: clip\">\
+         <div style=\"width: 200px; height: 100px; background-color: blue\"></div></div>"
+    ));
+    assert_eq!(clip_bounds(&operations), [[0.0, 20.0, 300.0, 60.0]]);
+}
+
+#[test]
+fn an_empty_overflow_box_hides_its_content() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 0; overflow: hidden\">\
+         <div style=\"height: 50px; background-color: blue\"></div></div>"
+    ));
+    // The clip still exists, around no area at all.
+    let bounds = clip_bounds(&operations);
+    assert_eq!(bounds.len(), 1);
+    assert!(bounds[0][2] - bounds[0][0] <= 0.0 || bounds[0][3] - bounds[0][1] <= 0.0);
+}
+
+#[test]
+fn generated_content_is_clipped_by_its_element() {
+    let (pdf, operations) = operations(
+        "<style>@page { size: 300px 200px; margin: 20px } body { margin: 0 } \
+         div::before { content: 'gen' }</style>\
+         <div style=\"height: 20px; overflow: hidden\"></div>",
+    );
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert_eq!(text.split_whitespace().collect::<Vec<_>>(), ["gen"]);
+    let clip = operations.iter().position(|op| op.operator == "W").unwrap();
+    let text_start = operations
+        .iter()
+        .position(|op| op.operator == "BT")
+        .unwrap();
+    assert!(clip < text_start);
+}

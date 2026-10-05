@@ -268,4 +268,23 @@ mod tests {
         assert_eq!(inner.radii[0], [8.0, 6.0]);
         assert_eq!(inner.radii[1], [0.0, 6.0]);
     }
+
+    #[test]
+    fn insets_larger_than_the_box_collapse_it_in_proportion() {
+        let outer = RoundedRect::rect(0.0, 0.0, 10.0, 6.0);
+        // 15px of horizontal and 12px of vertical inset in a 10 x 6 box:
+        // each side keeps its share, and the inner box is empty.
+        let inner = outer.inset(Edges {
+            top: 4.0,
+            right: 10.0,
+            bottom: 8.0,
+            left: 5.0,
+        });
+        assert!((inner.x - 10.0 / 3.0).abs() < 1e-5, "{inner:?}");
+        assert_eq!((inner.y, inner.width, inner.height), (2.0, 0.0, 0.0));
+        assert!(inner.is_empty());
+        assert!(inner.path().is_none());
+        // The ring of an empty inner box is the whole outer box.
+        assert!(ring(&outer, &inner).is_some());
+    }
 }
