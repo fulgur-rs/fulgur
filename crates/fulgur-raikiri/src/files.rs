@@ -1,7 +1,9 @@
 //! Local file access for the resources a document references.
 
 use fulgur_core::{Error, Result};
+use raikiri_html::DEFAULT_MAX_RESOURCE_BYTES;
 use raikiri_traits::net::{FetchOutcome, FetchedResource, NetworkError, NetworkProvider, Request};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -13,6 +15,7 @@ use url::Url;
 /// reach files next to it.
 pub(crate) struct BaseDirectoryProvider {
     root: PathBuf,
+    max_bytes: u64,
 }
 
 impl BaseDirectoryProvider {
@@ -24,6 +27,7 @@ impl BaseDirectoryProvider {
             .unwrap_or_else(|| Path::new("."));
         Ok(Self {
             root: parent.canonicalize()?,
+            max_bytes: DEFAULT_MAX_RESOURCE_BYTES,
         })
     }
 
@@ -42,9 +46,14 @@ impl BaseDirectoryProvider {
                 "only file:// resources are read, got {url}"
             )));
         }
+        // A host names another machine (a UNC share on Windows); only
+        // `file:///path` and `file://localhost/path` are local.
+        let local = matches!(url.host_str(), None | Some("") | Some("localhost"));
         let path = url
             .to_file_path()
-            .map_err(|()| NetworkError::Other(format!("invalid file URL: {url}")))?;
+            .ok()
+            .filter(|_| local)
+            .ok_or_else(|| NetworkError::Other(format!("invalid file URL: {url}")))?;
         let path = path.canonicalize().map_err(NetworkError::Io)?;
         if !path.starts_with(&self.root) {
             return Err(NetworkError::Other(format!(
@@ -59,7 +68,7 @@ impl BaseDirectoryProvider {
 impl NetworkProvider for BaseDirectoryProvider {
     fn fetch_one_hop(&self, request: Request) -> std::result::Result<FetchOutcome, NetworkError> {
         let path = self.resolve(&request.url)?;
-        let bytes = std::fs::read(&path).map_err(NetworkError::Io)?;
+        let bytes = read_capped(&path, self.max_bytes)?;
         Ok(FetchOutcome::Body(FetchedResource {
             bytes: bytes.into(),
             content_type: content_type(&path).map(str::to_string),
@@ -67,6 +76,26 @@ impl NetworkProvider for BaseDirectoryProvider {
             encoding: None,
         }))
     }
+}
+
+/// Read at most `max_bytes` of `path`, failing if the file is larger.
+///
+/// Raikiri also rejects oversized responses, but only after the provider
+/// has returned them; reading through a cap keeps a huge file from being
+/// buffered in full first.
+fn read_capped(path: &Path, max_bytes: u64) -> std::result::Result<Vec<u8>, NetworkError> {
+    let file = std::fs::File::open(path).map_err(NetworkError::Io)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(NetworkError::Io)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(NetworkError::Other(format!(
+            "{} exceeds {max_bytes} bytes",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// The MIME type a local file would be served with, from its extension.
@@ -89,4 +118,12 @@ pub(crate) fn content_type(path: &Path) -> Option<&'static str> {
         "woff2" => "font/woff2",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+impl BaseDirectoryProvider {
+    pub(crate) fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
 }

@@ -17,9 +17,11 @@ use std::path::Path;
 /// Stylesheets, `@import`s, and other resources the document references are
 /// read from the local filesystem, limited to the input file's directory.
 ///
-/// Returns an IO or layout error if those stages fail, or a PDF generation
-/// error if the PDF cannot be written.
+/// Returns a configuration error for page geometry that
+/// [`Config::validate`] rejects, an IO or layout error if those stages fail,
+/// or a PDF generation error if the PDF cannot be written.
 pub fn render(input: &Path, config: &Config) -> Result<Vec<u8>> {
+    config.validate()?;
     draw(layout_file(input, config, LayoutConfig::default())?)
 }
 
@@ -60,6 +62,11 @@ fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Re
 /// explicitly. A field marked in [`Config::overrides`] is declared
 /// `!important`, and important user declarations beat every author
 /// declaration (CSS Cascade 4 §6.2).
+///
+/// Two cases still differ from the Blitz backend: a landscape-only override
+/// keeps the document's `@page size` as declared, orientation included,
+/// because CSS cannot override the orientation of a size it does not name;
+/// and `@page { size: auto }` resolves to A4 rather than the configured size.
 fn page_stylesheet(config: &Config) -> String {
     let overrides = config.overrides;
     let size = if config.landscape {
@@ -67,7 +74,7 @@ fn page_stylesheet(config: &Config) -> String {
     } else {
         config.page_size
     };
-    let size_priority = important(overrides.page_size || overrides.landscape);
+    let size_priority = important(overrides.page_size);
     let margin = config.margin;
     let margin_priority = important(overrides.margin);
     format!(

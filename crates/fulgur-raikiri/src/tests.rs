@@ -358,12 +358,44 @@ fn provider_refuses_other_schemes_and_hosted_file_urls() {
     assert!(get(&provider, document.as_str()).is_ok());
     let error = get(&provider, "https://example.com/style.css").unwrap_err();
     assert!(error.contains("only file://"), "{error}");
-    // Windows maps a hosted file URL to a UNC path instead of rejecting it.
-    #[cfg(unix)]
-    {
-        let error = get(&provider, "file://example.com/style.css").unwrap_err();
-        assert!(error.contains("invalid file URL"), "{error}");
-    }
+    let error = get(&provider, "file://example.com/style.css").unwrap_err();
+    assert!(error.contains("invalid file URL"), "{error}");
+    let localhost = document.as_str().replacen("file://", "file://localhost", 1);
+    assert!(get(&provider, &localhost).is_ok());
+}
+
+#[test]
+fn provider_refuses_files_over_the_resource_limit() {
+    let (dir, path) = input("<p>Hello</p>");
+    let provider = files::BaseDirectoryProvider::for_input(&path)
+        .unwrap()
+        .with_max_bytes(4);
+    std::fs::write(dir.path().join("small.css"), "p{}").unwrap();
+    std::fs::write(dir.path().join("large.css"), "p { }").unwrap();
+    let url = |name: &str| {
+        url::Url::from_file_path(dir.path().canonicalize().unwrap().join(name)).unwrap()
+    };
+    assert!(get(&provider, url("small.css").as_str()).is_ok());
+    let error = get(&provider, url("large.css").as_str()).unwrap_err();
+    assert!(error.contains("exceeds 4 bytes"), "{error}");
+}
+
+#[test]
+fn invalid_config_is_rejected_before_layout() {
+    let (_dir, path) = input("<p>Hello</p>");
+    let config = Config {
+        margin: Margin::uniform(f32::NAN),
+        ..Config::default()
+    };
+    assert!(render(&path, &config).is_err());
+}
+
+#[test]
+fn landscape_only_override_keeps_the_document_page_size() {
+    let (_dir, path) = input(&format!("{CSS}<p>Hello</p>"));
+    let config = Config::builder().landscape(true).build();
+    let (width, height, _) = first_page_geometry(&path, &config);
+    assert_eq!((width, height), (300.0, 200.0));
 }
 
 #[test]
