@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-dev"
-version = "0.40.0"
+version = "0.0.0"
 dependencies = [
  "clap",
  "fontique 0.11.1",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-raikiri"
-version = "0.40.0"
+version = "0.0.0"
 dependencies = [
  "fulgur-core",
  "raikiri-html",

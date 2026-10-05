@@ -1,6 +1,6 @@
 [package]
 name = "fulgur-raikiri"
-version = "0.40.0"
+version = "0.0.0"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ description = "Raikiri layout backend under development for fulgur"
 readme = "README.md"
 
 [dependencies]
-fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
+fulgur-core = { path = "../fulgur-core" }
 raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "3b2d8a1f70f8bf8cccf7e0ada4db25a054b0350e" }
 
 [dev-dependencies]

@@ -1,6 +1,6 @@
 [package]
 name = "fulgur-dev"
-version = "0.40.0"
+version = "0.0.0"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
@@ -16,8 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
-fulgur-blitz = { version = "0.40.0", path = "../fulgur-blitz" }
+fulgur-core = { path = "../fulgur-core" }
+fulgur-blitz = { path = "../fulgur-blitz" }
 fulgur-raikiri = { path = "../fulgur-raikiri" }
 
 [dev-dependencies]
