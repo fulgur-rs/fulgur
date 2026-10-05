@@ -1,8 +1,8 @@
 //! Raikiri layout backend for Fulgur's development CLI.
 //!
 //! The input is a file path and the output is PDF bytes. Drawing covers page
-//! geometry and box backgrounds and borders so far; text is not drawn yet. No
-//! other backend is used as a fallback.
+//! geometry, box backgrounds and borders, and text. No other backend is used
+//! as a fallback.
 
 use fulgur_core::{Error, Result};
 use raikiri_html::{

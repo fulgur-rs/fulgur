@@ -39,9 +39,12 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
-    // Block boxes in tree order: a box's background and borders go below its
-    // descendants' (CSS 2.1 Appendix E, normal flow without positioning or
-    // stacking contexts).
+    // CSS 2.1 Appendix E for normal flow: the backgrounds and borders of all
+    // block boxes in tree order, then the inline content (text) of all of
+    // them, so overflowing text stays above later blocks' backgrounds.
+    // Positioned boxes and other stacking contexts paint in a different order
+    // that the fragments alone do not describe; they are drawn in this
+    // normal-flow order until Raikiri exposes the paint order.
     let mut boxes: Vec<_> = page
         .fragments()
         .filter(|fragment| fragment.kind() == FragmentKind::Box)
@@ -52,7 +55,7 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
             paint_box(&mut surface, fragment.paint_rect(), style);
         }
     }
-    // Text goes above the block backgrounds and borders.
+    // Text goes above every block background and border.
     for run in page.text_runs() {
         paint_text_run(&mut surface, &run, fonts);
     }
