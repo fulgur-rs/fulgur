@@ -78,29 +78,34 @@ mod tests {
     #[test]
     fn all_variant_displays_include_the_message() {
         let cases: &[(&str, Error)] = &[
-            ("HTML parse error:", Error::HtmlParse("bad tag".into())),
-            ("Layout error:", Error::Layout("overflow".into())),
             (
-                "PDF generation error:",
+                "HTML parse error: bad tag",
+                Error::HtmlParse("bad tag".into()),
+            ),
+            ("Layout error: overflow", Error::Layout("overflow".into())),
+            (
+                "PDF generation error: krilla fail",
                 Error::PdfGeneration("krilla fail".into()),
             ),
-            ("Asset error:", Error::Asset("missing font".into())),
-            ("Template error:", Error::Template("bad block".into())),
             (
-                "WOFF decode error:",
+                "Asset error: missing font",
+                Error::Asset("missing font".into()),
+            ),
+            (
+                "Template error: bad block",
+                Error::Template("bad block".into()),
+            ),
+            (
+                "WOFF decode error: corrupt header",
                 Error::WoffDecode("corrupt header".into()),
             ),
             (
-                "Unsupported font format:",
+                "Unsupported font format: eot",
                 Error::UnsupportedFontFormat("eot".into()),
             ),
         ];
-        for (prefix, err) in cases {
-            let s = err.to_string();
-            assert!(
-                s.starts_with(prefix),
-                "expected display to start with {prefix:?}, got: {s:?}"
-            );
+        for (expected, err) in cases {
+            assert_eq!(&err.to_string(), expected);
         }
     }
 
