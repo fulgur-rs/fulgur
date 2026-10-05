@@ -1,8 +1,8 @@
 //! Raikiri layout backend for Fulgur's development CLI.
 //!
-//! The input is a file path and the intended output is PDF bytes.
-//! PDF drawing is not implemented yet; successful layout returns an explicit
-//! drawing error. No other backend is used as a fallback.
+//! The input is a file path and the output is PDF bytes. Drawing covers page
+//! geometry, box backgrounds and borders, and text. No other backend is used
+//! as a fallback.
 
 use fulgur_core::{Error, Result};
 use raikiri_html::{
@@ -13,9 +13,9 @@ use std::path::Path;
 
 /// Read and lay out an HTML file for PDF rendering.
 ///
-/// Returns an IO or layout error if those stages fail. After a successful
-/// layout, returns a PDF generation error until PDF drawing is implemented.
-/// External resources are not loaded; styles must be embedded in the HTML.
+/// Returns an IO or layout error if those stages fail, or a PDF generation
+/// error if the PDF cannot be written. External resources are not loaded;
+/// styles must be embedded in the HTML.
 pub fn render(input: &Path) -> Result<Vec<u8>> {
     draw(layout_file(input, LayoutConfig::default())?)
 }
@@ -29,15 +29,7 @@ fn draw(status: LayoutStatus) -> Result<Vec<u8>> {
             "Raikiri layout was aborted or did not complete".into(),
         ));
     };
-    for page in document.pages() {
-        let _geometry = page.geometry();
-        for fragment in page.fragments() {
-            let _placement = (fragment.node(), fragment.rect(), fragment.line_range());
-        }
-    }
-    Err(Error::PdfGeneration(
-        "Raikiri PDF drawing is not implemented".into(),
-    ))
+    paint::paint_document(&document)
 }
 
 fn layout_file(input: &Path, config: LayoutConfig) -> Result<LayoutStatus> {
@@ -56,3 +48,5 @@ fn layout_file(input: &Path, config: LayoutConfig) -> Result<LayoutStatus> {
 
 #[cfg(test)]
 mod tests;
+
+mod paint;
