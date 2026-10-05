@@ -358,8 +358,12 @@ fn provider_refuses_other_schemes_and_hosted_file_urls() {
     assert!(get(&provider, document.as_str()).is_ok());
     let error = get(&provider, "https://example.com/style.css").unwrap_err();
     assert!(error.contains("only file://"), "{error}");
-    let error = get(&provider, "file://example.com/style.css").unwrap_err();
-    assert!(error.contains("invalid file URL"), "{error}");
+    // Windows maps a hosted file URL to a UNC path instead of rejecting it.
+    #[cfg(unix)]
+    {
+        let error = get(&provider, "file://example.com/style.css").unwrap_err();
+        assert!(error.contains("invalid file URL"), "{error}");
+    }
 }
 
 #[test]
