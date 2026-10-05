@@ -93,10 +93,10 @@ fn already_aborted_layout_returns_aborted() {
     let config = LayoutConfig::builder()
         .signal(Some(controller.signal.clone()))
         .build();
-    assert!(matches!(
-        layout_file(&path, config).unwrap(),
-        LayoutStatus::Aborted
-    ));
+    let status = layout_file(&path, config).unwrap();
+    assert!(matches!(status, LayoutStatus::Aborted));
+    // An aborted layout has nothing to draw.
+    assert!(matches!(draw(status), Err(Error::Layout(_))));
 }
 
 #[test]

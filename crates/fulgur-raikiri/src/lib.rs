@@ -17,21 +17,27 @@ use std::path::Path;
 /// layout, returns a PDF generation error until PDF drawing is implemented.
 /// External resources are not loaded; styles must be embedded in the HTML.
 pub fn render(input: &Path) -> Result<Vec<u8>> {
-    match layout_file(input, LayoutConfig::default())? {
-        LayoutStatus::Completed(document) => {
-            for page in document.pages() {
-                let _geometry = page.geometry();
-                for fragment in page.fragments() {
-                    let _placement = (fragment.node(), fragment.rect(), fragment.line_range());
-                }
-            }
-            Err(Error::PdfGeneration(
-                "Raikiri PDF drawing is not implemented".into(),
-            ))
+    draw(layout_file(input, LayoutConfig::default())?)
+}
+
+/// Draw a layout result as PDF bytes.
+fn draw(status: LayoutStatus) -> Result<Vec<u8>> {
+    // `LayoutStatus` is non-exhaustive; anything but a completed layout,
+    // including an abort, leaves no pages to draw.
+    let LayoutStatus::Completed(document) = status else {
+        return Err(Error::Layout(
+            "Raikiri layout was aborted or did not complete".into(),
+        ));
+    };
+    for page in document.pages() {
+        let _geometry = page.geometry();
+        for fragment in page.fragments() {
+            let _placement = (fragment.node(), fragment.rect(), fragment.line_range());
         }
-        LayoutStatus::Aborted => Err(Error::Layout("Raikiri layout was aborted".into())),
-        _ => Err(Error::Layout("Unsupported Raikiri layout status".into())),
     }
+    Err(Error::PdfGeneration(
+        "Raikiri PDF drawing is not implemented".into(),
+    ))
 }
 
 fn layout_file(input: &Path, config: LayoutConfig) -> Result<LayoutStatus> {
