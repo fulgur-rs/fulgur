@@ -332,3 +332,43 @@ fn local_files_get_a_content_type_from_their_extension() {
     assert_eq!(files::content_type(Path::new("README")), None);
     assert_eq!(files::content_type(Path::new("data.bin")), None);
 }
+
+fn get(provider: &files::BaseDirectoryProvider, url: &str) -> std::result::Result<(), String> {
+    use raikiri_traits::ResourceKind;
+    use raikiri_traits::net::{Body, Method, NetworkProvider, Request};
+    provider
+        .fetch_one_hop(Request {
+            url: url::Url::parse(url).unwrap(),
+            method: Method::Get,
+            content_type: None,
+            headers: Vec::new(),
+            body: Body::Empty,
+            signal: None,
+            kind: ResourceKind::ExternalStylesheet,
+        })
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn provider_refuses_other_schemes_and_hosted_file_urls() {
+    let (_dir, path) = input("<p>Hello</p>");
+    let provider = files::BaseDirectoryProvider::for_input(&path).unwrap();
+    let document = provider.document_url(&path).unwrap();
+    assert!(get(&provider, document.as_str()).is_ok());
+    let error = get(&provider, "https://example.com/style.css").unwrap_err();
+    assert!(error.contains("only file://"), "{error}");
+    let error = get(&provider, "file://example.com/style.css").unwrap_err();
+    assert!(error.contains("invalid file URL"), "{error}");
+}
+
+#[test]
+fn input_path_without_a_file_name_is_a_layout_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("..");
+    let provider = files::BaseDirectoryProvider::for_input(&dir.path().join("x.html")).unwrap();
+    assert!(matches!(
+        provider.document_url(&path),
+        Err(Error::Layout(_))
+    ));
+}
