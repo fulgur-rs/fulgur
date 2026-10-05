@@ -26,7 +26,7 @@ enum Commands {
         /// Output PDF file.
         #[arg(short, long)]
         output: PathBuf,
-        /// Layout backend (Raikiri PDF drawing is not implemented yet).
+        /// Layout backend.
         #[arg(long, value_enum, default_value = "blitz")]
         engine: EngineChoice,
     },
@@ -47,7 +47,9 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let bytes = match engine {
                 EngineChoice::Blitz => blitz::render(&input),
-                EngineChoice::Raikiri => fulgur_raikiri::render(&input),
+                EngineChoice::Raikiri => {
+                    fulgur_raikiri::render(&input, &fulgur_core::Config::default())
+                }
             }?;
             std::fs::write(output, bytes)?;
             Ok(())
