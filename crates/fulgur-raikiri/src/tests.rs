@@ -1,5 +1,5 @@
 use super::*;
-use fulgur_core::Error;
+use fulgur_core::{Config, Error, Margin, PageSize};
 use raikiri_html::{DocumentLayout, DomView, FragmentKind, LayoutConfig, LayoutStatus, NodeId};
 use raikiri_traits::AbortController;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ fn input(html: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn completed(path: &Path) -> DocumentLayout {
-    match layout_file(path, LayoutConfig::default()).unwrap() {
+    match layout_file(path, &Config::default(), LayoutConfig::default()).unwrap() {
         LayoutStatus::Completed(result) => result,
         _ => panic!("expected a completed layout"),
     }
@@ -93,7 +93,7 @@ fn already_aborted_layout_returns_aborted() {
     let config = LayoutConfig::builder()
         .signal(Some(controller.signal.clone()))
         .build();
-    let status = layout_file(&path, config).unwrap();
+    let status = layout_file(&path, &Config::default(), config).unwrap();
     assert!(matches!(status, LayoutStatus::Aborted));
     // An aborted layout has nothing to draw.
     assert!(matches!(draw(status), Err(Error::Layout(_))));
@@ -105,7 +105,7 @@ fn render_writes_one_pdf_page_per_layout_page() {
         "{CSS}<p style=\"background-color: rgb(0, 128, 0); border: 2px solid red\">one</p>\
          <p style=\"break-before: page\">two</p>"
     ));
-    let bytes = render(&path).expect("PDF bytes");
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let pages = pdf.get_pages();
     assert_eq!(pages.len(), 2);
@@ -124,7 +124,7 @@ fn render_writes_one_pdf_page_per_layout_page() {
 #[test]
 fn render_preserves_input_io_error() {
     let dir = tempfile::tempdir().unwrap();
-    match render(&dir.path().join("missing.html")) {
+    match render(&dir.path().join("missing.html"), &Config::default()) {
         Err(Error::Io(error)) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
         other => panic!("expected IO error, got {other:?}"),
     }
@@ -142,7 +142,7 @@ fn non_utf8_input_filename_is_accepted() {
         .join(std::ffi::OsString::from_vec(b"input-\xff.html".to_vec()));
     std::fs::write(&path, "<p>Hello</p>").unwrap();
     assert_eq!(completed(&path).page_count(), 1);
-    assert!(render(&path).is_ok_and(|bytes| bytes.starts_with(b"%PDF")));
+    assert!(render(&path, &Config::default()).is_ok_and(|bytes| bytes.starts_with(b"%PDF")));
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn render_draws_extractable_text_with_one_font_per_face() {
     let (_dir, path) = input(&format!(
         "{CSS}<p>Hello <b>bold</b> world</p><p style=\"color: rgb(200, 0, 0)\">second line</p>"
     ));
-    let bytes = render(&path).expect("PDF bytes");
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let text = pdf.extract_text(&[1]).expect("extractable text");
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -179,7 +179,7 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
          <p style=\"visibility: hidden; background-color: red; border: 3px solid red\">hidden</p>\
          <p style=\"color: transparent\">clear</p>"
     ));
-    let bytes = render(&path).expect("PDF bytes");
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let text = pdf.extract_text(&[1]).expect("extractable text");
     assert_eq!(text.split_whitespace().collect::<Vec<_>>(), ["kept"]);
@@ -189,4 +189,146 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
         .unwrap();
     let content = String::from_utf8_lossy(&content);
     assert!(!content.contains("1 0 0 rg"), "{content}");
+}
+
+fn first_page_geometry(path: &Path, config: &Config) -> (f32, f32, [f32; 4]) {
+    let LayoutStatus::Completed(result) =
+        layout_file(path, config, LayoutConfig::default()).unwrap()
+    else {
+        panic!("expected a completed layout");
+    };
+    let geometry = result.page(0).unwrap().geometry();
+    let m = geometry.margins;
+    (
+        geometry.page_box.width,
+        geometry.page_box.height,
+        [m.top, m.right, m.bottom, m.left],
+    )
+}
+
+fn assert_close(actual: f32, expected: f32) {
+    assert!(
+        (actual - expected).abs() < 0.01,
+        "expected {expected}, got {actual}"
+    );
+}
+
+fn assert_margins(actual: [f32; 4], expected: [f32; 4]) {
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert_close(actual, expected);
+    }
+}
+
+/// 20mm, Fulgur's default margin, in CSS px.
+const DEFAULT_MARGIN_PX: f32 = 20.0 * 96.0 / 25.4;
+
+#[test]
+fn config_supplies_page_size_and_margins_without_page_rules() {
+    let (_dir, path) = input("<p>Hello</p>");
+    let (width, height, margins) = first_page_geometry(&path, &Config::default());
+    assert_close(width, 210.0 * 96.0 / 25.4);
+    assert_close(height, 297.0 * 96.0 / 25.4);
+    assert_margins(margins, [DEFAULT_MARGIN_PX; 4]);
+
+    let config = Config {
+        landscape: true,
+        margin: Margin::symmetric(36.0, 18.0),
+        ..Config::default()
+    };
+    let (width, height, margins) = first_page_geometry(&path, &config);
+    assert_close(width, 297.0 * 96.0 / 25.4);
+    assert_close(height, 210.0 * 96.0 / 25.4);
+    assert_margins(margins, [48.0, 24.0, 48.0, 24.0]);
+}
+
+#[test]
+fn document_page_rules_win_over_config_defaults() {
+    let (_dir, path) = input(&format!("{CSS}<p>Hello</p>"));
+    let (width, height, margins) = first_page_geometry(&path, &Config::default());
+    assert_eq!((width, height), (300.0, 200.0));
+    assert_margins(margins, [20.0; 4]);
+}
+
+#[test]
+fn explicitly_set_config_fields_win_over_document_page_rules() {
+    let (_dir, path) = input(&format!("{CSS}<p>Hello</p>"));
+    let config = Config::builder()
+        .page_size(PageSize::A5)
+        .margin(Margin::uniform(30.0))
+        .build();
+    let (width, height, margins) = first_page_geometry(&path, &config);
+    assert_close(width, 148.0 * 96.0 / 25.4);
+    assert_close(height, 210.0 * 96.0 / 25.4);
+    assert_margins(margins, [40.0; 4]);
+
+    // Only the margin is set: the document's size still applies.
+    let config = Config::builder().margin(Margin::uniform(30.0)).build();
+    let (width, height, margins) = first_page_geometry(&path, &config);
+    assert_eq!((width, height), (300.0, 200.0));
+    assert_margins(margins, [40.0; 4]);
+}
+
+fn paragraph_height(path: &Path) -> f32 {
+    let result = completed(path);
+    let page = result.page(0).unwrap();
+    page.fragments()
+        .find(|f| page.dom().local_name(f.node()) == Some("p"))
+        .unwrap()
+        .rect()
+        .height
+}
+
+#[test]
+fn linked_and_imported_stylesheets_next_to_the_input_apply() {
+    let (dir, path) = input(
+        "<link rel=stylesheet href=style.css><link rel=stylesheet href='nested/more.css'><p>Hello</p>",
+    );
+    std::fs::write(dir.path().join("style.css"), "p { height: 41px }").unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(
+        dir.path().join("nested/more.css"),
+        "@import url('../late.css');",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("late.css"), "p { padding-top: 2px }").unwrap();
+    let result = completed(&path);
+    let page = result.page(0).unwrap();
+    let paragraph = page
+        .fragments()
+        .find(|f| page.dom().local_name(f.node()) == Some("p"))
+        .unwrap();
+    assert_eq!(paragraph.rect().height, 43.0);
+}
+
+#[test]
+fn stylesheets_outside_the_input_directory_are_not_read() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("secret.css"), "p { height: 77px }").unwrap();
+    let inner = outer.path().join("doc");
+    std::fs::create_dir(&inner).unwrap();
+    let path = inner.join("input.html");
+    let absolute = url::Url::from_file_path(outer.path().join("secret.css")).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "<link rel=stylesheet href=../secret.css><link rel=stylesheet href='{absolute}'><p style='margin:0'>Hello</p>"
+        ),
+    )
+    .unwrap();
+    assert_ne!(paragraph_height(&path), 77.0);
+}
+
+#[test]
+fn local_files_get_a_content_type_from_their_extension() {
+    assert_eq!(files::content_type(Path::new("a/b.CSS")), Some("text/css"));
+    assert_eq!(
+        files::content_type(Path::new("x.woff2")),
+        Some("font/woff2")
+    );
+    assert_eq!(
+        files::content_type(Path::new("photo.jpeg")),
+        Some("image/jpeg")
+    );
+    assert_eq!(files::content_type(Path::new("README")), None);
+    assert_eq!(files::content_type(Path::new("data.bin")), None);
 }

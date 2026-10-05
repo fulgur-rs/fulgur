@@ -2,17 +2,22 @@
 
 Unpublished Raikiri backend for Fulgur development.
 
-The backend accepts an HTML file path and returns `Result<Vec<u8>>`, whose
-successful value will contain PDF bytes. It currently reads, parses, and lays
-out the document, then returns a PDF generation error:
-`Raikiri PDF drawing is not implemented`.
+The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
+`Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
+document with Raikiri, then draws the pages with Krilla: page geometry, box
+backgrounds and borders, and text. It does not fall back to Blitz.
 
-PDF drawing will be added later. The backend does not fall back to Blitz or
-return an empty PDF. Styles must be embedded in the HTML; external resource
-loading and AssetBundle integration are not connected yet.
+The config's page size and margins act as defaults that the document's own
+`@page` rules override; fields the caller set explicitly (`Config::overrides`)
+win over `@page`. Linked stylesheets, `@import`s, and other referenced files
+are read from the input file's directory; files outside it are not read.
+AssetBundle integration is not connected yet.
 
 ```rust
-let result = fulgur_raikiri::render(std::path::Path::new("input.html"));
+let pdf = fulgur_raikiri::render(
+    std::path::Path::new("input.html"),
+    &fulgur_core::Config::default(),
+)?;
 ```
 
 Raikiri is a Git dependency pinned to a specific revision. This crate is not
