@@ -120,3 +120,16 @@ publish = false
 name = "fulgur-wpt"
 release = false
 publish = false
+
+# Unpublished Raikiri backend and development CLI: excluded like the
+# test/fixture crates above, and versioned 0.0.0 with path-only dependencies
+# so core releases never have to touch them.
+[[package]]
+name = "fulgur-raikiri"
+release = false
+publish = false
+
+[[package]]
+name = "fulgur-dev"
+release = false
+publish = false

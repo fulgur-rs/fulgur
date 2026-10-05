@@ -1,0 +1,19 @@
+[package]
+name = "fulgur-raikiri"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Raikiri layout backend under development for fulgur"
+readme = "README.md"
+
+[dependencies]
+fulgur-core = { path = "../fulgur-core" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "3b2d8a1f70f8bf8cccf7e0ada4db25a054b0350e" }
+
+[dev-dependencies]
+tempfile = "3"
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "3b2d8a1f70f8bf8cccf7e0ada4db25a054b0350e" }
