@@ -120,9 +120,26 @@ fn radial_paint(gradient: &RadialGradient, area: &RoundedRect, current: CssColor
     let (px, py) = resolve_position(gradient.position, w, h);
     let (rx, ry) = radial_size(gradient.shape, gradient.size, px, py, w, h);
     if !(rx > 0.0 && ry > 0.0) {
-        // §3.2.3 degenerate ending shapes: draw the last color.
-        let last = gradient.stops.last()?;
-        return Some(solid(stop_color(last.color, current)));
+        // §3.2.3 degenerate ending shapes: draw the last color, with its
+        // alpha, as a shading of flat stops (a plain color paint has no
+        // opacity of its own).
+        let last = stop_color(gradient.stops.last()?.color, current);
+        if last.a == 0 {
+            return None;
+        }
+        return Some(
+            KrillaLinear {
+                x1: area.x,
+                y1: area.y,
+                x2: area.x + w,
+                y2: area.y,
+                transform: Transform::identity(),
+                spread_method: SpreadMethod::Pad,
+                stops: ColorLine::flat(last).stops,
+                anti_alias: false,
+            }
+            .into(),
+        );
     }
     let positions = resolve_positions(&gradient.stops, rx);
     let colors: Vec<CssColor> = gradient
@@ -255,10 +272,6 @@ fn conic_paint(gradient: &ConicGradient, area: &RoundedRect, current: CssColor) 
         }
         .into(),
     )
-}
-
-fn solid(color: CssColor) -> Paint {
-    rgb::Color::new(color.r, color.g, color.b).into()
 }
 
 fn stop_color(color: GradientStopColor, current: CssColor) -> CssColor {

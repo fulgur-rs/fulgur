@@ -137,10 +137,17 @@ impl RoundedRect {
         }
     }
 
-    /// Scale every radius by `f = min(Li / Si)` over the four sides, where
-    /// `Li` is the side length and `Si` the sum of the two radii along it
-    /// (CSS Backgrounds 3 §5.5), when `f < 1`.
+    /// Make every corner with a zero radius square (CSS Backgrounds 3
+    /// §5.1: "If either length is zero, the corner is square, not
+    /// rounded"), then scale every radius by `f = min(Li / Si)` over the
+    /// four sides, where `Li` is the side length and `Si` the sum of the two
+    /// radii along it (§5.5), when `f < 1`.
     fn clamped(mut self) -> Self {
+        for corner in &mut self.radii {
+            if corner[0] <= 0.0 || corner[1] <= 0.0 {
+                *corner = [0.0; 2];
+            }
+        }
         let r = self.radii;
         let fit = |length: f32, sum: f32| {
             if sum > length && sum > 0.0 {
@@ -311,7 +318,9 @@ mod tests {
             (2.0, 4.0, 86.0, 92.0)
         );
         assert_eq!(inner.radii[0], [8.0, 6.0]);
-        assert_eq!(inner.radii[1], [0.0, 6.0]);
+        // The right border (12px) exceeds the 10px radius: one inner radius
+        // is zero, so the corner is square (§5.1), not [0, 6].
+        assert_eq!(inner.radii[1], [0.0, 0.0]);
     }
 
     #[test]

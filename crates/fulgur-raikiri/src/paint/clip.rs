@@ -16,22 +16,30 @@ use krilla::geom::Path;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
 use raikiri_html::computed::{ComputedDisplay, ComputedValues, OverflowValue};
-use raikiri_html::{FragmentKind, NodeId, Page};
+use raikiri_html::{FragmentKind, NodeId, Page, PaintRect};
 use std::collections::HashMap;
 
-/// The overflow clip paths of the boxes on one page, by node.
+/// One clipping box fragment: the node and the fragment's position among
+/// that node's fragments on the page.
+pub(super) type ClipKey = (NodeId, usize);
+
+/// The overflow clip paths of the box fragments on one page, by node. A
+/// node broken into several fragments on the page (columns) has one clip
+/// per fragment, each at that fragment's padding box.
 pub(super) struct ClipMap {
-    clips: HashMap<NodeId, Path>,
+    clips: HashMap<NodeId, Vec<(PaintRect, Path)>>,
 }
 
 impl ClipMap {
     pub(super) fn new(page: &Page<'_>) -> Self {
         let bounds = page.geometry().page_box;
-        let mut clips = HashMap::new();
-        for fragment in page.fragments() {
-            if fragment.kind() != FragmentKind::Box || clips.contains_key(&fragment.node()) {
-                continue;
-            }
+        let mut clips: HashMap<NodeId, Vec<(PaintRect, Path)>> = HashMap::new();
+        let mut fragments: Vec<_> = page
+            .fragments()
+            .filter(|fragment| fragment.kind() == FragmentKind::Box)
+            .collect();
+        fragments.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
+        for fragment in fragments {
             let node = fragment.node();
             let Some(style) = page.computed(node) else {
                 continue;
@@ -39,21 +47,25 @@ impl ClipMap {
             if propagates_to_viewport(page, node) {
                 continue;
             }
-            // A node split into several fragments on one page clips to its
-            // first one.
-            if let Some(path) =
-                clip_path(fragment.paint_rect(), Slice::of(&fragment), style, bounds)
-            {
-                clips.insert(node, path);
+            let rect = fragment.paint_rect();
+            if let Some(path) = clip_path(rect, Slice::of(&fragment), style, bounds) {
+                clips.entry(node).or_default().push((rect, path));
             }
         }
         Self { clips }
     }
 
-    /// The clipping ancestors of a painted item, outermost first. `start`
-    /// is the innermost node whose clip applies: the parent of a box, or the
-    /// element a text run belongs to.
-    pub(super) fn chain(&self, page: &Page<'_>, start: Option<NodeId>) -> Vec<NodeId> {
+    /// The clipping ancestor fragments of a painted item, outermost first.
+    /// `start` is the innermost node whose clip applies: the parent of a
+    /// box, or the element a text run belongs to. `target` is the item's
+    /// area; of an ancestor broken into several fragments, the one nearest
+    /// to it (normally the one containing it) clips it.
+    pub(super) fn chain(
+        &self,
+        page: &Page<'_>,
+        start: Option<NodeId>,
+        target: PaintRect,
+    ) -> Vec<ClipKey> {
         let mut chain = Vec::new();
         if self.clips.is_empty() {
             return chain;
@@ -61,14 +73,39 @@ impl ClipMap {
         let dom = page.dom();
         let mut node = start;
         while let Some(current) = node {
-            if self.clips.contains_key(&current) {
-                chain.push(current);
+            if let Some(fragments) = self.clips.get(&current) {
+                let rects: Vec<PaintRect> = fragments.iter().map(|(rect, _)| *rect).collect();
+                chain.push((current, nearest(&rects, target)));
             }
             node = dom.parent(current);
         }
         chain.reverse();
         chain
     }
+
+    fn path(&self, key: ClipKey) -> Option<&Path> {
+        self.clips.get(&key.0)?.get(key.1).map(|(_, path)| path)
+    }
+}
+
+/// The index of the rectangle in `rects` nearest to the center of
+/// `target`: zero distance for any rectangle containing it, so the
+/// fragment an item lies in wins.
+fn nearest(rects: &[PaintRect], target: PaintRect) -> usize {
+    let (cx, cy) = (
+        target.x + target.width / 2.0,
+        target.y + target.height / 2.0,
+    );
+    let distance = |rect: &PaintRect| {
+        let dx = (rect.x - cx).max(cx - (rect.x + rect.width)).max(0.0);
+        let dy = (rect.y - cy).max(cy - (rect.y + rect.height)).max(0.0);
+        dx * dx + dy * dy
+    };
+    rects
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
+        .map_or(0, |(index, _)| index)
 }
 
 /// CSS Overflow 3 §3.3: the root element's `overflow` applies to the
@@ -99,10 +136,10 @@ fn propagates_to_viewport(page: &Page<'_>, node: NodeId) -> bool {
 /// `hidden`, `clip`, `scroll` and `auto` values all clip; the cascade has
 /// already applied the rule that couples the two axes.
 fn clip_path(
-    rect: raikiri_html::PaintRect,
+    rect: PaintRect,
     slice: Slice,
     style: &ComputedValues,
-    bounds: raikiri_html::PaintRect,
+    bounds: PaintRect,
 ) -> Option<Path> {
     let clip_x = !matches!(style.overflow.x, OverflowValue::Visible);
     let clip_y = !matches!(style.overflow.y, OverflowValue::Visible);
@@ -158,11 +195,11 @@ fn empty_path() -> Option<Path> {
 /// one chain to the next pops and pushes only where they differ.
 #[derive(Default)]
 pub(super) struct ClipStack {
-    active: Vec<NodeId>,
+    active: Vec<ClipKey>,
 }
 
 impl ClipStack {
-    pub(super) fn apply(&mut self, surface: &mut Surface<'_>, map: &ClipMap, chain: &[NodeId]) {
+    pub(super) fn apply(&mut self, surface: &mut Surface<'_>, map: &ClipMap, chain: &[ClipKey]) {
         let common = self
             .active
             .iter()
@@ -173,10 +210,10 @@ impl ClipStack {
             surface.pop();
             self.active.pop();
         }
-        for node in &chain[common..] {
-            if let Some(path) = map.clips.get(node) {
+        for key in &chain[common..] {
+            if let Some(path) = map.path(*key) {
                 surface.push_clip_path(path, &FillRule::NonZero);
-                self.active.push(*node);
+                self.active.push(*key);
             }
         }
     }
@@ -185,5 +222,29 @@ impl ClipStack {
         while self.active.pop().is_some() {
             surface.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_item_is_clipped_by_the_fragment_it_lies_in() {
+        // Two columns of one box on a page.
+        let columns = [
+            PaintRect::new(20.0, 20.0, 120.0, 160.0),
+            PaintRect::new(160.0, 20.0, 120.0, 160.0),
+        ];
+        assert_eq!(nearest(&columns, PaintRect::new(30.0, 40.0, 50.0, 20.0)), 0);
+        assert_eq!(
+            nearest(&columns, PaintRect::new(170.0, 40.0, 50.0, 20.0)),
+            1
+        );
+        // Overflowing below the second column, it still belongs to it.
+        assert_eq!(
+            nearest(&columns, PaintRect::new(170.0, 190.0, 50.0, 20.0)),
+            1
+        );
     }
 }

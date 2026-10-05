@@ -746,19 +746,35 @@ fn radial_gradient_explicit_sizes_and_positions() {
 
 #[test]
 fn degenerate_radial_gradients_draw_their_last_color() {
-    for gradient in [
-        // A zero-size ending shape (CSS Images 3 §3.2.3).
-        "radial-gradient(circle 0px, red, blue)",
-        // Every stop before the center, where no radius reaches.
-        "radial-gradient(red -20px, blue -10px)",
-    ] {
-        let (pdf, operations, _) = gradient_box(&format!("background-image: {gradient}"));
-        assert!(shadings(&pdf).is_empty(), "{gradient}");
-        assert!(
-            fill_colors(&operations).contains(&[0, 0, 255]),
-            "{gradient}"
-        );
-    }
+    // A zero-size ending shape (CSS Images 3 §3.2.3): flat stops of the
+    // last color.
+    let (pdf, _, _) = gradient_box("background-image: radial-gradient(circle 0px, red, blue)");
+    let colors = stop_colors(&pdf, shadings(&pdf)[0]);
+    assert!(
+        colors.iter().all(|color| *color == [0, 0, 255]),
+        "{colors:?}"
+    );
+    // Its alpha is kept: half-transparent blue gets an opacity shading;
+    // a transparent last color draws nothing.
+    let (pdf, _) = operations(&format!(
+        "{CSS}<p style=\"background-image: \
+         radial-gradient(circle 0px, red, rgba(0, 0, 255, 0.5))\"></p>"
+    ));
+    assert_eq!(
+        stop_colors(&pdf, color_shading(&pdf)),
+        [[0, 0, 255], [0, 0, 255]]
+    );
+    assert!(shadings(&pdf).len() > 1, "an opacity shading");
+    let (pdf, operations, _) =
+        gradient_box("background-image: radial-gradient(circle 0px, red, transparent)");
+    assert!(shadings(&pdf).is_empty());
+    assert_eq!(count(&operations, "f"), 0);
+    // Every stop before the center, where no radius reaches: one stop,
+    // which Krilla draws as a plain color.
+    let (pdf, operations, _) =
+        gradient_box("background-image: radial-gradient(red -20px, blue -10px)");
+    assert!(shadings(&pdf).is_empty());
+    assert!(fill_colors(&operations).contains(&[0, 0, 255]));
 }
 
 #[test]
@@ -1385,4 +1401,91 @@ fn input_path_without_a_file_name_is_a_layout_error() {
         provider.document_url(&path),
         Err(Error::Layout(_))
     ));
+}
+
+/// Whether every straight segment of every filled path is horizontal or
+/// vertical (clip paths, such as the mitred side regions, are skipped).
+fn filled_segments_are_axis_aligned(operations: &[lopdf::content::Operation]) -> bool {
+    let mut current = (0.0, 0.0);
+    let mut diagonal = false;
+    for op in operations {
+        let values: Vec<f32> = op
+            .operands
+            .iter()
+            .filter_map(|value| value.as_float().ok())
+            .collect();
+        match op.operator.as_str() {
+            "m" => current = (values[0], values[1]),
+            "l" => {
+                let next = (values[0], values[1]);
+                if (next.0 - current.0).abs() > 1e-3 && (next.1 - current.1).abs() > 1e-3 {
+                    diagonal = true;
+                }
+                current = next;
+            }
+            "c" => current = (values[4], values[5]),
+            "f" | "f*" if diagonal => return false,
+            "f" | "f*" | "n" => diagonal = false,
+            _ => {}
+        }
+    }
+    true
+}
+
+#[test]
+fn a_corner_with_one_zero_inner_radius_is_square() {
+    // The 12px top border exceeds the 10px radius, so the inner top
+    // corners have a zero vertical radius: square (CSS Backgrounds 3 §5.1),
+    // not a diagonal cut across the padding area.
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border-style: solid; border-width: 12px 2px 2px 2px; \
+         border-color: rgb(0, 0, 255); border-radius: 10px; \
+         background-color: rgb(0, 128, 0); background-clip: padding-box\"></p>"
+    ));
+    assert!(count(&operations, "c") > 0);
+    assert!(
+        filled_segments_are_axis_aligned(&operations),
+        "{operations:?}"
+    );
+}
+
+#[test]
+fn background_clip_text_paints_inside_the_glyphs() {
+    let (pdf, text_ops) = operations(&format!(
+        "{CSS}<p style=\"background-image: linear-gradient(red, blue); \
+         background-clip: text; color: transparent\">Hi</p>"
+    ));
+    assert!(has_shading(&pdf, 2));
+    // The gradient fills glyph outlines (curves), not the 260 x 30 box.
+    let fill = text_ops.iter().position(|op| op.operator == "f").unwrap();
+    let path = &text_ops[..fill];
+    let start = path.iter().position(|op| op.operator == "m").unwrap();
+    assert!(count(&path[start..], "c") > 4, "{path:?}");
+    let xs: Vec<f32> = path[start..]
+        .iter()
+        .flat_map(|op| {
+            floats(&lopdf::Object::Array(op.operands.clone()))
+                .into_iter()
+                .step_by(2)
+        })
+        .collect();
+    let right = xs.iter().copied().fold(f32::MIN, f32::max);
+    assert!(right < 60.0, "{right}");
+    // Without text there is nothing to paint.
+    let (_, empty) = operations(&format!(
+        "{CSS}<p style=\"background-color: rgb(255, 0, 0); background-clip: text\"></p>"
+    ));
+    assert!(!fill_colors(&empty).contains(&[255, 0, 0]));
+}
+
+#[test]
+fn background_clip_border_area_paints_under_the_border() {
+    let (_, operations) = operations(&format!(
+        "{CSS}<p style=\"border: 5px solid transparent; background-color: rgb(0, 128, 0); \
+         background-clip: border-area\"></p>"
+    ));
+    assert!(fill_colors(&operations).contains(&[0, 128, 0]));
+    // The ring between the border and padding edges, filled even-odd.
+    assert_eq!(count(&operations, "f*"), 1);
+    assert_eq!(count(&operations, "f"), 0);
 }

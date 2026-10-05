@@ -10,23 +10,22 @@ mod border;
 mod clip;
 mod gradient;
 mod shape;
+mod text_clip;
 
 use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
 use krilla::color::rgb;
-use krilla::geom::Transform;
+use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
-use krilla::paint::Fill;
+use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
 use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
     ComputedVisualBox, CssColor,
 };
-use raikiri_html::{
-    DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun, RunSource,
-};
+use raikiri_html::{DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun};
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
@@ -64,30 +63,34 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
         .filter(|fragment| fragment.kind() == FragmentKind::Box)
         .collect();
     boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
+    let runs = page.text_runs();
     for fragment in boxes {
         if let Some(style) = page.computed(fragment.node()) {
             // A box's own overflow clips its content, not its decorations.
-            let chain = clips.chain(page, dom.parent(fragment.node()));
+            let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
             active.apply(&mut surface, &clips, &chain);
+            let text = || text_clip::outlines(dom, fragment.node(), &runs);
             paint_box(
                 &mut surface,
                 fragment.paint_rect(),
                 Slice::of(&fragment),
                 style,
+                text,
             );
         }
     }
     // Text goes above every block background and border.
-    for run in page.text_runs() {
-        let element = match run.source {
-            RunSource::Text(node) => dom.parent(node),
-            // Generated content sits inside its originating element.
-            RunSource::Generated(node, _) => Some(node),
-            _ => None,
-        };
-        let chain = clips.chain(page, element);
+    for run in &runs {
+        let element = text_clip::run_element(dom, run);
+        let area = PaintRect::new(
+            run.origin.0,
+            run.origin.1 - run.ascent,
+            run.advance,
+            run.ascent + run.descent,
+        );
+        let chain = clips.chain(page, element, area);
         active.apply(&mut surface, &clips, &chain);
-        paint_text_run(&mut surface, &run, fonts);
+        paint_text_run(&mut surface, run, fonts);
     }
     active.clear(&mut surface);
 
@@ -103,23 +106,34 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
 /// corner radii (percentages and the §5.5 scaling) and the background
 /// positioning area refer to the fragment, because the fragment API does
 /// not give the size of the unbroken box or the fragment's offset in it.
-fn paint_box(surface: &mut Surface<'_>, rect: PaintRect, slice: Slice, style: &ComputedValues) {
+/// `text` gives the outlines of the element's text, for
+/// `background-clip: text`.
+fn paint_box(
+    surface: &mut Surface<'_>,
+    rect: PaintRect,
+    slice: Slice,
+    style: &ComputedValues,
+    text: impl FnOnce() -> Option<Path>,
+) {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
         return;
     }
     let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
-    paint_background(surface, &border_box, slice, style);
+    paint_background(surface, &border_box, slice, style, text);
     border::paint_borders(surface, &border_box, style, slice);
 }
 
 /// CSS Backgrounds 3 §2: the background color, then the background image
 /// over it, both clipped to the `background-clip` box with its corner
-/// curves (§5.3).
+/// curves (§5.3). CSS Backgrounds 4 §2.6 adds two painting areas:
+/// `border-area` (the area under the border) and `text` (the glyphs of the
+/// element's text).
 fn paint_background(
     surface: &mut Surface<'_>,
     border_box: &RoundedRect,
     slice: Slice,
     style: &ComputedValues,
+    text: impl FnOnce() -> Option<Path>,
 ) {
     let borders = slice.edges(border::widths(style));
     let padding = slice.edges(padding(style));
@@ -129,12 +143,22 @@ fn paint_background(
         // `border-box`, and the boxes this painter does not distinguish.
         _ => *border_box,
     };
-    let painting_area = visual_box(style.background_clip);
-    let Some(area) = painting_area.path() else {
+    let painting_area = match style.background_clip {
+        ComputedVisualBox::BorderArea => shape::ring(border_box, &border_box.inset(borders))
+            .map(|path| (path, FillRule::EvenOdd)),
+        ComputedVisualBox::Text => text().map(|path| (path, FillRule::NonZero)),
+        visual => visual_box(visual)
+            .path()
+            .map(|path| (path, FillRule::NonZero)),
+    };
+    let Some((area, rule)) = painting_area else {
         return;
     };
     if style.background_color.a > 0 {
-        surface.set_fill(Some(fill(style.background_color)));
+        surface.set_fill(Some(Fill {
+            rule,
+            ..fill(style.background_color)
+        }));
         surface.draw_path(&area);
     }
     // One layer with the initial size, position and repeat: the gradient
@@ -147,7 +171,7 @@ fn paint_background(
             surface.set_fill(Some(Fill {
                 paint,
                 opacity: NormalizedF32::ONE,
-                rule: Default::default(),
+                rule,
             }));
             surface.draw_path(&area);
         }
