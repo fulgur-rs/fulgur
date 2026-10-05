@@ -98,29 +98,33 @@ fn blitz_resolves_stylesheet_relative_to_input() {
 }
 
 #[test]
-fn raikiri_selection_reports_unavailable() {
+fn raikiri_selection_writes_pdf() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.html");
     let output = dir.path().join("output.pdf");
     std::fs::write(&input, HTML).unwrap();
     let result = run(&input, &output, Some("raikiri"), dir.path());
-    assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("Raikiri PDF drawing is not implemented")
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
     );
-    assert!(!output.exists());
+    assert_eq!(load_pdf(&output).get_pages().len(), 1);
 }
 
 #[test]
 fn backend_failure_preserves_existing_output() {
     let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("input.html");
+    // A directory cannot be read as an HTML file, so both backends fail.
+    let input = dir.path().join("input-dir");
+    std::fs::create_dir(&input).unwrap();
     let output = dir.path().join("output.pdf");
-    std::fs::write(&input, HTML).unwrap();
     std::fs::write(&output, b"keep me").unwrap();
-    let result = run(&input, &output, Some("raikiri"), dir.path());
-    assert!(!result.status.success());
-    assert_eq!(std::fs::read(&output).unwrap(), b"keep me");
+    for engine in ["blitz", "raikiri"] {
+        let result = run(&input, &output, Some(engine), dir.path());
+        assert!(!result.status.success(), "{engine}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"keep me", "{engine}");
+    }
 }
 
 #[test]

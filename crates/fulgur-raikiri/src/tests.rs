@@ -100,14 +100,25 @@ fn already_aborted_layout_returns_aborted() {
 }
 
 #[test]
-fn render_reports_pdf_drawing_unavailable() {
-    let (_dir, path) = input("<p>Hello</p>");
-    match render(&path) {
-        Err(Error::PdfGeneration(message)) => {
-            assert_eq!(message, "Raikiri PDF drawing is not implemented")
-        }
-        other => panic!("expected PDF drawing error, got {other:?}"),
-    }
+fn render_writes_one_pdf_page_per_layout_page() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<p style=\"background-color: rgb(0, 128, 0); border: 2px solid red\">one</p>\
+         <p style=\"break-before: page\">two</p>"
+    ));
+    let bytes = render(&path).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let pages = pdf.get_pages();
+    assert_eq!(pages.len(), 2);
+    // 300 x 200 CSS px is 225 x 150 pt.
+    let first = pdf.get_object(*pages.get(&1).unwrap()).unwrap();
+    let media_box = first.as_dict().unwrap().get(b"MediaBox").unwrap();
+    let media_box: Vec<f32> = media_box
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_float().unwrap())
+        .collect();
+    assert_eq!(media_box, vec![0.0, 0.0, 225.0, 150.0]);
 }
 
 #[test]
@@ -131,5 +142,51 @@ fn non_utf8_input_filename_is_accepted() {
         .join(std::ffi::OsString::from_vec(b"input-\xff.html".to_vec()));
     std::fs::write(&path, "<p>Hello</p>").unwrap();
     assert_eq!(completed(&path).page_count(), 1);
-    assert!(matches!(render(&path), Err(Error::PdfGeneration(_))));
+    assert!(render(&path).is_ok_and(|bytes| bytes.starts_with(b"%PDF")));
+}
+
+#[test]
+fn render_draws_extractable_text_with_one_font_per_face() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<p>Hello <b>bold</b> world</p><p style=\"color: rgb(200, 0, 0)\">second line</p>"
+    ));
+    let bytes = render(&path).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    let words: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(words, ["Hello", "bold", "world", "second", "line"]);
+    // The regular face is shared by both paragraphs; bold is a second face.
+    let fonts = pdf
+        .objects
+        .values()
+        .filter(|object| {
+            object.as_dict().is_ok_and(|dict| {
+                dict.get(b"Type")
+                    .is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Font"))
+            }) && object.as_dict().is_ok_and(|dict| {
+                dict.get(b"Subtype")
+                    .is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Type0"))
+            })
+        })
+        .count();
+    assert_eq!(fonts, 2);
+}
+
+#[test]
+fn hidden_boxes_and_transparent_text_draw_nothing() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<p>kept</p>\
+         <p style=\"visibility: hidden; background-color: red; border: 3px solid red\">hidden</p>\
+         <p style=\"color: transparent\">clear</p>"
+    ));
+    let bytes = render(&path).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(text.split_whitespace().collect::<Vec<_>>(), ["kept"]);
+    // Nothing red is filled: the hidden box draws no background or border.
+    let content = pdf
+        .get_page_content(*pdf.get_pages().get(&1).unwrap())
+        .unwrap();
+    let content = String::from_utf8_lossy(&content);
+    assert!(!content.contains("1 0 0 rg"), "{content}");
 }
