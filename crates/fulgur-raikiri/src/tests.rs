@@ -276,7 +276,7 @@ fn clip_bounds(operations: &[lopdf::content::Operation]) -> Vec<[f32; 4]> {
                 .iter()
                 .filter_map(|value| value.as_float().ok())
                 .collect();
-            for point in values.chunks_exact(2) {
+            for point in values.as_chunks::<2>().0 {
                 bbox = [
                     bbox[0].min(point[0]),
                     bbox[1].min(point[1]),
