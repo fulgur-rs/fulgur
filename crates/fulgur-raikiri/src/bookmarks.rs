@@ -156,3 +156,6 @@ pub(super) fn outline(document: &DocumentLayout, collector: &BookmarkCollector) 
     }
     outline
 }
+
+#[cfg(test)]
+mod tests;
