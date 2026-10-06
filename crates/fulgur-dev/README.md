@@ -87,7 +87,6 @@ page, preserving text. Replaced/image content is still unsupported. The
 current pinned API exposes no ellipsis source; existing text-overflow output
 is preserved without claiming ellipsis rendering support.
 
-
 For pages whose events cover all ordinary text runs, Raikiri follows
 `Page::paint_order()` and composites opacity groups. It keeps the existing
 rounded and per-axis overflow geometry. Pages with generated text, repeated
