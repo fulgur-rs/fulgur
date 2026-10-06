@@ -16,7 +16,9 @@ Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
 and registered with Raikiri. Parsing, layout, and painting retain the same
 resources and local-file provider. Disabling system fonts requires a bundled
-font. Invalid fonts and non-empty image bundles return an asset error.
+font. Invalid fonts, TTC/OTC collections, and non-empty image bundles return
+an asset error. The pinned font API cannot select a collection face; use
+individual TTF/OTF fonts or WOFF2.
 Bundle CSS has document URL provenance; linked stylesheet imports retain
 stylesheet URL provenance.
 

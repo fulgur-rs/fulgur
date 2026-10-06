@@ -16,7 +16,7 @@ pub(super) struct RenderArgs {
     /// Additional user stylesheet, repeatable.
     #[arg(long)]
     css: Vec<PathBuf>,
-    /// Bundled font file, repeatable (TTF/OTF/TTC/WOFF2).
+    /// Bundled font file, repeatable (TTF/OTF/WOFF2; TTC only with Blitz).
     #[arg(long)]
     font: Vec<PathBuf>,
     /// Disable system fonts; requires at least one bundled font.

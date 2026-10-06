@@ -133,3 +133,33 @@ fn external_css_import_resolves_from_stylesheet_directory() {
     assert!((geometry.page_box.width * 0.75 - 250.0).abs() < 0.01);
     assert!((geometry.page_box.height * 0.75 - 350.0).abs() < 0.01);
 }
+
+#[test]
+fn bundled_font_collection_is_rejected() {
+    let (_dir, path) = input("<p>Hello</p>");
+    let mut font = std::fs::read(font_path(false)).unwrap();
+    let tables = u16::from_be_bytes(font[4..6].try_into().unwrap());
+    for table in 0..usize::from(tables) {
+        let offset = 12 + table * 16 + 8;
+        let value = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
+        font[offset..offset + 4].copy_from_slice(&(value + 20).to_be_bytes());
+    }
+    let mut collection = b"ttcf".to_vec();
+    for value in [0x0001_0000_u32, 2, 20, 20] {
+        collection.extend(value.to_be_bytes());
+    }
+    collection.extend(font);
+    let file = skrifa::raw::FileRef::new(&collection).unwrap();
+    assert_eq!(file.fonts().filter_map(|face| face.ok()).count(), 2);
+    let mut bundle = AssetBundle::new();
+    bundle.fonts.push(std::sync::Arc::new(collection));
+    let result = render_with_options(
+        &path,
+        &Config::default(),
+        &RenderOptions {
+            assets: Some(&bundle),
+            system_fonts: false,
+        },
+    );
+    assert!(matches!(result, Err(Error::Asset(message)) if message.contains("collections")));
+}

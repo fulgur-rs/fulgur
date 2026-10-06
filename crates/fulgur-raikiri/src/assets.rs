@@ -39,6 +39,11 @@ pub(super) fn fonts(options: &RenderOptions<'_>) -> Result<Option<RenderFonts>> 
 fn family_names(bytes: &[u8]) -> Result<Vec<String>> {
     let file = FileRef::new(bytes)
         .map_err(|error| Error::Asset(format!("invalid bundled font: {error}")))?;
+    if matches!(file, FileRef::Collection(_)) {
+        return Err(Error::Asset(
+            "font collections are not supported by the current Raikiri font API".into(),
+        ));
+    }
     let mut families = Vec::new();
     for font in file.fonts() {
         let font =
