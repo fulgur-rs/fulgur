@@ -128,7 +128,9 @@ fn navigation_relative_uri_uses_document_base() {
         .unwrap()
         .as_str()
         .unwrap();
-    let expected = url::Url::from_file_path(dir.path().join("reports/next.html")).unwrap();
+    let expected =
+        url::Url::from_file_path(dir.path().canonicalize().unwrap().join("reports/next.html"))
+            .unwrap();
     assert_eq!(String::from_utf8_lossy(uri), format!("{expected}?x=1#part"));
 }
 
