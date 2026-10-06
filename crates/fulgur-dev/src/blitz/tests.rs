@@ -10,7 +10,7 @@ fn file_input_returns_pdf_bytes() {
         "<!doctype html><html><body><p>Hello</p></body></html>",
     )
     .unwrap();
-    let bytes = render(&input).unwrap();
+    let bytes = render(&input, &Config::default(), None, true).unwrap();
     assert!(bytes.starts_with(b"%PDF-"));
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     assert_eq!(pdf.get_pages().len(), 1);
@@ -19,7 +19,12 @@ fn file_input_returns_pdf_bytes() {
 #[test]
 fn missing_input_returns_io_error() {
     let dir = tempfile::tempdir().unwrap();
-    match render(&dir.path().join("missing.html")) {
+    match render(
+        &dir.path().join("missing.html"),
+        &Config::default(),
+        None,
+        true,
+    ) {
         Err(Error::Io(error)) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
         other => panic!("expected IO error, got {other:?}"),
     }

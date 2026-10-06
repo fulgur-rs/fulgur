@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod blitz;
+mod options;
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +30,8 @@ enum Commands {
         /// Layout backend.
         #[arg(long, value_enum, default_value = "blitz")]
         engine: EngineChoice,
+        #[command(flatten)]
+        args: options::RenderArgs,
     },
 }
 
@@ -44,12 +47,13 @@ fn run(cli: Cli) -> Result<()> {
             input,
             output,
             engine,
+            args,
         } => {
+            let config = args.config();
+            config.validate()?;
             let bytes = match engine {
-                EngineChoice::Blitz => blitz::render(&input),
-                EngineChoice::Raikiri => {
-                    fulgur_raikiri::render(&input, &fulgur_core::Config::default())
-                }
+                EngineChoice::Blitz => blitz::render(&input, &config, None, true),
+                EngineChoice::Raikiri => fulgur_raikiri::render(&input, &config),
             }?;
             std::fs::write(output, bytes)?;
             Ok(())
