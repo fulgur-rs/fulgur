@@ -62,7 +62,7 @@ pub fn render_with_options(
         config,
         options,
         LayoutConfig::default(),
-        |status, _resources, collector| draw(status, config, collector),
+        |status, _resources, collector, document_url| draw(status, config, collector, document_url),
     )
 }
 
@@ -71,6 +71,7 @@ fn draw(
     status: LayoutStatus,
     config: &Config,
     collector: &bookmarks::BookmarkCollector,
+    document_url: &url::Url,
 ) -> Result<Vec<u8>> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
@@ -82,7 +83,7 @@ fn draw(
     let outline = config
         .bookmarks
         .then(|| bookmarks::outline(&document, collector));
-    paint::paint_document(&document, config, outline)
+    paint::paint_document(&document, config, outline, document_url)
 }
 
 #[cfg(test)]
@@ -92,7 +93,7 @@ fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Re
         config,
         &RenderOptions::default(),
         layout_config,
-        |status, _resources, _collector| Ok(status),
+        |status, _resources, _collector, _document_url| Ok(status),
     )
 }
 
@@ -101,15 +102,21 @@ fn with_layout<T>(
     config: &Config,
     options: &RenderOptions<'_>,
     layout_config: LayoutConfig,
-    consume: impl FnOnce(LayoutStatus, &RenderResources<'_>, &bookmarks::BookmarkCollector) -> Result<T>,
+    consume: impl FnOnce(
+        LayoutStatus,
+        &RenderResources<'_>,
+        &bookmarks::BookmarkCollector,
+        &url::Url,
+    ) -> Result<T>,
 ) -> Result<T> {
     let fonts = assets::fonts(options)?;
     let html = std::fs::read(input)?;
     let files = files::BaseDirectoryProvider::for_input(input)?;
+    let document_url = files.document_url(input)?;
     let mut resources = RenderResources::new()
         .stylesheet(page_stylesheet(config))
         .network_provider(&files)
-        .base_url(files.document_url(input)?);
+        .base_url(document_url.clone());
     if config.bookmarks {
         resources = resources.stylesheet(bookmarks::heading_stylesheet());
     }
@@ -140,7 +147,7 @@ fn with_layout<T>(
         layout_options,
     )
     .map_err(|error| Error::Layout(error.to_string()))?;
-    consume(status, &resources, &collector)
+    consume(status, &resources, &collector, &document_url)
 }
 
 /// The page size and margins of `config` as a user-origin `@page` rule.

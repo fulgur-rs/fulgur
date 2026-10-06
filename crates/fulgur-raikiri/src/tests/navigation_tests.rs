@@ -101,7 +101,16 @@ fn navigation_multiline_and_escaped_anchor() {
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     assert_eq!(pdf.get_pages().len(), 2);
     let links = annotations(&pdf, 1);
-    assert_eq!(links.len(), 3);
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0]
+            .get(b"QuadPoints")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        24
+    );
     for link in links {
         let dest = destination(&pdf, link);
         assert_eq!(dest[0].as_reference().unwrap(), pdf.get_pages()[&2]);
@@ -179,4 +188,56 @@ fn navigation_missing_same_document_anchor_is_omitted() {
     assert_eq!(action.get(b"S").unwrap().as_name().unwrap(), b"URI");
     let uri = String::from_utf8_lossy(action.get(b"URI").unwrap().as_str().unwrap());
     assert!(uri.ends_with("?other=1#target"));
+}
+
+#[test]
+fn navigation_base_href_resolves_links_before_classification() {
+    for base in ["other.html", "https://example.com/other.html"] {
+        let (_dir, path) = input("");
+        let original = url::Url::from_file_path(path.canonicalize().unwrap()).unwrap();
+        std::fs::write(&path, format!("<head><base href='{base}'></head>{NAV_CSS}<div id=target></div><a href='#target'></a><a href='other.html#target'></a><a href='{original}#target'></a>")).unwrap();
+        let bytes = render(&path, &Config::default()).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        let links = annotations(&pdf, 1);
+        assert_eq!(links.len(), 3);
+        let expected = original.join(base).unwrap().join("#target").unwrap();
+        for link in &links[..2] {
+            let action = link.get(b"A").unwrap().as_dict().unwrap();
+            assert_eq!(action.get(b"S").unwrap().as_name().unwrap(), b"URI");
+            assert_eq!(
+                String::from_utf8_lossy(action.get(b"URI").unwrap().as_str().unwrap()),
+                expected.as_str()
+            );
+        }
+        let dest = destination(&pdf, links[2]);
+        assert_eq!(dest[0].as_reference().unwrap(), pdf.get_pages()[&1]);
+        assert_eq!(dest[2].as_float().unwrap(), 15.0);
+        assert_eq!(dest[3].as_float().unwrap(), 120.0);
+    }
+}
+
+#[test]
+fn navigation_multiline_uses_one_annotation_with_all_quads() {
+    let (_dir, path) = input(
+        "<style>@page {size:300px 200px;margin:0} body {margin:0} p {margin:0;font-size:10px;line-height:10px}</style><p><a href='https://example.com/'>One<br>Two</a></p>",
+    );
+    let document = completed(&path);
+    let count: usize = document
+        .page(0)
+        .unwrap()
+        .links()
+        .map(|link| link.quads.len())
+        .sum();
+    assert_eq!(count, 3);
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 1);
+    let points = links[0].get(b"QuadPoints").unwrap().as_array().unwrap();
+    assert_eq!(points.len(), 24);
+    assert!(
+        points
+            .iter()
+            .all(|point| point.as_float().unwrap().is_finite())
+    );
 }

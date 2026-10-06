@@ -100,7 +100,8 @@ fn already_aborted_layout_returns_aborted() {
         draw(
             status,
             &Config::default(),
-            &bookmarks::BookmarkCollector::default()
+            &bookmarks::BookmarkCollector::default(),
+            &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
         ),
         Err(Error::Layout(_))
     ));

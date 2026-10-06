@@ -3,7 +3,7 @@ use krilla::{
     action::{Action, LinkAction},
     annotation::{Annotation, LinkAnnotation, Target},
     destination::XyzDestination,
-    geom::{Point, Rect},
+    geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
 use raikiri_html::{DocumentLayout, Page};
@@ -34,35 +34,37 @@ fn anchor_target(document: &DocumentLayout, fragment: &str) -> Option<LinkTarget
     )))
 }
 
-fn target(document: &DocumentLayout, href: &str) -> Option<LinkTarget> {
-    if let Some(fragment) = href.strip_prefix('#') {
-        return anchor_target(document, fragment);
-    }
+fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Option<LinkTarget> {
     let uri = document
         .base_url()
         .map_or_else(|| url::Url::parse(href), |base| base.join(href))
         .ok()?;
-    if let (Some(base), Some(fragment)) = (document.base_url(), uri.fragment()) {
-        let mut document_url = base.clone();
-        document_url.set_fragment(None);
+    if let Some(fragment) = uri.fragment() {
+        let mut original_url = document_url.clone();
+        original_url.set_fragment(None);
         let mut target_url = uri.clone();
         target_url.set_fragment(None);
-        if document_url == target_url {
+        if original_url == target_url {
             return anchor_target(document, fragment);
         }
     }
     Some(LinkTarget::External(uri.into()))
 }
 
-pub(super) fn annotations(document: &DocumentLayout, page: &Page<'_>) -> Result<Vec<Annotation>> {
+pub(super) fn annotations(
+    document: &DocumentLayout,
+    page: &Page<'_>,
+    document_url: &url::Url,
+) -> Result<Vec<Annotation>> {
     let mut annotations = Vec::new();
     for link in page.links() {
         if link.target.is_empty() {
             continue;
         }
-        let Some(target) = target(document, link.target) else {
+        let Some(target) = target(document, document_url, link.target) else {
             continue;
         };
+        let mut rects = Vec::new();
         for quad in link.quads {
             if ![quad.x, quad.y, quad.width, quad.height]
                 .iter()
@@ -80,11 +82,17 @@ pub(super) fn annotations(document: &DocumentLayout, page: &Page<'_>) -> Result<
             ) else {
                 continue;
             };
-            annotations.push(Annotation::new_link(
-                LinkAnnotation::new(rect, target.annotation_target()),
-                None,
-            ));
+            rects.push(rect);
         }
+        let annotation = match rects.as_slice() {
+            [] => continue,
+            [rect] => LinkAnnotation::new(*rect, target.annotation_target()),
+            _ => LinkAnnotation::new_with_quad_points(
+                rects.into_iter().map(Quadrilateral::from).collect(),
+                target.annotation_target(),
+            ),
+        };
+        annotations.push(Annotation::new_link(annotation, None));
     }
     Ok(annotations)
 }

@@ -61,10 +61,12 @@ Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 An omitted creation date does not insert the current time. Tagged PDF and
 PDF/UA requests through Raikiri return an explicit error.
 
-Raikiri PDF links use all quads supplied by the page API. Fragment links use
+Raikiri PDF links retain all quads supplied by the page API in one annotation
+per link per page. Fragment links use
 rendered anchors (including percent-encoded names and the first duplicate
 anchor); missing targets are omitted. File-name and absolute URL links to the same document use internal
-destinations too; links to other documents resolve against the document base URL. Destinations and link rectangles convert CSS px to pt,
+destinations too; links resolve against the effective document base URL,
+including HTML `base`, then compare against the original input URL. Destinations and link rectangles convert CSS px to pt,
 with the PDF coordinate transform applied once by Krilla.
 
 `--bookmarks` enables heading outlines. Raikiri receives resolved level and

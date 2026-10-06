@@ -35,6 +35,7 @@ pub(crate) fn paint_document(
     document: &DocumentLayout,
     config: &fulgur_core::Config,
     outline: Option<krilla::outline::Outline>,
+    document_url: &url::Url,
 ) -> Result<Vec<u8>> {
     let mut pdf = krilla::Document::new();
     pdf.set_metadata(crate::metadata::build(config)?);
@@ -43,7 +44,7 @@ pub(crate) fn paint_document(
     }
     let mut fonts = FontCache::default();
     for page in document.pages() {
-        paint_page(&mut pdf, document, &page, &mut fonts)?;
+        paint_page(&mut pdf, document, &page, &mut fonts, document_url)?;
     }
     pdf.finish()
         .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
@@ -54,6 +55,7 @@ fn paint_page(
     document: &DocumentLayout,
     page: &Page<'_>,
     fonts: &mut FontCache,
+    document_url: &url::Url,
 ) -> Result<()> {
     let page_box = page.geometry().page_box;
     let settings = PageSettings::from_wh(page_box.width * PX_TO_PT, page_box.height * PX_TO_PT)
@@ -110,7 +112,7 @@ fn paint_page(
 
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page)? {
+    for annotation in navigation::annotations(document, page, document_url)? {
         pdf_page.add_annotation(annotation);
     }
     pdf_page.finish();
