@@ -1496,3 +1496,5 @@ fn background_clip_border_area_paints_under_the_border() {
 mod assets_tests;
 
 mod metadata_tests;
+
+mod navigation_tests;

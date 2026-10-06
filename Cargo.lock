@@ -1243,6 +1243,7 @@ dependencies = [
  "fulgur-core",
  "krilla",
  "lopdf",
+ "percent-encoding",
  "raikiri-html",
  "raikiri-traits",
  "skrifa 0.45.1",

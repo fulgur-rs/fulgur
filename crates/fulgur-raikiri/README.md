@@ -40,3 +40,9 @@ Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
 An omitted creation date does not insert the current time. Tagged PDF and
 PDF/UA requests through Raikiri return an explicit error.
+
+Raikiri PDF links use all quads supplied by the page API. Fragment links use
+rendered anchors (including percent-encoded names and the first duplicate
+anchor); missing targets are omitted. Other links are resolved against the
+document base URL. Destinations and link rectangles convert CSS px to pt,
+with the PDF coordinate transform applied once by Krilla.

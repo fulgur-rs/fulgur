@@ -17,6 +17,7 @@ fulgur-core = { path = "../fulgur-core" }
 raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "5783e542d5a64b86cc762755b2ddb0982898b613" }
 raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "5783e542d5a64b86cc762755b2ddb0982898b613" }
 url = "2.5"
+percent-encoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
