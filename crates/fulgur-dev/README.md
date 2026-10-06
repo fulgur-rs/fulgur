@@ -49,3 +49,12 @@ rendering. Font family names come from the font, not the file name.
 user stylesheets based on the input document URL; a CSS argument's file path
 is not retained as stylesheet provenance. Linked stylesheets resolve imports
 from their own URLs. Image bundles are unsupported by the Raikiri painter.
+
+PDF metadata supports title, repeated authors and keywords, description,
+language, creator, producer, and creation date. The development CLI exposes
+`--title`, `--author`, `--description`, `--keyword` (alias `--keywords`),
+`--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
+Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
+`YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
+An omitted creation date does not insert the current time. Tagged PDF and
+PDF/UA requests through Raikiri return an explicit error.

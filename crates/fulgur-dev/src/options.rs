@@ -22,6 +22,30 @@ pub(super) struct RenderArgs {
     /// Disable system fonts; requires at least one bundled font.
     #[arg(long, requires = "font")]
     no_system_fonts: bool,
+    /// PDF title.
+    #[arg(long)]
+    title: Option<String>,
+    /// PDF author, repeatable.
+    #[arg(long)]
+    author: Vec<String>,
+    /// PDF description.
+    #[arg(long)]
+    description: Option<String>,
+    /// PDF keyword, repeatable.
+    #[arg(long, alias = "keywords")]
+    keyword: Vec<String>,
+    /// Document language tag.
+    #[arg(long)]
+    language: Option<String>,
+    /// Creator tool.
+    #[arg(long)]
+    creator: Option<String>,
+    /// PDF producer.
+    #[arg(long)]
+    producer: Option<String>,
+    /// Creation date as YYYY, YYYY-MM, YYYY-MM-DD, or a full timestamp.
+    #[arg(long)]
+    creation_date: Option<String>,
 }
 
 impl RenderArgs {
@@ -58,6 +82,27 @@ impl RenderArgs {
         if self.landscape {
             builder = builder.landscape(true);
         }
+        if let Some(value) = &self.title {
+            builder = builder.title(value);
+        }
+        if let Some(value) = &self.description {
+            builder = builder.description(value);
+        }
+        if let Some(value) = &self.language {
+            builder = builder.lang(value);
+        }
+        if let Some(value) = &self.creator {
+            builder = builder.creator(value);
+        }
+        if let Some(value) = &self.producer {
+            builder = builder.producer(value);
+        }
+        if let Some(value) = &self.creation_date {
+            builder = builder.creation_date(value);
+        }
+        builder = builder
+            .authors(self.author.iter())
+            .keywords(self.keyword.iter());
         builder.build()
     }
 }

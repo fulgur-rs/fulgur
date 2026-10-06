@@ -30,8 +30,16 @@ use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
 /// Draw every page of `document` and return the PDF bytes.
-pub(crate) fn paint_document(document: &DocumentLayout) -> Result<Vec<u8>> {
+pub(crate) fn paint_document(
+    document: &DocumentLayout,
+    config: &fulgur_core::Config,
+    outline: Option<krilla::outline::Outline>,
+) -> Result<Vec<u8>> {
     let mut pdf = krilla::Document::new();
+    pdf.set_metadata(crate::metadata::build(config)?);
+    if let Some(outline) = outline {
+        pdf.set_outline(outline);
+    }
     let mut fonts = FontCache::default();
     for page in document.pages() {
         paint_page(&mut pdf, &page, &mut fonts)?;

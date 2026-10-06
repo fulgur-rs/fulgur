@@ -29,3 +29,12 @@ let pdf = fulgur_raikiri::render(
 
 Raikiri is a Git dependency pinned to a specific revision. This crate is not
 used by Fulgur's published facade, CLI, or bindings.
+
+PDF metadata supports title, repeated authors and keywords, description,
+language, creator, producer, and creation date. The development CLI exposes
+`--title`, `--author`, `--description`, `--keyword` (alias `--keywords`),
+`--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
+Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
+`YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
+An omitted creation date does not insert the current time. Tagged PDF and
+PDF/UA requests through Raikiri return an explicit error.

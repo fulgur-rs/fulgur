@@ -96,7 +96,10 @@ fn already_aborted_layout_returns_aborted() {
     let status = layout_file(&path, &Config::default(), config).unwrap();
     assert!(matches!(status, LayoutStatus::Aborted));
     // An aborted layout has nothing to draw.
-    assert!(matches!(draw(status), Err(Error::Layout(_))));
+    assert!(matches!(
+        draw(status, &Config::default()),
+        Err(Error::Layout(_))
+    ));
 }
 
 #[test]
@@ -1491,3 +1494,5 @@ fn background_clip_border_area_paints_under_the_border() {
 }
 
 mod assets_tests;
+
+mod metadata_tests;

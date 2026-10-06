@@ -56,17 +56,18 @@ pub fn render_with_options(
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     config.validate()?;
+    metadata::build(config)?;
     with_layout(
         input,
         config,
         options,
         LayoutConfig::default(),
-        |status, _resources| draw(status),
+        |status, _resources| draw(status, config),
     )
 }
 
 /// Draw a layout result as PDF bytes.
-fn draw(status: LayoutStatus) -> Result<Vec<u8>> {
+fn draw(status: LayoutStatus, config: &Config) -> Result<Vec<u8>> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
     let LayoutStatus::Completed(document) = status else {
@@ -74,7 +75,7 @@ fn draw(status: LayoutStatus) -> Result<Vec<u8>> {
             "Raikiri layout was aborted or did not complete".into(),
         ));
     };
-    paint::paint_document(&document)
+    paint::paint_document(&document, config, None)
 }
 
 #[cfg(test)]
@@ -161,3 +162,5 @@ mod files;
 mod paint;
 
 mod assets;
+
+mod metadata;

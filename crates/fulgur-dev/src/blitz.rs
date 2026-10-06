@@ -27,6 +27,27 @@ pub(super) fn render(
     if let Some(assets) = assets {
         builder = builder.assets(assets.clone());
     }
+    if let Some(value) = &config.title {
+        builder = builder.title(value);
+    }
+    if let Some(value) = &config.description {
+        builder = builder.description(value);
+    }
+    if let Some(value) = &config.lang {
+        builder = builder.lang(value);
+    }
+    if let Some(value) = &config.creator {
+        builder = builder.creator(value);
+    }
+    if let Some(value) = &config.producer {
+        builder = builder.producer(value);
+    }
+    if let Some(value) = &config.creation_date {
+        builder = builder.creation_date(value);
+    }
+    builder = builder
+        .authors(config.authors.iter())
+        .keywords(config.keywords.iter());
     builder.build().render(&html)
 }
 

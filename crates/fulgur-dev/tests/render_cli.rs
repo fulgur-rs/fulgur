@@ -425,3 +425,68 @@ fn dev_assets_invalid_font_does_not_write_output() {
         }
     }
 }
+
+#[test]
+fn dev_metadata_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, HTML).unwrap();
+    let args: Vec<&OsStr> = [
+        "--title",
+        "Report",
+        "--author",
+        "Alice",
+        "--author",
+        "Bob",
+        "--description",
+        "Quarterly",
+        "--keyword",
+        "one",
+        "--keywords",
+        "two",
+        "--language",
+        "ja",
+        "--creator",
+        "tool",
+        "--producer",
+        "fulgur-dev",
+        "--creation-date",
+        "2026-10-07T01:02:03Z",
+    ]
+    .into_iter()
+    .map(OsStr::new)
+    .collect();
+    for engine in ["blitz", "raikiri"] {
+        let result = run_with_args(&input, &output, Some(engine), dir.path(), &args);
+        assert!(
+            result.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let pdf = load_pdf(&output);
+        let info = pdf
+            .get_dictionary(pdf.trailer.get(b"Info").unwrap().as_reference().unwrap())
+            .unwrap();
+        for (key, expected) in [
+            ("Title", "Report"),
+            ("Author", "Alice, Bob"),
+            ("Subject", "Quarterly"),
+            ("Keywords", "one, two"),
+            ("Creator", "tool"),
+            ("Producer", "fulgur-dev"),
+        ] {
+            assert_eq!(
+                lopdf::decode_text_string(info.get(key.as_bytes()).unwrap()).unwrap(),
+                expected,
+                "{engine}: {key}"
+            );
+        }
+        let date = lopdf::decode_text_string(info.get(b"CreationDate").unwrap()).unwrap();
+        assert!(date.starts_with("D:20261007010203"), "{engine}: {date}");
+        assert_eq!(
+            lopdf::decode_text_string(pdf.catalog().unwrap().get(b"Lang").unwrap()).unwrap(),
+            "ja"
+        );
+    }
+}
