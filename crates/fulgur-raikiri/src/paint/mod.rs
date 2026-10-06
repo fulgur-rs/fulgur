@@ -10,6 +10,7 @@ mod border;
 mod clip;
 mod gradient;
 mod navigation;
+mod order;
 mod shape;
 mod text_clip;
 
@@ -26,7 +27,10 @@ use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
     ComputedVisualBox, CssColor,
 };
-use raikiri_html::{DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun};
+use raikiri_html::{
+    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
+    RunSource,
+};
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
@@ -64,51 +68,13 @@ fn paint_page(
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
-    let clips = ClipMap::new(page);
-    let mut active = ClipStack::default();
-    let dom = page.dom();
-
-    // CSS 2.1 Appendix E for normal flow: the backgrounds and borders of all
-    // block boxes in tree order, then the inline content (text) of all of
-    // them, so overflowing text stays above later blocks' backgrounds.
-    // Positioned boxes and other stacking contexts paint in a different order
-    // that the fragments alone do not describe; they are drawn in this
-    // normal-flow order until Raikiri exposes the paint order.
-    let mut boxes: Vec<_> = page
-        .fragments()
-        .filter(|fragment| fragment.kind() == FragmentKind::Box)
-        .collect();
-    boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
     let runs = page.text_runs();
-    for fragment in boxes {
-        if let Some(style) = page.computed(fragment.node()) {
-            // A box's own overflow clips its content, not its decorations.
-            let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
-            active.apply(&mut surface, &clips, &chain);
-            let text = || text_clip::outlines(dom, fragment.node(), &runs);
-            paint_box(
-                &mut surface,
-                fragment.paint_rect(),
-                Slice::of(&fragment),
-                style,
-                text,
-            );
-        }
+    let events = page.paint_order();
+    if order::supported(&events, &runs) {
+        paint_ordered(&mut surface, page, &events, &runs, fonts);
+    } else {
+        paint_legacy(&mut surface, page, &runs, fonts);
     }
-    // Text goes above every block background and border.
-    for run in &runs {
-        let element = text_clip::run_element(dom, run);
-        let area = PaintRect::new(
-            run.origin.0,
-            run.origin.1 - run.ascent,
-            run.advance,
-            run.ascent + run.descent,
-        );
-        let chain = clips.chain(page, element, area);
-        active.apply(&mut surface, &clips, &chain);
-        paint_text_run(&mut surface, run, fonts);
-    }
-    active.clear(&mut surface);
 
     surface.pop();
     surface.finish();
@@ -117,6 +83,122 @@ fn paint_page(
     }
     pdf_page.finish();
     Ok(())
+}
+
+fn paint_legacy(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    runs: &[PositionedGlyphRun<'_>],
+    fonts: &mut FontCache,
+) {
+    let clips = ClipMap::new(page);
+    let mut active = ClipStack::default();
+    let dom = page.dom();
+
+    // Keep the existing whole-page rendering when text events cannot map
+    // each source node to exactly one draw step.
+    let mut boxes: Vec<_> = page
+        .fragments()
+        .filter(|fragment| fragment.kind() == FragmentKind::Box)
+        .collect();
+    boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
+    for fragment in boxes {
+        if let Some(style) = page.computed(fragment.node()) {
+            // A box's own overflow clips its content, not its decorations.
+            let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
+            active.apply(surface, &clips, &chain);
+            let text = || text_clip::outlines(dom, fragment.node(), runs);
+            paint_box(
+                surface,
+                fragment.paint_rect(),
+                Slice::of(&fragment),
+                style,
+                text,
+            );
+        }
+    }
+    // Text goes above every block background and border.
+    for run in runs {
+        let element = text_clip::run_element(dom, run);
+        let area = PaintRect::new(
+            run.origin.0,
+            run.origin.1 - run.ascent,
+            run.advance,
+            run.ascent + run.descent,
+        );
+        let chain = clips.chain(page, element, area);
+        active.apply(surface, &clips, &chain);
+        paint_text_run(surface, run, fonts);
+    }
+    active.clear(surface);
+}
+
+fn paint_ordered(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    events: &[PaintEvent<'_>],
+    runs: &[PositionedGlyphRun<'_>],
+    fonts: &mut FontCache,
+) {
+    let clips = ClipMap::new(page);
+    let mut active = ClipStack::default();
+    let dom = page.dom();
+    let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
+    for run in runs {
+        if let RunSource::Text(node) = run.source {
+            by_node.entry(node).or_default().push(run);
+        }
+    }
+    for event in events {
+        match event {
+            PaintEvent::Box(fragment) => {
+                if let Some(style) = page.computed(fragment.node()) {
+                    let chain =
+                        clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
+                    active.apply(surface, &clips, &chain);
+                    let text = || text_clip::outlines(dom, fragment.node(), runs);
+                    paint_box(
+                        surface,
+                        fragment.paint_rect(),
+                        Slice::of(fragment),
+                        style,
+                        text,
+                    );
+                }
+            }
+            PaintEvent::Text(fragment) => {
+                for run in by_node.get(&fragment.node()).into_iter().flatten() {
+                    let element = text_clip::run_element(dom, run);
+                    let area = PaintRect::new(
+                        run.origin.0,
+                        run.origin.1 - run.ascent,
+                        run.advance,
+                        run.ascent + run.descent,
+                    );
+                    let chain = clips.chain(page, element, area);
+                    active.apply(surface, &clips, &chain);
+                    paint_text_run(surface, run, fonts);
+                }
+            }
+            PaintEvent::PushOpacity(alpha) => {
+                // Clips and opacity groups share the surface stack. Close clips
+                // at each group boundary and reapply them on the next draw.
+                active.clear(surface);
+                if let Some(alpha) = NormalizedF32::new(*alpha) {
+                    surface.push_opacity(alpha);
+                }
+            }
+            PaintEvent::PopOpacity => {
+                active.clear(surface);
+                surface.pop();
+            }
+            // Keep the existing rounded and axis-aware clip geometry. Replaced
+            // content still needs consumer data the current API does not expose.
+            PaintEvent::PushClip(_, _) | PaintEvent::PopClip | PaintEvent::Replaced(_) => {}
+            _ => {}
+        }
+    }
+    active.clear(surface);
 }
 
 /// Background and borders of one box fragment (`rect` is its border box).

@@ -998,16 +998,11 @@ fn clip_switches_between_sibling_overflow_boxes() {
          <p style=\"background-color: green\">after</p>"
     ));
     let bounds = clip_bounds(&operations);
-    // Boxes: the first clip, then the second (after popping the first);
-    // text: the first again, then the second.
+    // Each subtree draws its box and text together, then switches to the
+    // second clip after popping the first.
     assert_eq!(
         bounds,
-        [
-            [20.0, 20.0, 280.0, 40.0],
-            [20.0, 40.0, 280.0, 60.0],
-            [20.0, 20.0, 280.0, 40.0],
-            [20.0, 40.0, 280.0, 60.0],
-        ]
+        [[20.0, 20.0, 280.0, 40.0], [20.0, 40.0, 280.0, 60.0],]
     );
     // Every pushed clip is popped: the graphics states balance.
     assert_eq!(count(&operations, "q"), count(&operations, "Q"));
@@ -1505,3 +1500,5 @@ mod metadata_tests;
 mod navigation_tests;
 
 mod bookmark_tests;
+
+mod order_tests;

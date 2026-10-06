@@ -78,3 +78,11 @@ omitted. Empty or missing drawable boxes use the first rendered descendant.
 Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
 counter/string labels, and general display:contents box suppression are not
 implemented in this backend. Aborted layout or callback errors return no PDF.
+
+Raikiri pages whose text nodes each map to one paint event use page paint order
+for boxes and text, with opacity composited as groups. Rounded and axis-aware
+clips retain the existing geometry. Generated content, duplicate or missing
+text events, and unknown run sources use the legacy rendering for the entire
+page, preserving text. Replaced/image content is still unsupported. The
+current pinned API exposes no ellipsis source; existing text-overflow output
+is preserved without claiming ellipsis rendering support.
