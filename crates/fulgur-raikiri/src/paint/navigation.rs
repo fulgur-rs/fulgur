@@ -22,22 +22,35 @@ impl LinkTarget {
     }
 }
 
+fn anchor_target(document: &DocumentLayout, fragment: &str) -> Option<LinkTarget> {
+    let fragment = percent_decode_str(fragment).decode_utf8().ok()?;
+    let anchor = document.anchors().get(&fragment)?;
+    if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
+        return None;
+    }
+    Some(LinkTarget::Internal(XyzDestination::new(
+        anchor.page_index as usize,
+        Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
+    )))
+}
+
 fn target(document: &DocumentLayout, href: &str) -> Option<LinkTarget> {
     if let Some(fragment) = href.strip_prefix('#') {
-        let fragment = percent_decode_str(fragment).decode_utf8().ok()?;
-        let anchor = document.anchors().get(&fragment)?;
-        if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
-            return None;
-        }
-        return Some(LinkTarget::Internal(XyzDestination::new(
-            anchor.page_index as usize,
-            Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
-        )));
+        return anchor_target(document, fragment);
     }
     let uri = document
         .base_url()
         .map_or_else(|| url::Url::parse(href), |base| base.join(href))
         .ok()?;
+    if let (Some(base), Some(fragment)) = (document.base_url(), uri.fragment()) {
+        let mut document_url = base.clone();
+        document_url.set_fragment(None);
+        let mut target_url = uri.clone();
+        target_url.set_fragment(None);
+        if document_url == target_url {
+            return anchor_target(document, fragment);
+        }
+    }
     Some(LinkTarget::External(uri.into()))
 }
 

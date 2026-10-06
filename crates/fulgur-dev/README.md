@@ -63,8 +63,8 @@ PDF/UA requests through Raikiri return an explicit error.
 
 Raikiri PDF links use all quads supplied by the page API. Fragment links use
 rendered anchors (including percent-encoded names and the first duplicate
-anchor); missing targets are omitted. Other links are resolved against the
-document base URL. Destinations and link rectangles convert CSS px to pt,
+anchor); missing targets are omitted. File-name and absolute URL links to the same document use internal
+destinations too; links to other documents resolve against the document base URL. Destinations and link rectangles convert CSS px to pt,
 with the PDF coordinate transform applied once by Krilla.
 
 `--bookmarks` enables heading outlines. Raikiri receives resolved level and

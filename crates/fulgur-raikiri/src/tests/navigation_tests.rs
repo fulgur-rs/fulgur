@@ -143,3 +143,40 @@ fn navigation_missing_anchor_and_empty_quads_are_omitted() {
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     assert!(annotations(&pdf, 1).is_empty());
 }
+
+#[test]
+fn navigation_same_document_url_forms_use_internal_destinations() {
+    let (_dir, path) = input("");
+    let absolute = url::Url::from_file_path(path.canonicalize().unwrap()).unwrap();
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    let html = format!(
+        "<style>@page {{size:300px 200px;margin:0}} body {{margin:0}} a {{display:block;width:40px;height:10px}}</style><a href='{filename}#section%20name'></a><a href='./{filename}#section%20name'></a><a href='{absolute}#section%20name'></a><div id='section name' style='break-before:page;height:20px'></div>"
+    );
+    std::fs::write(&path, html).unwrap();
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    assert_eq!(pdf.get_pages().len(), 2);
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 3);
+    for link in links {
+        let dest = destination(&pdf, link);
+        assert_eq!(dest[0].as_reference().unwrap(), pdf.get_pages()[&2]);
+        assert_eq!(dest[2].as_float().unwrap(), 0.0);
+        assert_eq!(dest[3].as_float().unwrap(), 150.0);
+    }
+}
+
+#[test]
+fn navigation_missing_same_document_anchor_is_omitted() {
+    let (_dir, path) = input("");
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    std::fs::write(&path, format!("{NAV_CSS}<a href='{filename}#missing'></a><a href='{filename}?other=1#target'></a><div id='target'></div>")).unwrap();
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 1);
+    let action = links[0].get(b"A").unwrap().as_dict().unwrap();
+    assert_eq!(action.get(b"S").unwrap().as_name().unwrap(), b"URI");
+    let uri = String::from_utf8_lossy(action.get(b"URI").unwrap().as_str().unwrap());
+    assert!(uri.ends_with("?other=1#target"));
+}
