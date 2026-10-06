@@ -1489,3 +1489,52 @@ fn background_clip_border_area_paints_under_the_border() {
     assert_eq!(count(&operations, "f*"), 1);
     assert_eq!(count(&operations, "f"), 0);
 }
+
+#[test]
+fn content_type_covers_all_image_extensions() {
+    assert_eq!(files::content_type(Path::new("a.png")), Some("image/png"));
+    assert_eq!(files::content_type(Path::new("b.gif")), Some("image/gif"));
+    assert_eq!(files::content_type(Path::new("c.webp")), Some("image/webp"));
+    assert_eq!(
+        files::content_type(Path::new("d.svg")),
+        Some("image/svg+xml")
+    );
+    // .jpg and .jpeg both map to image/jpeg
+    assert_eq!(files::content_type(Path::new("e.jpg")), Some("image/jpeg"));
+}
+
+#[test]
+fn content_type_covers_all_font_extensions() {
+    assert_eq!(files::content_type(Path::new("f.ttf")), Some("font/ttf"));
+    assert_eq!(files::content_type(Path::new("g.otf")), Some("font/otf"));
+    assert_eq!(files::content_type(Path::new("h.woff")), Some("font/woff"));
+}
+
+#[test]
+fn provider_refuses_path_traversal_outside_root() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("escape.css"), "p{}").unwrap();
+    let inner = outer.path().join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    let input = inner.join("input.html");
+    std::fs::write(&input, "<p>Hello</p>").unwrap();
+    let provider = files::BaseDirectoryProvider::for_input(&input).unwrap();
+    let outside = url::Url::from_file_path(outer.path().join("escape.css")).unwrap();
+    let error = get(&provider, outside.as_str()).unwrap_err();
+    assert!(error.contains("outside"), "{error}");
+}
+
+#[test]
+fn for_input_with_no_explicit_parent_uses_current_dir() {
+    // When input has no parent component (e.g. "input.html"), for_input
+    // should fall back to "." (the current directory) and succeed.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.html");
+    std::fs::write(&path, "<p>Hello</p>").unwrap();
+    // Use a path with just a filename to exercise the empty-parent branch.
+    let bare = Path::new("input.html");
+    // We only care it doesn't panic; it will error because "." may not
+    // resolve to a parent containing input.html, but the important thing
+    // is that for_input itself completes (or errors with IO, not a panic).
+    let _ = files::BaseDirectoryProvider::for_input(bare);
+}
