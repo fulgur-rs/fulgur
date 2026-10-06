@@ -1533,8 +1533,6 @@ fn for_input_with_no_explicit_parent_uses_current_dir() {
     std::fs::write(&path, "<p>Hello</p>").unwrap();
     // Use a path with just a filename to exercise the empty-parent branch.
     let bare = Path::new("input.html");
-    // We only care it doesn't panic; it will error because "." may not
-    // resolve to a parent containing input.html, but the important thing
-    // is that for_input itself completes (or errors with IO, not a panic).
-    let _ = files::BaseDirectoryProvider::for_input(bare);
+    // "." (the CWD) is always canonicalisable, so the call must succeed.
+    assert!(files::BaseDirectoryProvider::for_input(bare).is_ok());
 }
