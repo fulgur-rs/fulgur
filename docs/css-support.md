@@ -59,6 +59,54 @@ Not yet supported:
 See PR `#83` and `docs/plans/2026-04-14-box-shadow.md` for implementation
 details.
 
+## Engine-level limitations
+
+These are not fulgur bugs to be fixed in isolation — the layout and cascade
+below fulgur do not implement them. They are recorded here because both
+fail *silently*: the declaration parses, nothing errors, and the output is
+simply wrong in a way that is easy to miss until the document is printed.
+
+### `@media print` is never matched (`fulgur-d3zc`)
+
+`@media print { ... }` and `<link rel="stylesheet" media="print">` do not
+apply. `@media screen` does. `blitz-dom` 0.2.4 hardcodes
+`MediaType::screen()` when it builds the stylist device
+(`document.rs:180`) and exposes no setter, so every media query is
+evaluated against a screen device even though the output is paper.
+
+Feature queries are unaffected: `@media (min-width: …)` and `@supports`
+both evaluate correctly.
+
+Workaround: put print rules in the unconditional part of the stylesheet,
+or behind a feature query, rather than behind `@media print`.
+
+`BaseDocument::set_stylist_device` is public, so swapping the device is the
+natural fix — but building a replacement `Device` needs a
+`Box<dyn FontMetricsProvider>`, and blitz's implementation, its
+`FontContext`, and the `stylo_to_parley` conversions it relies on are all
+private. See the issue for the full analysis; the practical fix is a
+`blitz-dom` upgrade.
+
+### `float` is not implemented (`fulgur-p1r4`)
+
+`float: left` / `float: right` have no layout effect: a floated box is laid
+out in normal flow, text does not wrap around it, and it does not
+contribute to its parent's height. A document rendered with and without the
+declaration is byte-identical.
+
+`blitz-dom` 0.2.4 reads `float` only for damage tracking, and Taffy — which
+does the layout — implements `block`, `flexbox`, `grid` and `leaf`, with no
+float algorithm.
+
+Consequences:
+
+- `display: flow-root` has no observable effect, since float containment is
+  its main job.
+- `float: footnote` (CSS GCPM footnotes) cannot work.
+
+Workaround: use flexbox or grid for side-by-side layout. For a figure with
+text beside it, a two-column grid is the closest equivalent.
+
 ## Layout
 
 ### `overflow` / `overflow-x` / `overflow-y`
