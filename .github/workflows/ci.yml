@@ -60,6 +60,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Test development backend comparison script
+        run: python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -120,7 +122,7 @@ jobs:
         with:
           shared-key: ${{ matrix.cache-key }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
+      - name: Install poppler-utils (for fulgur-wpt and fulgur-dev raster tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - name: Configure mold linker

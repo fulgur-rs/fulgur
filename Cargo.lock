@@ -1231,7 +1231,9 @@ dependencies = [
  "fulgur-blitz",
  "fulgur-core",
  "fulgur-raikiri",
+ "image",
  "lopdf",
+ "skrifa 0.45.1",
  "tempfile",
 ]
 
@@ -1242,6 +1244,7 @@ dependencies = [
  "fulgur-core",
  "krilla",
  "lopdf",
+ "percent-encoding",
  "raikiri-html",
  "raikiri-traits",
  "skrifa 0.45.1",

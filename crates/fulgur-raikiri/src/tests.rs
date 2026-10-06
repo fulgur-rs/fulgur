@@ -96,7 +96,15 @@ fn already_aborted_layout_returns_aborted() {
     let status = layout_file(&path, &Config::default(), config).unwrap();
     assert!(matches!(status, LayoutStatus::Aborted));
     // An aborted layout has nothing to draw.
-    assert!(matches!(draw(status), Err(Error::Layout(_))));
+    assert!(matches!(
+        draw(
+            status,
+            &Config::default(),
+            &bookmarks::BookmarkCollector::default(),
+            &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
+        ),
+        Err(Error::Layout(_))
+    ));
 }
 
 #[test]
@@ -990,16 +998,11 @@ fn clip_switches_between_sibling_overflow_boxes() {
          <p style=\"background-color: green\">after</p>"
     ));
     let bounds = clip_bounds(&operations);
-    // Boxes: the first clip, then the second (after popping the first);
-    // text: the first again, then the second.
+    // Each subtree draws its box and text together, then switches to the
+    // second clip after popping the first.
     assert_eq!(
         bounds,
-        [
-            [20.0, 20.0, 280.0, 40.0],
-            [20.0, 40.0, 280.0, 60.0],
-            [20.0, 20.0, 280.0, 40.0],
-            [20.0, 40.0, 280.0, 60.0],
-        ]
+        [[20.0, 20.0, 280.0, 40.0], [20.0, 40.0, 280.0, 60.0],]
     );
     // Every pushed clip is popped: the graphics states balance.
     assert_eq!(count(&operations, "q"), count(&operations, "Q"));
@@ -1489,3 +1492,13 @@ fn background_clip_border_area_paints_under_the_border() {
     assert_eq!(count(&operations, "f*"), 1);
     assert_eq!(count(&operations, "f"), 0);
 }
+
+mod assets_tests;
+
+mod metadata_tests;
+
+mod navigation_tests;
+
+mod bookmark_tests;
+
+mod order_tests;

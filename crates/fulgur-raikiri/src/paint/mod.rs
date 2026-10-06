@@ -9,6 +9,8 @@
 mod border;
 mod clip;
 mod gradient;
+mod navigation;
+mod order;
 mod shape;
 mod text_clip;
 
@@ -25,22 +27,40 @@ use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
     ComputedVisualBox, CssColor,
 };
-use raikiri_html::{DocumentLayout, FontId, FragmentKind, Page, PaintRect, PositionedGlyphRun};
+use raikiri_html::{
+    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
+    RunSource,
+};
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
 
 /// Draw every page of `document` and return the PDF bytes.
-pub(crate) fn paint_document(document: &DocumentLayout) -> Result<Vec<u8>> {
+pub(crate) fn paint_document(
+    document: &DocumentLayout,
+    config: &fulgur_core::Config,
+    outline: Option<krilla::outline::Outline>,
+    document_url: &url::Url,
+) -> Result<Vec<u8>> {
     let mut pdf = krilla::Document::new();
+    pdf.set_metadata(crate::metadata::build(config)?);
+    if let Some(outline) = outline {
+        pdf.set_outline(outline);
+    }
     let mut fonts = FontCache::default();
     for page in document.pages() {
-        paint_page(&mut pdf, &page, &mut fonts)?;
+        paint_page(&mut pdf, document, &page, &mut fonts, document_url)?;
     }
     pdf.finish()
         .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
 }
 
-fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache) -> Result<()> {
+fn paint_page(
+    pdf: &mut krilla::Document,
+    document: &DocumentLayout,
+    page: &Page<'_>,
+    fonts: &mut FontCache,
+    document_url: &url::Url,
+) -> Result<()> {
     let page_box = page.geometry().page_box;
     let settings = PageSettings::from_wh(page_box.width * PX_TO_PT, page_box.height * PX_TO_PT)
         .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
@@ -48,30 +68,48 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
+    let runs = page.text_runs();
+    let events = page.paint_order();
+    if order::supported(&events, &runs) {
+        paint_ordered(&mut surface, page, &events, &runs, fonts);
+    } else {
+        paint_legacy(&mut surface, page, &runs, fonts);
+    }
+
+    surface.pop();
+    surface.finish();
+    for annotation in navigation::annotations(document, page, document_url)? {
+        pdf_page.add_annotation(annotation);
+    }
+    pdf_page.finish();
+    Ok(())
+}
+
+fn paint_legacy(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    runs: &[PositionedGlyphRun<'_>],
+    fonts: &mut FontCache,
+) {
     let clips = ClipMap::new(page);
     let mut active = ClipStack::default();
     let dom = page.dom();
 
-    // CSS 2.1 Appendix E for normal flow: the backgrounds and borders of all
-    // block boxes in tree order, then the inline content (text) of all of
-    // them, so overflowing text stays above later blocks' backgrounds.
-    // Positioned boxes and other stacking contexts paint in a different order
-    // that the fragments alone do not describe; they are drawn in this
-    // normal-flow order until Raikiri exposes the paint order.
+    // Keep the existing whole-page rendering when text events cannot map
+    // each source node to exactly one draw step.
     let mut boxes: Vec<_> = page
         .fragments()
         .filter(|fragment| fragment.kind() == FragmentKind::Box)
         .collect();
     boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
-    let runs = page.text_runs();
     for fragment in boxes {
         if let Some(style) = page.computed(fragment.node()) {
             // A box's own overflow clips its content, not its decorations.
             let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
-            active.apply(&mut surface, &clips, &chain);
-            let text = || text_clip::outlines(dom, fragment.node(), &runs);
+            active.apply(surface, &clips, &chain);
+            let text = || text_clip::outlines(dom, fragment.node(), runs);
             paint_box(
-                &mut surface,
+                surface,
                 fragment.paint_rect(),
                 Slice::of(&fragment),
                 style,
@@ -80,7 +118,7 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
         }
     }
     // Text goes above every block background and border.
-    for run in &runs {
+    for run in runs {
         let element = text_clip::run_element(dom, run);
         let area = PaintRect::new(
             run.origin.0,
@@ -89,15 +127,78 @@ fn paint_page(pdf: &mut krilla::Document, page: &Page<'_>, fonts: &mut FontCache
             run.ascent + run.descent,
         );
         let chain = clips.chain(page, element, area);
-        active.apply(&mut surface, &clips, &chain);
-        paint_text_run(&mut surface, run, fonts);
+        active.apply(surface, &clips, &chain);
+        paint_text_run(surface, run, fonts);
     }
-    active.clear(&mut surface);
+    active.clear(surface);
+}
 
-    surface.pop();
-    surface.finish();
-    pdf_page.finish();
-    Ok(())
+fn paint_ordered(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    events: &[PaintEvent<'_>],
+    runs: &[PositionedGlyphRun<'_>],
+    fonts: &mut FontCache,
+) {
+    let clips = ClipMap::new(page);
+    let mut active = ClipStack::default();
+    let dom = page.dom();
+    let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
+    for run in runs {
+        if let RunSource::Text(node) = run.source {
+            by_node.entry(node).or_default().push(run);
+        }
+    }
+    for event in events {
+        match event {
+            PaintEvent::Box(fragment) => {
+                if let Some(style) = page.computed(fragment.node()) {
+                    let chain =
+                        clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
+                    active.apply(surface, &clips, &chain);
+                    let text = || text_clip::outlines(dom, fragment.node(), runs);
+                    paint_box(
+                        surface,
+                        fragment.paint_rect(),
+                        Slice::of(fragment),
+                        style,
+                        text,
+                    );
+                }
+            }
+            PaintEvent::Text(fragment) => {
+                for run in by_node.get(&fragment.node()).into_iter().flatten() {
+                    let element = text_clip::run_element(dom, run);
+                    let area = PaintRect::new(
+                        run.origin.0,
+                        run.origin.1 - run.ascent,
+                        run.advance,
+                        run.ascent + run.descent,
+                    );
+                    let chain = clips.chain(page, element, area);
+                    active.apply(surface, &clips, &chain);
+                    paint_text_run(surface, run, fonts);
+                }
+            }
+            PaintEvent::PushOpacity(alpha) => {
+                // Clips and opacity groups share the surface stack. Close clips
+                // at each group boundary and reapply them on the next draw.
+                active.clear(surface);
+                if let Some(alpha) = NormalizedF32::new(*alpha) {
+                    surface.push_opacity(alpha);
+                }
+            }
+            PaintEvent::PopOpacity => {
+                active.clear(surface);
+                surface.pop();
+            }
+            // Keep the existing rounded and axis-aware clip geometry. Replaced
+            // content still needs consumer data the current API does not expose.
+            // Other events have already been rejected by `order::supported`.
+            _ => {}
+        }
+    }
+    active.clear(surface);
 }
 
 /// Background and borders of one box fragment (`rect` is its border box).
