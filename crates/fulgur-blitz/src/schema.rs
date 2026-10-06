@@ -1200,4 +1200,105 @@ mod tests {
             "`author` (absent from data) must not appear in the schema"
         );
     }
+
+    // ── WithBlock multi-target (tuple unpacking) ───────────────────────────────
+
+    /// `{% with (a, b) = (x, y) %}` has two target names (`var_names.len() > 1`).
+    /// The else branch in `collect_from_stmt`/`WithBlock` that inserts all names
+    /// as local (empty-path) variables must fire (Lines 295-297).
+    #[test]
+    fn with_block_tuple_target_variables_are_local_not_top_level() {
+        let schema = extract_schema(
+            "{% with (a, b) = (x, y) %}{{ a }} {{ b }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        // `a` and `b` are local variables introduced by the `with` target;
+        // they must NOT appear as top-level schema properties.
+        assert!(
+            schema["properties"]["a"].is_null(),
+            "`a` is a local `with` target and must not leak"
+        );
+        assert!(
+            schema["properties"]["b"].is_null(),
+            "`b` is a local `with` target and must not leak"
+        );
+    }
+
+    // ── WithBlock multi-target: body still collects its own variables ──────────
+
+    /// A WithBlock with tuple-unpacked targets must still walk the body and
+    /// register any free variables used there (Lines 295-300).
+    #[test]
+    fn with_block_tuple_target_body_variables_are_still_collected() {
+        let schema = extract_schema(
+            "{% with (p, q) = (left, right) %}{{ title }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        // `title` is used in the body as a free variable and must appear.
+        assert_eq!(
+            schema["properties"]["title"]["type"], "string",
+            "`title` used in body must be collected"
+        );
+        // `p` and `q` are local targets — they must not appear.
+        assert!(schema["properties"]["p"].is_null());
+        assert!(schema["properties"]["q"].is_null());
+    }
+
+    // ── PosSplat / KwargSplat call args ───────────────────────────────────────
+
+    /// `{{ func(*args) }}` uses a positional-splat argument (`PosSplat`).
+    /// `collect_from_call_arg` must recurse into the spread expression and
+    /// register `args` as a top-level schema variable (Line 416).
+    #[test]
+    fn call_with_pos_splat_arg_collects_spread_variable() {
+        let schema = extract_schema("{{ func(*args) }}", "test.html").unwrap();
+        // `args` is the spread expression; it must appear in the schema.
+        assert!(
+            !schema["properties"]["args"].is_null(),
+            "`args` from *args splat must be collected"
+        );
+    }
+
+    /// `{{ func(**kwargs) }}` uses a keyword-splat argument (`KwargSplat`).
+    /// `collect_from_call_arg` must recurse into the spread expression and
+    /// register `kwargs` as a top-level schema variable (Line 416 branch).
+    #[test]
+    fn call_with_kwarg_splat_collects_spread_variable() {
+        let schema = extract_schema("{{ func(**kwargs) }}", "test.html").unwrap();
+        assert!(
+            !schema["properties"]["kwargs"].is_null(),
+            "`kwargs` from **kwargs splat must be collected"
+        );
+    }
+
+    // ── resolve_path: Array(String) inner upgraded to Object ──────────────────
+
+    /// When an `Array(String)` entry is followed by attribute access on the same
+    /// variable (e.g. `{{ items[0] }}` then `{{ items[0].name }}`), `resolve_path`
+    /// must upgrade the inner type from String to Object (Lines 487-492).
+    /// The high-level route is: first `items[0]` registers `items` as
+    /// `Array(String)`, then iterating `items` with `.name` access must upgrade
+    /// the inner `String` to `Object`.
+    #[test]
+    fn array_inner_string_upgraded_to_object_when_attr_accessed() {
+        // `{{ items[0] }}` → items: Array(String)
+        // `{% for item in items %}{{ item.name }}{% endfor %}` → inner becomes Object
+        let schema = extract_schema(
+            "{{ items[0] }}{% for item in items %}{{ item.name }}{% endfor %}",
+            "test.html",
+        )
+        .unwrap();
+        let items = &schema["properties"]["items"];
+        assert_eq!(items["type"], "array", "items must be an array");
+        assert_eq!(
+            items["items"]["type"], "object",
+            "inner type must be upgraded from String to Object when attr is accessed"
+        );
+        assert_eq!(
+            items["items"]["properties"]["name"]["type"], "string",
+            "`name` must be a property of the inner object"
+        );
+    }
 }
