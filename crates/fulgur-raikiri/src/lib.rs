@@ -4,25 +4,65 @@
 //! geometry, box backgrounds and borders, and text. No other backend is used
 //! as a fallback.
 
-use fulgur_core::{Config, Error, Result};
+use fulgur_core::{AssetBundle, Config, Error, Result};
 use raikiri_html::{
     LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources, layout,
     parse_html_with_resources,
 };
 use std::path::Path;
 
-/// Read and lay out an HTML file for PDF rendering.
+/// Rendering resources for the Raikiri development backend.
 ///
-/// `config` supplies the page size and margins (see [`page_stylesheet`]).
-/// Stylesheets, `@import`s, and other resources the document references are
-/// read from the local filesystem, limited to the input file's directory.
+/// Fonts supplied by the bundle are registered in order. Image bundles are
+/// rejected because the current consumer paint API cannot draw their content.
+#[derive(Clone, Copy)]
+pub struct RenderOptions<'a> {
+    /// Optional user stylesheets and bundled fonts.
+    pub assets: Option<&'a AssetBundle>,
+    /// Whether host-dependent system font fallback is enabled.
+    pub system_fonts: bool,
+}
+
+impl Default for RenderOptions<'_> {
+    fn default() -> Self {
+        Self {
+            assets: None,
+            system_fonts: true,
+        }
+    }
+}
+
+/// Read, lay out, and paint an HTML file using default rendering resources.
 ///
-/// Returns a configuration error for page geometry that
-/// [`Config::validate`] rejects, an IO or layout error if those stages fail,
-/// or a PDF generation error if the PDF cannot be written.
+/// Page settings act as CSS defaults unless marked explicit in the config.
+/// Local resources are limited to the input file's directory.
+///
+/// # Errors
+/// Returns an error for invalid config, input IO, layout, or PDF generation.
 pub fn render(input: &Path, config: &Config) -> Result<Vec<u8>> {
+    render_with_options(input, config, &RenderOptions::default())
+}
+
+/// Render with additional user stylesheets and bundled fonts.
+///
+/// The same resources remain alive throughout parsing, layout, and painting.
+///
+/// # Errors
+/// Returns an asset error for invalid fonts, image bundles, or disabling system
+/// fonts without a bundled font; other errors match [`render`].
+pub fn render_with_options(
+    input: &Path,
+    config: &Config,
+    options: &RenderOptions<'_>,
+) -> Result<Vec<u8>> {
     config.validate()?;
-    draw(layout_file(input, config, LayoutConfig::default())?)
+    with_layout(
+        input,
+        config,
+        options,
+        LayoutConfig::default(),
+        |status, _resources| draw(status),
+    )
 }
 
 /// Draw a layout result as PDF bytes.
@@ -37,22 +77,49 @@ fn draw(status: LayoutStatus) -> Result<Vec<u8>> {
     paint::paint_document(&document)
 }
 
+#[cfg(test)]
 fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Result<LayoutStatus> {
+    with_layout(
+        input,
+        config,
+        &RenderOptions::default(),
+        layout_config,
+        |status, _resources| Ok(status),
+    )
+}
+
+fn with_layout<T>(
+    input: &Path,
+    config: &Config,
+    options: &RenderOptions<'_>,
+    layout_config: LayoutConfig,
+    consume: impl FnOnce(LayoutStatus, &RenderResources<'_>) -> Result<T>,
+) -> Result<T> {
+    let fonts = assets::fonts(options)?;
     let html = std::fs::read(input)?;
     let files = files::BaseDirectoryProvider::for_input(input)?;
-    let resources = RenderResources::new()
+    let mut resources = RenderResources::new()
         .stylesheet(page_stylesheet(config))
         .network_provider(&files)
         .base_url(files.document_url(input)?);
+    if let Some(bundle) = options.assets {
+        for css in &bundle.css {
+            resources = resources.stylesheet(css.clone());
+        }
+    }
+    if let Some(fonts) = fonts {
+        resources = resources.fonts(fonts);
+    }
     let document = parse_html_with_resources(html.as_slice(), &resources)
         .map_err(|error| Error::Layout(error.to_string()))?;
-    layout(
+    let status = layout(
         &document,
         PageDefaults::default(),
         layout_config,
         LayoutOptions::new().resources(&resources),
     )
-    .map_err(|error| Error::Layout(error.to_string()))
+    .map_err(|error| Error::Layout(error.to_string()))?;
+    consume(status, &resources)
 }
 
 /// The page size and margins of `config` as a user-origin `@page` rule.
@@ -92,3 +159,5 @@ mod tests;
 
 mod files;
 mod paint;
+
+mod assets;

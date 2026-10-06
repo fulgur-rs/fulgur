@@ -1489,3 +1489,5 @@ fn background_clip_border_area_paints_under_the_border() {
     assert_eq!(count(&operations, "f*"), 1);
     assert_eq!(count(&operations, "f"), 0);
 }
+
+mod assets_tests;

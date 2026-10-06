@@ -1232,6 +1232,7 @@ dependencies = [
  "fulgur-core",
  "fulgur-raikiri",
  "lopdf",
+ "skrifa 0.45.1",
  "tempfile",
 ]
 

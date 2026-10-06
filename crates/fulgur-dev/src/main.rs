@@ -51,9 +51,18 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let config = args.config();
             config.validate()?;
+            let assets = args.assets()?;
+            let system_fonts = args.system_fonts();
             let bytes = match engine {
-                EngineChoice::Blitz => blitz::render(&input, &config, None, true),
-                EngineChoice::Raikiri => fulgur_raikiri::render(&input, &config),
+                EngineChoice::Blitz => blitz::render(&input, &config, Some(&assets), system_fonts),
+                EngineChoice::Raikiri => fulgur_raikiri::render_with_options(
+                    &input,
+                    &config,
+                    &fulgur_raikiri::RenderOptions {
+                        assets: Some(&assets),
+                        system_fonts,
+                    },
+                ),
             }?;
             std::fs::write(output, bytes)?;
             Ok(())

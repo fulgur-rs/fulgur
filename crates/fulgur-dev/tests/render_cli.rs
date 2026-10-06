@@ -338,3 +338,90 @@ fn dev_config_landscape_rotates_explicit_size() {
         assert_eq!(media_box(&load_pdf(&output), 1), [0.0, 0.0, 300.0, 200.0]);
     }
 }
+
+#[test]
+fn dev_assets_css_and_fonts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    let css = dir.path().join("page.css");
+    std::fs::write(&input, "<p>Hello bundled font</p>").unwrap();
+    std::fs::write(
+        &css,
+        "@page {size:250pt 350pt; margin:0} body {font-family:'Noto Sans'}",
+    )
+    .unwrap();
+    for engine in ["blitz", "raikiri"] {
+        for font in [
+            "../fulgur-ruby/spec/fixtures/noto_sans.ttf",
+            "../fulgur-blitz/tests/fixtures/fonts/NotoSans-Regular.woff2",
+        ] {
+            let font = Path::new(env!("CARGO_MANIFEST_DIR")).join(font);
+            let family = if font.extension() == Some(OsStr::new("ttf")) {
+                "Noto Sans Mono"
+            } else {
+                "Noto Sans"
+            };
+            std::fs::write(
+                &css,
+                format!("@page {{size:250pt 350pt; margin:0}} body {{font-family:'{family}'}}"),
+            )
+            .unwrap();
+            let cwd = tempfile::tempdir().unwrap();
+            let result = run_with_args(
+                &input,
+                &output,
+                Some(engine),
+                cwd.path(),
+                &[
+                    OsStr::new("--css"),
+                    css.as_os_str(),
+                    OsStr::new("--font"),
+                    font.as_os_str(),
+                    OsStr::new("--no-system-fonts"),
+                ],
+            );
+            assert!(
+                result.status.success(),
+                "{engine}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let pdf = load_pdf(&output);
+            assert_eq!(media_box(&pdf, 1), [0.0, 0.0, 250.0, 350.0]);
+            let text = pdf.extract_text(&[1]).unwrap();
+            assert!(
+                text.contains("Hello bundled font"),
+                "{engine}, {font:?}: {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dev_assets_invalid_font_does_not_write_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    let font = dir.path().join("bad.ttf");
+    std::fs::write(&input, HTML).unwrap();
+    std::fs::write(&font, b"not a font").unwrap();
+    for engine in ["blitz", "raikiri"] {
+        for flag in ["--font", "--css"] {
+            std::fs::write(&output, b"keep me").unwrap();
+            let asset = if flag == "--css" {
+                dir.path().join("missing.css")
+            } else {
+                font.clone()
+            };
+            let result = run_with_args(
+                &input,
+                &output,
+                Some(engine),
+                dir.path(),
+                &[OsStr::new(flag), asset.as_os_str()],
+            );
+            assert!(!result.status.success());
+            assert_eq!(std::fs::read(&output).unwrap(), b"keep me");
+        }
+    }
+}

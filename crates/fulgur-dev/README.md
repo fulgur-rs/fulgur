@@ -35,3 +35,17 @@ shorthand order. Explicit settings override author page rules; omitted
 settings preserve CSS priority. Invalid geometry fails before writing output.
 `--landscape` requires `--size`; orientation-only CSS and landscape-only
 overrides remain outside the current Raikiri API support.
+
+Additional CSS and fonts can be supplied in registration order:
+
+```sh
+cargo run -p fulgur-dev -- render input.html --engine raikiri --css print.css --font NotoSans-Regular.woff2 --no-system-fonts -o output.pdf
+```
+
+`--css` and `--font` are repeatable. Core asset loading enforces byte limits
+and decodes WOFF2; the development CLI rejects invalid font files before
+rendering. Font family names come from the font, not the file name.
+`--no-system-fonts` requires a bundled font. Raikiri registers bundle CSS as
+user stylesheets based on the input document URL; a CSS argument's file path
+is not retained as stylesheet provenance. Linked stylesheets resolve imports
+from their own URLs. Image bundles are unsupported by the Raikiri painter.

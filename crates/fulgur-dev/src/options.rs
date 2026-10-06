@@ -1,5 +1,6 @@
 use clap::Args;
-use fulgur_core::{Config, Margin, PageSize};
+use fulgur_core::{AssetBundle, Config, Error, Margin, PageSize, Result as CoreResult};
+use std::path::PathBuf;
 
 #[derive(Args)]
 pub(super) struct RenderArgs {
@@ -12,9 +13,40 @@ pub(super) struct RenderArgs {
     /// Rotate an explicitly supplied page size.
     #[arg(long, requires = "size")]
     landscape: bool,
+    /// Additional user stylesheet, repeatable.
+    #[arg(long)]
+    css: Vec<PathBuf>,
+    /// Bundled font file, repeatable (TTF/OTF/TTC/WOFF2).
+    #[arg(long)]
+    font: Vec<PathBuf>,
+    /// Disable system fonts; requires at least one bundled font.
+    #[arg(long, requires = "font")]
+    no_system_fonts: bool,
 }
 
 impl RenderArgs {
+    pub(super) fn assets(&self) -> CoreResult<AssetBundle> {
+        let mut bundle = AssetBundle::new();
+        for path in &self.css {
+            bundle.add_css_file(path)?;
+        }
+        for path in &self.font {
+            bundle.add_font_file(path)?;
+        }
+        for data in &bundle.fonts {
+            let file = skrifa::raw::FileRef::new(data)
+                .map_err(|error| Error::Asset(format!("invalid bundled font: {error}")))?;
+            for font in file.fonts() {
+                font.map_err(|error| Error::Asset(format!("invalid bundled font face: {error}")))?;
+            }
+        }
+        Ok(bundle)
+    }
+
+    pub(super) fn system_fonts(&self) -> bool {
+        !self.no_system_fonts
+    }
+
     pub(super) fn config(&self) -> Config {
         let mut builder = Config::builder();
         if let Some(size) = self.size {
