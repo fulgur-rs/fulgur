@@ -46,3 +46,13 @@ rendered anchors (including percent-encoded names and the first duplicate
 anchor); missing targets are omitted. Other links are resolved against the
 document base URL. Destinations and link rectangles convert CSS px to pt,
 with the PDF coordinate transform applied once by Krilla.
+
+`--bookmarks` enables heading outlines. Raikiri receives resolved level and
+label values through render-local consumer callbacks, then builds destinations
+and hierarchy only after layout completes. Author CSS overrides the heading
+defaults; supported labels are literal strings, `attr(...)`, and
+`content(text)`. Invalid levels, empty labels, and non-rendered headings are
+omitted. Empty or missing drawable boxes use the first rendered descendant.
+Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
+counter/string labels, and general display:contents box suppression are not
+implemented in this backend. Aborted layout or callback errors return no PDF.

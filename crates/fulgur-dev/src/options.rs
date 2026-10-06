@@ -46,6 +46,9 @@ pub(super) struct RenderArgs {
     /// Creation date as YYYY, YYYY-MM, YYYY-MM-DD, or a full timestamp.
     #[arg(long)]
     creation_date: Option<String>,
+    /// Generate PDF bookmarks from headings and supported bookmark CSS.
+    #[arg(long)]
+    bookmarks: bool,
 }
 
 impl RenderArgs {
@@ -103,7 +106,7 @@ impl RenderArgs {
         builder = builder
             .authors(self.author.iter())
             .keywords(self.keyword.iter());
-        builder.build()
+        builder.bookmarks(self.bookmarks).build()
     }
 }
 

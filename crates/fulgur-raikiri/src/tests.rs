@@ -97,7 +97,11 @@ fn already_aborted_layout_returns_aborted() {
     assert!(matches!(status, LayoutStatus::Aborted));
     // An aborted layout has nothing to draw.
     assert!(matches!(
-        draw(status, &Config::default()),
+        draw(
+            status,
+            &Config::default(),
+            &bookmarks::BookmarkCollector::default()
+        ),
         Err(Error::Layout(_))
     ));
 }
@@ -1498,3 +1502,5 @@ mod assets_tests;
 mod metadata_tests;
 
 mod navigation_tests;
+
+mod bookmark_tests;

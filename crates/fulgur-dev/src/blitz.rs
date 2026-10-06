@@ -48,7 +48,7 @@ pub(super) fn render(
     builder = builder
         .authors(config.authors.iter())
         .keywords(config.keywords.iter());
-    builder.build().render(&html)
+    builder.bookmarks(config.bookmarks).build().render(&html)
 }
 
 #[cfg(test)]

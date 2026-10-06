@@ -490,3 +490,29 @@ fn dev_metadata_round_trip() {
         );
     }
 }
+
+#[test]
+fn dev_bookmark_opt_in_creates_outline() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, "<h1>Heading</h1>").unwrap();
+    for engine in ["blitz", "raikiri"] {
+        let result = run_with_args(
+            &input,
+            &output,
+            Some(engine),
+            dir.path(),
+            &[OsStr::new("--bookmarks")],
+        );
+        assert!(
+            result.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            load_pdf(&output).catalog().unwrap().has(b"Outlines"),
+            "{engine}"
+        );
+    }
+}

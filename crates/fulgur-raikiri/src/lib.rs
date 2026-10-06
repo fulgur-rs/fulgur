@@ -62,12 +62,16 @@ pub fn render_with_options(
         config,
         options,
         LayoutConfig::default(),
-        |status, _resources| draw(status, config),
+        |status, _resources, collector| draw(status, config, collector),
     )
 }
 
 /// Draw a layout result as PDF bytes.
-fn draw(status: LayoutStatus, config: &Config) -> Result<Vec<u8>> {
+fn draw(
+    status: LayoutStatus,
+    config: &Config,
+    collector: &bookmarks::BookmarkCollector,
+) -> Result<Vec<u8>> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
     let LayoutStatus::Completed(document) = status else {
@@ -75,7 +79,10 @@ fn draw(status: LayoutStatus, config: &Config) -> Result<Vec<u8>> {
             "Raikiri layout was aborted or did not complete".into(),
         ));
     };
-    paint::paint_document(&document, config, None)
+    let outline = config
+        .bookmarks
+        .then(|| bookmarks::outline(&document, collector));
+    paint::paint_document(&document, config, outline)
 }
 
 #[cfg(test)]
@@ -85,7 +92,7 @@ fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Re
         config,
         &RenderOptions::default(),
         layout_config,
-        |status, _resources| Ok(status),
+        |status, _resources, _collector| Ok(status),
     )
 }
 
@@ -94,7 +101,7 @@ fn with_layout<T>(
     config: &Config,
     options: &RenderOptions<'_>,
     layout_config: LayoutConfig,
-    consume: impl FnOnce(LayoutStatus, &RenderResources<'_>) -> Result<T>,
+    consume: impl FnOnce(LayoutStatus, &RenderResources<'_>, &bookmarks::BookmarkCollector) -> Result<T>,
 ) -> Result<T> {
     let fonts = assets::fonts(options)?;
     let html = std::fs::read(input)?;
@@ -103,6 +110,9 @@ fn with_layout<T>(
         .stylesheet(page_stylesheet(config))
         .network_provider(&files)
         .base_url(files.document_url(input)?);
+    if config.bookmarks {
+        resources = resources.stylesheet(bookmarks::heading_stylesheet());
+    }
     if let Some(bundle) = options.assets {
         for css in &bundle.css {
             resources = resources.stylesheet(css.clone());
@@ -113,14 +123,24 @@ fn with_layout<T>(
     }
     let document = parse_html_with_resources(html.as_slice(), &resources)
         .map_err(|error| Error::Layout(error.to_string()))?;
+    let registrations = if config.bookmarks {
+        bookmarks::registrations()
+    } else {
+        Vec::new()
+    };
+    let mut collector = bookmarks::BookmarkCollector::default();
+    let mut layout_options = LayoutOptions::new().resources(&resources);
+    if config.bookmarks {
+        layout_options = layout_options.consumer_properties(&registrations, &mut collector);
+    }
     let status = layout(
         &document,
         PageDefaults::default(),
         layout_config,
-        LayoutOptions::new().resources(&resources),
+        layout_options,
     )
     .map_err(|error| Error::Layout(error.to_string()))?;
-    consume(status, &resources)
+    consume(status, &resources, &collector)
 }
 
 /// The page size and margins of `config` as a user-origin `@page` rule.
@@ -164,3 +184,5 @@ mod paint;
 mod assets;
 
 mod metadata;
+
+mod bookmarks;
