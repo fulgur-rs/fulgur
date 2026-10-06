@@ -194,7 +194,7 @@ fn paint_ordered(
             }
             // Keep the existing rounded and axis-aware clip geometry. Replaced
             // content still needs consumer data the current API does not expose.
-            PaintEvent::PushClip(_, _) | PaintEvent::PopClip | PaintEvent::Replaced(_) => {}
+            // Other events have already been rejected by `order::supported`.
             _ => {}
         }
     }

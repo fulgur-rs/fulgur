@@ -60,3 +60,19 @@ fn generated_run_uses_legacy_page() {
     runs[0].source = RunSource::Generated(node, GeneratedKind::Before);
     assert!(!supported(&page.paint_order(), &runs));
 }
+
+#[test]
+fn invalid_opacity_is_rejected_before_surface_stack_changes() {
+    for alpha in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        assert!(!supported(
+            &[PaintEvent::PushOpacity(alpha), PaintEvent::PopOpacity],
+            &[]
+        ));
+    }
+    for alpha in [0.0, 1.0] {
+        assert!(supported(
+            &[PaintEvent::PushOpacity(alpha), PaintEvent::PopOpacity],
+            &[]
+        ));
+    }
+}
