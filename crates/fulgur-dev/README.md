@@ -86,3 +86,56 @@ text events, and unknown run sources use the legacy rendering for the entire
 page, preserving text. Replaced/image content is still unsupported. The
 current pinned API exposes no ellipsis source; existing text-overflow output
 is preserved without claiming ellipsis rendering support.
+
+
+For pages whose events cover all ordinary text runs, Raikiri follows
+`Page::paint_order()` and composites opacity groups. It keeps the existing
+rounded and per-axis overflow geometry. Pages with generated text, repeated
+text events, or missing run events use the previous painter for the whole page
+to preserve their text. The pinned API has no ellipsis source variant; current
+`text-overflow:ellipsis` output remains at its existing baseline. Replaced
+content, SVG, background images, margin boxes, and generated-content ordering
+remain outside this development backend's supported API.
+
+## Development validation
+
+| Capability | Validation |
+| --- | --- |
+| Page settings and CSS priority | CLI/PDF MediaBox assertions |
+| Bundle CSS, TTF/WOFF2, fixed fonts | CLI and resource tests |
+| Metadata, links, anchors, heading outlines | Parsed PDF values and destinations |
+| Paint order, group opacity, rounded/axis clips | PDF operations and fixed-color Linux raster assertions |
+| Fixed-font/date reproducibility | Three separate CLI runs with identical PDF bytes |
+
+Linux tests require Poppler's `pdftocairo`; CI installs `poppler-utils` and
+runs these tests through the workspace test suite. They fail if the rasterizer
+is missing. Run the focused checks with:
+
+```sh
+cargo test -p fulgur-dev --test paint_order_raster --test determinism
+python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
+```
+
+The comparison tool writes development PDFs, PPMs, and `comparison.json` only
+to the selected output directory. It records fixture/font/binary hashes,
+revision, rasterizer versions, page counts, extracted text, per-page RGB
+pixel differences, and repeated-run PDF hashes. Backend differences are
+observations; the correctness assertions above supply independent expectations.
+Production VRT goldens are not updated.
+
+```sh
+cargo build -p fulgur-dev
+python3 scripts/compare-raikiri-dev.py \
+  --binary target/debug/fulgur-dev \
+  --font crates/fulgur-ruby/spec/fixtures/noto_sans.ttf \
+  --output-dir "$HOME/tmp/fulgur-dev-comparison" \
+  tests/fixtures/raikiri-dev/*.html
+```
+
+For same-condition performance measurements, pass `--measure --runs 3` and
+`tests/fixtures/raikiri-dev/long-document.html`. This requires GNU
+`/usr/bin/time -v` and records elapsed seconds and maximum RSS in KiB for each
+engine/run. Compare the same build profile and revision; the debug command
+above is a development baseline, not a release performance claim. The bundled
+TTF's family name is `Noto Sans Mono`, as used by these fixtures. Record any
+measurement conclusions before removing the temporary output directory.

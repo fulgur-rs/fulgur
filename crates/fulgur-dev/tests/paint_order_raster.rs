@@ -64,3 +64,29 @@ fn ordered_siblings_follow_z_index() {
     ));
     assert_color(&image, 30, 30, [0, 0, 255, 255]);
 }
+
+#[test]
+fn positioned_background_covers_prior_text() {
+    let image = raster(
+        "<style>@page {size:200px 150px;margin:0} body {margin:0;background:white} p {margin:0;font-size:30px}</style><p>MMMM</p><div style='position:absolute;left:0;top:0;width:100px;height:50px;background:blue'></div>",
+    );
+    for x in [5, 15, 30, 50, 80] {
+        for y in [5, 15, 25, 35, 45] {
+            assert_color(&image, x, y, [0, 0, 255, 255]);
+        }
+    }
+}
+
+#[test]
+fn rounded_and_axis_clips_keep_inside_and_outside_colors() {
+    let image = raster(include_str!(
+        "../../../tests/fixtures/raikiri-dev/clips.html"
+    ));
+    assert_color(&image, 30, 30, [255, 0, 0, 255]);
+    assert_color(&image, 10, 10, [255, 255, 255, 255]);
+    assert_color(&image, 65, 30, [255, 255, 255, 255]);
+    assert_color(&image, 30, 65, [255, 255, 255, 255]);
+    assert_color(&image, 120, 30, [0, 0, 255, 255]);
+    assert_color(&image, 120, 70, [0, 0, 255, 255]);
+    assert_color(&image, 155, 30, [255, 255, 255, 255]);
+}
