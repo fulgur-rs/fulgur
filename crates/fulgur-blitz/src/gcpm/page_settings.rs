@@ -301,7 +301,7 @@ pub fn resolve_page_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, PageSize};
+    use crate::config::{Config, Margin, PageSize};
     use crate::gcpm::{PageSettingsRule, PageSizeDecl, PartialMargin};
 
     /// `bound_keyword` has to shorten a pathologically long keyword using
@@ -706,6 +706,140 @@ mod tests {
         assert!(
             (m4.top - 22.0).abs() < 0.01,
             "page 4 should be :right in RTL"
+        );
+    }
+
+    // --- Branches not covered by the tests above ---
+
+    /// `selector_matches` has a `_ => false` catch-all arm for selectors this
+    /// module does not recognise. Every selector used in the tests above is one
+    /// of `:first`, `:left`, or `:right`, so the arm was previously unreachable
+    /// from any test. An unrecognised selector must silently return `false` so
+    /// the rule is treated as never matching.
+    #[test]
+    fn selector_matches_unrecognised_selector_returns_false() {
+        assert!(!selector_matches(":nth-child(2)", 2, false));
+        assert!(!selector_matches("", 1, false));
+        assert!(!selector_matches(":blank", 1, false));
+        assert!(!selector_matches(":last", 5, false));
+    }
+
+    /// When `config.overrides.margin` is `true` (set via
+    /// `Config::builder().margin()`), the early-return branch in
+    /// `resolve_page_settings` returns `config.margin` directly without
+    /// applying any CSS `@page` margin rules. No existing test set this flag.
+    #[test]
+    fn resolve_page_settings_cli_margin_override_ignores_css_rules() {
+        let config = Config::builder().margin(Margin::uniform(99.0)).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: None,
+            margin: PartialMargin::from_uniform(0.0),
+        }];
+        let (_, m, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (m.top - 99.0).abs() < 0.01,
+            "CLI margin must override CSS (top = {})",
+            m.top
+        );
+        assert!((m.bottom - 99.0).abs() < 0.01);
+        assert!((m.left - 99.0).abs() < 0.01);
+        assert!((m.right - 99.0).abs() < 0.01);
+    }
+
+    /// `PageSizeDecl::Auto` falls through to the `Some(PageSizeDecl::Auto) | None`
+    /// match arm in `resolve_page_settings` and must return `config.page_size`.
+    /// Previous tests only exercised the `None` path (no CSS rule at all),
+    /// leaving the `Auto` variant uncovered.
+    #[test]
+    fn resolve_page_settings_auto_page_size_decl_uses_config_size() {
+        let config = Config::default(); // A4
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::Auto),
+            margin: PartialMargin::default(),
+        }];
+        let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size.width - PageSize::A4.width).abs() < 0.01,
+            "PageSizeDecl::Auto must use config page size (width = {})",
+            size.width
+        );
+        assert!((size.height - PageSize::A4.height).abs() < 0.01);
+        assert!(
+            !landscape,
+            "landscape must default to config.landscape (false)"
+        );
+    }
+
+    /// `PageSizeDecl::KeywordWithOrientation("auto", is_landscape)` enters
+    /// the `name == "auto"` branch and must use `config.page_size` for
+    /// dimensions while honoring the CSS orientation. No existing test covered
+    /// the `"auto"` size-name inside `KeywordWithOrientation`.
+    #[test]
+    fn resolve_page_settings_keyword_orientation_auto_name_uses_config_page_size() {
+        let config = Config::default(); // A4, portrait, no overrides
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
+            margin: PartialMargin::default(),
+        }];
+        let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size.width - PageSize::A4.width).abs() < 0.01,
+            "auto keyword must preserve config page width"
+        );
+        assert!(
+            (size.height - PageSize::A4.height).abs() < 0.01,
+            "auto keyword must preserve config page height"
+        );
+        assert!(
+            landscape,
+            "CSS 'auto landscape' must yield landscape when no CLI landscape override"
+        );
+    }
+
+    /// When `config.overrides.landscape` is `true` (via
+    /// `Config::builder().landscape()`), the `KeywordWithOrientation` branch
+    /// must use `config.landscape` rather than the CSS-declared orientation.
+    /// No existing test set `overrides.landscape` without also setting
+    /// `overrides.page_size` (which would have taken the first branch and
+    /// skipped `KeywordWithOrientation` entirely).
+    #[test]
+    fn resolve_page_settings_keyword_orientation_cli_landscape_overrides_css() {
+        let config = Config::builder().landscape(true).build();
+        // CSS says portrait — CLI flag says landscape.
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), false)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            landscape,
+            "--landscape CLI flag must override CSS portrait in KeywordWithOrientation"
+        );
+    }
+
+    /// `PageSizeDecl::Custom` does not carry an explicit orientation, so the
+    /// `ls` field in its match arm defaults to `false` (portrait) unless
+    /// `config.overrides.landscape` is `true`, in which case `config.landscape`
+    /// is used. No existing test exercised the `overrides.landscape = true` path
+    /// inside the `Custom` arm.
+    #[test]
+    fn resolve_page_settings_custom_size_cli_landscape_overrides_implicit_portrait() {
+        let config = Config::builder().landscape(true).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::Custom(300.0, 500.0)),
+            margin: PartialMargin::default(),
+        }];
+        let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!((size.width - 300.0).abs() < 0.01);
+        assert!((size.height - 500.0).abs() < 0.01);
+        assert!(
+            landscape,
+            "--landscape must override the Custom size's implicit portrait orientation"
         );
     }
 }
