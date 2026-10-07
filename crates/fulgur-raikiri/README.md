@@ -66,7 +66,8 @@ pinned API exposes ellipsis runs and preserves the visible truncated text.
 Generated text and ellipses have no decoration segments in this API version.
 
 Used text decorations come directly from Raikiri's glyph runs, including
-ancestor propagation, line endpoints, color, thickness, and pattern origin.
+ancestor propagation, line endpoints, color, thickness, and the unsplit pattern
+extent. Insets apply before font and color run slicing.
 Underline and overline paint before glyphs, and line-through paints after
 them. Solid, double, dotted, dashed, and wavy styles retain their pattern
 phase across font and color run boundaries. Decorations share the text's

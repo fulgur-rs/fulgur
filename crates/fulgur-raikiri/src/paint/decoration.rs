@@ -26,15 +26,18 @@ pub(super) fn paint(surface: &mut Surface<'_>, lines: &[DecorationLine], phase: 
             line.y,
             line.thickness,
             line.pattern_origin_x,
+            line.pattern_end_x,
         ]
         .into_iter()
         .all(f32::is_finite)
             || line.x_end <= line.x_start
             || line.thickness <= 0.0
+            || line.pattern_end_x <= line.pattern_origin_x
         {
             continue;
         }
         let t = line.thickness;
+        let pattern_span = line.pattern_end_x - line.pattern_origin_x;
         match line.style {
             DecorationStyle::Double => {
                 let band = (t / 3.0).max(0.5);
@@ -45,7 +48,7 @@ pub(super) fn paint(surface: &mut Surface<'_>, lines: &[DecorationLine], phase: 
                 let dotted = line.style == DecorationStyle::Dotted;
                 let width = if dotted { t.max(1.0) } else { t };
                 let (array, period, origin) = if dotted {
-                    let period = width * 2.0;
+                    let period = (width * 2.0).max(pattern_span / MAX_WAVES as f32);
                     (
                         vec![0.0, period],
                         period,
@@ -54,11 +57,24 @@ pub(super) fn paint(surface: &mut Surface<'_>, lines: &[DecorationLine], phase: 
                 } else {
                     let dash = (t * 3.0).max(2.0);
                     let gap = (t * 2.0).max(2.0);
+                    let scale = (pattern_span / (MAX_WAVES as f32 * (dash + gap))).max(1.0);
+                    let (dash, gap) = (dash * scale, gap * scale);
                     (vec![dash, gap], dash + gap, line.pattern_origin_x)
                 };
+                // Include neighboring dot centers before clipping the round caps.
+                let path_start = if dotted {
+                    origin + ((line.x_start - width * 0.5 - origin) / period).floor() * period
+                } else {
+                    line.x_start
+                };
+                let path_end = if dotted {
+                    line.x_end + width * 0.5
+                } else {
+                    line.x_end
+                };
                 let mut path = PathBuilder::new();
-                path.move_to(line.x_start, line.y);
-                path.line_to(line.x_end, line.y);
+                path.move_to(path_start, line.y);
+                path.line_to(path_end, line.y);
                 if let Some(path) = path.finish() {
                     surface.set_fill(None);
                     let color = fill(line.color);
@@ -73,7 +89,11 @@ pub(super) fn paint(surface: &mut Surface<'_>, lines: &[DecorationLine], phase: 
                         },
                         dash: Some(StrokeDash {
                             array,
-                            offset: (line.x_start - origin).rem_euclid(period),
+                            offset: if dotted {
+                                0.0
+                            } else {
+                                (path_start - origin).rem_euclid(period)
+                            },
                         }),
                         ..Default::default()
                     }));
@@ -89,7 +109,7 @@ pub(super) fn paint(surface: &mut Surface<'_>, lines: &[DecorationLine], phase: 
                 }
             }
             DecorationStyle::Wavy => {
-                let span = line.x_end - line.pattern_origin_x;
+                let span = pattern_span;
                 let half_wave = ((t * 4.0).max(4.0) * 0.5).max(span / MAX_WAVES as f32);
                 let amplitude = (t * 1.5).max(0.75);
                 let mut index = ((line.x_start - line.pattern_origin_x) / half_wave).floor();

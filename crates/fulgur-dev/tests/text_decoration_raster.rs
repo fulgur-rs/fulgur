@@ -182,3 +182,91 @@ fn line_through_is_above_glyphs() {
         "line-through does not cover glyph ink"
     );
 }
+
+#[test]
+fn dotted_caps_survive_a_split_inside_a_dot() {
+    let css =
+        ".line {font-size:96px;line-height:120px;color:transparent;text-decoration-style:dotted}";
+    let (whole, _) = raster("<p class='line'>MMMMMM</p>", css);
+    let (split, _) = raster(
+        "<p class='line'>MMM<span style='color:rgba(0,0,255,0)'>MMM</span></p>",
+        css,
+    );
+    assert!(whole.pixels().any(red));
+    for (x, y, p) in whole.enumerate_pixels() {
+        assert_eq!(
+            red(p),
+            red(split.get_pixel(x, y)),
+            "dotted split changes ({x},{y})"
+        );
+    }
+}
+
+#[test]
+fn underlines_stay_below_neighboring_run_glyphs() {
+    for generated in ["", "p::before {content:'X'}"] {
+        let css = format!(
+            ".line {{font-size:64px;line-height:120px;letter-spacing:-5px;text-underline-offset:-30px}} {generated}"
+        );
+        let (whole, _) = raster("<p class='line'>MMMMMM</p>", &css);
+        let (split, _) = raster(
+            "<p class='line'>MMM<span style='color:rgb(1,0,0)'>MMM</span></p>",
+            &css,
+        );
+        assert!(whole.pixels().any(red));
+        for (x, y, p) in whole.enumerate_pixels() {
+            assert_eq!(
+                red(p),
+                red(split.get_pixel(x, y)),
+                "underline phase changes ({x},{y}) with {generated}"
+            );
+        }
+    }
+}
+
+#[test]
+fn long_clipped_lines_keep_one_pattern_budget_after_splitting() {
+    let text = "M".repeat(1000);
+    let split_text = format!(
+        "{}<span style='color:rgba(0,0,255,0)'>{}</span>",
+        "M".repeat(500),
+        "M".repeat(500)
+    );
+    for style in ["dotted", "dashed", "wavy"] {
+        let css = format!(
+            ".line {{color:transparent;width:250px;white-space:nowrap;overflow:hidden;text-decoration-style:{style}}}"
+        );
+        let (whole, _) = raster(&format!("<p class='line'>{text}</p>"), &css);
+        let (split, _) = raster(&format!("<p class='line'>{split_text}</p>"), &css);
+        assert!(whole.pixels().any(red));
+        let changed = whole
+            .pixels()
+            .zip(split.pixels())
+            .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 8))
+            .count();
+        assert!(
+            changed <= 8,
+            "{style}: {changed} visible pixels change when an offscreen run boundary moves"
+        );
+    }
+}
+
+#[test]
+fn insets_do_not_open_gaps_at_color_run_boundaries() {
+    for insets in ["4px", "-4px -6px"] {
+        let css = format!(".line {{color:transparent;text-decoration-inset:{insets}}}");
+        let (whole, _) = raster("<p class='line'>MMMMMM</p>", &css);
+        let (split, _) = raster(
+            "<p class='line'>MM<span style='color:rgba(0,0,255,0)'>MM</span>MM</p>",
+            &css,
+        );
+        assert!(whole.pixels().any(red));
+        for (x, y, p) in whole.enumerate_pixels() {
+            assert_eq!(
+                red(p),
+                red(split.get_pixel(x, y)),
+                "inset {insets} opens a gap at ({x},{y})"
+            );
+        }
+    }
+}
