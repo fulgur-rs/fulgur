@@ -815,7 +815,11 @@ mod tests {
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
         assert!(
             (size.width - 566.929).abs() < 0.01,
-            "custom size dimensions should be preserved"
+            "custom size width should be preserved"
+        );
+        assert!(
+            (size.height - 850.394).abs() < 0.01,
+            "custom size height should be preserved"
         );
         assert!(
             landscape,
