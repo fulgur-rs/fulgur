@@ -5,7 +5,7 @@ Unpublished Raikiri backend for Fulgur development.
 The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, and text. It does not fall back to Blitz.
+backgrounds and borders, text, and text decorations. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
@@ -57,13 +57,27 @@ Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
 counter/string labels, and general display:contents box suppression are not
 implemented in this backend. Aborted layout or callback errors return no PDF.
 
-Raikiri pages whose text nodes each map to one paint event use page paint order
-for boxes and text, with opacity composited as groups. Rounded and axis-aware
-clips retain the existing geometry. Generated content, duplicate or missing
-text events, and unknown run sources use the legacy rendering for the entire
-page, preserving text. Replaced/image content is still unsupported. The
-current pinned API exposes no ellipsis source; existing text-overflow output
-is preserved without claiming ellipsis rendering support.
+Raikiri pages use paint order with one text event per paragraph line from the
+page's positioned runs. Source text, generated content and ellipses share their
+ancestor opacity groups, which composite overlapping descendants once. Rounded
+and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
+line events and unknown run sources use legacy rendering for the entire page.
+Replaced/image content and inline element opacity remain unsupported. Generated
+text and ellipses have no decoration segments in this API version.
+
+Used text decorations come directly from Raikiri's glyph runs, including
+ancestor propagation, line endpoints, color, thickness, and the unsplit pattern
+extent. Insets apply before font and color run slicing.
+Underline and overline paint before glyphs, and line-through paints after
+them. Solid, double, dotted, dashed, and wavy styles retain their pattern
+phase across font and color run boundaries. Decorations share the text's
+active clip and opacity group; transparent glyphs can still have visible
+colored decorations. Margin-box decorations and text shadows are not drawn.
+
+Decoration phases apply to each paragraph line independently. Raikiri's
+line identities keep coincident lines distinct and join font/color slices
+of the same line, so earlier decorations cannot cover later overlapping
+text merely because both are in one paint batch.
 
 Corner radii retain separate horizontal and vertical axes from Raikiri,
 including slash shorthand, two-value corner longhands, and percentages of

@@ -76,3 +76,57 @@ fn invalid_opacity_is_rejected_before_surface_stack_changes() {
         ));
     }
 }
+
+#[test]
+fn line_events_include_generated_and_ellipsis_runs() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let mut runs = page.text_runs();
+    let RunSource::Text(node) = runs[0].source else {
+        panic!("text run")
+    };
+    let events = page.paint_order_for_text_runs(&runs);
+    assert!(supported(&events, &runs));
+    runs[0].source = RunSource::Generated(node, GeneratedKind::Before);
+    assert!(supported(&events, &runs));
+    runs[0].source = RunSource::Ellipsis(node);
+    assert!(supported(&events, &runs));
+}
+
+#[test]
+fn duplicate_missing_and_unknown_lines_are_rejected() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let runs = page.text_runs();
+    let events = page.paint_order_for_text_runs(&runs);
+    let line = events
+        .iter()
+        .find(|event| matches!(event, PaintEvent::TextLine(_)))
+        .copied()
+        .unwrap();
+    let mut duplicate = events.clone();
+    duplicate.push(line);
+    assert!(!supported(&duplicate, &runs));
+    let mut missing = events.clone();
+    missing.retain(|event| !matches!(event, PaintEvent::TextLine(_)));
+    assert!(!supported(&missing, &runs));
+    let mut unknown_line = runs[0].line;
+    unknown_line.index += 100;
+    let mut unknown = events;
+    unknown.push(PaintEvent::TextLine(unknown_line));
+    assert!(!supported(&unknown, &runs));
+}
+
+#[test]
+fn mixed_fragment_and_line_events_are_rejected() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let runs = page.text_runs();
+    let mut events = page.paint_order_for_text_runs(&runs);
+    events.extend(
+        page.paint_order()
+            .into_iter()
+            .filter(|event| matches!(event, PaintEvent::Text(_))),
+    );
+    assert!(!supported(&events, &runs));
+}
