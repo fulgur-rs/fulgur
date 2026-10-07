@@ -730,7 +730,7 @@ mod tests {
         let rules = vec![
             PageSettingsRule {
                 page_selector: None,
-                size: Some(PageSizeDecl::Keyword("A4".into())),
+                size: Some(PageSizeDecl::Keyword("A3".into())),
                 margin: PartialMargin::default(),
             },
             PageSettingsRule {
@@ -746,14 +746,15 @@ mod tests {
         );
         let (size_p2, _, _) = resolve_page_settings(&rules, 2, 10, &config, false);
         assert!(
-            (size_p2.width - PageSize::A4.width).abs() < 0.01,
-            "subsequent pages should use A4 size"
+            (size_p2.width - PageSize::A3.width).abs() < 0.01,
+            "subsequent pages should use A3 from the CSS default rule"
         );
     }
 
     #[test]
     fn keyword_with_orientation_auto_uses_config_page_size() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.page_size = PageSize::A3;
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
@@ -761,8 +762,8 @@ mod tests {
         }];
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
         assert!(
-            (size.width - PageSize::A4.width).abs() < 0.01,
-            "auto keyword should fall back to config page size"
+            (size.width - PageSize::A3.width).abs() < 0.01,
+            "auto keyword should fall back to config page size (A3)"
         );
         assert!(landscape, "landscape=true from CSS should be respected");
     }
@@ -779,6 +780,21 @@ mod tests {
         assert!(
             landscape,
             "CLI landscape override should win over CSS portrait orientation"
+        );
+    }
+
+    #[test]
+    fn landscape_cli_false_override_suppresses_css_landscape() {
+        let config = Config::builder().landscape(false).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), true)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            !landscape,
+            "CLI landscape(false) override should suppress CSS landscape orientation"
         );
     }
 
