@@ -64,3 +64,10 @@ text events, and unknown run sources use the legacy rendering for the entire
 page, preserving text. Replaced/image content is still unsupported. The
 current pinned API exposes no ellipsis source; existing text-overflow output
 is preserved without claiming ellipsis rendering support.
+
+Corner radii retain separate horizontal and vertical axes from Raikiri,
+including slash shorthand, two-value corner longhands, and percentages of
+the border box. Both painters use the shared used-value calculation, with
+one scale factor when adjacent corners overlap. PDF backgrounds, borders,
+and overflow clips follow the resulting ellipses; insets subtract their
+adjacent border widths and fragment breaks keep their corners square.

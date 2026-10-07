@@ -3,7 +3,7 @@
 
 use krilla::geom::{Path, PathBuilder};
 use raikiri_html::PaintRect;
-use raikiri_html::computed::{ComputedBorderRadius, ComputedLengthPercentage};
+use raikiri_html::computed::ComputedBorderRadius;
 
 /// Cubic Bézier control-point distance for a quarter ellipse, as a fraction
 /// of the radius.
@@ -85,32 +85,16 @@ pub(super) struct RoundedRect {
 impl RoundedRect {
     /// The border box of a fragment with its used corner radii.
     ///
-    /// CSS Backgrounds 3 §5.1: a percentage radius refers to the border box,
-    /// its width for the horizontal radius and its height for the vertical
-    /// one. The computed value has one value per corner, so both radii come
-    /// from it. §5.5: when the radii of two adjacent corners do not fit
-    /// along a side, every radius is scaled by the same factor.
+    /// Resolve both axes and the common overlap scale through Raikiri's
+    /// used-value API (CSS Backgrounds 3 §§4.1, 4.5).
     pub(super) fn border_box(rect: PaintRect, radius: &ComputedBorderRadius) -> Self {
-        let corner = |value: ComputedLengthPercentage| match value {
-            ComputedLengthPercentage::Px(px) => [px.max(0.0), px.max(0.0)],
-            ComputedLengthPercentage::Percent(percent) => [
-                (rect.width * percent / 100.0).max(0.0),
-                (rect.height * percent / 100.0).max(0.0),
-            ],
-        };
         Self {
             x: rect.x,
             y: rect.y,
             width: rect.width.max(0.0),
             height: rect.height.max(0.0),
-            radii: [
-                corner(radius.top_left),
-                corner(radius.top_right),
-                corner(radius.bottom_right),
-                corner(radius.bottom_left),
-            ],
+            radii: radius.used(rect.width, rect.height),
         }
-        .clamped()
     }
 
     /// This shape with square corners along the broken edges of `slice`.
@@ -138,10 +122,10 @@ impl RoundedRect {
     }
 
     /// Make every corner with a zero radius square (CSS Backgrounds 3
-    /// §5.1: "If either length is zero, the corner is square, not
+    /// §4.1: "If either length is zero, the corner is square, not
     /// rounded"), then scale every radius by `f = min(Li / Si)` over the
     /// four sides, where `Li` is the side length and `Si` the sum of the two
-    /// radii along it (§5.5), when `f < 1`.
+    /// radii along it (§4.5), when `f < 1`.
     fn clamped(mut self) -> Self {
         for corner in &mut self.radii {
             if corner[0] <= 0.0 || corner[1] <= 0.0 {
@@ -178,7 +162,7 @@ impl RoundedRect {
     }
 
     /// This shape moved inward by `edges`, as the padding edge is from the
-    /// border edge. CSS Backgrounds 3 §5.2: the inner radius of a corner is
+    /// border edge. CSS Backgrounds 3 §4.2: the inner radius of a corner is
     /// the outer radius minus the adjacent border width, floored at zero.
     /// Insets larger than the box collapse it to an empty one.
     pub(super) fn inset(&self, edges: Edges) -> Self {
@@ -276,69 +260,4 @@ pub(super) fn polygon(points: &[(f32, f32)]) -> Option<Path> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn radius(px: f32) -> ComputedBorderRadius {
-        ComputedBorderRadius::all(raikiri_html::computed::ComputedLength(px))
-    }
-
-    #[test]
-    fn overlapping_radii_scale_by_the_smallest_side_ratio() {
-        // 100 x 40 with 30px corners: the vertical sides need 60px but have
-        // 40, so f = 40 / 60 and every radius becomes 20px.
-        let shape = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 40.0), &radius(30.0));
-        for corner in shape.radii {
-            assert!((corner[0] - 20.0).abs() < 1e-4, "{corner:?}");
-            assert!((corner[1] - 20.0).abs() < 1e-4, "{corner:?}");
-        }
-    }
-
-    #[test]
-    fn percentage_radius_refers_to_each_axis_of_the_border_box() {
-        let all = ComputedLengthPercentage::Percent(50.0);
-        let shape = RoundedRect::border_box(
-            PaintRect::new(0.0, 0.0, 80.0, 40.0),
-            &ComputedBorderRadius::corners(all, all, all, all),
-        );
-        assert_eq!(shape.radii[0], [40.0, 20.0]);
-    }
-
-    #[test]
-    fn inner_radius_subtracts_the_adjacent_border_width() {
-        let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 100.0), &radius(10.0));
-        let inner = outer.inset(Edges {
-            top: 4.0,
-            right: 12.0,
-            bottom: 4.0,
-            left: 2.0,
-        });
-        assert_eq!(
-            (inner.x, inner.y, inner.width, inner.height),
-            (2.0, 4.0, 86.0, 92.0)
-        );
-        assert_eq!(inner.radii[0], [8.0, 6.0]);
-        // The right border (12px) exceeds the 10px radius: one inner radius
-        // is zero, so the corner is square (§5.1), not [0, 6].
-        assert_eq!(inner.radii[1], [0.0, 0.0]);
-    }
-
-    #[test]
-    fn insets_larger_than_the_box_collapse_it_in_proportion() {
-        let outer = RoundedRect::rect(0.0, 0.0, 10.0, 6.0);
-        // 15px of horizontal and 12px of vertical inset in a 10 x 6 box:
-        // each side keeps its share, and the inner box is empty.
-        let inner = outer.inset(Edges {
-            top: 4.0,
-            right: 10.0,
-            bottom: 8.0,
-            left: 5.0,
-        });
-        assert!((inner.x - 10.0 / 3.0).abs() < 1e-5, "{inner:?}");
-        assert_eq!((inner.y, inner.width, inner.height), (2.0, 0.0, 0.0));
-        assert!(inner.is_empty());
-        assert!(inner.path().is_none());
-        // The ring of an empty inner box is the whole outer box.
-        assert!(ring(&outer, &inner).is_some());
-    }
-}
+mod tests;

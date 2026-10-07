@@ -85,7 +85,7 @@ fn ordered_opacity_boundaries_restore_clips() {
 }
 
 #[test]
-fn generated_and_ellipsis_keep_legacy_text() {
+fn generated_and_ellipsis_preserve_visible_text() {
     let (_dir, path) = input("<style>p::before {content:'Before'}</style><p>Hello</p>");
     let document = completed(&path);
     let page = document.page(0).unwrap();
@@ -101,10 +101,29 @@ fn generated_and_ellipsis_keep_legacy_text() {
         ),
         (
             "<style>p {width:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><p>Hello World</p>",
-            "Hello World \n",
+            "Hel \n…\n",
         ),
     ] {
-        let (pdf, _) = operations(html);
+        let (_dir, path) = input(&format!(
+            "<style>body {{font:16px 'Noto Sans Mono'}}</style>{html}"
+        ));
+        let mut bundle = fulgur_core::AssetBundle::new();
+        bundle
+            .add_font_file(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../fulgur-ruby/spec/fixtures/noto_sans.ttf"),
+            )
+            .unwrap();
+        let bytes = render_with_options(
+            &path,
+            &Config::default(),
+            &RenderOptions {
+                assets: Some(&bundle),
+                system_fonts: false,
+            },
+        )
+        .unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
         let text = pdf.extract_text(&[1]).unwrap();
         assert_eq!(text, expected);
     }

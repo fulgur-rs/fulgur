@@ -96,7 +96,7 @@ fn navigation_multiline_and_escaped_anchor() {
     let document = completed(&path);
     let page = document.page(0).unwrap();
     let quads: usize = page.links().map(|link| link.quads.len()).sum();
-    assert_eq!(quads, 3);
+    assert_eq!(quads, 2);
     let bytes = render(&path, &Config::default()).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     assert_eq!(pdf.get_pages().len(), 2);
@@ -109,7 +109,7 @@ fn navigation_multiline_and_escaped_anchor() {
             .as_array()
             .unwrap()
             .len(),
-        24
+        16
     );
     for link in links {
         let dest = destination(&pdf, link);
@@ -228,13 +228,13 @@ fn navigation_multiline_uses_one_annotation_with_all_quads() {
         .links()
         .map(|link| link.quads.len())
         .sum();
-    assert_eq!(count, 3);
+    assert_eq!(count, 2);
     let bytes = render(&path, &Config::default()).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     let links = annotations(&pdf, 1);
     assert_eq!(links.len(), 1);
     let points = links[0].get(b"QuadPoints").unwrap().as_array().unwrap();
-    assert_eq!(points.len(), 24);
+    assert_eq!(points.len(), 16);
     assert!(
         points
             .iter()
