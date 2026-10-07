@@ -91,3 +91,7 @@ widths. Thick opposite borders crop the ellipse at the padding/content rectangle
 they do not rescale it. An entirely excluded inner shape paints no background,
 hides descendants when used as an overflow clip, and leaves the full outer
 border ring.
+When cropped diagonal inner arcs intersect, their common outline is computed
+with adaptive vector segments (0.05px control-hull tolerance, bounded to 1024
+segments per corner for extreme coordinates). Single-corner crops and ordinary
+rounded rectangles retain cubic curves.

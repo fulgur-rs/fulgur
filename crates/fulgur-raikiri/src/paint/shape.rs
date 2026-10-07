@@ -186,6 +186,18 @@ impl RoundedRect {
         let Some(corners) = self.corner_paths() else {
             return;
         };
+        if self.intersecting_corners() {
+            let points = self.common_outline(&corners);
+            if points.len() < 3 {
+                return;
+            }
+            builder.move_to(points[0][0] as f32, points[0][1] as f32);
+            for point in &points[1..] {
+                builder.line_to(point[0] as f32, point[1] as f32);
+            }
+            builder.close();
+            return;
+        }
         let start = corners[0]
             .curve
             .map_or(corners[0].start, |points| points[2]);
@@ -198,6 +210,43 @@ impl RoundedRect {
             }
         }
         builder.close();
+    }
+
+    fn intersecting_corners(&self) -> bool {
+        let r = self.radii.map(|corner| corner.map(f64::from));
+        let (width, height) = (f64::from(self.width), f64::from(self.height));
+        let cropped = r
+            .iter()
+            .any(|corner| corner[0] > width || corner[1] > height);
+        cropped
+            && [(0, 2), (1, 3)].into_iter().any(|(a, b)| {
+                r[a].iter().chain(&r[b]).all(|radius| *radius > 0.0)
+                    && r[a][0] + r[b][0] > width
+                    && r[a][1] + r[b][1] > height
+            })
+    }
+
+    /// Intersect the rectangle with every convex corner constraint. Flatten
+    /// only when cropped diagonal arcs can cross; individual corners keep
+    /// their cubic paths. The clipping chords bound a single common outline.
+    fn common_outline(&self, corners: &[CornerPath; 4]) -> Vec<[f64; 2]> {
+        let (x0, y0) = (f64::from(self.x), f64::from(self.y));
+        let (x1, y1) = (x0 + f64::from(self.width), y0 + f64::from(self.height));
+        let mut polygon = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        for corner in corners {
+            if let Some([a, b, end]) = corner.curve {
+                let curve = [corner.start, a, b, end].map(|p| p.map(f64::from));
+                let mut points = vec![curve[0]];
+                flatten_corner(curve, 0, &mut points);
+                for edge in points.windows(2) {
+                    polygon = clip_convex_polygon(polygon, edge[0], edge[1]);
+                    if polygon.len() < 3 {
+                        return Vec::new();
+                    }
+                }
+            }
+        }
+        polygon
     }
 
     fn corner_paths(&self) -> Option<[CornerPath; 4]> {
@@ -275,6 +324,62 @@ impl RoundedRect {
         self.append_to(&mut builder);
         builder.finish()
     }
+}
+
+/// Subdivide a convex cubic until its control hull is within 0.05px of
+/// its chord. Depth is bounded to 10 (1024 chords) for extreme coordinates.
+fn flatten_corner(curve: [[f64; 2]; 4], depth: u8, points: &mut Vec<[f64; 2]>) {
+    let [from, a, b, to] = curve;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let length = dx.hypot(dy);
+    let distance = |point: [f64; 2]| {
+        let (px, py) = (point[0] - from[0], point[1] - from[1]);
+        if length == 0.0 {
+            px.hypot(py)
+        } else {
+            (dx * py - dy * px).abs() / length
+        }
+    };
+    if depth == 10 || distance(a).max(distance(b)) <= 0.05 {
+        points.push(to);
+        return;
+    }
+    let midpoint = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    let ab = midpoint(from, a);
+    let bc = midpoint(a, b);
+    let cd = midpoint(b, to);
+    let abc = midpoint(ab, bc);
+    let bcd = midpoint(bc, cd);
+    let center = midpoint(abc, bcd);
+    flatten_corner([from, ab, abc, center], depth + 1, points);
+    flatten_corner([center, bcd, cd, to], depth + 1, points);
+}
+
+/// Keep the half-plane to the clockwise contour's interior side of `a`→`b`.
+fn clip_convex_polygon(polygon: Vec<[f64; 2]>, a: [f64; 2], b: [f64; 2]) -> Vec<[f64; 2]> {
+    let Some(&last) = polygon.last() else {
+        return polygon;
+    };
+    let distance =
+        |point: [f64; 2]| (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
+    let mut out = Vec::with_capacity(polygon.len() + 1);
+    let mut previous = last;
+    let mut previous_distance = distance(previous);
+    for current in polygon {
+        let current_distance = distance(current);
+        if (previous_distance >= 0.0) != (current_distance >= 0.0) {
+            let t = previous_distance / (previous_distance - current_distance);
+            out.push(std::array::from_fn(|axis| {
+                previous[axis] + t * (current[axis] - previous[axis])
+            }));
+        }
+        if current_distance >= 0.0 {
+            out.push(current);
+        }
+        previous = current;
+        previous_distance = current_distance;
+    }
+    out
 }
 
 /// The area between `outer` and `inner`, to fill with the even-odd rule.

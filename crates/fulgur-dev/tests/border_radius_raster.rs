@@ -206,3 +206,61 @@ fn uniform_border_ring_crops_large_inner_ellipse_in_all_corners() {
         );
     }
 }
+
+const DIAGONALS: [&str; 2] = [
+    "border-top-left-radius:100px;border-bottom-right-radius:100px",
+    "border-top-right-radius:100px;border-bottom-left-radius:100px",
+];
+
+#[test]
+fn crossing_inner_ellipses_keep_only_the_common_padding_region() {
+    for (radii, outside) in DIAGONALS.into_iter().zip([(78, 21), (21, 21)]) {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:100px;box-sizing:border-box;border:20px solid transparent;{radii};background-clip:padding-box}}"
+            ),
+        );
+        assert_white(&image, outside.0, outside.1);
+        assert_red(&image, 50, 50);
+    }
+}
+
+#[test]
+fn crossing_inner_ellipses_with_no_common_region_paint_no_background() {
+    for radii in DIAGONALS {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:100px;box-sizing:border-box;border:40px solid transparent;{radii};background-clip:padding-box}}"
+            ),
+        );
+        assert_white(&image, 50, 50);
+    }
+}
+
+#[test]
+fn crossing_inner_ellipses_with_no_common_region_leave_the_full_border() {
+    for radii in DIAGONALS {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:100px;box-sizing:border-box;border:40px solid red;{radii};background:blue;background-clip:padding-box}}"
+            ),
+        );
+        assert_red(&image, 50, 50);
+    }
+}
+
+#[test]
+fn crossing_inner_ellipses_with_no_common_region_clip_all_children() {
+    for radii in DIAGONALS {
+        let (image, _) = raster(
+            "<div class=box><div class=child></div></div>",
+            &format!(
+                ".box {{width:100px;height:100px;box-sizing:border-box;border:40px solid transparent;{radii};background:none;overflow:hidden}} .child {{width:100px;height:100px;background:red}}"
+            ),
+        );
+        assert_white(&image, 50, 50);
+    }
+}

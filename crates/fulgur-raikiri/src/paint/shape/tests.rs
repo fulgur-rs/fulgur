@@ -144,3 +144,22 @@ fn entirely_excluded_inner_ellipse_appends_no_partial_subpath() {
     assert!(inner.path().is_none());
     assert!(ring(&outer, &inner).is_some());
 }
+
+#[test]
+fn disjoint_diagonal_inner_ellipses_have_no_common_path() {
+    use ComputedLengthPercentage::Px;
+    let radius = ComputedBorderRadius::elliptical(
+        [Px(100.0), Px(0.0), Px(100.0), Px(0.0)],
+        [Px(100.0), Px(0.0), Px(100.0), Px(0.0)],
+    );
+    let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 100.0), &radius);
+    let inner = outer.inset(Edges {
+        top: 40.0,
+        right: 40.0,
+        bottom: 40.0,
+        left: 40.0,
+    });
+    assert!(!inner.is_empty());
+    assert!(inner.path().is_none());
+    assert!(ring(&outer, &inner).is_some());
+}
