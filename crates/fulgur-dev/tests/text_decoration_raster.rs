@@ -270,3 +270,48 @@ fn insets_do_not_open_gaps_at_color_run_boundaries() {
         }
     }
 }
+
+#[test]
+fn wrapped_lines_keep_the_same_decoration_order_as_separate_lines() {
+    for decoration in [
+        "line-through red",
+        "underline red;text-underline-offset:-30px",
+    ] {
+        let css = format!(
+            "p {{padding-left:10px;width:120px;font-size:64px;line-height:8px;word-break:break-all;text-decoration:{decoration}}}"
+        );
+        let (wrapped, text) = raster("<p>MMMM</p>", &css);
+        let (separate, _) = raster("<p>MMM</p><p>M</p>", &css);
+        assert!(text.contains('M'), "missing extracted glyph text");
+        assert!(wrapped.pixels().any(red));
+        let diff = wrapped
+            .pixels()
+            .zip(separate.pixels())
+            .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 8))
+            .count();
+        assert!(
+            diff <= 8,
+            "{decoration}: {diff} changed pixels between wrapped and separate line paint units"
+        );
+    }
+}
+
+#[test]
+fn legacy_decorations_stay_below_later_overlapping_text() {
+    let css = "section::before {content:'marker';font-size:12px} p {font-size:64px;line-height:80px} .later {color:blue;margin-top:-80px}";
+    let (plain, _) = raster("<section><p>MMM</p><p class=later>MMM</p></section>", css);
+    let (decorated, _) = raster(
+        "<section><p style='text-decoration:line-through red'>MMM</p><p class=later>MMM</p></section>",
+        css,
+    );
+    let blue: Vec<_> = plain
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p[2] > 245 && p[0] < 20 && p[1] < 20)
+        .collect();
+    assert!(blue.len() > 100, "missing later glyphs");
+    assert!(
+        blue.iter()
+            .all(|(x, y, _)| !red(decorated.get_pixel(*x, *y))),
+        "earlier line-through covers later glyphs in legacy rendering"
+    );
+}

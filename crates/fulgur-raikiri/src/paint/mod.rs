@@ -197,25 +197,38 @@ fn paint_text_batch(
     fonts: &mut FontCache,
 ) {
     let dom = page.dom();
-    for phase in [
-        Some(decoration::Phase::BeforeGlyphs),
-        None,
-        Some(decoration::Phase::AfterGlyphs),
-    ] {
-        for run in runs {
-            let element = text_clip::run_element(dom, run);
-            let area = PaintRect::new(
-                run.origin.0,
-                run.origin.1 - run.ascent,
-                run.advance,
-                run.ascent + run.descent,
-            );
-            let chain = clips.chain(page, element, area);
-            active.apply(surface, clips, &chain);
-            if let Some(phase) = phase {
-                decoration::paint(surface, &run.decorations, phase);
-            } else {
-                paint_glyph_run(surface, run, fonts);
+    let mut indices = HashMap::new();
+    let mut lines: Vec<Vec<&PositionedGlyphRun<'_>>> = Vec::new();
+    for &run in runs {
+        let index = *indices.entry(run.line).or_insert_with(|| {
+            lines.push(Vec::new());
+            lines.len() - 1
+        });
+        lines[index].push(run);
+    }
+    // Reunite color and font slices of each line before painting its three
+    // phases, without reordering independent lines that overlap on the page.
+    for runs in lines {
+        for phase in [
+            Some(decoration::Phase::BeforeGlyphs),
+            None,
+            Some(decoration::Phase::AfterGlyphs),
+        ] {
+            for run in &runs {
+                let element = text_clip::run_element(dom, run);
+                let area = PaintRect::new(
+                    run.origin.0,
+                    run.origin.1 - run.ascent,
+                    run.advance,
+                    run.ascent + run.descent,
+                );
+                let chain = clips.chain(page, element, area);
+                active.apply(surface, clips, &chain);
+                if let Some(phase) = phase {
+                    decoration::paint(surface, &run.decorations, phase);
+                } else {
+                    paint_glyph_run(surface, run, fonts);
+                }
             }
         }
     }

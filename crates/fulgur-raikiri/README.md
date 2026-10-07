@@ -73,3 +73,8 @@ them. Solid, double, dotted, dashed, and wavy styles retain their pattern
 phase across font and color run boundaries. Decorations share the text's
 active clip and opacity group; transparent glyphs can still have visible
 colored decorations. Margin-box decorations and text shadows are not drawn.
+
+Decoration phases apply to each paragraph line independently. Raikiri's
+line identities keep coincident lines distinct and join font/color slices
+of the same line, so earlier decorations cannot cover later overlapping
+text merely because both are in one paint batch.
