@@ -753,8 +753,7 @@ mod tests {
 
     #[test]
     fn keyword_with_orientation_auto_uses_config_page_size() {
-        let mut config = Config::default();
-        config.page_size = PageSize::A3;
+        let config = Config { page_size: PageSize::A3, ..Default::default() };
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
