@@ -762,7 +762,11 @@ mod tests {
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
         assert!(
             (size.width - PageSize::A3.width).abs() < 0.01,
-            "auto keyword should fall back to config page size (A3)"
+            "auto keyword should fall back to config page size width (A3)"
+        );
+        assert!(
+            (size.height - PageSize::A3.height).abs() < 0.01,
+            "auto keyword should fall back to config page size height (A3)"
         );
         assert!(landscape, "landscape=true from CSS should be respected");
     }
