@@ -153,3 +153,56 @@ fn borders_and_padding_clip_use_the_same_ellipse() {
         "inner: {pixel:?}"
     );
 }
+
+#[test]
+fn opposite_border_crops_padding_ellipse_instead_of_rescaling_it() {
+    for (corner, border, outside, inside) in [
+        ("top-left", "right", (10, 10), (10, 25)),
+        ("top-right", "left", (90, 10), (90, 25)),
+        ("bottom-right", "left", (90, 49), (90, 34)),
+        ("bottom-left", "right", (10, 49), (10, 34)),
+    ] {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:60px;box-sizing:border-box;border-{border}:80px solid transparent;border-{corner}-radius:50px 30px;background-clip:padding-box}}"
+            ),
+        );
+        assert_white(&image, outside.0, outside.1);
+        assert_red(&image, inside.0, inside.1);
+    }
+}
+
+#[test]
+fn opposite_border_crops_overflow_ellipse_instead_of_rescaling_it() {
+    let (image, _) = raster(
+        "<div class=box><div class=child></div></div>",
+        ".box {width:100px;height:60px;box-sizing:border-box;background:none;overflow:hidden;border-right:80px solid transparent;border-top-left-radius:50px 30px}.child {width:100px;height:60px;background:red}",
+    );
+    assert_white(&image, 10, 10);
+    assert_red(&image, 10, 25);
+    assert_white(&image, 30, 40);
+}
+
+#[test]
+fn uniform_border_ring_crops_large_inner_ellipse_in_all_corners() {
+    for (corner, red, blue) in [
+        ("top-left", (50, 25), (75, 35)),
+        ("top-right", (49, 25), (24, 35)),
+        ("bottom-right", (49, 34), (24, 24)),
+        ("bottom-left", (50, 34), (75, 24)),
+    ] {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:60px;box-sizing:border-box;border:20px solid red;border-{corner}-radius:100px 60px;background:blue;background-clip:padding-box}}"
+            ),
+        );
+        assert_red(&image, red.0, red.1);
+        let pixel = image.get_pixel(blue.0, blue.1);
+        assert!(
+            pixel[2] > 245 && pixel[0] < 20 && pixel[1] < 20,
+            "{corner} inner: {pixel:?}"
+        );
+    }
+}

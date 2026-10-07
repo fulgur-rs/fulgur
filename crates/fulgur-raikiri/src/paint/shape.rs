@@ -5,10 +5,6 @@ use krilla::geom::{Path, PathBuilder};
 use raikiri_html::PaintRect;
 use raikiri_html::computed::ComputedBorderRadius;
 
-/// Cubic Bézier control-point distance for a quarter ellipse, as a fraction
-/// of the radius.
-const KAPPA: f32 = 0.552_284_8;
-
 /// Lengths for the four sides of a box, in px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Edges {
@@ -82,6 +78,12 @@ pub(super) struct RoundedRect {
     pub radii: [[f32; 2]; 4],
 }
 
+#[derive(Clone, Copy)]
+struct CornerPath {
+    start: [f32; 2],
+    curve: Option<[[f32; 2]; 3]>,
+}
+
 impl RoundedRect {
     /// The border box of a fragment with its used corner radii.
     ///
@@ -121,38 +123,6 @@ impl RoundedRect {
         }
     }
 
-    /// Make every corner with a zero radius square (CSS Backgrounds 3
-    /// §4.1: "If either length is zero, the corner is square, not
-    /// rounded"), then scale every radius by `f = min(Li / Si)` over the
-    /// four sides, where `Li` is the side length and `Si` the sum of the two
-    /// radii along it (§4.5), when `f < 1`.
-    fn clamped(mut self) -> Self {
-        for corner in &mut self.radii {
-            if corner[0] <= 0.0 || corner[1] <= 0.0 {
-                *corner = [0.0; 2];
-            }
-        }
-        let r = self.radii;
-        let fit = |length: f32, sum: f32| {
-            if sum > length && sum > 0.0 {
-                length / sum
-            } else {
-                1.0
-            }
-        };
-        let factor = fit(self.width, r[0][0] + r[1][0])
-            .min(fit(self.height, r[1][1] + r[2][1]))
-            .min(fit(self.width, r[2][0] + r[3][0]))
-            .min(fit(self.height, r[3][1] + r[0][1]));
-        if factor < 1.0 {
-            for corner in &mut self.radii {
-                corner[0] *= factor;
-                corner[1] *= factor;
-            }
-        }
-        self
-    }
-
     pub(super) fn is_rounded(&self) -> bool {
         self.radii.iter().flatten().any(|radius| *radius > 0.0)
     }
@@ -164,7 +134,8 @@ impl RoundedRect {
     /// This shape moved inward by `edges`, as the padding edge is from the
     /// border edge. CSS Backgrounds 3 §4.2: the inner radius of a corner is
     /// the outer radius minus the adjacent border width, floored at zero.
-    /// Insets larger than the box collapse it to an empty one.
+    /// Insets larger than the box collapse it to an empty one. Opposite
+    /// edges crop inner curves when drawing, without rescaling their radii.
     pub(super) fn inset(&self, edges: Edges) -> Self {
         let r = self.radii;
         let horizontal = edges.left + edges.right;
@@ -193,39 +164,109 @@ impl RoundedRect {
                 [(r[1][0] - right).max(0.0), (r[1][1] - top).max(0.0)],
                 [(r[2][0] - right).max(0.0), (r[2][1] - bottom).max(0.0)],
                 [(r[3][0] - left).max(0.0), (r[3][1] - bottom).max(0.0)],
-            ],
+            ]
+            .map(|corner| {
+                if corner[0] == 0.0 || corner[1] == 0.0 {
+                    [0.0; 2]
+                } else {
+                    corner
+                }
+            }),
         }
-        .clamped()
     }
 
-    /// Append this shape as one closed subpath, clockwise from the end of
-    /// the top-left corner. Nothing is appended for an empty shape.
+    /// Append one clockwise subpath, starting at the top-left curve's end.
+    /// Inner ellipses retain their radii and are cropped at opposite edges
+    /// (CSS Backgrounds 3 §4.2). An empty intersection appends nothing.
     pub(super) fn append_to(&self, builder: &mut PathBuilder) {
         if self.is_empty() {
             return;
         }
-        let (x0, y0) = (self.x, self.y);
-        let (x1, y1) = (self.x + self.width, self.y + self.height);
-        let [tl, tr, br, bl] = self.radii;
-        let k = 1.0 - KAPPA;
-        builder.move_to(x0 + tl[0], y0);
-        builder.line_to(x1 - tr[0], y0);
-        if tr[0] > 0.0 && tr[1] > 0.0 {
-            builder.cubic_to(x1 - tr[0] * k, y0, x1, y0 + tr[1] * k, x1, y0 + tr[1]);
-        }
-        builder.line_to(x1, y1 - br[1]);
-        if br[0] > 0.0 && br[1] > 0.0 {
-            builder.cubic_to(x1, y1 - br[1] * k, x1 - br[0] * k, y1, x1 - br[0], y1);
-        }
-        builder.line_to(x0 + bl[0], y1);
-        if bl[0] > 0.0 && bl[1] > 0.0 {
-            builder.cubic_to(x0 + bl[0] * k, y1, x0, y1 - bl[1] * k, x0, y1 - bl[1]);
-        }
-        builder.line_to(x0, y0 + tl[1]);
-        if tl[0] > 0.0 && tl[1] > 0.0 {
-            builder.cubic_to(x0, y0 + tl[1] * k, x0 + tl[0] * k, y0, x0 + tl[0], y0);
+        // Validate every corner before mutating a border ring's builder.
+        let Some(corners) = self.corner_paths() else {
+            return;
+        };
+        let start = corners[0]
+            .curve
+            .map_or(corners[0].start, |points| points[2]);
+        builder.move_to(start[0], start[1]);
+        for index in [1, 2, 3, 0] {
+            let corner = corners[index];
+            builder.line_to(corner.start[0], corner.start[1]);
+            if let Some([a, b, end]) = corner.curve {
+                builder.cubic_to(a[0], a[1], b[0], b[1], end[0], end[1]);
+            }
         }
         builder.close();
+    }
+
+    fn corner_paths(&self) -> Option<[CornerPath; 4]> {
+        let (x0, y0) = (f64::from(self.x), f64::from(self.y));
+        let (x1, y1) = (x0 + f64::from(self.width), y0 + f64::from(self.height));
+        let square = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let mut paths = square.map(|point| CornerPath {
+            start: point.map(|v| v as f32),
+            curve: None,
+        });
+        for (index, [rx, ry]) in self.radii.map(|r| r.map(f64::from)).into_iter().enumerate() {
+            if rx <= 0.0 || ry <= 0.0 {
+                continue;
+            }
+            let (cx, cy) = match index {
+                0 => (x0 + rx, y0 + ry),
+                1 => (x1 - rx, y0 + ry),
+                2 => (x1 - rx, y1 - ry),
+                _ => (x0 + rx, y1 - ry),
+            };
+            let (lower, upper) = match index {
+                0 => ((cy - y1) / ry, (cx - x1) / rx),
+                1 => ((x0 - cx) / rx, (cy - y1) / ry),
+                2 => ((y0 - cy) / ry, (x0 - cx) / rx),
+                _ => ((cx - x1) / rx, (y0 - cy) / ry),
+            };
+            let start = lower.clamp(0.0, 1.0).asin();
+            let end = upper.clamp(0.0, 1.0).acos();
+            if start >= end {
+                return None;
+            }
+            let point_and_tangent = |angle: f64| {
+                let (sin, cos) = angle.sin_cos();
+                match index {
+                    0 => ([cx - rx * cos, cy - ry * sin], [rx * sin, -ry * cos]),
+                    1 => ([cx + rx * sin, cy - ry * cos], [rx * cos, ry * sin]),
+                    2 => ([cx + rx * cos, cy + ry * sin], [-rx * sin, ry * cos]),
+                    _ => ([cx - rx * sin, cy + ry * cos], [-rx * cos, -ry * sin]),
+                }
+            };
+            let (mut from, from_tangent) = point_and_tangent(start);
+            let (mut to, to_tangent) = point_and_tangent(end);
+            // Place intersections exactly on their clipping edge.
+            if lower > 0.0 {
+                match index {
+                    0 => from[1] = y1,
+                    1 => from[0] = x0,
+                    2 => from[1] = y0,
+                    _ => from[0] = x1,
+                }
+            }
+            if upper > 0.0 {
+                match index {
+                    0 => to[0] = x1,
+                    1 => to[1] = y1,
+                    2 => to[0] = x0,
+                    _ => to[1] = y0,
+                }
+            }
+            // Tangent controls approximate this arc (at most a quarter turn).
+            let alpha = (4.0 / 3.0) * ((end - start) / 4.0).tan();
+            let a = std::array::from_fn(|axis| from[axis] + alpha * from_tangent[axis]);
+            let b = std::array::from_fn(|axis| to[axis] - alpha * to_tangent[axis]);
+            paths[index] = CornerPath {
+                start: from.map(|v| v as f32),
+                curve: Some([a, b, to].map(|point| point.map(|v| v as f32))),
+            };
+        }
+        Some(paths)
     }
 
     /// The outline of this shape, or `None` when it is empty.

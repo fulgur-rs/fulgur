@@ -110,3 +110,37 @@ fn unequal_percentages_use_their_own_box_axes() {
     let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 80.0, 40.0), &radius);
     assert_eq!(outer.radii, [[40.0, 10.0]; 4]);
 }
+
+#[test]
+fn opposite_side_inset_preserves_inner_ellipse_axes() {
+    use ComputedLengthPercentage::Px;
+    let radius = ComputedBorderRadius::elliptical(
+        [Px(50.0), Px(0.0), Px(0.0), Px(0.0)],
+        [Px(30.0), Px(0.0), Px(0.0), Px(0.0)],
+    );
+    let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 60.0), &radius);
+    let inner = outer.inset(Edges {
+        right: 80.0,
+        ..Edges::default()
+    });
+    assert_eq!((inner.width, inner.height), (20.0, 60.0));
+    assert_eq!(inner.radii[0], [50.0, 30.0]);
+}
+
+#[test]
+fn entirely_excluded_inner_ellipse_appends_no_partial_subpath() {
+    use ComputedLengthPercentage::Px;
+    let radius = ComputedBorderRadius::elliptical(
+        [Px(100.0), Px(0.0), Px(0.0), Px(0.0)],
+        [Px(60.0), Px(0.0), Px(0.0), Px(0.0)],
+    );
+    let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 60.0), &radius);
+    let inner = outer.inset(Edges {
+        right: 80.0,
+        bottom: 45.0,
+        ..Edges::default()
+    });
+    assert!(!inner.is_empty());
+    assert!(inner.path().is_none());
+    assert!(ring(&outer, &inner).is_some());
+}

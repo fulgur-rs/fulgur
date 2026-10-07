@@ -85,3 +85,9 @@ the border box. Both painters use the shared used-value calculation, with
 one scale factor when adjacent corners overlap. PDF backgrounds, borders,
 and overflow clips follow the resulting ellipses; insets subtract their
 adjacent border widths and fragment breaks keep their corners square.
+
+Inner corner curves preserve the outer radius minus adjacent border or padding
+widths. Thick opposite borders crop the ellipse at the padding/content rectangle;
+they do not rescale it. An entirely excluded inner shape paints no background,
+hides descendants when used as an overflow clip, and leaves the full outer
+border ring.
