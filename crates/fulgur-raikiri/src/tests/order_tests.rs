@@ -85,7 +85,7 @@ fn ordered_opacity_boundaries_restore_clips() {
 }
 
 #[test]
-fn generated_and_ellipsis_keep_legacy_text() {
+fn generated_and_ellipsis_preserve_visible_text() {
     let (_dir, path) = input("<style>p::before {content:'Before'}</style><p>Hello</p>");
     let document = completed(&path);
     let page = document.page(0).unwrap();
@@ -101,7 +101,7 @@ fn generated_and_ellipsis_keep_legacy_text() {
         ),
         (
             "<style>p {width:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><p>Hello World</p>",
-            "Hello World \n",
+            "Hel \n…\n",
         ),
     ] {
         let (pdf, _) = operations(html);

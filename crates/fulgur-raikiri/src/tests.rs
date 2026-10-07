@@ -1502,3 +1502,5 @@ mod navigation_tests;
 mod bookmark_tests;
 
 mod order_tests;
+
+mod decoration_tests;

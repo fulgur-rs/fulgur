@@ -8,6 +8,7 @@
 
 mod border;
 mod clip;
+mod decoration;
 mod gradient;
 mod navigation;
 mod order;
@@ -342,6 +343,12 @@ impl FontCache {
 /// Krilla takes them per unit of font size and subtracts `y_offset`, so both
 /// are divided by the font size and `y_offset` changes sign.
 fn paint_text_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
+    decoration::paint(surface, &run.decorations, decoration::Phase::BeforeGlyphs);
+    paint_glyph_run(surface, run, fonts);
+    decoration::paint(surface, &run.decorations, decoration::Phase::AfterGlyphs);
+}
+
+fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
     if run.glyphs.is_empty() || run.font_size <= 0.0 || run.color.a == 0 {
         return;
     }

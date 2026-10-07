@@ -5,7 +5,7 @@ Unpublished Raikiri backend for Fulgur development.
 The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, and text. It does not fall back to Blitz.
+backgrounds and borders, text, and text decorations. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
@@ -62,5 +62,13 @@ for boxes and text, with opacity composited as groups. Rounded and axis-aware
 clips retain the existing geometry. Generated content, duplicate or missing
 text events, and unknown run sources use the legacy rendering for the entire
 page, preserving text. Replaced/image content is still unsupported. The
-current pinned API exposes no ellipsis source; existing text-overflow output
-is preserved without claiming ellipsis rendering support.
+pinned API exposes ellipsis runs and preserves the visible truncated text.
+Generated text and ellipses have no decoration segments in this API version.
+
+Used text decorations come directly from Raikiri's glyph runs, including
+ancestor propagation, line endpoints, color, thickness, and pattern origin.
+Underline and overline paint before glyphs, and line-through paints after
+them. Solid, double, dotted, dashed, and wavy styles retain their pattern
+phase across font and color run boundaries. Decorations share the text's
+active clip and opacity group; transparent glyphs can still have visible
+colored decorations. Margin-box decorations and text shadows are not drawn.
