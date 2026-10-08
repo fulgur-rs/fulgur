@@ -262,6 +262,22 @@ fn svg_layered_css_dimensions_override_presentation_attributes() {
 }
 
 #[test]
+fn hidden_svg_roots_draw_visible_children_without_host_box_ink() {
+    for hidden in ["style='visibility:hidden'", "visibility='hidden'"] {
+        let body = format!(
+            "<svg width='20' height='10' {hidden}><rect width='10' height='10' fill='red'/><rect x='10' width='10' height='10' fill='blue' visibility='visible'/></svg>"
+        );
+        let (images, _, _) = render(
+            &body,
+            "svg{padding:3px;border:2px solid red;background:green}",
+        );
+        rgb(&images[0], 1, 1, [255, 255, 255]);
+        rgb(&images[0], 10, 10, [255, 255, 255]);
+        rgb(&images[0], 20, 10, [0, 0, 255]);
+    }
+}
+
+#[test]
 fn svg_relative_root_font_sizes_match_resolved_absolute_sizes() {
     let root = |attributes: &str| {
         format!("<svg width='180' height='90' {attributes}><text x='0' y='65'>TEST</text></svg>")

@@ -11,6 +11,9 @@ use raikiri_html::{Fragment, Page};
 
 use crate::RenderOptions;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct SvgCache<'a> {
     options: RenderOptions<'a>,
     fonts: Option<Arc<usvg::fontdb::Database>>,
