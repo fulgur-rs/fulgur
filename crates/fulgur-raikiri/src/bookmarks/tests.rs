@@ -65,6 +65,7 @@ fn missing_resolved_label_omits_outline_without_losing_text() {
         .unwrap();
     let bytes = crate::paint::paint_document(
         &document,
+        &raikiri_html::RenderResources::new(),
         &fulgur_core::Config::default(),
         Some(outline(&document, &collector)),
         &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),

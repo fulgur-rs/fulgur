@@ -1,7 +1,7 @@
 //! Raikiri layout backend for Fulgur's development CLI.
 //!
 //! The input is a file path and the output is PDF bytes. Drawing covers page
-//! geometry, box backgrounds and borders, and text. No other backend is used
+//! geometry, box backgrounds and borders, text, and resolved images. No other backend is used
 //! as a fallback.
 
 use fulgur_core::{AssetBundle, Config, Error, Result};
@@ -14,7 +14,7 @@ use std::path::Path;
 /// Rendering resources for the Raikiri development backend.
 ///
 /// Fonts supplied by the bundle are registered in order. Image bundles are
-/// rejected because the current consumer paint API cannot draw their content.
+/// rejected because bundle image URLs are not configured by this backend.
 #[derive(Clone, Copy)]
 pub struct RenderOptions<'a> {
     /// Optional user stylesheets and bundled fonts.
@@ -62,8 +62,8 @@ pub fn render_with_options(
         config,
         options,
         LayoutConfig::default(),
-        |status, _resources, collector, document_url| {
-            draw(status, config, collector, document_url, options)
+        |status, resources, collector, document_url| {
+            draw(status, resources, config, collector, document_url, options)
         },
     )
 }
@@ -71,6 +71,7 @@ pub fn render_with_options(
 /// Draw a layout result as PDF bytes.
 fn draw(
     status: LayoutStatus,
+    resources: &RenderResources<'_>,
     config: &Config,
     collector: &bookmarks::BookmarkCollector,
     document_url: &url::Url,
@@ -86,7 +87,7 @@ fn draw(
     let outline = config
         .bookmarks
         .then(|| bookmarks::outline(&document, collector));
-    paint::paint_document(&document, config, outline, document_url, options)
+    paint::paint_document(&document, resources, config, outline, document_url, options)
 }
 
 #[cfg(test)]
@@ -116,7 +117,11 @@ fn with_layout<T>(
     let html = std::fs::read(input)?;
     let files = files::BaseDirectoryProvider::for_input(input)?;
     let document_url = files.document_url(input)?;
+    let images = raikiri_net::ImageResolver::new(files.clone());
+    let resolver = images::OptionalImages(&images);
     let mut resources = RenderResources::new()
+        .replaced_resolver(&resolver)
+        .image_pixel_source(&images)
         .stylesheet(page_stylesheet(config))
         .network_provider(&files)
         .base_url(document_url.clone());
@@ -189,6 +194,7 @@ fn important(set: bool) -> &'static str {
 mod tests;
 
 mod files;
+mod images;
 mod paint;
 
 mod assets;

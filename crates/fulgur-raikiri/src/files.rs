@@ -13,6 +13,7 @@ use url::Url;
 /// provider. A path that leaves the directory once symlinks and `..` are
 /// resolved is refused, as is every other URL scheme, so a document can only
 /// reach files next to it.
+#[derive(Clone)]
 pub(crate) struct BaseDirectoryProvider {
     root: PathBuf,
     max_bytes: u64,
