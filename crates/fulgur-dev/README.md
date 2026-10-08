@@ -79,22 +79,13 @@ Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
 counter/string labels, and general display:contents box suppression are not
 implemented in this backend. Aborted layout or callback errors return no PDF.
 
-Raikiri pages whose text nodes each map to one paint event use page paint order
-for boxes and text, with opacity composited as groups. Rounded and axis-aware
-clips retain the existing geometry. Generated content, duplicate or missing
-text events, and unknown run sources use the legacy rendering for the entire
-page, preserving text. Replaced/image content is still unsupported. The
-current pinned API exposes no ellipsis source; existing text-overflow output
-is preserved without claiming ellipsis rendering support.
-
-For pages whose events cover all ordinary text runs, Raikiri follows
-`Page::paint_order()` and composites opacity groups. It keeps the existing
-rounded and per-axis overflow geometry. Pages with generated text, repeated
-text events, or missing run events use the previous painter for the whole page
-to preserve their text. The pinned API has no ellipsis source variant; current
-`text-overflow:ellipsis` output remains at its existing baseline. Replaced
-content, SVG, background images, margin boxes, and generated-content ordering
-remain outside this development backend's supported API.
+Raikiri follows `Page::paint_order_for_text_runs()` when its events cover all
+page text lines, including generated text, anonymous text and ellipses. Each
+line is emitted once, and opacity is composited as groups. The backend retains
+its rounded and per-axis overflow geometry. Pages with incomplete line events
+or unknown run sources use the legacy painter for the whole page to preserve
+text. Replaced content, SVG, background images and margin boxes remain outside
+this development backend's supported API.
 
 ## Development validation
 
