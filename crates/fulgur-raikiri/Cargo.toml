@@ -14,8 +14,8 @@ readme = "README.md"
 krilla = "0.7.0"
 skrifa = "0.45"
 fulgur-core = { path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "932d0abf830c3e2c62d2ac89489369bbeda03fb6" }
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "932d0abf830c3e2c62d2ac89489369bbeda03fb6" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "8123161eae1e2884d0f8535fbcef65f8625d0e9d" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "8123161eae1e2884d0f8535fbcef65f8625d0e9d" }
 url = "2.5"
 percent-encoding = "2"
 
