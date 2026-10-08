@@ -68,6 +68,7 @@ fn missing_resolved_label_omits_outline_without_losing_text() {
         &fulgur_core::Config::default(),
         Some(outline(&document, &collector)),
         &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
+        &crate::RenderOptions::default(),
     )
     .unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
