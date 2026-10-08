@@ -394,6 +394,35 @@ fn svg_inherited_font_families_keep_missing_and_bundled_candidates() {
 }
 
 #[test]
+fn svg_cursive_and_fantasy_use_the_bundled_family_like_html_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let font = dir.path().join("fallback.ttf");
+    std::fs::write(&font, renamed_test_font()).unwrap();
+    for generic in ["cursive", "fantasy"] {
+        let (_, text, pdf) = render_with_fonts(
+            "<svg width='180' height='90'><text x='0' y='65'>TEST</text></svg>",
+            &format!("body{{font-family:{generic},'Test Font Mono';font-size:24px}}"),
+            std::slice::from_ref(&font),
+        );
+        assert!(text.contains("TEST"), "{generic}");
+        let names: Vec<_> = pdf
+            .objects
+            .values()
+            .filter_map(|object| object.as_dict().ok()?.get(b"BaseFont").ok()?.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|name| name.contains("NotoSansMono")),
+            "{generic}: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains("TestFontMono")),
+            "{generic}: {names:?}"
+        );
+    }
+}
+
+#[test]
 fn viewbox_wrappers_do_not_apply_host_opacity_twice() {
     let (images, _, _) = render(
         "<svg width='100' height='50' viewBox='10 20 200 100'><rect x='10' y='20' width='200' height='100' fill='red'/></svg>",

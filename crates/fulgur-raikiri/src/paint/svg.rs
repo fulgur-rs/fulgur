@@ -44,9 +44,13 @@ impl<'a> SvgCache<'a> {
                 if self.options.system_fonts {
                     database.load_system_fonts();
                 }
+                // HTML text maps every generic family to the bundle, so SVG
+                // text must not fall back to host defaults for any of them.
                 if let Some(family) = bundled_family {
                     database.set_serif_family(family.clone());
                     database.set_sans_serif_family(family.clone());
+                    database.set_cursive_family(family.clone());
+                    database.set_fantasy_family(family.clone());
                     database.set_monospace_family(family);
                 }
                 Arc::new(database)
@@ -54,11 +58,15 @@ impl<'a> SvgCache<'a> {
             .clone()
     }
 
+    /// Draws the fragment's inline SVG. Pass `host_group` when the enclosing
+    /// paint events composite the host opacity; otherwise the SVG keeps its
+    /// root opacity.
     pub(super) fn paint(
         &mut self,
         surface: &mut Surface<'_>,
         page: &Page<'_>,
         fragment: &Fragment<'_>,
+        host_group: bool,
     ) -> Result<()> {
         let Some(svg) = page
             .inline_svg(fragment)
@@ -76,8 +84,8 @@ impl<'a> SvgCache<'a> {
         };
         let tree = parse(&svg.source, &options)?;
         let tree = match svg.host_opacity {
-            Some(alpha) => neutralize_root_opacity(tree, &options, alpha)?,
-            None => tree,
+            Some(alpha) if host_group => neutralize_root_opacity(tree, &options, alpha)?,
+            _ => tree,
         };
         let area = fragment.paint_rect();
         let clip = Rect::from_xywh(area.x, area.y, area.width, area.height)

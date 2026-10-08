@@ -55,6 +55,31 @@ fn inherited_svg_font_faces_reach_the_vector_parser() {
 }
 
 #[test]
+fn bundled_family_backs_every_generic_svg_family() {
+    let mut bundle = fulgur_core::AssetBundle::new();
+    bundle
+        .add_font_bytes(
+            include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
+        )
+        .unwrap();
+    let mut cache = SvgCache::new(RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: true,
+    });
+    let fonts = cache.fonts();
+    let bundled = fonts.faces().next().unwrap().families[0].0.clone();
+    for (name, family) in [
+        ("serif", usvg::fontdb::Family::Serif),
+        ("sans-serif", usvg::fontdb::Family::SansSerif),
+        ("cursive", usvg::fontdb::Family::Cursive),
+        ("fantasy", usvg::fontdb::Family::Fantasy),
+        ("monospace", usvg::fontdb::Family::Monospace),
+    ] {
+        assert_eq!(fonts.family_name(&family), bundled, "{name}");
+    }
+}
+
+#[test]
 fn root_opacity_neutralization_preserves_viewbox_transforms() {
     let options = usvg::Options::default();
     let tree = parse("<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50' viewBox='10 20 200 100' opacity='.5'><rect x='10' y='20' width='200' height='100' fill='red'/></svg>", &options).unwrap();

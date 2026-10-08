@@ -133,7 +133,8 @@ fn paint_legacy(
     for fragment in page.fragments() {
         let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
         active.apply(surface, &clips, &chain);
-        svg.paint(surface, page, &fragment)?;
+        // This painter has no opacity groups, so the SVG keeps its root opacity.
+        svg.paint(surface, page, &fragment, false)?;
     }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
@@ -193,7 +194,7 @@ fn paint_ordered(
             PaintEvent::Replaced(fragment) => {
                 let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
                 active.apply(surface, &clips, &chain);
-                svg.paint(surface, page, fragment)?;
+                svg.paint(surface, page, fragment, true)?;
             }
             PaintEvent::PushOpacity(alpha) => {
                 // Clips and opacity groups share the surface stack. Close clips
