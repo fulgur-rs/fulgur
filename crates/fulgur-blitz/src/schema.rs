@@ -1200,4 +1200,95 @@ mod tests {
             "`author` (absent from data) must not appear in the schema"
         );
     }
+
+    // ── WithBlock tuple-target (collect_from_stmt WithBlock else branch) ──────
+
+    /// `{% with (a, b) = pair %}` uses a tuple target expression.
+    /// `extract_var_names(List([Var("a"), Var("b")]))` returns two names, so
+    /// `var_names.len() > 1` and the else branch at lines 295-296 fires: both
+    /// names are inserted as locals with an empty path instead of resolving
+    /// the rhs path.
+    #[test]
+    fn with_block_tuple_target_vars_are_local() {
+        let schema = extract_schema(
+            "{% with (a, b) = pair %}{{ a }}: {{ b }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        // `pair` is the RHS of the with-assignment → must appear as a top-level property.
+        assert_eq!(
+            schema["properties"]["pair"]["type"], "string",
+            "`pair` (RHS of with-assignment) must be collected"
+        );
+        // `a` and `b` are local to the with block — must NOT leak.
+        assert!(
+            schema["properties"]["a"].is_null(),
+            "`a` must not appear as a top-level property"
+        );
+        assert!(
+            schema["properties"]["b"].is_null(),
+            "`b` must not appear as a top-level property"
+        );
+    }
+
+    /// Multiple tuple targets in a single `{% with %}` are each treated as
+    /// local, and all RHS expressions are collected.
+    #[test]
+    fn with_block_two_tuple_targets_both_rhs_collected() {
+        let schema = extract_schema(
+            "{% with (x, y) = coords, (r, g, b) = color %}{{ x }}{{ r }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        assert_eq!(schema["properties"]["coords"]["type"], "string");
+        assert_eq!(schema["properties"]["color"]["type"], "string");
+        // Tuple locals must not leak.
+        for name in ["x", "y", "r", "g", "b"] {
+            assert!(
+                schema["properties"][name].is_null(),
+                "`{name}` must not appear as a top-level property"
+            );
+        }
+    }
+
+    // ── ForLoop: local-variable exclusion ───────────────────────────────────
+
+    /// When an outer for-loop uses tuple unpacking, each loop variable is
+    /// mapped to an empty path in the inner scope. `resolve_expr_path` returns
+    /// `None` for empty-path scope entries, so an inner for-loop over one of
+    /// those variables does not add it to the top-level schema.
+    #[test]
+    fn inner_for_loop_over_tuple_var_excludes_loop_locals_from_schema() {
+        let schema = extract_schema(
+            "{% for key, value in pairs %}{% for sub in key %}{{ sub }}{% endfor %}{% endfor %}",
+            "test.html",
+        )
+        .unwrap();
+        // `pairs` is the outer iterator — must appear as an array.
+        assert_eq!(schema["properties"]["pairs"]["type"], "array");
+        // Loop-local variables must not leak to the top-level schema.
+        for name in ["key", "value", "sub"] {
+            assert!(
+                schema["properties"][name].is_null(),
+                "`{name}` must not appear as a top-level schema property"
+            );
+        }
+    }
+
+    /// A setblock variable used as a for-loop iterator has an empty path in
+    /// scope. `resolve_expr_path` returns `None` for it, so the variable does
+    /// not appear in the top-level schema and neither does the loop variable.
+    #[test]
+    fn for_loop_over_set_var_excludes_iter_and_loop_var_from_schema() {
+        let schema = extract_schema(
+            "{% set local %}captured{% endset %}{% for item in local %}{{ title }}{% endfor %}",
+            "test.html",
+        )
+        .unwrap();
+        // `title` is referenced in the loop body — must appear in schema.
+        assert_eq!(schema["properties"]["title"]["type"], "string");
+        // `local` and `item` are local variables — must not appear.
+        assert!(schema["properties"]["local"].is_null());
+        assert!(schema["properties"]["item"].is_null());
+    }
 }
