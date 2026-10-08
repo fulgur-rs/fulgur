@@ -407,3 +407,57 @@ fn empty_svg_with_host_opacity_leaves_the_page_blank() {
     let (images, _, _) = render("<svg width='20' height='10'/>", "svg{opacity:.5}");
     rgb(&images[0], 10, 5, [255, 255, 255]);
 }
+
+#[test]
+fn document_display_rules_hide_svg_descendants() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><rect width='20' height='10' fill='red'/></svg>",
+        "body > svg rect:first-child{display:none}",
+    );
+    rgb(&images[0], 5, 5, [255, 255, 255]);
+}
+
+#[test]
+fn document_opacity_rules_hide_svg_descendants() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><rect class='muted' width='20' height='10' fill='red'/></svg>",
+        ".muted{opacity:0}",
+    );
+    rgb(&images[0], 5, 5, [255, 255, 255]);
+}
+
+#[test]
+fn document_visibility_rules_hide_svg_descendants() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><rect class='hidden' width='20' height='10' fill='red'/></svg>",
+        ".hidden{visibility:hidden}",
+    );
+    rgb(&images[0], 5, 5, [255, 255, 255]);
+}
+
+#[test]
+fn document_color_rules_override_svg_presentation_attributes() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><g class='accent' color='red'><rect width='20' height='10' fill='currentColor'/></g></svg>",
+        "body > svg .accent{color:blue}",
+    );
+    rgb(&images[0], 5, 5, [0, 0, 255]);
+}
+
+#[test]
+fn document_opacity_inherit_resolves_through_use_instances() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><defs><g class='template' id='r'><rect width='20' height='10' fill='red'/></g></defs><use class='instance' href='#r'/></svg>",
+        ".template{opacity:inherit}.instance{opacity:.5}",
+    );
+    rgb(&images[0], 5, 5, [255, 191, 191]);
+}
+
+#[test]
+fn document_current_color_resolves_through_use_instances() {
+    let (images, _, _) = render(
+        "<svg width='20' height='10'><defs><g class='template' id='r'><rect width='20' height='10' fill='currentColor'/></g></defs><use class='instance' href='#r'/></svg>",
+        ".template{color:currentColor}.instance{color:blue}",
+    );
+    rgb(&images[0], 5, 5, [0, 0, 255]);
+}

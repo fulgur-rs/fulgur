@@ -109,3 +109,54 @@ fn descendants_cannot_substitute_for_a_missing_root_multiplier() {
         ));
     }
 }
+
+#[test]
+fn document_font_rules_keep_relative_sizes_in_use_instances() {
+    let resources = RenderResources::new();
+    let document = raikiri_html::parse_html_with_resources(
+        &b"<style>body{font-family:'Noto Sans Mono';font-size:12px}svg{display:block}.template{font-size:2em;font-weight:700}.instance{font-size:10px;font-weight:200}</style><svg width='100' height='40'><defs><g id='label' class='template'><text y='20'>TEST</text></g></defs><use class='instance' href='#label'/></svg>"[..], &resources,
+    ).unwrap();
+    let LayoutStatus::Completed(layout) = raikiri_html::layout(
+        &document,
+        PageDefaults::default(),
+        LayoutConfig::default(),
+        LayoutOptions::new(),
+    )
+    .unwrap() else {
+        panic!("expected completed layout")
+    };
+    let page = layout.page(0).unwrap();
+    let fragment = page
+        .fragments()
+        .find(|fragment| page.dom().local_name(fragment.node()) == Some("svg"))
+        .unwrap();
+    let svg = page.inline_svg(&fragment).unwrap().unwrap();
+    let mut bundle = fulgur_core::AssetBundle::new();
+    bundle
+        .add_font_bytes(
+            include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
+        )
+        .unwrap();
+    let mut cache = SvgCache::new(RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: true,
+    });
+    let tree = parse(
+        &svg.source,
+        &usvg::Options {
+            fontdb: cache.fonts(),
+            ..usvg::Options::default()
+        },
+    )
+    .unwrap();
+    fn first_text(group: &usvg::Group) -> Option<&usvg::Text> {
+        group.children().iter().find_map(|node| match node {
+            usvg::Node::Text(text) => Some(text.as_ref()),
+            usvg::Node::Group(group) => first_text(group),
+            _ => None,
+        })
+    }
+    let span = &first_text(tree.root()).unwrap().chunks()[0].spans()[0];
+    assert_eq!(span.font_size().get(), 20.0);
+    assert_eq!(span.font().weight(), 700);
+}
