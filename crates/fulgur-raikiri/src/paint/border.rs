@@ -102,11 +102,21 @@ pub(super) fn paint_borders(
         }
     }
 
+    let mut partition_inner = inner;
+    if !inner.is_empty() && inner.path().is_none() {
+        // A vanished curved padding shape leaves the entire outer shape as
+        // border area; join the side partitions at the inner box's center.
+        partition_inner.x += partition_inner.width * 0.5;
+        partition_inner.y += partition_inner.height * 0.5;
+        partition_inner.width = 0.0;
+        partition_inner.height = 0.0;
+    }
+
     for (position, side) in sides {
         if !side.is_visible() {
             continue;
         }
-        let Some(region) = side_region(outer, &inner, position) else {
+        let Some(region) = side_region(outer, &partition_inner, position) else {
             continue;
         };
         surface.push_clip_path(&region, &FillRule::NonZero);

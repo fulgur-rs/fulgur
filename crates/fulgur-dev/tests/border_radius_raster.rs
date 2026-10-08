@@ -264,3 +264,28 @@ fn crossing_inner_ellipses_with_no_common_region_clip_all_children() {
         assert_white(&image, 50, 50);
     }
 }
+
+#[test]
+fn empty_inner_ellipse_mixed_border_colors_cover_the_center() {
+    for radii in DIAGONALS {
+        let (image, _) = raster(
+            "<div class=box></div>",
+            &format!(
+                ".box {{width:100px;height:100px;box-sizing:border-box;border:40px solid red;border-top-color:blue;{radii};background:none}}"
+            ),
+        );
+        for y in 42..58 {
+            for x in 42..58 {
+                // Side joins are antialiased; sample fully covered interiors.
+                if (x as i32 - y as i32).abs() <= 1 || (x as i32 + y as i32 - 100).abs() <= 1 {
+                    continue;
+                }
+                assert!(
+                    image.get_pixel(x, y)[1] < 30,
+                    "unpainted border center at ({x},{y}): {:?}",
+                    image.get_pixel(x, y)
+                );
+            }
+        }
+    }
+}
