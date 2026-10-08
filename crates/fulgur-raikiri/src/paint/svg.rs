@@ -63,7 +63,7 @@ impl<'a> SvgCache<'a> {
         else {
             return Ok(());
         };
-        let mut options = usvg::Options {
+        let options = usvg::Options {
             fontdb: self.fonts(),
             image_href_resolver: usvg::ImageHrefResolver {
                 resolve_data: Box::new(|_, _, _| None),
@@ -71,12 +71,6 @@ impl<'a> SvgCache<'a> {
             },
             ..usvg::Options::default()
         };
-        if let Some(style) = page.computed(fragment.node()) {
-            options.font_size = style.font_size.0;
-            if let Some(family) = style.font_family.first() {
-                options.font_family = family.as_str().to_owned();
-            }
-        }
         let tree = parse(&svg.source, &options)?;
         let tree = match svg.host_opacity {
             Some(alpha) => neutralize_root_opacity(tree, &options, alpha)?,

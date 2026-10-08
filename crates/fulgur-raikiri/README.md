@@ -68,7 +68,9 @@ text and ellipses have no decoration segments in this API version.
 Inline SVG is drawn as PDF vector content through Krilla SVG, including paths,
 gradients, and selectable text. Its viewport uses Raikiri's resolved content box,
 including border, padding, fixed repeats, and page cuts. SVG fonts follow the
-same bundled-font and system-font options as the HTML text. Parent and SVG-root
+same bundled-font and system-font options as the HTML text. Resolved root font
+sizes and complete family candidate lists preserve relative sizing and fallback.
+Parent and SVG-root
 opacity composite once while explicit inherited descendant opacity is retained.
 Source preparation preserves selector matches before rewriting the root viewport
 and color. The supported SVG subset follows Raikiri's admission checks; external

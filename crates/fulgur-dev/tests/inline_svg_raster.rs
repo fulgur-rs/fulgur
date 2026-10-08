@@ -1,29 +1,32 @@
 #![cfg(target_os = "linux")]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn render(body: &str, css: &str) -> (Vec<image::RgbaImage>, String, lopdf::Document) {
+    render_with_fonts(body, css, &[])
+}
+
+fn render_with_fonts(
+    body: &str,
+    css: &str,
+    additional_fonts: &[PathBuf],
+) -> (Vec<image::RgbaImage>, String, lopdf::Document) {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.html");
     let output = dir.path().join("output.pdf");
-    std::fs::write(&input, format!("<style>@page{{size:200px 150px;margin:0}}body{{margin:0;background:white;font:12px/16px 'Noto Sans Mono'}}svg{{display:block}}.anchor{{position:fixed;left:130px;top:110px;color:black}}{css}</style>{body}<p class=anchor>anchor</p>")).unwrap();
+    std::fs::write(&input, format!("<style>@page{{size:200px 150px;margin:0}}body{{margin:0;background:white;font:12px/16px 'Noto Sans Mono'}}svg{{display:block}}.anchor{{position:fixed;left:130px;top:110px;color:black;font-size:12px}}{css}</style>{body}<p class=anchor>anchor</p>")).unwrap();
     let font =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../fulgur-ruby/spec/fixtures/noto_sans.ttf");
-    let result = Command::new(env!("CARGO_BIN_EXE_fulgur-dev"))
-        .args([
-            "render",
-            "--engine",
-            "raikiri",
-            "--no-system-fonts",
-            "--font",
-        ])
-        .arg(font)
-        .arg(input)
-        .arg("-o")
-        .arg(&output)
-        .output()
-        .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fulgur-dev"));
+    command
+        .arg("render")
+        .args(["--engine", "raikiri", "--no-system-fonts", "--font"])
+        .arg(font);
+    for font in additional_fonts {
+        command.arg("--font").arg(font);
+    }
+    let result = command.arg(input).arg("-o").arg(&output).output().unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -256,4 +259,120 @@ fn svg_layered_css_dimensions_override_presentation_attributes() {
     rgb(&images[0], 24, 10, [255, 0, 0]);
     rgb(&images[0], 34, 10, [255, 255, 255]);
     rgb(&images[0], 14, 18, [255, 255, 255]);
+}
+
+#[test]
+fn svg_relative_root_font_sizes_match_resolved_absolute_sizes() {
+    let root = |attributes: &str| {
+        format!("<svg width='180' height='90' {attributes}><text x='0' y='65'>TEST</text></svg>")
+    };
+    let expected = render(&root("style='font-size:24px'"), "").0;
+    for attributes in [
+        "style='font:2em Noto Sans Mono !important'",
+        "style='font-size:2em'",
+        "style='font-size:200%'",
+        "style='font-size:2em !important'",
+        "style='font:2em Noto Sans Mono'",
+        "font-size='24'",
+        "font-size='2em'",
+    ] {
+        let (images, text, _) = render(&root(attributes), "");
+        assert!(text.contains("TEST"));
+        assert!(images[0] == expected[0], "{attributes}");
+    }
+    for font in [
+        "font-size:2em !important",
+        "font:2em Noto Sans Mono !important",
+    ] {
+        let body = format!(
+            "<svg width='180' height='90'><style>svg {{{font}}}</style><text x='0' y='65'>TEST</text></svg>"
+        );
+        let images = render(&body, "").0;
+        assert!(images[0] == expected[0], "{font}");
+    }
+    let bold = render(&root("style='font:bold 24px Noto Sans Mono'"), "").0;
+    let relative_bold = render(&root("style='font:bold 2em Noto Sans Mono !important'"), "").0;
+    assert!(bold[0] == relative_bold[0], "bold font shorthand");
+}
+
+fn renamed_test_font() -> Vec<u8> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../fulgur-ruby/spec/fixtures/noto_sans.ttf");
+    let mut data = std::fs::read(path).unwrap();
+    let count = u16::from_be_bytes(data[4..6].try_into().unwrap()) as usize;
+    let mut name_record = None;
+    let mut head_offset = None;
+    for record in (12..12 + count * 16).step_by(16) {
+        let offset = u32::from_be_bytes(data[record + 8..record + 12].try_into().unwrap()) as usize;
+        if &data[record..record + 4] == b"name" {
+            let length =
+                u32::from_be_bytes(data[record + 12..record + 16].try_into().unwrap()) as usize;
+            name_record = Some((record, offset, length));
+        } else if &data[record..record + 4] == b"head" {
+            head_offset = Some(offset);
+        }
+    }
+    let (record, offset, length) = name_record.unwrap();
+    // A renamed face makes fallback selection observable without another binary fixture.
+    for (old, new) in [
+        ("Noto Sans Mono", "Test Font Mono"),
+        ("NotoSansMono", "TestFontMono"),
+    ] {
+        for (old, new) in [
+            (old.as_bytes().to_vec(), new.as_bytes().to_vec()),
+            (
+                old.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+                new.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            ),
+        ] {
+            assert_eq!(old.len(), new.len());
+            let table = &mut data[offset..offset + length];
+            for position in 0..=table.len() - old.len() {
+                if table[position..position + old.len()] == old {
+                    table[position..position + new.len()].copy_from_slice(&new);
+                }
+            }
+        }
+    }
+    let checksum = |bytes: &[u8]| {
+        bytes.chunks(4).fold(0u32, |sum, chunk| {
+            let mut word = [0; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            sum.wrapping_add(u32::from_be_bytes(word))
+        })
+    };
+    let name_checksum = checksum(&data[offset..offset + length]);
+    data[record + 4..record + 8].copy_from_slice(&name_checksum.to_be_bytes());
+    let adjustment = head_offset.unwrap() + 8;
+    data[adjustment..adjustment + 4].fill(0);
+    let total = 0xb1b0afbau32.wrapping_sub(checksum(&data));
+    data[adjustment..adjustment + 4].copy_from_slice(&total.to_be_bytes());
+    data
+}
+
+#[test]
+fn svg_inherited_font_families_keep_missing_and_bundled_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let font = dir.path().join("fallback.ttf");
+    std::fs::write(&font, renamed_test_font()).unwrap();
+    let (_, text, pdf) = render_with_fonts(
+        "<svg width='180' height='90'><text x='0' y='65'>TEST</text></svg>",
+        "body{font-family:Missing,'Test Font Mono';font-size:24px}",
+        &[font],
+    );
+    assert!(text.contains("TEST"));
+    let names: Vec<_> = pdf
+        .objects
+        .values()
+        .filter_map(|object| object.as_dict().ok()?.get(b"BaseFont").ok()?.as_name().ok())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("TestFontMono")),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.contains("NotoSansMono")),
+        "{names:?}"
+    );
 }
