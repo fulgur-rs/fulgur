@@ -1133,15 +1133,11 @@ fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
         .find(|f| page.dom().local_name(f.node()) == Some("body"))
         .unwrap()
         .paint_rect();
-    assert_eq!(
-        clip_bounds(&clipped),
-        [[
-            body.x + 5.0,
-            body.y + 5.0,
-            body.x + body.width - 5.0,
-            body.y + body.height - 5.0
-        ]]
-    );
+    assert_eq!(body, raikiri_html::PaintRect::new(20.0, 20.0, 260.0, 160.0));
+    // The body's content-box minimum is 160px; its two 5px borders make
+    // the whole box 170px tall. The page cuts the visible fragment, while
+    // the overflow clip keeps the whole padding box below the page cut.
+    assert_eq!(clip_bounds(&clipped), [[25.0, 25.0, 275.0, 185.0]]);
 }
 
 /// Decoded operations of one page's content stream.
