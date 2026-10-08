@@ -247,13 +247,19 @@ fn paint_text_batch(
         ] {
             for run in &runs {
                 let element = text_clip::run_element(dom, run);
+                // Standalone markers precede the item's own overflow clip.
+                let clip_owner = if run.is_standalone_marker() {
+                    element.and_then(|node| dom.parent(node))
+                } else {
+                    element
+                };
                 let area = PaintRect::new(
                     run.origin.0,
                     run.origin.1 - run.ascent,
                     run.advance,
                     run.ascent + run.descent,
                 );
-                let chain = clips.chain(page, element, area);
+                let chain = clips.chain(page, clip_owner, area);
                 active.apply(surface, clips, &chain);
                 if let Some(phase) = phase {
                     decoration::paint(surface, &run.decorations, phase);
