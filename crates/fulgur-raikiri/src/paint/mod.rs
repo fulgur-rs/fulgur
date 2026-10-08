@@ -8,6 +8,7 @@
 
 mod border;
 mod clip;
+mod decoration;
 mod gradient;
 mod navigation;
 mod order;
@@ -118,18 +119,8 @@ fn paint_legacy(
         }
     }
     // Text goes above every block background and border.
-    for run in runs {
-        let element = text_clip::run_element(dom, run);
-        let area = PaintRect::new(
-            run.origin.0,
-            run.origin.1 - run.ascent,
-            run.advance,
-            run.ascent + run.descent,
-        );
-        let chain = clips.chain(page, element, area);
-        active.apply(surface, &clips, &chain);
-        paint_text_run(surface, run, fonts);
-    }
+    let text: Vec<_> = runs.iter().collect();
+    paint_text_batch(surface, page, &clips, &mut active, &text, fonts);
     active.clear(surface);
 }
 
@@ -149,7 +140,15 @@ fn paint_ordered(
             by_node.entry(node).or_default().push(run);
         }
     }
+    let mut batch = Vec::new();
     for event in events {
+        if let PaintEvent::Text(fragment) = event {
+            batch.extend(by_node.get(&fragment.node()).into_iter().flatten().copied());
+            continue;
+        }
+        // Clip, opacity, box and stacking steps delimit a text paint batch.
+        paint_text_batch(surface, page, &clips, &mut active, &batch, fonts);
+        batch.clear();
         match event {
             PaintEvent::Box(fragment) => {
                 if let Some(style) = page.computed(fragment.node()) {
@@ -164,20 +163,6 @@ fn paint_ordered(
                         style,
                         text,
                     );
-                }
-            }
-            PaintEvent::Text(fragment) => {
-                for run in by_node.get(&fragment.node()).into_iter().flatten() {
-                    let element = text_clip::run_element(dom, run);
-                    let area = PaintRect::new(
-                        run.origin.0,
-                        run.origin.1 - run.ascent,
-                        run.advance,
-                        run.ascent + run.descent,
-                    );
-                    let chain = clips.chain(page, element, area);
-                    active.apply(surface, &clips, &chain);
-                    paint_text_run(surface, run, fonts);
                 }
             }
             PaintEvent::PushOpacity(alpha) => {
@@ -198,7 +183,55 @@ fn paint_ordered(
             _ => {}
         }
     }
+    paint_text_batch(surface, page, &clips, &mut active, &batch, fonts);
     active.clear(surface);
+}
+
+/// Keep the line's decorations below or above all neighboring glyph ink.
+fn paint_text_batch(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    clips: &ClipMap,
+    active: &mut ClipStack,
+    runs: &[&PositionedGlyphRun<'_>],
+    fonts: &mut FontCache,
+) {
+    let dom = page.dom();
+    let mut indices = HashMap::new();
+    let mut lines: Vec<Vec<&PositionedGlyphRun<'_>>> = Vec::new();
+    for &run in runs {
+        let index = *indices.entry(run.line).or_insert_with(|| {
+            lines.push(Vec::new());
+            lines.len() - 1
+        });
+        lines[index].push(run);
+    }
+    // Reunite color and font slices of each line before painting its three
+    // phases, without reordering independent lines that overlap on the page.
+    for runs in lines {
+        for phase in [
+            Some(decoration::Phase::BeforeGlyphs),
+            None,
+            Some(decoration::Phase::AfterGlyphs),
+        ] {
+            for run in &runs {
+                let element = text_clip::run_element(dom, run);
+                let area = PaintRect::new(
+                    run.origin.0,
+                    run.origin.1 - run.ascent,
+                    run.advance,
+                    run.ascent + run.descent,
+                );
+                let chain = clips.chain(page, element, area);
+                active.apply(surface, clips, &chain);
+                if let Some(phase) = phase {
+                    decoration::paint(surface, &run.decorations, phase);
+                } else {
+                    paint_glyph_run(surface, run, fonts);
+                }
+            }
+        }
+    }
 }
 
 /// Background and borders of one box fragment (`rect` is its border box).
@@ -341,7 +374,7 @@ impl FontCache {
 /// Raikiri reports glyph advances and offsets in px with y growing downward;
 /// Krilla takes them per unit of font size and subtracts `y_offset`, so both
 /// are divided by the font size and `y_offset` changes sign.
-fn paint_text_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
+fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
     if run.glyphs.is_empty() || run.font_size <= 0.0 || run.color.a == 0 {
         return;
     }
