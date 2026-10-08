@@ -1701,7 +1701,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -3023,7 +3023,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 [[package]]
 name = "raikiri-dom"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=0e33d28d8f3344cd9368b01d8cae5e34a51be825#0e33d28d8f3344cd9368b01d8cae5e34a51be825"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=060dae5231e803ea9e92509d0489a78c9cf08d7b#060dae5231e803ea9e92509d0489a78c9cf08d7b"
 dependencies = [
  "bitflags 2.11.0",
  "raikiri-style",
@@ -3041,7 +3041,7 @@ dependencies = [
 [[package]]
 name = "raikiri-html"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=0e33d28d8f3344cd9368b01d8cae5e34a51be825#0e33d28d8f3344cd9368b01d8cae5e34a51be825"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=060dae5231e803ea9e92509d0489a78c9cf08d7b#060dae5231e803ea9e92509d0489a78c9cf08d7b"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3062,7 +3062,7 @@ dependencies = [
 [[package]]
 name = "raikiri-style"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=0e33d28d8f3344cd9368b01d8cae5e34a51be825#0e33d28d8f3344cd9368b01d8cae5e34a51be825"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=060dae5231e803ea9e92509d0489a78c9cf08d7b#060dae5231e803ea9e92509d0489a78c9cf08d7b"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3074,7 +3074,7 @@ dependencies = [
 [[package]]
 name = "raikiri-svg"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=0e33d28d8f3344cd9368b01d8cae5e34a51be825#0e33d28d8f3344cd9368b01d8cae5e34a51be825"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=060dae5231e803ea9e92509d0489a78c9cf08d7b#060dae5231e803ea9e92509d0489a78c9cf08d7b"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3088,7 +3088,7 @@ dependencies = [
 [[package]]
 name = "raikiri-traits"
 version = "0.2.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=0e33d28d8f3344cd9368b01d8cae5e34a51be825#0e33d28d8f3344cd9368b01d8cae5e34a51be825"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=060dae5231e803ea9e92509d0489a78c9cf08d7b#060dae5231e803ea9e92509d0489a78c9cf08d7b"
 dependencies = [
  "bytes",
  "libc",
