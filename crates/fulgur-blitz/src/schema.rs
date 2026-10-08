@@ -1251,14 +1251,14 @@ mod tests {
         }
     }
 
-    // ── ensure_array_at_path: empty-path early return ────────────────────────
+    // ── ForLoop: local-variable exclusion ───────────────────────────────────
 
     /// When an outer for-loop uses tuple unpacking, each loop variable is
-    /// mapped to an empty path in the inner scope.  An inner for-loop that
-    /// iterates over one of those variables calls `ensure_array_at_path` with
-    /// `path = []`, hitting the early-return guard at the top of the function.
+    /// mapped to an empty path in the inner scope. `resolve_expr_path` returns
+    /// `None` for empty-path scope entries, so an inner for-loop over one of
+    /// those variables does not add it to the top-level schema.
     #[test]
-    fn inner_for_loop_over_tuple_var_hits_ensure_array_empty_path() {
+    fn inner_for_loop_over_tuple_var_excludes_loop_locals_from_schema() {
         let schema = extract_schema(
             "{% for key, value in pairs %}{% for sub in key %}{{ sub }}{% endfor %}{% endfor %}",
             "test.html",
@@ -1275,12 +1275,11 @@ mod tests {
         }
     }
 
-    /// A set variable used as a for-loop iterator also has an empty path in
-    /// scope, producing the same `ensure_array_at_path([])` early return.
+    /// A setblock variable used as a for-loop iterator has an empty path in
+    /// scope. `resolve_expr_path` returns `None` for it, so the variable does
+    /// not appear in the top-level schema and neither does the loop variable.
     #[test]
-    fn for_loop_over_set_var_hits_ensure_array_empty_path() {
-        // `{% set local %}...{% endset %}` creates a block-capture with empty path.
-        // Using it as a for-loop iterator triggers ensure_array_at_path with [].
+    fn for_loop_over_set_var_excludes_iter_and_loop_var_from_schema() {
         let schema = extract_schema(
             "{% set local %}captured{% endset %}{% for item in local %}{{ title }}{% endfor %}",
             "test.html",
