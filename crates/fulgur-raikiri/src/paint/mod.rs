@@ -30,8 +30,8 @@ use raikiri_html::computed::{
     ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
-    RunSource,
+    ClipKind, DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect,
+    PositionedGlyphRun, RunSource,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -163,6 +163,7 @@ fn paint_ordered(
         }
     }
     let mut batch = Vec::new();
+    let mut event_clips = Vec::new();
     for event in events {
         if let PaintEvent::Text(fragment) = event {
             batch.extend(by_node.get(&fragment.node()).into_iter().flatten().copied());
@@ -195,6 +196,24 @@ fn paint_ordered(
                 let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
                 active.apply(surface, &clips, &chain);
                 svg.paint(surface, page, fragment, true)?;
+            }
+            PaintEvent::PushClip(shape, kind) => {
+                // Table-part decorations are drawn once per cell intersection.
+                // These clips supplement the lazily applied ancestor overflow.
+                let path = (*kind == ClipKind::TableCell)
+                    .then(|| clip::clip_path(*shape, page.geometry().page_box))
+                    .flatten();
+                if let Some(path) = &path {
+                    active.clear(surface);
+                    surface.push_clip_path(path, &FillRule::NonZero);
+                }
+                event_clips.push(path.is_some());
+            }
+            PaintEvent::PopClip => {
+                if event_clips.pop() == Some(true) {
+                    active.clear(surface);
+                    surface.pop();
+                }
             }
             PaintEvent::PushOpacity(alpha) => {
                 // Clips and opacity groups share the surface stack. Close clips

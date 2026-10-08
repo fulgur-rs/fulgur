@@ -98,7 +98,7 @@ fn nearest(rects: &[PaintRect], target: PaintRect) -> usize {
 
 /// Draw Raikiri's resolved padding-edge clip without resolving percentages
 /// on the page slice or normalizing a cropped inner ellipse again.
-fn clip_path(clip: PaintClip, bounds: PaintRect) -> Option<Path> {
+pub(super) fn clip_path(clip: PaintClip, bounds: PaintRect) -> Option<Path> {
     let rect = clip.rect;
     if clip.clip_x && clip.clip_y {
         return RoundedRect {
