@@ -70,7 +70,7 @@ fn paint_page(
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
     let runs = page.text_runs();
-    let events = page.paint_order();
+    let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs) {
         paint_ordered(&mut surface, page, &events, &runs, fonts);
     } else {
@@ -97,7 +97,7 @@ fn paint_legacy(
     let dom = page.dom();
 
     // Keep the existing whole-page rendering when text events cannot map
-    // each source node to exactly one draw step.
+    // every text run to exactly one draw step.
     let mut boxes: Vec<_> = page
         .fragments()
         .filter(|fragment| fragment.kind() == FragmentKind::Box)
@@ -135,7 +135,9 @@ fn paint_ordered(
     let mut active = ClipStack::default();
     let dom = page.dom();
     let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
+    let mut by_line: HashMap<_, Vec<_>> = HashMap::new();
     for run in runs {
+        by_line.entry(run.line).or_default().push(run);
         if let RunSource::Text(node) = run.source {
             by_node.entry(node).or_default().push(run);
         }
@@ -144,6 +146,10 @@ fn paint_ordered(
     for event in events {
         if let PaintEvent::Text(fragment) = event {
             batch.extend(by_node.get(&fragment.node()).into_iter().flatten().copied());
+            continue;
+        }
+        if let PaintEvent::TextLine(line) = event {
+            batch.extend(by_line.get(line).into_iter().flatten().copied());
             continue;
         }
         // Clip, opacity, box and stacking steps delimit a text paint batch.

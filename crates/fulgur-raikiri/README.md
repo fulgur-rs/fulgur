@@ -57,13 +57,13 @@ Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
 counter/string labels, and general display:contents box suppression are not
 implemented in this backend. Aborted layout or callback errors return no PDF.
 
-Raikiri pages whose text nodes each map to one paint event use page paint order
-for boxes and text, with opacity composited as groups. Rounded and axis-aware
-clips retain the existing geometry. Generated content, duplicate or missing
-text events, and unknown run sources use the legacy rendering for the entire
-page, preserving text. Replaced/image content is still unsupported. The
-pinned API exposes ellipsis runs and preserves the visible truncated text.
-Generated text and ellipses have no decoration segments in this API version.
+Raikiri pages use paint order with one text event per paragraph line from the
+page's positioned runs. Source text, generated content and ellipses share their
+ancestor opacity groups, which composite overlapping descendants once. Rounded
+and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
+line events and unknown run sources use legacy rendering for the entire page.
+Replaced/image content and inline element opacity remain unsupported. Generated
+text and ellipses have no decoration segments in this API version.
 
 Used text decorations come directly from Raikiri's glyph runs, including
 ancestor propagation, line endpoints, color, thickness, and the unsplit pattern
@@ -78,3 +78,20 @@ Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices
 of the same line, so earlier decorations cannot cover later overlapping
 text merely because both are in one paint batch.
+
+Corner radii retain separate horizontal and vertical axes from Raikiri,
+including slash shorthand, two-value corner longhands, and percentages of
+the border box. Both painters use the shared used-value calculation, with
+one scale factor when adjacent corners overlap. PDF backgrounds, borders,
+and overflow clips follow the resulting ellipses; insets subtract their
+adjacent border widths and fragment breaks keep their corners square.
+
+Inner corner curves preserve the outer radius minus adjacent border or padding
+widths. Thick opposite borders crop the ellipse at the padding/content rectangle;
+they do not rescale it. An entirely excluded inner shape paints no background,
+hides descendants when used as an overflow clip, and leaves the full outer
+border ring.
+When cropped diagonal inner arcs intersect, their common outline is computed
+with adaptive vector segments (0.05px control-hull tolerance, bounded to 1024
+segments per corner for extreme coordinates). Single-corner crops and ordinary
+rounded rectangles retain cubic curves.
