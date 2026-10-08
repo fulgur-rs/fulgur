@@ -1,0 +1,158 @@
+//! Inline SVG vector content inside the existing page paint stack.
+
+use std::sync::Arc;
+
+use fulgur_core::{Error, Result};
+use krilla::geom::{Rect, Size, Transform};
+use krilla::paint::FillRule;
+use krilla::surface::Surface;
+use krilla_svg::{SurfaceExt, SvgSettings};
+use raikiri_html::{Fragment, Page};
+
+use crate::RenderOptions;
+
+pub(super) struct SvgCache<'a> {
+    options: RenderOptions<'a>,
+    fonts: Option<Arc<usvg::fontdb::Database>>,
+}
+
+impl<'a> SvgCache<'a> {
+    pub(super) fn new(options: RenderOptions<'a>) -> Self {
+        Self {
+            options,
+            fonts: None,
+        }
+    }
+
+    fn fonts(&mut self) -> Arc<usvg::fontdb::Database> {
+        self.fonts
+            .get_or_insert_with(|| {
+                let mut database = usvg::fontdb::Database::new();
+                if let Some(bundle) = self.options.assets {
+                    for bytes in &bundle.fonts {
+                        database.load_font_data(bytes.to_vec());
+                    }
+                }
+                let bundled_family = database
+                    .faces()
+                    .next()
+                    .and_then(|face| face.families.first())
+                    .map(|(name, _)| name.clone());
+                if self.options.system_fonts {
+                    database.load_system_fonts();
+                }
+                if let Some(family) = bundled_family {
+                    database.set_serif_family(family.clone());
+                    database.set_sans_serif_family(family.clone());
+                    database.set_monospace_family(family);
+                }
+                Arc::new(database)
+            })
+            .clone()
+    }
+
+    pub(super) fn paint(
+        &mut self,
+        surface: &mut Surface<'_>,
+        page: &Page<'_>,
+        fragment: &Fragment<'_>,
+    ) -> Result<()> {
+        let Some(svg) = page
+            .inline_svg(fragment)
+            .map_err(|error| Error::Layout(format!("inline SVG: {error}")))?
+        else {
+            return Ok(());
+        };
+        let mut options = usvg::Options {
+            fontdb: self.fonts(),
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_data: Box::new(|_, _, _| None),
+                resolve_string: Box::new(|_, _| None),
+            },
+            ..usvg::Options::default()
+        };
+        if let Some(style) = page.computed(fragment.node()) {
+            options.font_size = style.font_size.0;
+            if let Some(family) = style.font_family.first() {
+                options.font_family = family.as_str().to_owned();
+            }
+        }
+        let tree = parse(&svg.source, &options)?;
+        let tree = match svg.host_opacity {
+            Some(alpha) => neutralize_root_opacity(tree, &options, alpha)?,
+            None => tree,
+        };
+        let area = fragment.paint_rect();
+        let clip = Rect::from_xywh(area.x, area.y, area.width, area.height)
+            .ok_or_else(|| Error::PdfGeneration("invalid SVG fragment clip".into()))?;
+        let size = Size::from_wh(svg.viewport.width, svg.viewport.height)
+            .ok_or_else(|| Error::PdfGeneration("invalid SVG viewport".into()))?;
+        // Keep the original viewport while clipping this page's fragment slice.
+        let mut builder = krilla::geom::PathBuilder::new();
+        builder.push_rect(clip);
+        let clip_path = builder
+            .finish()
+            .ok_or_else(|| Error::PdfGeneration("invalid SVG clip path".into()))?;
+        surface.push_clip_path(&clip_path, &FillRule::NonZero);
+        surface.push_transform(&Transform::from_translate(svg.viewport.x, svg.viewport.y));
+        let result = surface.draw_svg(&tree, size, SvgSettings::default());
+        surface.pop();
+        surface.pop();
+        result.ok_or_else(|| Error::PdfGeneration("SVG vector drawing failed".into()))
+    }
+}
+
+fn parse(source: &str, options: &usvg::Options<'_>) -> Result<usvg::Tree> {
+    usvg::Tree::from_str(source, options)
+        .map_err(|error| Error::Layout(format!("inline SVG vector parse: {error}")))
+}
+
+fn neutralize_root_opacity(
+    tree: usvg::Tree,
+    options: &usvg::Options<'_>,
+    alpha: f32,
+) -> Result<usvg::Tree> {
+    // usvg omits the root opacity group when it is within four ULPs of one.
+    if alpha.to_bits().abs_diff(1.0f32.to_bits()) <= 4 || tree.root().children().is_empty() {
+        return Ok(tree);
+    }
+    // Resolve inheritance and use instances before removing the root multiplier.
+    // Preserve SVG text so Krilla can still embed selectable glyphs.
+    let mut source = tree.to_string(&usvg::WriteOptions {
+        preserve_text: true,
+        ..usvg::WriteOptions::default()
+    });
+    let range = {
+        let document = usvg::roxmltree::Document::parse(&source)
+            .map_err(|error| Error::Layout(format!("normalized SVG XML: {error}")))?;
+        let mut group = document
+            .root_element()
+            .children()
+            .find(|node| node.has_tag_name("g"))
+            .ok_or_else(|| Error::Layout("missing SVG root opacity group".into()))?;
+        loop {
+            if let Some(attribute) = group.attribute_node("opacity") {
+                let opacity: f32 = attribute
+                    .value()
+                    .parse()
+                    .map_err(|_| Error::Layout("invalid normalized SVG root opacity".into()))?;
+                if opacity.to_bits().abs_diff(alpha.to_bits()) > 4 {
+                    return Err(Error::Layout("unexpected SVG root opacity".into()));
+                }
+                break attribute.range();
+            }
+            // The optional viewBox transform wrapper precedes the source root.
+            let mut children = group.children().filter(|node| node.is_element());
+            let child = children
+                .next()
+                .filter(|node| node.has_tag_name("g"))
+                .ok_or_else(|| Error::Layout("missing nested SVG root opacity group".into()))?;
+            if children.next().is_some() {
+                return Err(Error::Layout("ambiguous SVG root opacity group".into()));
+            }
+            group = child;
+        }
+    };
+    source.replace_range(range, "");
+    parse(&source, options)
+}

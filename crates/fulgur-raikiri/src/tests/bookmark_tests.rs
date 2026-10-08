@@ -189,6 +189,7 @@ fn bookmark_collection_is_discarded_on_abort_or_observer_error() {
                     &Config::builder().bookmarks(true).build(),
                     &collector,
                     &url::Url::parse("file:///input.html").unwrap(),
+                    &RenderOptions::default(),
                 )
             });
         assert!(matches!(result, Err(Error::Layout(_))));
@@ -209,7 +210,13 @@ fn bookmark_with_layout_discards_already_aborted_result() {
             .signal(Some(controller.signal.clone()))
             .build(),
         |status, _resources, collector, document_url| {
-            draw(status, &config, collector, document_url)
+            draw(
+                status,
+                &config,
+                collector,
+                document_url,
+                &RenderOptions::default(),
+            )
         },
     );
     assert!(matches!(result, Err(Error::Layout(_))));

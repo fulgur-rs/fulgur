@@ -13,6 +13,7 @@ mod gradient;
 mod navigation;
 mod order;
 mod shape;
+mod svg;
 mod text_clip;
 
 use clip::{ClipMap, ClipStack};
@@ -41,6 +42,7 @@ pub(crate) fn paint_document(
     config: &fulgur_core::Config,
     outline: Option<krilla::outline::Outline>,
     document_url: &url::Url,
+    options: &crate::RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     let mut pdf = krilla::Document::new();
     pdf.set_metadata(crate::metadata::build(config)?);
@@ -48,8 +50,16 @@ pub(crate) fn paint_document(
         pdf.set_outline(outline);
     }
     let mut fonts = FontCache::default();
+    let mut svg = svg::SvgCache::new(*options);
     for page in document.pages() {
-        paint_page(&mut pdf, document, &page, &mut fonts, document_url)?;
+        paint_page(
+            &mut pdf,
+            document,
+            &page,
+            &mut fonts,
+            &mut svg,
+            document_url,
+        )?;
     }
     pdf.finish()
         .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
@@ -60,6 +70,7 @@ fn paint_page(
     document: &DocumentLayout,
     page: &Page<'_>,
     fonts: &mut FontCache,
+    svg: &mut svg::SvgCache<'_>,
     document_url: &url::Url,
 ) -> Result<()> {
     let page_box = page.geometry().page_box;
@@ -72,9 +83,9 @@ fn paint_page(
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs) {
-        paint_ordered(&mut surface, page, &events, &runs, fonts);
+        paint_ordered(&mut surface, page, &events, &runs, fonts, svg)?;
     } else {
-        paint_legacy(&mut surface, page, &runs, fonts);
+        paint_legacy(&mut surface, page, &runs, fonts, svg)?;
     }
 
     surface.pop();
@@ -91,7 +102,8 @@ fn paint_legacy(
     page: &Page<'_>,
     runs: &[PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
-) {
+    svg: &mut svg::SvgCache<'_>,
+) -> Result<()> {
     let clips = ClipMap::new(page);
     let mut active = ClipStack::default();
     let dom = page.dom();
@@ -118,10 +130,16 @@ fn paint_legacy(
             );
         }
     }
+    for fragment in page.fragments() {
+        let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
+        active.apply(surface, &clips, &chain);
+        svg.paint(surface, page, &fragment)?;
+    }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
     paint_text_batch(surface, page, &clips, &mut active, &text, fonts);
     active.clear(surface);
+    Ok(())
 }
 
 fn paint_ordered(
@@ -130,7 +148,8 @@ fn paint_ordered(
     events: &[PaintEvent<'_>],
     runs: &[PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
-) {
+    svg: &mut svg::SvgCache<'_>,
+) -> Result<()> {
     let clips = ClipMap::new(page);
     let mut active = ClipStack::default();
     let dom = page.dom();
@@ -171,6 +190,11 @@ fn paint_ordered(
                     );
                 }
             }
+            PaintEvent::Replaced(fragment) => {
+                let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
+                active.apply(surface, &clips, &chain);
+                svg.paint(surface, page, fragment)?;
+            }
             PaintEvent::PushOpacity(alpha) => {
                 // Clips and opacity groups share the surface stack. Close clips
                 // at each group boundary and reapply them on the next draw.
@@ -183,14 +207,14 @@ fn paint_ordered(
                 active.clear(surface);
                 surface.pop();
             }
-            // Keep the existing rounded and axis-aware clip geometry. Replaced
-            // content still needs consumer data the current API does not expose.
+            // Clips are applied lazily before each content draw.
             // Other events have already been rejected by `order::supported`.
             _ => {}
         }
     }
     paint_text_batch(surface, page, &clips, &mut active, &batch, fonts);
     active.clear(surface);
+    Ok(())
 }
 
 /// Keep the line's decorations below or above all neighboring glyph ink.

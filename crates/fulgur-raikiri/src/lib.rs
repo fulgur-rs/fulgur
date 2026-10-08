@@ -62,7 +62,9 @@ pub fn render_with_options(
         config,
         options,
         LayoutConfig::default(),
-        |status, _resources, collector, document_url| draw(status, config, collector, document_url),
+        |status, _resources, collector, document_url| {
+            draw(status, config, collector, document_url, options)
+        },
     )
 }
 
@@ -72,6 +74,7 @@ fn draw(
     config: &Config,
     collector: &bookmarks::BookmarkCollector,
     document_url: &url::Url,
+    options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
@@ -83,7 +86,7 @@ fn draw(
     let outline = config
         .bookmarks
         .then(|| bookmarks::outline(&document, collector));
-    paint::paint_document(&document, config, outline, document_url)
+    paint::paint_document(&document, config, outline, document_url, options)
 }
 
 #[cfg(test)]

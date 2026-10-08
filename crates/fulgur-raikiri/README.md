@@ -5,7 +5,7 @@ Unpublished Raikiri backend for Fulgur development.
 The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, text, and text decorations. It does not fall back to Blitz.
+backgrounds and borders, text, text decorations, and inline SVG. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
@@ -62,8 +62,18 @@ page's positioned runs. Source text, generated content and ellipses share their
 ancestor opacity groups, which composite overlapping descendants once. Rounded
 and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
 line events and unknown run sources use legacy rendering for the entire page.
-Replaced/image content and inline element opacity remain unsupported. Generated
+Other replaced/image content and inline element opacity remain unsupported. Generated
 text and ellipses have no decoration segments in this API version.
+
+Inline SVG is drawn as PDF vector content through Krilla SVG, including paths,
+gradients, and selectable text. Its viewport uses Raikiri's resolved content box,
+including border, padding, fixed repeats, and page cuts. SVG fonts follow the
+same bundled-font and system-font options as the HTML text. Parent and SVG-root
+opacity composite once while explicit inherited descendant opacity is retained.
+Source preparation preserves selector matches before rewriting the root viewport
+and color. The supported SVG subset follows Raikiri's admission checks; external
+references and filter effects return errors rather than fetching resources or
+silently dropping the SVG.
 
 Used text decorations come directly from Raikiri's glyph runs, including
 ancestor propagation, line endpoints, color, thickness, and the unsplit pattern
