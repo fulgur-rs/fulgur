@@ -392,3 +392,18 @@ fn svg_inherited_font_families_keep_missing_and_bundled_candidates() {
         "{names:?}"
     );
 }
+
+#[test]
+fn viewbox_wrappers_do_not_apply_host_opacity_twice() {
+    let (images, _, _) = render(
+        "<svg width='100' height='50' viewBox='10 20 200 100'><rect x='10' y='20' width='200' height='100' fill='red'/></svg>",
+        "svg{opacity:.5}",
+    );
+    rgb(&images[0], 50, 25, [255, 128, 128]);
+}
+
+#[test]
+fn empty_svg_with_host_opacity_leaves_the_page_blank() {
+    let (images, _, _) = render("<svg width='20' height='10'/>", "svg{opacity:.5}");
+    rgb(&images[0], 10, 5, [255, 255, 255]);
+}

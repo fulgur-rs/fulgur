@@ -434,3 +434,6 @@ fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, font
         false,
     );
 }
+
+#[cfg(test)]
+mod tests;
