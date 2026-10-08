@@ -1200,4 +1200,96 @@ mod tests {
             "`author` (absent from data) must not appear in the schema"
         );
     }
+
+    // ── WithBlock tuple-target (collect_from_stmt WithBlock else branch) ──────
+
+    /// `{% with (a, b) = pair %}` uses a tuple target expression.
+    /// `extract_var_names(List([Var("a"), Var("b")]))` returns two names, so
+    /// `var_names.len() > 1` and the else branch at lines 295-296 fires: both
+    /// names are inserted as locals with an empty path instead of resolving
+    /// the rhs path.
+    #[test]
+    fn with_block_tuple_target_vars_are_local() {
+        let schema = extract_schema(
+            "{% with (a, b) = pair %}{{ a }}: {{ b }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        // `pair` is the RHS of the with-assignment → must appear as a top-level property.
+        assert_eq!(
+            schema["properties"]["pair"]["type"], "string",
+            "`pair` (RHS of with-assignment) must be collected"
+        );
+        // `a` and `b` are local to the with block — must NOT leak.
+        assert!(
+            schema["properties"]["a"].is_null(),
+            "`a` must not appear as a top-level property"
+        );
+        assert!(
+            schema["properties"]["b"].is_null(),
+            "`b` must not appear as a top-level property"
+        );
+    }
+
+    /// Multiple tuple targets in a single `{% with %}` are each treated as
+    /// local, and all RHS expressions are collected.
+    #[test]
+    fn with_block_two_tuple_targets_both_rhs_collected() {
+        let schema = extract_schema(
+            "{% with (x, y) = coords, (r, g, b) = color %}{{ x }}{{ r }}{% endwith %}",
+            "test.html",
+        )
+        .unwrap();
+        assert_eq!(schema["properties"]["coords"]["type"], "string");
+        assert_eq!(schema["properties"]["color"]["type"], "string");
+        // Tuple locals must not leak.
+        for name in ["x", "y", "r", "g", "b"] {
+            assert!(
+                schema["properties"][name].is_null(),
+                "`{name}` must not appear as a top-level property"
+            );
+        }
+    }
+
+    // ── ensure_array_at_path: empty-path early return ────────────────────────
+
+    /// When an outer for-loop uses tuple unpacking, each loop variable is
+    /// mapped to an empty path in the inner scope.  An inner for-loop that
+    /// iterates over one of those variables calls `ensure_array_at_path` with
+    /// `path = []`, hitting the early-return guard at the top of the function.
+    #[test]
+    fn inner_for_loop_over_tuple_var_hits_ensure_array_empty_path() {
+        let schema = extract_schema(
+            "{% for key, value in pairs %}{% for sub in key %}{{ sub }}{% endfor %}{% endfor %}",
+            "test.html",
+        )
+        .unwrap();
+        // `pairs` is the outer iterator — must appear as an array.
+        assert_eq!(schema["properties"]["pairs"]["type"], "array");
+        // Loop-local variables must not leak to the top-level schema.
+        for name in ["key", "value", "sub"] {
+            assert!(
+                schema["properties"][name].is_null(),
+                "`{name}` must not appear as a top-level schema property"
+            );
+        }
+    }
+
+    /// A set variable used as a for-loop iterator also has an empty path in
+    /// scope, producing the same `ensure_array_at_path([])` early return.
+    #[test]
+    fn for_loop_over_set_var_hits_ensure_array_empty_path() {
+        // `{% set local %}...{% endset %}` creates a block-capture with empty path.
+        // Using it as a for-loop iterator triggers ensure_array_at_path with [].
+        let schema = extract_schema(
+            "{% set local %}captured{% endset %}{% for item in local %}{{ title }}{% endfor %}",
+            "test.html",
+        )
+        .unwrap();
+        // `title` is referenced in the loop body — must appear in schema.
+        assert_eq!(schema["properties"]["title"]["type"], "string");
+        // `local` and `item` are local variables — must not appear.
+        assert!(schema["properties"]["local"].is_null());
+        assert!(schema["properties"]["item"].is_null());
+    }
 }
