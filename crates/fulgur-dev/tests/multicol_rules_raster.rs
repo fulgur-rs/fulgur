@@ -397,18 +397,42 @@ fn compare_rule_pattern_pages(style: &str, height: i32, shapes: &str, dots: bool
     for letter in 'A'..='Z' {
         assert_eq!(text.matches(letter).count(), 1);
     }
-    let red = |pixel: &image::Rgba<u8>| {
-        pixel[0] > pixel[1].saturating_add(20) && pixel[0] > pixel[2].saturating_add(20)
-    };
+
     for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
         assert_eq!(actual.dimensions(), (180, 150));
-        let mask = |page: &image::RgbaImage| {
+        // Include the complete rule neighborhood, its faint edge pixels,
+        // and the blank page margins independently of the actual color.
+        let region = |page: &image::RgbaImage| {
             page.enumerate_pixels()
-                .filter_map(|(x, y, pixel)| red(pixel).then_some((x, y, pixel.0)))
+                .filter(|(x, _, _)| (68..=72).contains(x))
+                .map(|(x, y, pixel)| (x, y, pixel.0))
                 .collect::<Vec<_>>()
         };
-        assert!(!mask(expected).is_empty());
-        assert_eq!(mask(actual), mask(expected), "pattern page {}", index + 1);
+        assert!(
+            region(expected)
+                .iter()
+                .any(|(_, _, pixel)| *pixel != [255; 4])
+        );
+        assert_eq!(
+            region(actual),
+            region(expected),
+            "pattern page {}",
+            index + 1
+        );
+        // Retain a full-page check for unexpected colored paint outside
+        // the fixed neighborhood, including arbitrarily faint fringes.
+        let colored = |page: &image::RgbaImage| {
+            page.enumerate_pixels()
+                .filter(|(_, _, pixel)| pixel[0] != pixel[1] || pixel[1] != pixel[2])
+                .map(|(x, y, pixel)| (x, y, pixel.0))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            colored(actual),
+            colored(expected),
+            "colored page {}",
+            index + 1
+        );
     }
 }
 
