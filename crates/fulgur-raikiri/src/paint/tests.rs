@@ -108,3 +108,5 @@ fn legacy_pages_keep_inline_svg_vectors() {
             == Some(b"Image".as_slice())
     }));
 }
+
+mod raster_tests;
