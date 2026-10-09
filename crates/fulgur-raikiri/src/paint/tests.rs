@@ -25,7 +25,16 @@ fn legacy_pages_keep_inline_svg_root_opacity() {
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-    paint_legacy(&mut surface, &page, &page.text_runs(), &mut fonts, &mut svg).unwrap();
+    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
+    paint_legacy(
+        &mut surface,
+        &page,
+        &page.text_runs(),
+        &mut fonts,
+        &mut svg,
+        &mut raster,
+    )
+    .unwrap();
     surface.finish();
     pdf_page.finish();
     let parsed = lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap();
@@ -60,7 +69,16 @@ fn legacy_pages_keep_inline_svg_vectors() {
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-    paint_legacy(&mut surface, &page, &page.text_runs(), &mut fonts, &mut svg).unwrap();
+    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
+    paint_legacy(
+        &mut surface,
+        &page,
+        &page.text_runs(),
+        &mut fonts,
+        &mut svg,
+        &mut raster,
+    )
+    .unwrap();
     surface.finish();
     pdf_page.finish();
     let bytes = pdf.finish().unwrap();
@@ -90,3 +108,5 @@ fn legacy_pages_keep_inline_svg_vectors() {
             == Some(b"Image".as_slice())
     }));
 }
+
+mod raster_tests;

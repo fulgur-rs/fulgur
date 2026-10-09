@@ -5,7 +5,7 @@ Unpublished Raikiri backend for Fulgur development.
 The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, text, text decorations, and inline SVG. It does not fall back to Blitz.
+backgrounds and borders, text, text decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
@@ -62,8 +62,17 @@ page's positioned runs. Source text, generated content and ellipses share their
 ancestor opacity groups, which composite overlapping descendants once. Rounded
 and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
 line events and unknown run sources use legacy rendering for the entire page.
-Other replaced/image content and inline element opacity remain unsupported. Generated
+Inline element opacity and other replaced content remain unsupported. Generated
 text and ellipses have no decoration segments in this API version.
+
+Ordinary PNG/JPEG images use the layout-resolved URL, intrinsic dimensions,
+`object-fit` and `object-position` from Raikiri. The PDF painter reads the
+same cached pixels without fetching resources, and clips the object to its
+content box and active ancestor overflow while sharing opacity groups.
+Relative local URLs retain the input-directory boundary and resource limits.
+Unavailable images produce an explicit resolver fallback and are omitted;
+repeated sources share one PDF image resource. Image bundle URLs and raster
+list markers are not configured in this slice.
 
 Inline SVG is drawn as PDF vector content through Krilla SVG, including paths,
 gradients, and selectable text. Its viewport uses Raikiri's resolved content box,

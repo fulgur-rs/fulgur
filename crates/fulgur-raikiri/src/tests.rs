@@ -99,6 +99,7 @@ fn already_aborted_layout_returns_aborted() {
     assert!(matches!(
         draw(
             status,
+            &RenderResources::new(),
             &Config::default(),
             &bookmarks::BookmarkCollector::default(),
             &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
