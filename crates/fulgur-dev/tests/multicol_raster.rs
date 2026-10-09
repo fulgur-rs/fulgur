@@ -229,11 +229,11 @@ fn constrained_wrapper_width_preserves_its_literal_pdf_lines() {
 }
 
 #[test]
-fn constrained_wrapper_margin_does_not_newly_hide_pdf_glyphs() {
+fn constrained_wrapper_margin_continues_into_visible_overflow_columns_in_pdf() {
     compare(
         "<div class=mc><div style='overflow:hidden'><p style='margin-top:20px'>A<br>B<br>C<br>D</p></div></div><p>E</p>",
         ".mc{height:40px}",
-        "<div style='position:absolute;left:0;top:20px'>A<br>B<br>C<br>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "<div style='position:absolute;left:0;top:20px'>A</div><div style='position:absolute;left:60px;top:0'>B<br>C</div><div style='position:absolute;left:120px;top:0'>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
         "ABCDE",
     );
 }
@@ -432,5 +432,116 @@ fn an_anonymous_table_cell_keeps_ordinary_pdf_text() {
         "",
         "<div style='position:absolute;left:0;top:0'>A</div>",
         "A",
+    );
+}
+
+#[test]
+fn constrained_wrapper_authored_widths_keep_wide_lines_in_each_pdf_column() {
+    for width in [
+        "width:80px",
+        "min-width:80px",
+        "width:200%",
+        "width:calc(200%)",
+    ] {
+        compare(
+            &format!(
+                "<div class=mc><div style='{width}'><p>ABCD<br>EFGH<br>IJKL<br>MNOP</p></div></div><p>Q</p>"
+            ),
+            ".mc{height:40px}",
+            "<div style='position:absolute;left:0;top:0;width:80px'>ABCD<br>EFGH</div><div style='position:absolute;left:60px;top:0;width:80px'>IJKL<br>MNOP</div><div style='position:absolute;left:0;top:40px'>Q</div>",
+            "ABCDEFGHIJKLMNOPQ",
+        );
+    }
+}
+
+#[test]
+fn constrained_wrapper_margin_consumes_only_the_first_pdf_column_budget() {
+    compare(
+        "<div class=mc><div style='overflow:hidden'><p style='margin-top:20px'>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{height:60px}",
+        "<div style='position:absolute;left:0;top:20px'>A<br>B</div><div style='position:absolute;left:60px;top:0'>C<br>D</div><div style='position:absolute;left:0;top:60px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn constrained_wrapper_auto_margins_center_in_each_pdf_column() {
+    compare(
+        "<div class=mc><div style='width:20px;margin-left:auto;margin-right:auto'><p>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{height:40px}",
+        "<div style='position:absolute;left:10px;top:0'>A<br>B</div><div style='position:absolute;left:70px;top:0'>C<br>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn constrained_deep_wrapper_keeps_parent_insets_and_clips_in_pdf() {
+    compare(
+        "<p>X</p><div class=mc><div style='width:80px;overflow:hidden'><div><p style='margin-top:20px'>A<br>B<br>C<br>D</p></div></div></div><p>E</p>",
+        ".mc{height:40px;width:160px;column-count:3;padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0'>X</div><div style='position:absolute;left:0;top:20px;box-sizing:border-box;width:172px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:45px'>A</div><div style='position:absolute;left:66px;top:25px'>B<br>C</div><div style='position:absolute;left:126px;top:25px'>D</div><div style='position:absolute;left:0;top:70px'>E</div>",
+        "XABCDE",
+    );
+}
+
+#[test]
+fn constrained_wrapper_refills_middle_orphans_for_final_widows_in_pdf() {
+    compare(
+        "<div class=mc><div style='width:80px'><p style='orphans:4;widows:4'>A<br>B<br>C<br>D<br>E<br>F<br>G<br>H<br>I<br>J<br>K<br>L</p></div></div><p>M</p>",
+        ".mc{height:100px;width:160px;column-count:3}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C<br>D</div><div style='position:absolute;left:60px;top:0'>E<br>F<br>G<br>H</div><div style='position:absolute;left:120px;top:0'>I<br>J<br>K<br>L</div><div style='position:absolute;left:0;top:100px'>M</div>",
+        "ABCDEFGHIJKLM",
+    );
+}
+
+#[test]
+fn constrained_wrapper_preserves_visible_unbreakable_pdf_line_overflow() {
+    compare(
+        "<div class=mc><div style='width:20px'><p style='white-space:nowrap'>ABCDEF</p></div></div><p>G</p>",
+        ".mc{height:60px}",
+        "<div style='position:absolute;left:0;top:0;white-space:nowrap'>ABCDEF</div><div style='position:absolute;left:0;top:60px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn constrained_wrapper_final_background_keeps_its_child_bottom_margin_in_pdf() {
+    compare(
+        "<div class=mc><div style='width:80px;overflow:hidden;background:lime'><p style='margin-bottom:20px'>A</p></div></div><p>B</p>",
+        ".mc{height:60px}",
+        "<div style='position:absolute;left:0;top:0;width:80px;height:40px;background:lime'>A</div><div style='position:absolute;left:0;top:60px'>B</div>",
+        "AB",
+    );
+}
+
+#[test]
+fn constrained_wrapper_inline_background_moves_inside_explicit_pdf_clips() {
+    // Noto Sans inline boxes extend beyond a 20px line. Match explicit overflow
+    // clips in both fixtures; visible ink overflow is tracked in 9vjb.39.1.12.
+    compare(
+        "<div class=mc><div style='width:80px;overflow:hidden'><p><span style='background:lime'>A<br>B<br>C<br>D</span></p></div></div><p>E</p>",
+        ".mc{height:40px}",
+        "<div style='position:absolute;left:0;top:0;width:80px;height:40px;overflow:hidden'><span style='background:lime'>A<br>B</span></div><div style='position:absolute;left:60px;top:0;width:80px;height:40px;overflow:hidden'><span style='background:lime'>C<br>D</span></div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn constrained_wrapper_retains_all_pdf_lines_when_minima_cannot_fit() {
+    compare(
+        "<div class=mc><div style='width:80px'><p style='orphans:4;widows:5'>A<br>B<br>C<br>D<br>E<br>F<br>G<br>H<br>I<br>J<br>K<br>L</p></div></div><p>M</p>",
+        ".mc{height:100px;width:160px;column-count:3}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C<br>D</div><div style='position:absolute;left:60px;top:0'>E<br>F<br>G</div><div style='position:absolute;left:120px;top:0'>H<br>I<br>J<br>K<br>L</div><div style='position:absolute;left:0;top:100px'>M</div>",
+        "ABCDEFGHIJKLM",
+    );
+}
+
+#[test]
+fn constrained_wrapper_variable_height_lines_keep_feasible_pdf_break_minima() {
+    compare(
+        "<div class=mc><div style='width:80px'><p style='orphans:1;widows:3'><span style='line-height:20px'>A</span><br><span style='line-height:5px'>B</span><br><span style='line-height:10px'>C</span><br><span style='line-height:15px'>D</span><br><span style='line-height:20px'>E</span><br><span style='line-height:10px'>F</span><br><span style='line-height:5px'>G</span><br><span style='line-height:5px'>H</span></p></div></div><p>I</p>",
+        "body{font:5px/5px 'Noto Sans'}.mc{height:40px;width:160px;column-count:3}",
+        "<style>body{font:5px/5px 'Noto Sans'}</style><div style='position:absolute;left:0;top:0'><span style='line-height:20px'>A</span></div><div style='position:absolute;left:60px;top:0'><span style='line-height:5px'>B</span><br><span style='line-height:10px'>C</span><br><span style='line-height:15px'>D</span></div><div style='position:absolute;left:120px;top:0'><span style='line-height:20px'>E</span><br><span style='line-height:10px'>F</span><br><span style='line-height:5px'>G</span><br><span style='line-height:5px'>H</span></div><div style='position:absolute;left:0;top:40px'>I</div>",
+        "ABCDEFGHI",
     );
 }
