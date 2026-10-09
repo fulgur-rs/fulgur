@@ -2,8 +2,9 @@
 //!
 //! A box whose `overflow` is anything but `visible` on an axis clips its
 //! descendants' painting on that axis to its padding box. Raikiri's
-//! fragments are a flat list, so the clips that apply to a fragment are
-//! found by walking the DOM ancestors of its node.
+//! legacy fragments are a flat list, so the fallback painter finds clips by
+//! walking DOM ancestors. Ordered painting consumes producer clip events
+//! directly, including the geometry of each column placement.
 //!
 //! An absolutely or fixed positioned descendant whose containing block is
 //! outside the clipping box should escape its clip. `ComputedValues::position`
@@ -24,6 +25,7 @@ pub(super) type ClipKey = (NodeId, usize);
 /// Resolved overflow clip paths on one page, by source node. Includes
 /// ancestors whose own boxes do not reach the page but whose descendants do.
 /// Raikiri retains each whole padding-edge shape across page cuts.
+#[derive(Default)]
 pub(super) struct ClipMap {
     clips: HashMap<NodeId, Vec<(PaintRect, Path)>>,
 }

@@ -31,8 +31,8 @@ use raikiri_html::computed::{
     ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    ClipKind, DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect,
-    PositionedGlyphRun, RunSource,
+    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
+    RunSource,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -159,7 +159,10 @@ fn paint_ordered(
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
 ) -> Result<()> {
-    let clips = ClipMap::new(page);
+    // Ordered painting consumes every producer clip directly. The legacy
+    // DOM-based clip lookup would apply the same shape twice and cannot
+    // identify repeated column placements.
+    let clips = ClipMap::default();
     let mut active = ClipStack::default();
     let dom = page.dom();
     let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
@@ -225,12 +228,9 @@ fn paint_ordered(
                     raster.paint_placement(surface, page, &placement, true)?;
                 }
             }
-            PaintEvent::PushClip(shape, kind) => {
-                // Table-part decorations are drawn once per cell intersection.
-                // These clips supplement the lazily applied ancestor overflow.
-                let path = (*kind == ClipKind::TableCell)
-                    .then(|| clip::clip_path(*shape, page.geometry().page_box))
-                    .flatten();
+            PaintEvent::PushClip(shape, _) => {
+                // The producer owns column placement and clipping geometry.
+                let path = clip::clip_path(*shape, page.geometry().page_box);
                 if let Some(path) = &path {
                     active.clear(surface);
                     surface.push_clip_path(path, &FillRule::NonZero);
