@@ -206,6 +206,13 @@ fn paint_ordered(
                 svg.paint(surface, page, fragment, true)?;
                 raster.paint(surface, page, fragment, true)?;
             }
+            PaintEvent::MarkerImage(owner) => {
+                if let Some(placement) = raster.marker(page, *owner) {
+                    let chain = clips.chain(page, placement.clip_owner, placement.rect);
+                    active.apply(surface, &clips, &chain);
+                    raster.paint_placement(surface, page, &placement, true)?;
+                }
+            }
             PaintEvent::PushClip(shape, kind) => {
                 // Table-part decorations are drawn once per cell intersection.
                 // These clips supplement the lazily applied ancestor overflow.

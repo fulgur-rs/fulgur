@@ -9,7 +9,7 @@ use krilla::image::{BitsPerComponent, CustomImage, Image, ImageColorspace};
 use krilla::num::NormalizedF32;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::{Fragment, Page};
+use raikiri_html::{Fragment, NodeId, Page, RasterImage};
 use raikiri_traits::{DecodedImage, ImagePixelSource};
 use url::Url;
 
@@ -106,6 +106,20 @@ impl<'a> RasterCache<'a> {
         let Some(placement) = page.raster_image(fragment, source) else {
             return Ok(());
         };
+        self.paint_placement(surface, page, &placement, host_group)
+    }
+
+    pub(super) fn marker(&self, page: &Page<'_>, owner: NodeId) -> Option<RasterImage> {
+        page.raster_marker(owner, self.source?)
+    }
+
+    pub(super) fn paint_placement(
+        &mut self,
+        surface: &mut Surface<'_>,
+        page: &Page<'_>,
+        placement: &RasterImage,
+        host_group: bool,
+    ) -> Result<()> {
         let Some(path) = super::clip::clip_path(placement.clip, page.geometry().page_box) else {
             return Ok(());
         };
@@ -114,7 +128,7 @@ impl<'a> RasterCache<'a> {
         };
         let image = self.image(&placement.url, &placement.pixels)?;
         let opacity = (!host_group)
-            .then(|| page.computed(fragment.node()))
+            .then(|| page.computed(placement.node))
             .flatten()
             .and_then(|style| NormalizedF32::new(style.opacity));
         if let Some(opacity) = opacity {

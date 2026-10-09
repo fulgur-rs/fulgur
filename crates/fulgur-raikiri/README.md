@@ -71,8 +71,11 @@ same cached pixels without fetching resources, and clips the object to its
 content box and active ancestor overflow while sharing opacity groups.
 Relative local URLs retain the input-directory boundary and resource limits.
 Unavailable images produce an explicit resolver fallback and are omitted;
-repeated sources share one PDF image resource. Image bundle URLs and raster
-list markers are not configured in this slice.
+repeated sources share one PDF image resource. PNG list markers reuse the same
+cache at Raikiri's outside or inline atomic placement, with first-fragment
+ownership, ancestor clipping, and item opacity. Missing marker sources retain
+text fallback, and explicit `::marker` content takes priority. Image bundle URLs
+remain unsupported.
 
 Inline SVG is drawn as PDF vector content through Krilla SVG, including paths,
 gradients, and selectable text. Its viewport uses Raikiri's resolved content box,
