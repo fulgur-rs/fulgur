@@ -501,3 +501,6 @@ fn darken(color: CssColor) -> CssColor {
         ..color
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -143,6 +143,16 @@ fn dashed_pdf_rule_matches_literal_dashes() {
 }
 
 #[test]
+fn short_dashed_pdf_rule_matches_one_literal_solid_segment() {
+    compare(
+        "<div class=mc><div></div><div></div></div>",
+        ".mc{column-rule:2px dashed red}.mc>div{height:4px}",
+        "<div style='position:absolute;left:49px;top:0;width:2px;height:4px;background:red'></div>",
+        "",
+    );
+}
+
+#[test]
 fn padded_pdf_rules_use_the_producer_content_origin() {
     compare(
         "<div class=mc>A<br>B<br>C<br>D</div><p>E</p>",
