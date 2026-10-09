@@ -83,6 +83,7 @@ fn paired_axes_survive_asymmetric_insets_and_fragment_slices() {
     let first = inner.sliced(Slice {
         top: false,
         bottom: true,
+        ..Slice::default()
     });
     assert_eq!(
         first.radii,
@@ -92,6 +93,7 @@ fn paired_axes_survive_asymmetric_insets_and_fragment_slices() {
         .sliced(Slice {
             top: true,
             bottom: false,
+            ..Slice::default()
         })
         .inset(Edges {
             top: 4.0,

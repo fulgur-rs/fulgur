@@ -34,14 +34,16 @@ impl Edges {
     }
 }
 
-/// Which block-direction edges of a box fragment are fragmentation breaks
-/// rather than edges of the box. With the initial `box-decoration-break:
+/// Which physical edges are breaks between page or inline fragments rather
+/// than edges of the box. With the initial `box-decoration-break:
 /// slice` (CSS Fragmentation 3 §5.4), a fragment is a slice of one
 /// unbroken box: a broken edge has no border, padding or corner rounding.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Slice {
     pub top: bool,
     pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
 }
 
 impl Slice {
@@ -51,6 +53,22 @@ impl Slice {
         Self {
             top: !fragment.is_first_fragment().unwrap_or(true),
             bottom: !fragment.is_last_fragment().unwrap_or(true),
+            ..Self::default()
+        }
+    }
+
+    /// The physical inline edges missing from one generated line piece.
+    pub(super) fn generated(piece: &raikiri_html::GeneratedBox<'_>) -> Self {
+        let (left, right) =
+            if piece.style.direction == raikiri_html::computed::ComputedDirection::Rtl {
+                (!piece.has_end_edge, !piece.has_start_edge)
+            } else {
+                (!piece.has_start_edge, !piece.has_end_edge)
+            };
+        Self {
+            left,
+            right,
+            ..Self::default()
         }
     }
 
@@ -61,6 +79,12 @@ impl Slice {
         }
         if self.bottom {
             edges.bottom = 0.0;
+        }
+        if self.left {
+            edges.left = 0.0;
+        }
+        if self.right {
+            edges.right = 0.0;
         }
         edges
     }
@@ -108,6 +132,14 @@ impl RoundedRect {
         if slice.bottom {
             self.radii[2] = [0.0; 2];
             self.radii[3] = [0.0; 2];
+        }
+        if slice.left {
+            self.radii[0] = [0.0; 2];
+            self.radii[3] = [0.0; 2];
+        }
+        if slice.right {
+            self.radii[1] = [0.0; 2];
+            self.radii[2] = [0.0; 2];
         }
         self
     }

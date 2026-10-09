@@ -3,7 +3,7 @@
 //! of the element's text.
 
 use krilla::geom::{Path, PathBuilder};
-use raikiri_html::{DomView, NodeId, PositionedGlyphRun, RunSource};
+use raikiri_html::{DomView, GeneratedBox, NodeId, PositionedGlyphRun, RunSource};
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
@@ -41,6 +41,25 @@ pub(super) fn outlines(
             }
         };
         if inside {
+            append_run(&mut pen, run);
+        }
+    }
+    pen.builder.finish()
+}
+
+/// Outlines of this pseudo-element on this piece's line, excluding its owner text.
+pub(super) fn generated_outlines(
+    piece: &GeneratedBox<'_>,
+    runs: &[PositionedGlyphRun<'_>],
+) -> Option<Path> {
+    let mut pen = Pen {
+        builder: PathBuilder::new(),
+        x: 0.0,
+        y: 0.0,
+        skew: 0.0,
+    };
+    for run in runs {
+        if run.line == piece.line && run.source == RunSource::Generated(piece.owner, piece.kind) {
             append_run(&mut pen, run);
         }
     }
