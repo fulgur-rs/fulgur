@@ -478,6 +478,119 @@ mod tests {
         assert!(provider.drain_gcpm_contexts().is_empty());
     }
 
+    // ── fetch() — fs::read failure path (line 201) ────────────────────────
+    //
+    // `resolve_local_path` calls `canonicalize`, which succeeds for
+    // directories too. A directory whose name ends in `.css` therefore passes
+    // both the scheme check and the `starts_with(base)` guard, but `fs::read`
+    // refuses to read a directory entry. The `else { return; }` arm at the
+    // `fs::read` call site must silently drop the request without delivering
+    // any bytes to the handler or recording any GCPM context.
+
+    #[test]
+    fn fetch_silently_drops_directory_path_that_looks_like_css() {
+        let dir = tempfile::tempdir().unwrap();
+        // A subdirectory named `sub.css` is canonicalisable inside `base` and
+        // passes the `.css` extension check, but `fs::read` will fail on it.
+        let subdir = dir.path().join("sub.css");
+        fs::create_dir(&subdir).unwrap();
+
+        let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let url = Url::from_file_path(&subdir).unwrap();
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, Request::get(url), handler);
+
+        assert!(
+            recorded.lock().unwrap().is_none(),
+            "fetch of a directory must not deliver bytes to the handler"
+        );
+        assert!(
+            provider.drain_gcpm_contexts().is_empty(),
+            "a failed fs::read must not accumulate any GCPM context"
+        );
+        assert!(
+            provider.drain_pending_resources().is_empty(),
+            "a failed fs::read must not register a pending resource"
+        );
+    }
+
+    // ── fetch() — non-UTF-8 CSS file path (line 226) ──────────────────────
+    //
+    // When the file has a `.css` extension but contains bytes that are not
+    // valid UTF-8, the inner `from_utf8` branch falls through to the raw-bytes
+    // path: the bytes are forwarded to the handler unchanged and no GCPM
+    // context is recorded (there is nothing safely parseable).
+
+    #[test]
+    fn fetch_non_utf8_css_delivers_raw_bytes_without_gcpm() {
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("broken.css");
+        // `\xFF\xFE` is a valid Latin-1 sequence but not valid UTF-8.
+        let raw: &[u8] = b"body { color: \xff\xfe; }";
+        fs::write(&css_path, raw).unwrap();
+
+        let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let url = Url::from_file_path(&css_path).unwrap();
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, Request::get(url), handler);
+
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fetch of a .css file must deliver bytes even when they are not UTF-8");
+        // Raw bytes forwarded unchanged.
+        assert_eq!(bytes.as_slice(), raw);
+        // No GCPM context accumulated because the payload could not be decoded.
+        assert!(
+            provider.drain_gcpm_contexts().is_empty(),
+            "non-UTF-8 CSS must not produce a GCPM context"
+        );
+        assert!(
+            provider.drain_column_css_texts().is_empty(),
+            "non-UTF-8 CSS must not produce a column_css_texts entry"
+        );
+    }
+
+    // ── fetch() — non-CSS file path (lines 239-240) ───────────────────────
+    //
+    // A file with no `.css` extension and no `text/css` content-type is not
+    // recognised as CSS. The raw bytes are still forwarded to the handler
+    // (the file may be an image or font), but no GCPM context is extracted.
+
+    #[test]
+    fn fetch_non_css_file_delivers_raw_bytes_without_gcpm() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt_path = dir.path().join("data.json");
+        let raw = b"{\"key\": \"value\"}";
+        fs::write(&txt_path, raw).unwrap();
+
+        let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let url = Url::from_file_path(&txt_path).unwrap();
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, Request::get(url), handler);
+
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fetch of a non-CSS file must still deliver bytes");
+        assert_eq!(bytes.as_slice(), raw);
+        assert!(
+            provider.drain_gcpm_contexts().is_empty(),
+            "non-CSS file must not produce a GCPM context"
+        );
+    }
+
     #[test]
     fn fetch_drops_request_outside_base_path() {
         // A fetch for a file outside `canonical_base` must be a no-op:
