@@ -247,3 +247,190 @@ fn deep_wrapper_clips_wide_pdf_lines_at_each_column() {
         "@#",
     );
 }
+
+#[test]
+fn multiple_paragraphs_balance_through_a_paragraph_break_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        "",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D<br>E<br>F</div><div style='position:absolute;left:0;top:60px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn multiple_paragraphs_fill_three_columns_in_one_group_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        ".mc{width:160px;column-count:3}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:60px;top:0'>C<br>D</div><div style='position:absolute;left:120px;top:0'>E<br>F</div><div style='position:absolute;left:0;top:40px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn multiple_paragraphs_balance_with_two_orphans_and_widows_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D<br>E<br>F</p><p>G<br>H</p></div><p>I</p>",
+        ".mc{orphans:2;widows:2}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C<br>D</div><div style='position:absolute;left:60px;top:0'>E<br>F<br>G<br>H</div><div style='position:absolute;left:0;top:80px'>I</div>",
+        "ABCDEFGHI",
+    );
+}
+
+#[test]
+fn paragraph_break_minima_override_the_column_container_in_pdf() {
+    compare(
+        "<div class=mc><p style='orphans:3;widows:3'>A<br>B<br>C<br>D<br>E<br>F</p><p>G<br>H</p></div><p>I</p>",
+        "",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D<br>E<br>F<br>G<br>H</div><div style='position:absolute;left:0;top:100px'>I</div>",
+        "ABCDEFGHI",
+    );
+}
+
+#[test]
+fn paragraph_bottom_margins_participate_in_balancing_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        ".mc p{margin-bottom:8px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:28px'>E<br>F</div><div style='position:absolute;left:0;top:76px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn adjoining_paragraph_margins_collapse_within_a_column_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B</p><p>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        ".mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn source_whitespace_and_parent_insets_preserve_group_continuations_in_pdf() {
+    compare(
+        "<p>@</p><div class=mc>\n <p>A<br>B<br>C<br>D</p>\n <p>E<br>F</p>\n</div><p>G</p>",
+        ".mc{padding:4px 5px;border:1px solid black}",
+        "<div style='position:absolute;left:0;top:0'>@</div><div style='position:absolute;left:0;top:20px;box-sizing:border-box;width:112px;height:70px;border:1px solid black'></div><div style='position:absolute;left:6px;top:25px'>A<br>B<br>C</div><div style='position:absolute;left:66px;top:25px'>D<br>E<br>F</div><div style='position:absolute;left:0;top:90px'>G</div>",
+        "@ABCDEFG",
+    );
+}
+
+#[test]
+fn short_paragraphs_move_whole_and_truncate_adjoining_break_margins_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B</p><p>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        ".mc{orphans:3;widows:3}.mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'>C<br>D</div><div style='position:absolute;left:60px;top:0'>E<br>F</div><div style='position:absolute;left:0;top:92px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn mid_column_paragraph_continuations_keep_wide_pdf_line_clips() {
+    compare(
+        "<div class=mc><p>ABCDEFGH<br>IJKLMNOP</p><p>QRSTUVWX<br>abcdefgh</p><p>ijklmnop<br>qrstuvwx</p></div><p>Y</p>",
+        ".mc p{white-space:pre;overflow:hidden;margin-bottom:8px}.mc p+p{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:0;width:40px;height:40px;white-space:pre;overflow:hidden'>ABCDEFGH<br>IJKLMNOP</div><div style='position:absolute;left:0;top:52px;width:40px;height:28px;white-space:pre;overflow:hidden'>QRSTUVWX</div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;white-space:pre;overflow:hidden'>abcdefgh</div><div style='position:absolute;left:60px;top:32px;width:40px;height:40px;white-space:pre;overflow:hidden'>ijklmnop<br>qrstuvwx</div><div style='position:absolute;left:0;top:80px'>Y</div>",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYabcdefghijklmnopqrstuvwx",
+    );
+}
+
+#[test]
+fn an_empty_paragraph_does_not_disable_group_balancing_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p></p><p>E<br>F</p></div><p>G</p>",
+        "",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D<br>E<br>F</div><div style='position:absolute;left:0;top:60px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn a_leading_margin_cannot_skip_an_empty_column_in_pdf() {
+    compare(
+        "<div class=mc><p style='margin-top:100px'>A</p><p>B</p></div><p>C</p>",
+        "",
+        "<div style='position:absolute;left:0;top:100px'>A</div><div style='position:absolute;left:60px;top:0'>B</div><div style='position:absolute;left:0;top:120px'>C</div>",
+        "ABC",
+    );
+}
+
+#[test]
+fn an_inline_background_moves_with_its_continuation_glyphs_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B</p><p><span style='background:lime'>C<br>D</span></p><p>E<br>F</p></div><p>G</p>",
+        ".mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'><span style='background:lime'>C</span></div><div style='position:absolute;left:60px;top:0'><span style='background:lime'>D</span></div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn an_unfinished_paragraph_background_fills_its_column_extent_in_pdf() {
+    compare(
+        "<div class=mc><p style='background:lime;orphans:3;widows:3'>A<br>B<br>C<br>D<br>E<br>F</p><p>G<br>H</p></div><p>I</p>",
+        "body{color:transparent}",
+        "<div style='position:absolute;left:0;top:0;width:40px;height:100px;background:lime'></div><div style='position:absolute;left:60px;top:0;width:40px;height:60px;background:lime'></div>",
+        "",
+    );
+}
+
+#[test]
+fn empty_paragraph_margin_chains_keep_both_signed_extrema_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B</p><p class=empty></p><p class=later>C<br>D</p><p class=last>E<br>F</p></div><p>G</p>",
+        ".mc p{margin-bottom:8px}.mc .empty{margin-top:12px;margin-bottom:-4px}.mc .later{margin-top:20px}.mc .last{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:56px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "ABCDEFG",
+    );
+}
+
+#[test]
+fn a_subpixel_noto_line_box_keeps_each_source_and_following_flow_in_pdf() {
+    compare(
+        "<div class=mc><p class=zero>A</p><p>B</p></div><p>C</p>",
+        ".mc .zero{line-height:0}",
+        "<div style='position:absolute;left:0;top:0;line-height:0'>A</div><div style='position:absolute;left:60px;top:0'>B</div><div style='position:absolute;left:0;top:20px'>C</div>",
+        "ABC",
+    );
+}
+
+#[test]
+fn a_nonfinal_background_fills_only_the_remaining_mid_column_extent_in_pdf() {
+    compare(
+        "<div class=mc><p>A<br>B</p><p style='background:lime'>C<br>D</p><p>E<br>F</p></div><p>G</p>",
+        "body{color:transparent}.mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
+        "<div style='position:absolute;left:0;top:52px;width:40px;height:28px;background:lime'></div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;background:lime'></div>",
+        "",
+    );
+}
+
+#[test]
+fn one_nonempty_paragraph_balances_beside_empty_blocks_in_pdf() {
+    for body in [
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p></p></div><p>E</p>",
+        "<div class=mc><p></p><p>A<br>B<br>C<br>D</p></div><p>E</p>",
+        "<div class=mc><p>A<br>B<br>C<br>D</p><p> </p></div><p>E</p>",
+        "<div class=mc><p> </p><p>A<br>B<br>C<br>D</p></div><p>E</p>",
+    ] {
+        compare(
+            body,
+            "",
+            "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:60px;top:0'>C<br>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
+            "ABCDE",
+        );
+    }
+}
+
+#[test]
+fn an_anonymous_table_cell_keeps_ordinary_pdf_text() {
+    compare(
+        "<div style='display:table;border-spacing:0'>A</div>",
+        "",
+        "<div style='position:absolute;left:0;top:0'>A</div>",
+        "A",
+    );
+}
