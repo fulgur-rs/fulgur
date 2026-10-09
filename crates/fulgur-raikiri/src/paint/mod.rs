@@ -200,6 +200,18 @@ fn paint_ordered(
                     );
                 }
             }
+            PaintEvent::GeneratedBox(piece) => {
+                let chain = clips.chain(page, Some(piece.clip_owner), piece.rect);
+                active.apply(surface, &clips, &chain);
+                let text = || text_clip::generated_outlines(piece, runs);
+                paint_box(
+                    surface,
+                    piece.rect,
+                    Slice::generated(piece),
+                    piece.style,
+                    text,
+                );
+            }
             PaintEvent::Replaced(fragment) => {
                 let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
                 active.apply(surface, &clips, &chain);

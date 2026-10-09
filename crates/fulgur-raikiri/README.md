@@ -65,6 +65,13 @@ line events and unknown run sources use legacy rendering for the entire page.
 Inline element opacity and other replaced content remain unsupported. Generated
 text and ellipses have no decoration segments in this API version.
 
+Ordinary inline-formatting `::before` and `::after` backgrounds and borders
+use the generated line pieces and pseudo styles, including split inline edges
+and glyph clipping. Their text, counters and attributes retain the resolved
+positioned runs and share the originating element's opacity and overflow.
+Pseudo-element opacity, anonymous table pseudo cells and legacy generated
+overlays remain unsupported.
+
 Ordinary PNG/JPEG images use the layout-resolved URL, intrinsic dimensions,
 `object-fit` and `object-position` from Raikiri. The PDF painter reads the
 same cached pixels without fetching resources, and clips the object to its

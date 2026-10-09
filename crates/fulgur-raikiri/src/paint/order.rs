@@ -25,6 +25,7 @@ pub(super) fn supported(events: &[PaintEvent<'_>], runs: &[PositionedGlyphRun<'_
             PaintEvent::Box(_)
             | PaintEvent::Replaced(_)
             | PaintEvent::MarkerImage(_)
+            | PaintEvent::GeneratedBox(_)
             | PaintEvent::PushClip(_, _)
             | PaintEvent::PopClip
             | PaintEvent::PopOpacity => {}
