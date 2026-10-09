@@ -126,3 +126,88 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
         );
     }
 }
+
+#[test]
+fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
+    let pixels = RedPixels(Arc::new(DecodedImage {
+        width: 4,
+        height: 2,
+        rgba: [255, 0, 0, 255].repeat(8),
+    }));
+    let resources = RenderResources::new().image_pixel_source(&pixels);
+    let document = raikiri_html::parse_html_with_resources(
+        &b"<style>@page{size:100px 100px;margin:0}body{margin:0}ul{margin:0;padding:0}li{margin-left:20px;opacity:.5;list-style-image:url(https://images.test/marker.png)}</style><ul><li></li></ul>"[..],
+        &resources,
+    ).unwrap();
+    let LayoutStatus::Completed(layout) = raikiri_html::layout(
+        &document,
+        PageDefaults::default(),
+        LayoutConfig::default(),
+        LayoutOptions::new().resources(&resources),
+    )
+    .unwrap() else {
+        panic!("completed layout")
+    };
+    let page = layout.page(0).unwrap();
+    let runs = page.text_runs();
+    let events = page.paint_order_for_text_runs(&runs);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, PaintEvent::MarkerImage(_)))
+    );
+    assert!(order::supported(&events, &runs));
+    for with_source in [false, true] {
+        let mut pdf = krilla::Document::new();
+        let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
+        let mut surface = pdf_page.surface();
+        let mut fonts = FontCache::default();
+        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut raster = raster::RasterCache::new(
+            with_source
+                .then(|| resources.image_pixel_source_ref())
+                .flatten(),
+        );
+        paint_ordered(
+            &mut surface,
+            &page,
+            &events,
+            &runs,
+            &mut fonts,
+            &mut svg,
+            &mut raster,
+        )
+        .unwrap();
+        surface.finish();
+        pdf_page.finish();
+        let parsed = lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap();
+        let images = parsed
+            .objects
+            .values()
+            .filter_map(|object| object.as_stream().ok())
+            .filter(|stream| {
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    == Some(b"Image".as_slice())
+            })
+            .count();
+        assert_eq!(images, usize::from(with_source));
+        let page_id = *parsed.get_pages().values().next().unwrap();
+        let content =
+            lopdf::content::Content::decode(&parsed.get_page_content(page_id).unwrap()).unwrap();
+        let saves = content
+            .operations
+            .iter()
+            .filter(|op| op.operator == "q")
+            .count();
+        let restores = content
+            .operations
+            .iter()
+            .filter(|op| op.operator == "Q")
+            .count();
+        assert_eq!(saves, restores);
+    }
+}
