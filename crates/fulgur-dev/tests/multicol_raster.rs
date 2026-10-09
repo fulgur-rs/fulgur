@@ -137,3 +137,33 @@ fn column_clip_composites_background_and_glyphs_in_one_opacity_group() {
         "",
     );
 }
+
+#[test]
+fn padded_columns_match_literal_pdf_positions() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p></div><p>E</p>",
+        ".mc{padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0;box-sizing:border-box;width:112px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:5px'>A<br>B</div><div style='position:absolute;left:66px;top:5px'>C<br>D</div><div style='position:absolute;left:0;top:50px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn padded_border_box_columns_match_literal_pdf_positions() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p></div><p>E</p>",
+        ".mc{box-sizing:border-box;padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0;box-sizing:border-box;width:100px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:5px'>A<br>B</div><div style='position:absolute;left:60px;top:5px'>C<br>D</div><div style='position:absolute;left:0;top:50px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn padded_minimum_height_columns_match_literal_pdf_positions() {
+    compare(
+        "<div class=mc><p>A<br>B<br>C<br>D</p></div><p>E</p>",
+        ".mc{min-height:60px;padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0;box-sizing:border-box;width:112px;height:70px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:5px'>A<br>B</div><div style='position:absolute;left:66px;top:5px'>C<br>D</div><div style='position:absolute;left:0;top:70px'>E</div>",
+        "ABCDE",
+    );
+}
