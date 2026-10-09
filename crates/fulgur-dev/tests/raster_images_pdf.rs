@@ -236,3 +236,43 @@ fn replaced_images_keep_their_own_rounded_overflow_clip() {
         );
     }
 }
+
+#[test]
+fn multicol_images_keep_column_and_spanner_positions_with_rounded_clips() {
+    let body = "<style>.mc{width:80px;column-count:2;column-gap:20px;orphans:1;widows:1}.span{column-span:all}</style><div class=mc><div><img src='SOURCE'></div><div><img src='SOURCE'></div><div class=span><img src='SOURCE'></div><div><img src='SOURCE'></div><div><img src='SOURCE'></div></div><img src='SOURCE'>";
+    let reference = "<img src='SOURCE' style='position:absolute;left:0;top:0'><img src='SOURCE' style='position:absolute;left:50px;top:0'><img src='SOURCE' style='position:absolute;left:0;top:20px'><img src='SOURCE' style='position:absolute;left:0;top:40px'><img src='SOURCE' style='position:absolute;left:50px;top:40px'><img src='SOURCE' style='position:absolute;left:0;top:60px'>";
+    for jpeg in [false, true] {
+        let css = "width:20px;height:20px;border-radius:50%;overflow:hidden";
+        let (actual, actual_pdf) = raster_result(css, jpeg, false, body);
+        let (expected, expected_pdf) = raster_result(css, jpeg, false, reference);
+        for bytes in [&actual_pdf, &expected_pdf] {
+            let pdf = lopdf::Document::load_mem(bytes).unwrap();
+            let pages = pdf.get_pages();
+            assert_eq!(pages.len(), 1);
+            let content = pdf.get_page_content(pages[&1]).unwrap();
+            let content = lopdf::content::Content::decode(&content).unwrap();
+            assert_eq!(
+                content
+                    .operations
+                    .iter()
+                    .filter(|operation| operation.operator == "Do")
+                    .count(),
+                6,
+                "six image placements, jpeg={jpeg}"
+            );
+        }
+        assert_eq!(actual.dimensions(), (100, 100));
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        color(&expected, 0, 0, [255, 255, 255, 255], 0);
+        color(&expected, 4, 4, [255, 0, 0, 255], if jpeg { 4 } else { 0 });
+        assert_eq!(
+            actual
+                .pixels()
+                .zip(expected.pixels())
+                .filter(|(a, b)| a != b)
+                .count(),
+            0,
+            "column and full-width spanner image placements, jpeg={jpeg}"
+        );
+    }
+}
