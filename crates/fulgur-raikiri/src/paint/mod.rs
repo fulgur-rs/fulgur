@@ -221,6 +221,10 @@ fn paint_ordered(
                 svg.paint(surface, page, fragment, true)?;
                 raster.paint(surface, page, fragment, true)?;
             }
+            PaintEvent::ColumnRule(rule) => {
+                active.clear(surface);
+                border::paint_column_rule(surface, rule);
+            }
             PaintEvent::MarkerImage(owner) => {
                 if let Some(placement) = raster.marker(page, *owner) {
                     let chain = clips.chain(page, placement.clip_owner, placement.rect);

@@ -22,7 +22,8 @@ pub(super) fn supported(events: &[PaintEvent<'_>], runs: &[PositionedGlyphRun<'_
                     return false;
                 }
             }
-            PaintEvent::Box(_)
+            PaintEvent::ColumnRule(_)
+            | PaintEvent::Box(_)
             | PaintEvent::Replaced(_)
             | PaintEvent::MarkerImage(_)
             | PaintEvent::GeneratedBox(_)
