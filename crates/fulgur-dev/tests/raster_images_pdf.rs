@@ -212,3 +212,27 @@ fn repeated_sources_reuse_one_pdf_image_resource() {
         .count();
     assert_eq!(images, 1, "opaque repeated sources share one PDF image");
 }
+
+#[test]
+fn replaced_images_keep_their_own_rounded_overflow_clip() {
+    for jpeg in [false, true] {
+        let actual = raster("border-radius:50%;overflow:hidden", jpeg, false);
+        let expected = raster_body(
+            "",
+            jpeg,
+            false,
+            "<div style='width:80px;height:80px;border-radius:50%;overflow:hidden'><img src='SOURCE'></div>",
+        );
+        color(&expected, 2, 2, [255, 255, 255, 255], 0);
+        color(&actual, 2, 2, [255, 255, 255, 255], 0);
+        assert_eq!(
+            actual
+                .pixels()
+                .zip(expected.pixels())
+                .filter(|(a, b)| a != b)
+                .count(),
+            0,
+            "rounded replaced clip, jpeg={jpeg}"
+        );
+    }
+}

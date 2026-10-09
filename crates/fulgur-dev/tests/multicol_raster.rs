@@ -127,3 +127,13 @@ fn clipped_wide_lines_follow_the_producer_column_placement() {
         "",
     );
 }
+
+#[test]
+fn column_clip_composites_background_and_glyphs_in_one_opacity_group() {
+    compare(
+        "<div class=mc><p>ABCDEFGHIJKLMNOPQRST<br>abcdefghijklmnopqrst<br>UVWXYZ0123456789<br>uvwxyz0123456789</p></div>",
+        ".mc p{white-space:pre;overflow:hidden;opacity:.5;background:lime}",
+        "<div style='position:absolute;left:0;top:0;width:40px;height:40px;white-space:pre;overflow:hidden;opacity:.5;background:lime'>ABCDEFGHIJKLMNOPQRST<br>abcdefghijklmnopqrst</div><div style='position:absolute;left:60px;top:0;width:40px;height:40px;white-space:pre;overflow:hidden;opacity:.5;background:lime'>UVWXYZ0123456789<br>uvwxyz0123456789</div>",
+        "",
+    );
+}

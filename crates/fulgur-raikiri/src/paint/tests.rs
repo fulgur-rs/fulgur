@@ -204,6 +204,21 @@ fn producer_fragmentainer_clip_is_applied_before_its_opacity_group() {
             .filter_map(|object| object.as_dict().ok())
             .any(|dict| dict.get(b"ca").ok().and_then(|value| value.as_float().ok()) == Some(0.5))
     );
+    let clip_step = content
+        .operations
+        .iter()
+        .position(|operation| operation.operator == "W")
+        .unwrap();
+    let group_step = content
+        .operations
+        .iter()
+        .position(|operation| operation.operator == "Do")
+        .unwrap();
+    assert!(
+        clip_step < group_step,
+        "the opacity group's form inherits its column clip"
+    );
+
     assert_eq!(
         content
             .operations
