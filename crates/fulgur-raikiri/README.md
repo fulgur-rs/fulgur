@@ -65,6 +65,12 @@ line events and unknown run sources use legacy rendering for the entire page.
 Inline element opacity and other replaced content remain unsupported. Generated
 text and ellipses have no decoration segments in this API version.
 
+Multi-column rules use Raikiri's physical rectangles, used widths, styles,
+colors, and complete pattern extents. Solid, double, dotted, dashed, ridge,
+groove, inset and outset rules paint above the owner's background and below
+its content and outside markers. Rules share ancestor clips, owner overflow
+and opacity, while retaining their pattern phase across page slices.
+
 Ordinary inline-formatting `::before` and `::after` backgrounds and borders
 use the generated line pieces and pseudo styles, including split inline edges
 and glyph clipping. Their text, counters and attributes retain the resolved

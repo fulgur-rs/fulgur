@@ -125,6 +125,105 @@ pub(super) fn paint_borders(
     }
 }
 
+/// Paint one producer-positioned rule with the same style primitives as borders.
+/// Its complete pattern geometry is retained across page clips.
+pub(super) fn paint_column_rule(surface: &mut Surface<'_>, rule: &raikiri_html::ColumnRule) {
+    let side = Side {
+        width: rule.rect.width,
+        style: rule.style,
+        color: rule.color,
+    };
+    if !side.is_visible() || rule.rect.height <= 0.0 || rule.pattern_height <= 0.0 {
+        return;
+    }
+    let visible = RoundedRect {
+        x: rule.rect.x,
+        y: rule.rect.y,
+        width: rule.rect.width,
+        height: rule.rect.height,
+        radii: [[0.0; 2]; 4],
+    };
+    let Some(clip) = visible.path() else {
+        return;
+    };
+    surface.push_clip_path(&clip, &FillRule::NonZero);
+    if side.style == BorderStyle::Dotted {
+        fill_column_rule_dots(surface, rule, side);
+    } else if side.style == BorderStyle::Dashed {
+        stroke_column_rule(surface, rule, side);
+    } else {
+        let outer = RoundedRect {
+            y: rule.pattern_origin,
+            height: rule.pattern_height,
+            ..visible
+        };
+        let widths = Edges {
+            left: side.width,
+            ..Edges::default()
+        };
+        let inner = outer.inset(widths);
+        paint_side(surface, &outer, &inner, widths, Position::Left, side);
+    }
+    surface.pop();
+}
+
+// Bound backend segments across the complete pattern, independently of
+// the visible page slice, matching the native painter's complexity cap.
+const MAX_RULE_SEGMENTS: f32 = 4096.0;
+
+fn fill_column_rule_dots(surface: &mut Surface<'_>, rule: &raikiri_html::ColumnRule, side: Side) {
+    let count = (rule.pattern_height / (2.0 * side.width))
+        .round()
+        .clamp(1.0, MAX_RULE_SEGMENTS - 1.0);
+    let spacing = rule.pattern_height / count;
+    let radius = side.width / 2.0;
+    let first = ((rule.rect.y - radius - rule.pattern_origin) / spacing)
+        .ceil()
+        .max(0.0) as usize;
+    let last = ((rule.rect.y + rule.rect.height + radius - rule.pattern_origin) / spacing)
+        .floor()
+        .min(count) as usize;
+    surface.set_stroke(None);
+    surface.set_fill(Some(fill(side.color)));
+    for index in first..=last {
+        let dot = RoundedRect {
+            x: rule.rect.x,
+            y: rule.pattern_origin + index as f32 * spacing - radius,
+            width: side.width,
+            height: side.width,
+            radii: [[radius; 2]; 4],
+        };
+        if let Some(path) = dot.path() {
+            surface.draw_path(&path);
+        }
+    }
+}
+
+fn stroke_column_rule(surface: &mut Surface<'_>, rule: &raikiri_html::ColumnRule, side: Side) {
+    let length = rule.pattern_height;
+    let natural_dash = 3.0 * side.width;
+    let natural_count = ((length + natural_dash) / (2.0 * natural_dash))
+        .round()
+        .max(1.0);
+    let count = natural_count.min(MAX_RULE_SEGMENTS);
+    let dash = natural_dash * (natural_count / count);
+    let (dash, gap) = if count < 2.0 {
+        (length, 0.0)
+    } else {
+        (dash, (length - count * dash) / (count - 1.0))
+    };
+    let x = rule.rect.x + side.width / 2.0;
+    let mut path = PathBuilder::new();
+    path.move_to(x, rule.pattern_origin);
+    path.line_to(x, rule.pattern_origin + length);
+    if let Some(path) = path.finish() {
+        surface.set_fill(None);
+        surface.set_stroke(Some(dash_stroke(side, dash, gap)));
+        surface.draw_path(&path);
+        surface.set_stroke(None);
+    }
+}
+
 fn resolve_border_color(color: BorderColor, current: CssColor) -> CssColor {
     match color {
         BorderColor::Resolved(color) => color,
@@ -402,3 +501,6 @@ fn darken(color: CssColor) -> CssColor {
         ..color
     }
 }
+
+#[cfg(test)]
+mod tests;
