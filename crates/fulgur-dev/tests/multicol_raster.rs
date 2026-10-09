@@ -167,3 +167,83 @@ fn padded_minimum_height_columns_match_literal_pdf_positions() {
         "ABCDE",
     );
 }
+
+#[test]
+fn a_fixed_height_column_container_splits_a_nested_plain_block_in_pdf() {
+    compare(
+        "<div class=mc><div><p>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{height:40px}",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:60px;top:0'>C<br>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn a_fixed_height_plain_chain_uses_three_columns_below_a_prefix_in_pdf() {
+    compare(
+        "<p>X</p><div class=mc><div><div><p>A<br>B<br>C<br>D<br>E<br>F</p></div></div></div><p>G</p>",
+        ".mc{width:160px;height:40px;column-count:3}",
+        "<div style='position:absolute;left:0;top:0'>X</div><div style='position:absolute;left:0;top:20px'>A<br>B</div><div style='position:absolute;left:60px;top:20px'>C<br>D</div><div style='position:absolute;left:120px;top:20px'>E<br>F</div><div style='position:absolute;left:0;top:60px'>G</div>",
+        "XABCDEFG",
+    );
+}
+
+#[test]
+fn a_fixed_height_plain_wrapper_respects_the_parent_content_origin_in_pdf() {
+    compare(
+        "<div class=mc><div><p>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{height:40px;padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0;box-sizing:border-box;width:112px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:5px'>A<br>B</div><div style='position:absolute;left:66px;top:5px'>C<br>D</div><div style='position:absolute;left:0;top:50px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn a_fixed_height_border_box_wrapper_uses_the_inner_column_width_in_pdf() {
+    compare(
+        "<div class=mc><div><p>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{box-sizing:border-box;height:50px;padding:4px 5px;border:1px solid black;background:lime}",
+        "<div style='position:absolute;left:0;top:0;box-sizing:border-box;width:100px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:5px'>A<br>B</div><div style='position:absolute;left:60px;top:5px'>C<br>D</div><div style='position:absolute;left:0;top:50px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn a_deep_plain_wrapper_keeps_column_clips_below_a_prefix_in_pdf() {
+    compare(
+        "<p>X</p><div class=mc><div><div><p>A<br>B<br>C<br>D<br>E<br>F</p></div></div></div><p>G</p>",
+        ".mc{width:160px;height:40px;column-count:3;padding:4px 5px;border:1px solid black;background:lime}.mc p{overflow:hidden}",
+        "<div style='position:absolute;left:0;top:0'>X</div><div style='position:absolute;left:0;top:20px;box-sizing:border-box;width:172px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:25px'>A<br>B</div><div style='position:absolute;left:66px;top:25px'>C<br>D</div><div style='position:absolute;left:126px;top:25px'>E<br>F</div><div style='position:absolute;left:0;top:70px'>G</div>",
+        "XABCDEFG",
+    );
+}
+
+#[test]
+fn constrained_wrapper_width_preserves_its_literal_pdf_lines() {
+    compare(
+        "<div class=mc><div style='width:80px'><p>A A A A A</p></div></div><p>E</p>",
+        ".mc{height:40px}",
+        "<div style='position:absolute;left:0;top:0'>A A A<br>A A</div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "E",
+    );
+}
+
+#[test]
+fn constrained_wrapper_margin_does_not_newly_hide_pdf_glyphs() {
+    compare(
+        "<div class=mc><div style='overflow:hidden'><p style='margin-top:20px'>A<br>B<br>C<br>D</p></div></div><p>E</p>",
+        ".mc{height:40px}",
+        "<div style='position:absolute;left:0;top:20px'>A<br>B<br>C<br>D</div><div style='position:absolute;left:0;top:40px'>E</div>",
+        "ABCDE",
+    );
+}
+
+#[test]
+fn deep_wrapper_clips_wide_pdf_lines_at_each_column() {
+    compare(
+        "<p>@</p><div class=mc><div><div><p>ABCDEFGHIJKL<br>mnopqrstuvwx<br>0123456789<br>abcdefghijk<br>QRSTUVWXYZ<br>ABCDEFGHIJK</p></div></div></div><p>#</p>",
+        ".mc{width:160px;height:40px;column-count:3;padding:4px 5px;border:1px solid black;background:lime}.mc p{white-space:pre;overflow:hidden}",
+        "<div style='position:absolute;left:0;top:0'>@</div><div style='position:absolute;left:0;top:20px;box-sizing:border-box;width:172px;height:50px;border:1px solid black;background:lime'></div><div style='position:absolute;left:6px;top:25px;width:40px;height:40px;white-space:pre;overflow:hidden'>ABCDEFGHIJKL<br>mnopqrstuvwx</div><div style='position:absolute;left:66px;top:25px;width:40px;height:40px;white-space:pre;overflow:hidden'>0123456789<br>abcdefghijk</div><div style='position:absolute;left:126px;top:25px;width:40px;height:40px;white-space:pre;overflow:hidden'>QRSTUVWXYZ<br>ABCDEFGHIJK</div><div style='position:absolute;left:0;top:70px'>#</div>",
+        "@#",
+    );
+}
