@@ -30,18 +30,41 @@ fn text_without_shadow_is_drawn_once() {
     assert_eq!(count(&ops, "Do"), 0);
 }
 
+/// The fill color of each path fill before the first text show, in order.
+fn shadow_fills(operations: &[lopdf::content::Operation]) -> Vec<[u8; 3]> {
+    let text = text_shows(operations)[0];
+    operations[..text]
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| op.operator == "f")
+        .map(|(index, _)| *fill_colors(&operations[..index]).last().unwrap())
+        .collect()
+}
+
 #[test]
-fn sharp_shadows_are_drawn_below_the_text_first_declared_on_top() {
+fn sharp_shadows_are_outlines_below_the_text_first_declared_on_top() {
     let (pdf, ops) = operations(&format!(
         "{SHADOW_CSS}<p style='text-shadow:1px 1px rgb(255,0,0), 2px 2px rgb(0,0,255)'>Shadow</p>"
     ));
+    // The shadows are filled outlines, so the text is shown, and
+    // extracted, once.
+    assert_eq!(text_colors(&ops), [[0, 0, 0]]);
+    assert_eq!(shadow_fills(&ops), [[0, 0, 255], [255, 0, 0]]);
+    assert_eq!(pdf.extract_text(&[1]).unwrap().matches("Shadow").count(), 1);
+}
+
+#[test]
+fn shadow_layers_span_every_run_of_the_line() {
+    let (_, ops) = operations(&format!(
+        "{SHADOW_CSS}<p style='text-shadow:1px 1px rgb(255,0,0), 2px 2px rgb(0,0,255)'>Split<span style='color:rgb(0,128,0)'>Run</span></p>"
+    ));
+    assert_eq!(text_shows(&ops).len(), 2);
+    // The second shadow of both runs is painted before the first shadow of
+    // either, so no run's first shadow is covered.
     assert_eq!(
-        text_colors(&ops),
-        [[0, 0, 255], [255, 0, 0], [0, 0, 0]],
-        "shadows in reverse order, then the text"
+        shadow_fills(&ops),
+        [[0, 0, 255], [0, 0, 255], [255, 0, 0], [255, 0, 0]]
     );
-    // Extracted text repeats once per shadow; the text itself is still there.
-    assert!(pdf.extract_text(&[1]).unwrap().contains("Shadow"));
 }
 
 #[test]
@@ -49,7 +72,7 @@ fn current_color_shadow_uses_the_text_color() {
     let (_, ops) = operations(&format!(
         "{SHADOW_CSS}<p style='color:rgb(0,128,0);text-shadow:1px 1px'>Green</p>"
     ));
-    assert_eq!(text_colors(&ops), [[0, 128, 0], [0, 128, 0]]);
+    assert_eq!(shadow_fills(&ops), [[0, 128, 0]]);
 }
 
 #[test]

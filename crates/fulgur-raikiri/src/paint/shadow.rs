@@ -1,14 +1,15 @@
 //! Text shadows (CSS Text Decoration 3 §4).
 //!
 //! Each shadow is the run's glyphs filled with the shadow color and moved
-//! by the shadow offset. A sharp shadow is drawn as glyphs. PDF has no blur,
+//! by the shadow offset. A sharp shadow is drawn as the glyph outlines, so
+//! that extracted or searched text holds the run's text once. PDF has no blur,
 //! so a blurred shadow is rasterized: the glyph outlines are filled into a
 //! coverage mask, blurred, and drawn as an image whose alpha is the blurred
 //! coverage, as browsers do when they print blurred shadows to PDF.
 
+use super::fill;
 use super::text_clip::{PathSink, Pen, append_run};
-use super::{FontCache, draw_glyphs};
-use krilla::geom::{Size, Transform};
+use krilla::geom::{PathBuilder, Size, Transform};
 use krilla::image::Image;
 use krilla::surface::Surface;
 use raikiri_html::computed::CssColor;
@@ -21,30 +22,35 @@ const RASTER_SCALE: f32 = 3.0;
 /// shadow is rasterized at a lower scale.
 const MAX_RASTER_PIXELS: f32 = 4_000_000.0;
 
-/// Draw the shadows of `run`, last declared first so that the first shadow
+/// Draw the shadow of `run` at `layer` in its list, if it has one. The
+/// caller paints the layers last declared first, so that the first shadow
 /// is on top (CSS Text Decoration 3 §4).
-pub(super) fn paint(
-    surface: &mut Surface<'_>,
-    run: &PositionedGlyphRun<'_>,
-    fonts: &mut FontCache,
-) {
-    if run.glyphs.is_empty() || run.font_size <= 0.0 {
+pub(super) fn paint(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, layer: usize) {
+    let Some(shadow) = run.shadows.get(layer) else {
+        return;
+    };
+    if run.glyphs.is_empty() || run.font_size <= 0.0 || shadow.color.a == 0 {
         return;
     }
-    for shadow in run.shadows.iter().rev() {
-        if shadow.color.a == 0 {
-            continue;
-        }
-        if shadow.blur_radius > 0.0 {
-            paint_blurred(surface, run, shadow);
-        } else {
-            let origin = (
-                run.origin.0 + shadow.offset.0,
-                run.origin.1 + shadow.offset.1,
-            );
-            draw_glyphs(surface, run, fonts, origin, shadow.color);
-        }
+    if shadow.blur_radius > 0.0 {
+        paint_blurred(surface, run, shadow);
+    } else {
+        paint_sharp(surface, run, shadow);
     }
+}
+
+/// Fill the glyph outlines of `run`, moved by the shadow offset.
+fn paint_sharp(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, shadow: &TextShadow) {
+    let mut pen = Pen::new(PathBuilder::new());
+    // The glyphs are drawn without synthetic oblique, so their shadow is too.
+    append_run(&mut pen, run, false);
+    let Some(path) = pen.builder.finish() else {
+        return;
+    };
+    surface.push_transform(&Transform::from_translate(shadow.offset.0, shadow.offset.1));
+    surface.set_fill(Some(fill(shadow.color)));
+    surface.draw_path(&path);
+    surface.pop();
 }
 
 /// Draw one blurred shadow of `run` as an image.

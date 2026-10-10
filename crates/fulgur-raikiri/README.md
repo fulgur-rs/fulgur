@@ -112,8 +112,10 @@ active clip and opacity group; transparent glyphs can still have visible
 colored decorations. Margin-box decorations are not drawn.
 
 Text shadows come from the glyph runs' used `text-shadow` list and paint below
-the line's decorations and glyphs, the first declared shadow on top. A sharp
-shadow is drawn as glyphs; PDF has no blur, so a blurred shadow is rasterized
+the line's decorations and glyphs, the first declared shadow on top; each
+shadow layer covers the whole line before the next. A sharp shadow is drawn as
+filled glyph outlines, so extracted text is not repeated; PDF has no blur, so a
+blurred shadow is rasterized
 at three pixels per CSS px (a Gaussian of half the blur radius, approximated by
 three box blurs) and drawn as an image with a soft mask. Shadows are not
 applied to text decorations, and page-margin box text has no shadows.

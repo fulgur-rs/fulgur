@@ -276,8 +276,9 @@ fn paint_ordered(
 /// What one pass over a line's runs draws.
 #[derive(Clone, Copy)]
 enum TextPhase {
-    /// Text shadows, below the line's decorations and glyphs.
-    Shadows,
+    /// One text shadow of each run, by its index in the run's list. The
+    /// shadows are below the line's decorations and glyphs.
+    Shadow(usize),
     Decorations(decoration::Phase),
     Glyphs,
 }
@@ -305,12 +306,16 @@ fn paint_text_batch(
     // Reunite color and font slices of each line before painting its three
     // phases, without reordering independent lines that overlap on the page.
     for runs in lines {
-        for phase in [
-            TextPhase::Shadows,
+        // Each shadow layer is painted across the whole line before the
+        // next one, so a run's first shadow is not covered by the later
+        // shadows of the runs after it.
+        let layers = runs.iter().map(|run| run.shadows.len()).max().unwrap_or(0);
+        let phases = (0..layers).rev().map(TextPhase::Shadow).chain([
             TextPhase::Decorations(decoration::Phase::BeforeGlyphs),
             TextPhase::Glyphs,
             TextPhase::Decorations(decoration::Phase::AfterGlyphs),
-        ] {
+        ]);
+        for phase in phases {
             for run in &runs {
                 let element = text_clip::run_element(dom, run);
                 // Standalone markers precede the item's own overflow clip.
@@ -328,7 +333,7 @@ fn paint_text_batch(
                 let chain = clips.chain(page, clip_owner, area);
                 active.apply(surface, clips, &chain);
                 match phase {
-                    TextPhase::Shadows => shadow::paint(surface, run, fonts),
+                    TextPhase::Shadow(layer) => shadow::paint(surface, run, layer),
                     TextPhase::Decorations(phase) => {
                         decoration::paint(surface, &run.decorations, phase);
                     }
@@ -480,19 +485,7 @@ impl FontCache {
 /// Krilla takes them per unit of font size and subtracts `y_offset`, so both
 /// are divided by the font size and `y_offset` changes sign.
 fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
-    draw_glyphs(surface, run, fonts, run.origin, run.color);
-}
-
-/// Draw the glyphs of `run` in `color` with the first pen position at
-/// `origin`.
-fn draw_glyphs(
-    surface: &mut Surface<'_>,
-    run: &PositionedGlyphRun<'_>,
-    fonts: &mut FontCache,
-    origin: (f32, f32),
-    color: CssColor,
-) {
-    if run.glyphs.is_empty() || run.font_size <= 0.0 || color.a == 0 {
+    if run.glyphs.is_empty() || run.font_size <= 0.0 || run.color.a == 0 {
         return;
     }
     // A face Krilla cannot parse is skipped rather than failing the page.
@@ -511,9 +504,9 @@ fn draw_glyphs(
             location: None,
         })
         .collect();
-    surface.set_fill(Some(fill(color)));
+    surface.set_fill(Some(fill(run.color)));
     surface.draw_glyphs(
-        krilla::geom::Point::from_xy(origin.0, origin.1),
+        krilla::geom::Point::from_xy(run.origin.0, run.origin.1),
         &glyphs,
         font,
         run.text,
