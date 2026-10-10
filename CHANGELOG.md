@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.41.0] - 2026-10-10
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(config): reject non-finite/negative/collapsing page size and margin by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/687
+* harden(asset): cap unbounded CSS/image asset registration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/688
+* harden(examples): scope wasm-demo HTTP server to examples/, not repo root by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/696
+* harden(asset): cap unbounded raw font-byte registration by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/697
+* fix(asset): stop echoing caller-supplied image keys in rejection messages by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/785
+### Features
+* feat(pagination): repeat table headers by @vsevolod in https://github.com/fulgur-rs/fulgur/pull/710
+* feat(raikiri): add the unpublished Raikiri DocumentLayout backend and dev CLI selection by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/809
+* feat(raikiri): draw Raikiri pages into PDF with Krilla by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/810
+* feat(raikiri): apply Config page settings and load stylesheets next to the input by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/813
+* feat(raikiri): draw rounded corners, gradients, overflow clips, and border styles by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/814
+* feat(dev): connect backend config, assets, and PDF metadata by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/818
+* feat(raikiri): add PDF links and bookmark outlines by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/819
+* feat(raikiri): paint pages in event order with group opacity by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/821
+* feat(raikiri): render PDF text decorations with per-line paint order by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/825
+* feat(raikiri): preserve group opacity for generated text and ellipses by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/827
+* feat(raikiri): render elliptical corners in PDF output by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/826
+* feat: render inline SVG in Raikiri PDF output by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/831
+* feat(raikiri): paint prepared PNG list markers in PDF by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/840
+* feat(raikiri): use shared paragraph column balancing by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/845
+* feat(raikiri): integrate constrained multicol wrappers into PDF by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/846
+* feat(raikiri): paint multicol column rules by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/847
+* feat(raikiri): render full-width multicol spanners across pages by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/848
+* feat(raikiri): paint page-margin boxes from Raikiri's layout by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/850
+* feat(raikiri): accept HTML strings with an optional base directory by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/853
+* feat(raikiri): draw running elements in page-margin boxes by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/851
+* feat(raikiri): bookmark-state and counter/string bookmark labels by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/857
+* feat(raikiri): paint text shadows by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/859
+* feat(raikiri): tagged PDF and PDF/UA output by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/856
+* feat(fulgur-raikiri): stream pages into the PDF as they are laid out by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/860
+### Bug Fixes
+* fix(gradient): harden stop resolution against non-finite geometry by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/684
+* fix: bump workspace MSRV to 1.89.0 to match dependency floor by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/701
+* fix(pagination): drop phantom header pages from trailing forced breaks by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/728
+* fix(pagination): address review findings on repeating table headers by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/721
+* fix(pagination): split nested inline-root paragraphs at line boundaries by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/741
+* fix(ci): stop rust-cache from corrupting the wpt checkout via target/wpt by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/761
+* fix(gcpm): specificity-aware, document-order-consistent GCPM selector cascade by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/768
+* fix(convert): convert colors to sRGB before reading components by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/772
+* fix(config): support the full CSS page-size keyword set by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/773
+* fix(security): pin release-plz manual recovery to default branch by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/803
+* fix: preserve padded multicol geometry in Raikiri PDFs by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/843
+* fix(raikiri): connect fixed-height multicol wrappers by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/844
+* fix(raikiri): paint percentage padding from the layout's content box by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/854
+* fix(raikiri): honor @page size: auto and orientation-only sizes by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/855
+* fix(blitz): require a document language for PDF/UA output by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/861
+### Other Changes
+* Crop inset PDF ellipses and intersect diagonal corners by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/829
+* Use resolved Raikiri overflow clips across page cuts by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/832
+* Paint standalone Raikiri list markers in PDFs by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/833
+* Connect HTML table defaults to Raikiri PDFs by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/834
+* Connect corrected paged table cell coordinates to PDF by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/836
+* Connect Raikiri table header repetition to PDF painting by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/837
+* Paint ordinary PNG and JPEG images in Raikiri PDFs by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/838
+* Paint Raikiri before/after inline backgrounds and borders by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/841
+* Render multicolumn placements with producer clipping events by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/842
+* Raikiri backend: serve bundled images and draw url() backgrounds by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/858
+
+## New Contributors
+* @vsevolod made their first contribution in https://github.com/fulgur-rs/fulgur/pull/710
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.40.0...v0.41.0
+<!-- release-notes:auto:end -->
+
 ## [0.40.0] - 2026-07-28
 
 <!-- release-notes:auto:begin -->

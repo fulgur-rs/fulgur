@@ -1253,7 +1253,7 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "fulgur"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "fulgur-blitz",
  "fulgur-core",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-blitz"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-cli"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "clap",
  "fulgur",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-core"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "getrandom 0.4.3",
  "image",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-ruby"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "base64 0.23.1",
  "fulgur",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-wasm"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "fulgur",
  "js-sys",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "pyfulgur"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "fulgur",
  "pyo3",
