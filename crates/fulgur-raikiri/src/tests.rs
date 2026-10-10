@@ -1503,6 +1503,8 @@ mod order_tests;
 
 mod decoration_tests;
 
+mod text_shadow_tests;
+
 #[test]
 fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
     let (pdf, operations) = operations(
