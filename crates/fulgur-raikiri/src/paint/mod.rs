@@ -66,7 +66,12 @@ pub(crate) fn paint_document(
         krilla::Document::new()
     };
     let mut tags = Tags::new(document, tagged);
-    let lang = config.lang.clone().or_else(|| html_lang(document));
+    // A blank configured language counts as unset.
+    let lang = config
+        .lang
+        .clone()
+        .filter(|lang| !lang.trim().is_empty())
+        .or_else(|| html_lang(document));
     if config.pdf_ua && lang.is_none() {
         return Err(Error::PdfGeneration(
             "PDF/UA requires a document language: set Config::lang or <html lang>".into(),

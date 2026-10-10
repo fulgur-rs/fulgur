@@ -134,7 +134,8 @@ impl Tags {
             return;
         };
         let dom = page.dom();
-        let annotation = Annotation::new_link(link, accessible_name(dom, owner));
+        let name = accessible_name(dom, owner, &tagger.structure.ids);
+        let annotation = Annotation::new_link(link, name);
         match tagger.structure.by_node.get(&owner) {
             Some(&element) => {
                 let id = pdf_page.add_tagged_annotation(annotation);
@@ -157,7 +158,7 @@ impl Tags {
         let alt = self
             .0
             .as_ref()
-            .and_then(|_| accessible_name(page.dom(), owner));
+            .and_then(|tagger| accessible_name(page.dom(), owner, &tagger.structure.ids));
         pdf_page.add_annotation(Annotation::new_link(link, alt));
     }
 
@@ -178,10 +179,10 @@ fn is_decorative_image(dom: DomView<'_>, node: NodeId) -> bool {
 /// The accessible name of the link or heading `node`: the text of the
 /// elements its `aria-labelledby` refers to, else its text, else its
 /// `aria-label` or `title`, else the `alt` text of an image inside it.
-fn accessible_name(dom: DomView<'_>, node: NodeId) -> Option<String> {
+fn accessible_name(dom: DomView<'_>, node: NodeId, ids: &Ids) -> Option<String> {
     let nonempty = |text: &str| Some(text.trim().to_owned()).filter(|text| !text.is_empty());
     dom.attr(node, "aria-labelledby")
-        .and_then(|ids| labelled_by(dom, ids))
+        .and_then(|list| labelled_by(dom, ids, list))
         .and_then(|text| nonempty(&text))
         .or_else(|| nonempty(&dom.text_content(node)))
         .or_else(|| dom.attr(node, "aria-label").and_then(nonempty))
@@ -192,28 +193,35 @@ fn accessible_name(dom: DomView<'_>, node: NodeId) -> Option<String> {
 /// The text of the elements named by the space-separated ID list `ids`,
 /// joined with spaces, following accname §2C. IDs that match no element
 /// are skipped.
-fn labelled_by(dom: DomView<'_>, ids: &str) -> Option<String> {
-    let parts: Vec<String> = ids
+fn labelled_by(dom: DomView<'_>, ids: &Ids, list: &str) -> Option<String> {
+    let parts: Vec<String> = list
         .split_ascii_whitespace()
-        .filter_map(|id| element_by_id(dom, id))
+        .filter_map(|id| ids.get(id).copied())
         .map(|element| dom.text_content(element).trim().to_owned())
         .filter(|text| !text.is_empty())
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// The first element in tree order whose `id` is `id`.
-fn element_by_id(dom: DomView<'_>, id: &str) -> Option<NodeId> {
+/// Element IDs to the first element in tree order that carries them.
+type Ids = HashMap<String, NodeId>;
+
+/// Index the element IDs of the document once, so that resolving
+/// `aria-labelledby` does not walk the whole tree for every reference.
+fn index_ids(dom: DomView<'_>) -> Ids {
+    let mut ids = Ids::new();
     let mut stack = vec![dom.root()];
     while let Some(node) = stack.pop() {
-        if dom.kind(node) == Some(NodeKind::Element) && dom.attr(node, "id") == Some(id) {
-            return Some(node);
+        if dom.kind(node) == Some(NodeKind::Element)
+            && let Some(id) = dom.attr(node, "id")
+        {
+            ids.entry(id.to_owned()).or_insert(node);
         }
         let start = stack.len();
         stack.extend(dom.children(node));
         stack[start..].reverse();
     }
-    None
+    ids
 }
 
 fn image_alt(dom: DomView<'_>, node: NodeId, depth: usize) -> Option<String> {
@@ -266,6 +274,8 @@ struct Structure {
     labels: HashMap<NodeId, usize>,
     /// DOM preorder position of each node, and the last position inside it.
     order: HashMap<NodeId, (u32, u32)>,
+    /// Element IDs, for `aria-labelledby`.
+    ids: Ids,
 }
 
 impl Structure {
@@ -277,9 +287,11 @@ impl Structure {
             content_of: HashMap::new(),
             labels: HashMap::new(),
             order: HashMap::new(),
+            ids: Ids::new(),
         };
         if let Some(page) = document.page(0) {
             let dom = page.dom();
+            structure.ids = index_ids(dom);
             let mut counter = 0;
             structure.walk(&page, dom, dom.root(), None, 0, &mut counter);
         }
@@ -334,7 +346,7 @@ impl Structure {
                     self.elements[element].alt = dom.attr(node, "alt").map(str::to_owned);
                 }
                 PdfTag::H { .. } => {
-                    self.elements[element].title = accessible_name(dom, node);
+                    self.elements[element].title = accessible_name(dom, node, &self.ids);
                 }
                 PdfTag::Li => {
                     // PDF/UA orders a list item's label before its body.

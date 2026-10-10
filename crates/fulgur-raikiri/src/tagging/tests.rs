@@ -517,6 +517,19 @@ fn pdf_ua_without_a_language_is_rejected() {
 }
 
 #[test]
+fn pdf_ua_treats_a_blank_language_as_unset() {
+    let config = Config::builder().pdf_ua(true).title("T").lang(" ").build();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.html");
+    std::fs::write(&path, "<p>Body</p>").unwrap();
+    let error = render(&path, &config).unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+    std::fs::write(&path, "<html lang='de'><p>Body</p></html>").unwrap();
+    let bytes = render(&path, &config).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("/Lang (de)"));
+}
+
+#[test]
 fn running_elements_are_footer_and_header_artifacts() {
     let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
     let pdf = tagged_pdf(
