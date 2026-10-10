@@ -130,7 +130,11 @@ Page-margin boxes come from Raikiri's per-page layout (`Page::margin_boxes`):
 the sixteen slots with their used rectangles, resolved generated content
 (`counter(page)`, `counter(pages)`, quotes, `string()` and `element()`), and
 glyph runs of their text. Each box paints below the page body: background
-color, solid borders, then its text clipped to the border box.
+color, solid borders, then its content clipped to the border box. A box
+whose `content` has `element()` draws the running element the page selects
+(`Page::margin_box_running_element`), laid out at the box's content width
+and drawn like a page body, with its links clipped to the box. Other boxes,
+including those that combine `element()` with other values, draw their text.
 `background-image: url()` and vertical-writing text in margin boxes are not
 drawn yet.
 

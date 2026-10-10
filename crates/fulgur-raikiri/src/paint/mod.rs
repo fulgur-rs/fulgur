@@ -87,22 +87,49 @@ fn paint_page(
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
     // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts);
-    let runs = page.text_runs();
-    let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs) {
-        paint_ordered(&mut surface, page, &events, &runs, fonts, svg, raster)?;
-    } else {
-        paint_legacy(&mut surface, page, &runs, fonts, svg, raster)?;
-    }
+    let running = margin::paint(&mut surface, page, fonts, svg, raster)?;
+    paint_body(&mut surface, page, fonts, svg, raster)?;
 
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page, document_url)? {
+    for annotation in
+        navigation::annotations(document, page, navigation::Placement::PAGE, document_url)?
+    {
         pdf_page.add_annotation(annotation);
+    }
+    // Links inside the running elements drawn in margin boxes, clipped like
+    // their content to the box.
+    for (running, border_box) in running {
+        let placement = navigation::Placement {
+            origin: running.origin,
+            clip: Some(border_box),
+        };
+        let running_page = running.layout.page();
+        for annotation in navigation::annotations(document, &running_page, placement, document_url)?
+        {
+            pdf_page.add_annotation(annotation);
+        }
     }
     pdf_page.finish();
     Ok(())
+}
+
+/// Draw the boxes, text and replaced content of `page`, without its margin
+/// boxes. A running element laid out for a margin box is drawn the same way.
+fn paint_body(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    fonts: &mut FontCache,
+    svg: &mut svg::SvgCache<'_>,
+    raster: &mut raster::RasterCache<'_>,
+) -> Result<()> {
+    let runs = page.text_runs();
+    let events = page.paint_order_for_text_runs(&runs);
+    if order::supported(&events, &runs) {
+        paint_ordered(surface, page, &events, &runs, fonts, svg, raster)
+    } else {
+        paint_legacy(surface, page, &runs, fonts, svg, raster)
+    }
 }
 
 fn paint_legacy(
