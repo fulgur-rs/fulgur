@@ -18,6 +18,7 @@ struct Heading {
     source_order: u32,
     level: Option<i32>,
     label: Option<String>,
+    closed: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +37,9 @@ impl ConsumerPropertyObserver for BookmarkCollector {
             ("bookmark-level", _) => heading.level = None,
             ("bookmark-label", ConsumerPropertyValue::Text(label)) => heading.label = Some(label),
             ("bookmark-label", _) => heading.label = None,
+            ("bookmark-state", ConsumerPropertyValue::Keyword(state)) => {
+                heading.closed = state == "closed"
+            }
             _ => {}
         }
         Ok(())
@@ -46,6 +50,8 @@ pub(super) fn registrations() -> Vec<ConsumerPropertyRegistration> {
     vec![
         ConsumerPropertyRegistration::integer_or_none("bookmark-level").non_inherited(),
         ConsumerPropertyRegistration::text("bookmark-label").non_inherited(),
+        ConsumerPropertyRegistration::keyword("bookmark-state", &["open", "closed"])
+            .non_inherited(),
     ]
 }
 
@@ -149,7 +155,11 @@ pub(super) fn outline(document: &DocumentLayout, collector: &BookmarkCollector) 
         {
             attach(&mut pending, &mut outline);
         }
-        pending.push((level, OutlineNode::new(label, position)));
+        // The initial value of `bookmark-state` is `open` (CSS GCPM 3).
+        pending.push((
+            level,
+            OutlineNode::new(label, position).with_open(!heading.closed),
+        ));
     }
     while !pending.is_empty() {
         attach(&mut pending, &mut outline);
