@@ -201,6 +201,37 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
 
+#[test]
+fn margin_boxes_draw_the_running_element_of_each_page() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; @top-center { content: element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } \
+         .hdr { position: running(hdr); background: rgb(0, 128, 0) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>\
+         <div class=\"hdr\">Beta</div><p style=\"break-before: page\">two</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let words = |page: u32| {
+        let text = pdf.extract_text(&[page]).expect("extractable text");
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // Each page shows its own header, drawn before the page body, instead of
+    // the document-wide text of the last header.
+    assert_eq!(words(1), ["Alpha", "one"]);
+    assert_eq!(words(2), ["Beta", "two"]);
+    // The element is drawn as laid out, with its background.
+    let content = pdf
+        .get_page_content(*pdf.get_pages().get(&1).unwrap())
+        .unwrap();
+    let operations = lopdf::content::Content::decode(&content)
+        .unwrap()
+        .operations;
+    assert!(fill_colors(&operations).contains(&[0, 128, 0]));
+}
+
 /// Render `html` and decode the drawing operations of every content stream:
 /// page contents and Form XObjects (Krilla draws some fills, such as
 /// translucent ones, through those).
