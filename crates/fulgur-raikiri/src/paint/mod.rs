@@ -54,7 +54,10 @@ pub(crate) fn paint_document(
     }
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::new(*options);
-    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
+    // Relative `url()` values resolve against the base Raikiri preloaded them
+    // with: the document's `<base href>`, else its own URL.
+    let base = document.base_url().unwrap_or(document_url);
+    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref(), base);
     for page in document.pages() {
         paint_page(
             &mut pdf,
@@ -87,7 +90,7 @@ fn paint_page(
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
     // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts);
+    margin::paint(&mut surface, page, fonts, raster)?;
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs) {
@@ -132,11 +135,12 @@ fn paint_legacy(
             let text = || text_clip::outlines(dom, fragment.node(), runs);
             paint_box(
                 surface,
+                raster,
                 fragment.paint_rect(),
                 Slice::of(&fragment),
                 style,
                 text,
-            );
+            )?;
         }
     }
     for fragment in page.fragments() {
@@ -199,11 +203,12 @@ fn paint_ordered(
                     let text = || text_clip::outlines(dom, fragment.node(), runs);
                     paint_box(
                         surface,
+                        raster,
                         fragment.paint_rect(),
                         Slice::of(fragment),
                         style,
                         text,
-                    );
+                    )?;
                 }
             }
             PaintEvent::GeneratedBox(piece) => {
@@ -212,11 +217,12 @@ fn paint_ordered(
                 let text = || text_clip::generated_outlines(piece, runs);
                 paint_box(
                     surface,
+                    raster,
                     piece.rect,
                     Slice::generated(piece),
                     piece.style,
                     text,
-                );
+                )?;
             }
             PaintEvent::Replaced(fragment) => {
                 let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
@@ -335,17 +341,19 @@ fn paint_text_batch(
 /// `background-clip: text`.
 fn paint_box(
     surface: &mut Surface<'_>,
+    raster: &mut raster::RasterCache<'_>,
     rect: PaintRect,
     slice: Slice,
     style: &ComputedValues,
     text: impl FnOnce() -> Option<Path>,
-) {
+) -> Result<()> {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
-        return;
+        return Ok(());
     }
     let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
-    paint_background(surface, &border_box, slice, style, text);
+    paint_background(surface, raster, &border_box, slice, style, text)?;
     border::paint_borders(surface, &border_box, style, slice);
+    Ok(())
 }
 
 /// CSS Backgrounds 3 §2: the background color, then the background image
@@ -355,11 +363,12 @@ fn paint_box(
 /// element's text).
 fn paint_background(
     surface: &mut Surface<'_>,
+    raster: &mut raster::RasterCache<'_>,
     border_box: &RoundedRect,
     slice: Slice,
     style: &ComputedValues,
     text: impl FnOnce() -> Option<Path>,
-) {
+) -> Result<()> {
     let borders = slice.edges(border::widths(style));
     let padding = slice.edges(padding(style));
     let visual_box = |visual: ComputedVisualBox| match visual {
@@ -377,7 +386,7 @@ fn paint_background(
             .map(|path| (path, FillRule::NonZero)),
     };
     let Some((area, rule)) = painting_area else {
-        return;
+        return Ok(());
     };
     if style.background_color.a > 0 {
         surface.set_fill(Some(Fill {
@@ -386,21 +395,45 @@ fn paint_background(
         }));
         surface.draw_path(&area);
     }
-    // One layer with the initial size, position and repeat: the gradient
-    // covers the positioning area and its end colors extend to the rest of
-    // the painting area. `url()` images are not drawn: the layout result
-    // carries no decoded image data.
-    if let ComputedBackgroundImage::Gradient(gradient) = &style.background_image {
-        let positioning_area = visual_box(style.background_origin);
-        if let Some(paint) = gradient::paint(gradient, &positioning_area, style.color) {
-            surface.set_fill(Some(Fill {
-                paint,
-                opacity: NormalizedF32::ONE,
-                rule,
-            }));
-            surface.draw_path(&area);
+    let positioning_area = visual_box(style.background_origin);
+    match &style.background_image {
+        // One layer with the initial size, position and repeat: the gradient
+        // covers the positioning area and its end colors extend to the rest
+        // of the painting area.
+        ComputedBackgroundImage::Gradient(gradient) => {
+            if let Some(paint) = gradient::paint(gradient, &positioning_area, style.color) {
+                surface.set_fill(Some(Fill {
+                    paint,
+                    opacity: NormalizedF32::ONE,
+                    rule,
+                }));
+                surface.draw_path(&area);
+            }
         }
+        ComputedBackgroundImage::Url(url) => {
+            // Tiles cover the clip box; `border-area` and `text` clip inside
+            // the border box.
+            let painting = match style.background_clip {
+                ComputedVisualBox::BorderArea | ComputedVisualBox::Text => *border_box,
+                visual => visual_box(visual),
+            };
+            let layer = raster::BackgroundLayer {
+                url,
+                size: &style.background_size,
+                position: &style.background_position,
+                repeat: &style.background_repeat,
+            };
+            raster.paint_background(
+                surface,
+                &layer,
+                positioning_area.bounds(),
+                painting.bounds(),
+                (&area, rule),
+            )?;
+        }
+        _ => {}
     }
+    Ok(())
 }
 
 /// Used padding widths. A percentage refers to the containing block's

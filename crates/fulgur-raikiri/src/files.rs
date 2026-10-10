@@ -41,6 +41,11 @@ impl BaseDirectoryProvider {
             .map_err(|()| Error::Layout(format!("{} has no file URL", input.display())))
     }
 
+    /// The `file://` URL of the directory, ending in a slash.
+    pub(crate) fn root_url(&self) -> Url {
+        Url::from_directory_path(&self.root).expect("the canonical root is absolute")
+    }
+
     fn resolve(&self, url: &Url) -> std::result::Result<PathBuf, NetworkError> {
         if url.scheme() != "file" {
             return Err(NetworkError::Other(format!(

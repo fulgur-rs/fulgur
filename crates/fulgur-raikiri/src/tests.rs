@@ -205,8 +205,15 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
 /// page contents and Form XObjects (Krilla draws some fills, such as
 /// translucent ones, through those).
 fn operations(html: &str) -> (lopdf::Document, Vec<lopdf::content::Operation>) {
+    operations_with(html, &RenderOptions::default())
+}
+
+fn operations_with(
+    html: &str,
+    options: &RenderOptions<'_>,
+) -> (lopdf::Document, Vec<lopdf::content::Operation>) {
     let (_dir, path) = input(html);
-    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let bytes = render_with_options(&path, &Config::default(), options).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let mut operations = Vec::new();
     for page in pdf.get_pages().values() {

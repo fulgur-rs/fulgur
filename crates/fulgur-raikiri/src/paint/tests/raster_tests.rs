@@ -55,7 +55,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
         let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-        let mut raster = raster::RasterCache::new(
+        let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
                 .flatten(),
@@ -163,7 +163,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
         let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-        let mut raster = raster::RasterCache::new(
+        let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
                 .flatten(),

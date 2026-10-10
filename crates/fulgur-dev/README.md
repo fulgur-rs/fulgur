@@ -50,7 +50,15 @@ use individual TTF/OTF fonts or WOFF2.
 `--no-system-fonts` requires a bundled font. Raikiri registers bundle CSS as
 user stylesheets based on the input document URL; a CSS argument's file path
 is not retained as stylesheet provenance. Linked stylesheets resolve imports
-from their own URLs. Image bundles are unsupported by the Raikiri painter.
+from their own URLs.
+
+`--image NAME=PATH` (repeatable) bundles an image. Both engines look a bundled
+image up by its URL path relative to the input file's directory, so
+`--image img/logo.png=assets/logo.png` serves `<img src="img/logo.png">` and
+`background-image: url(img/logo.png)`. Raikiri serves bundled images ahead of
+files in that directory and draws `url()` backgrounds with the same tile
+geometry as Raikiri's own painter; raster tiles are drawn as images, and an
+SVG background is rasterized at its used size.
 
 PDF metadata supports title, repeated authors and keywords, description,
 language, creator, producer, and creation date. The development CLI exposes
