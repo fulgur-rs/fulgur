@@ -128,6 +128,37 @@ fn bundled_images_match_percent_encoded_and_absolute_urls() {
 }
 
 #[test]
+fn stylesheet_urls_resolve_against_the_stylesheet_like_a_browser() {
+    let (dir, path) = input(&format!(
+        "{PAGE}<link rel=stylesheet href='css/print.css'><div class=bg></div>"
+    ));
+    std::fs::create_dir(dir.path().join("css")).unwrap();
+    std::fs::write(
+        dir.path().join("css/print.css"),
+        ".bg { width:8px; height:8px; background-image:url(img/dot.png) }",
+    )
+    .unwrap();
+    let render_with = |name: &str| {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image(name, dot_png());
+        let options = RenderOptions {
+            assets: Some(&bundle),
+            system_fonts: true,
+        };
+        let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        let content = pdf.get_page_content(pdf.get_pages()[&1]).unwrap();
+        let operations = lopdf::content::Content::decode(&content)
+            .unwrap()
+            .operations;
+        count(&operations, "Do")
+    };
+    // `url(img/dot.png)` in css/print.css names css/img/dot.png.
+    assert_eq!(render_with("css/img/dot.png"), 1);
+    assert_eq!(render_with("img/dot.png"), 0);
+}
+
+#[test]
 fn bundled_images_take_precedence_over_local_files() {
     let (dir, path) = input(&format!("{PAGE}<img src='dot.png' style='width:8px'>"));
     // The file on disk is not an image; the bundle's copy is drawn.

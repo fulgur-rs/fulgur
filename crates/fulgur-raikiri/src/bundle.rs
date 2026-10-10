@@ -1,65 +1,70 @@
-//! Images registered in an [`AssetBundle`], served ahead of local files.
+//! Bundled images as files of the document's sandbox.
 
 use crate::files::{BaseDirectoryProvider, content_type};
 use fulgur_core::AssetBundle;
-use percent_encoding::percent_decode_str;
-use raikiri_traits::ResourceKind;
 use raikiri_traits::net::{FetchOutcome, FetchedResource, NetworkError, NetworkProvider, Request};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use url::Url;
 
-/// Answers image requests from the bundle, and every other request (and
-/// every image the bundle lacks) from the input file's directory.
+/// The resources a document can fetch: the bundle's images, then the files
+/// in the input file's directory.
 ///
-/// A bundle image is named the way the Blitz backend names it: by its path
-/// relative to the input file's directory, so `<img src="logo.png">`,
-/// `url("./logo.png")` and `url("img/a%20b.png")` find the images registered
-/// as `logo.png` and `img/a b.png`. A URL outside that directory, such as
-/// `https://example.com/logo.png`, is looked up by the whole URL.
+/// Every bundle image is a file at a URL, like a file served next to the
+/// document. A name is a URL reference resolved against the input file's
+/// directory (`img/logo.png` is `file:///…/dir/img/logo.png`), or an
+/// absolute URL (`https://example.com/logo.png`). Raikiri resolves each
+/// reference in a document by the usual rules (an `<img src>` against the
+/// document base URL, a stylesheet's `url()` against the stylesheet URL)
+/// and fetches the result; a request whose URL is a bundle image gets its
+/// bytes, whatever the resource kind, and any other request goes to the
+/// directory.
 #[derive(Clone)]
-pub(crate) struct BundledImages<'a> {
-    bundle: Option<&'a AssetBundle>,
-    root: Url,
+pub(crate) struct Sandbox {
+    images: Arc<HashMap<Url, BundledFile>>,
     files: BaseDirectoryProvider,
 }
 
-impl<'a> BundledImages<'a> {
-    pub(crate) fn new(bundle: Option<&'a AssetBundle>, files: BaseDirectoryProvider) -> Self {
-        let bundle = bundle.filter(|bundle| !bundle.images.is_empty());
+struct BundledFile {
+    data: Arc<Vec<u8>>,
+    /// Served like a local file: by the extension of the bundle name.
+    content_type: Option<&'static str>,
+}
+
+impl Sandbox {
+    pub(crate) fn new(bundle: Option<&AssetBundle>, files: BaseDirectoryProvider) -> Self {
+        let root = files.root_url();
+        let images = bundle
+            .into_iter()
+            .flat_map(|bundle| bundle.images.iter())
+            .filter_map(|(name, data)| {
+                let url = Url::parse(name).or_else(|_| root.join(name)).ok()?;
+                let file = BundledFile {
+                    data: Arc::clone(data),
+                    content_type: content_type(Path::new(name)),
+                };
+                Some((without_fragment(url), file))
+            })
+            .collect();
         Self {
-            bundle,
-            root: files.root_url(),
+            images: Arc::new(images),
             files,
         }
     }
-
-    /// The bundle name `url` resolves to, if the bundle has that image.
-    fn lookup(&self, url: &Url) -> Option<(&'a [u8], String)> {
-        let bundle = self.bundle?;
-        let relative = url
-            .path()
-            .strip_prefix(self.root.path())
-            .filter(|_| url.scheme() == "file" && url.host_str() == self.root.host_str())
-            .and_then(|path| percent_decode_str(path).decode_utf8().ok())
-            .map(|path| match url.query() {
-                Some(query) => format!("{path}?{query}"),
-                None => path.into_owned(),
-            });
-        [relative, Some(url.as_str().to_string())]
-            .into_iter()
-            .flatten()
-            .find_map(|name| bundle.get_image(&name).map(|data| (data.as_slice(), name)))
-    }
 }
 
-impl NetworkProvider for BundledImages<'_> {
+fn without_fragment(mut url: Url) -> Url {
+    url.set_fragment(None);
+    url
+}
+
+impl NetworkProvider for Sandbox {
     fn fetch_one_hop(&self, request: Request) -> std::result::Result<FetchOutcome, NetworkError> {
-        if matches!(request.kind, ResourceKind::Image | ResourceKind::Svg)
-            && let Some((data, name)) = self.lookup(&request.url)
-        {
+        if let Some(file) = self.images.get(&without_fragment(request.url.clone())) {
             return Ok(FetchOutcome::Body(FetchedResource {
-                bytes: data.to_vec().into(),
-                content_type: content_type(Path::new(&name)).map(str::to_string),
+                bytes: file.data.as_slice().to_vec().into(),
+                content_type: file.content_type.map(str::to_string),
                 final_url: request.url,
                 encoding: None,
             }));

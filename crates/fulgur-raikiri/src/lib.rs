@@ -13,9 +13,10 @@ use std::path::Path;
 
 /// Rendering resources for the Raikiri development backend.
 ///
-/// Fonts supplied by the bundle are registered in order. Bundle images are
-/// served for image URLs that name them by their path relative to the input
-/// file's directory, ahead of the files in that directory.
+/// Fonts supplied by the bundle are registered in order. Each bundle image
+/// is a file at the URL its name resolves to against the input file's
+/// directory; documents reach it with ordinary URL resolution, ahead of the
+/// files in that directory.
 #[derive(Clone, Copy)]
 pub struct RenderOptions<'a> {
     /// Optional user stylesheets and bundled fonts.
@@ -118,7 +119,7 @@ fn with_layout<T>(
     let html = std::fs::read(input)?;
     let files = files::BaseDirectoryProvider::for_input(input)?;
     let document_url = files.document_url(input)?;
-    let network = bundle::BundledImages::new(options.assets, files);
+    let network = bundle::Sandbox::new(options.assets, files);
     let images = raikiri_net::ImageResolver::new(network.clone());
     let resolver = images::OptionalImages(&images);
     let mut resources = RenderResources::new()
