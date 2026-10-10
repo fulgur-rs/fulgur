@@ -193,11 +193,15 @@ fn repeated_sources_reuse_one_parsed_tree() {
         system_fonts: true,
     });
     let source = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><g opacity='0.5'><rect width='10' height='10'/></g></svg>";
-    let first: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
+    // A source drawn once is not kept.
+    cache.tree(source.into(), None).unwrap();
+    assert!(cache.trees.is_empty());
     let second: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
-    assert_eq!(first, second);
+    let third: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
+    assert_eq!(second, third);
+    cache.tree(source.into(), Some(0.5)).unwrap();
     let neutralized: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
-    assert_ne!(first, neutralized);
+    assert_ne!(second, neutralized);
     let again: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
     assert_eq!(neutralized, again);
     assert_eq!(cache.trees.len(), 1);

@@ -1,6 +1,7 @@
 //! Inline SVG vector content inside the existing page paint stack.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, RandomState};
 use std::sync::Arc;
 
 use fulgur_core::{Error, Result};
@@ -24,10 +25,14 @@ pub(super) struct SvgCache<'a> {
     no_fonts: Arc<usvg::fontdb::Database>,
     /// Parsed trees by prepared source, then by the host opacity removed from
     /// the root (its bits), so an SVG repeated on every page, such as a logo
-    /// in a running header, is parsed once.
+    /// in a running header, is parsed once more and then reused.
     trees: HashMap<String, Vec<(Option<u32>, usvg::Tree)>>,
+    /// Hashes of the (source, removed opacity) pairs drawn once. A tree is
+    /// kept only when its pair is drawn again, so one-off SVGs never pile up.
+    seen: HashSet<u64>,
+    hasher: RandomState,
     cached_source_bytes: usize,
-    /// The last tree parsed once the cache is full.
+    /// The last tree parsed but not kept.
     uncached: Option<usvg::Tree>,
 }
 
@@ -38,6 +43,8 @@ impl<'a> SvgCache<'a> {
             fonts: None,
             no_fonts: Arc::new(usvg::fontdb::Database::new()),
             trees: HashMap::new(),
+            seen: HashSet::new(),
+            hasher: RandomState::new(),
             cached_source_bytes: 0,
             uncached: None,
         }
@@ -146,7 +153,8 @@ impl<'a> SvgCache<'a> {
         };
         let new_source = !self.trees.contains_key(&source);
         let added = if new_source { source.len() } else { 0 };
-        if self.cached_source_bytes + added > MAX_CACHED_SOURCE_BYTES {
+        let repeated = !self.seen.insert(self.hasher.hash_one((&source, key)));
+        if !repeated || self.cached_source_bytes + added > MAX_CACHED_SOURCE_BYTES {
             self.uncached = Some(tree);
             return Ok(self.uncached.as_ref().expect("just stored"));
         }
