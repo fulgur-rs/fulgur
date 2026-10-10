@@ -66,6 +66,11 @@ pub(crate) fn paint_document(
     };
     let mut tags = Tags::new(document, tagged);
     let lang = config.lang.clone().or_else(|| html_lang(document));
+    if config.pdf_ua && lang.is_none() {
+        return Err(Error::PdfGeneration(
+            "PDF/UA requires a document language: set Config::lang or <html lang>".into(),
+        ));
+    }
     pdf.set_metadata(crate::metadata::build(
         config,
         html_title(document),

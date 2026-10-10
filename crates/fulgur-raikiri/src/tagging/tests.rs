@@ -495,6 +495,16 @@ fn pdf_ua_takes_the_language_from_the_html() {
 }
 
 #[test]
+fn pdf_ua_without_a_language_is_rejected() {
+    let config = Config::builder().pdf_ua(true).title("T").build();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.html");
+    std::fs::write(&path, "<p>Body</p>").unwrap();
+    let error = render(&path, &config).unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+}
+
+#[test]
 fn running_elements_are_footer_and_header_artifacts() {
     let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
     let pdf = tagged_pdf(

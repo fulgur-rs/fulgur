@@ -61,7 +61,9 @@ Backgrounds, borders, text decorations, column rules and margin boxes
 (`Header`/`Footer` for the top and bottom boxes) are artifacts, as are the
 repeated copies of table headers and `position: fixed` boxes after the page
 that first shows them. `Config::pdf_ua` adds Krilla's PDF/UA-1 validation and
-implies tagging and bookmarks.
+implies tagging and bookmarks. It takes the title and language from `Config`,
+falling back to `<title>` and `<html lang>`; rendering fails when no language
+is available.
 
 Raikiri PDF links use all quads supplied by the page API. Fragment links use
 rendered anchors (including percent-encoded names and the first duplicate
