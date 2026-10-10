@@ -60,9 +60,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo fmt --check
-      # fulgur-raikiri / fulgur-dev are linted by raikiri.yml instead, so a
-      # Raikiri-side breakage never blocks Blitz PRs.
+      # fulgur-raikiri / fulgur-dev are formatted and linted by raikiri.yml
+      # instead, so a Raikiri-side breakage never blocks Blitz PRs. The fmt
+      # package list comes from cargo metadata so new crates are covered.
+      - name: cargo fmt --check (excluding the Raikiri backend)
+        run: |
+          packages=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[].name | select(. != "fulgur-raikiri" and . != "fulgur-dev") | "-p " + .')
+          cargo fmt --check $packages
       - run: cargo clippy --workspace --all-targets --exclude fulgur-raikiri --exclude fulgur-dev -- -D warnings
 
   test:

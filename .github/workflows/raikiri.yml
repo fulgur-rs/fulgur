@@ -24,6 +24,10 @@ on:
       - "crates/fulgur-dev/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
+      # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
+      - "tests/fixtures/raikiri-dev/**"
+      - "crates/fulgur-ruby/spec/fixtures/**"
+      - "crates/fulgur-blitz/tests/fixtures/fonts/**"
   pull_request:
     paths:
       - ".github/workflows/raikiri.yml"
@@ -36,6 +40,10 @@ on:
       - "crates/fulgur-dev/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
+      # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
+      - "tests/fixtures/raikiri-dev/**"
+      - "crates/fulgur-ruby/spec/fixtures/**"
+      - "crates/fulgur-blitz/tests/fixtures/fonts/**"
   schedule:
     # 02:30 UTC daily (11:30 JST), after WPT nightly starts.
     - cron: '30 2 * * *'
@@ -71,6 +79,8 @@ jobs:
           swap-storage: false
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-latest-fulgur-raikiri
@@ -85,6 +95,8 @@ jobs:
         uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
       - name: Test development backend comparison script
         run: python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
+      - name: Rustfmt
+        run: cargo fmt --check -p fulgur-raikiri -p fulgur-dev
       - name: Clippy
         run: cargo clippy -p fulgur-raikiri -p fulgur-dev --all-targets -- -D warnings
       # Run the tests under coverage so Codecov patch coverage keeps working
