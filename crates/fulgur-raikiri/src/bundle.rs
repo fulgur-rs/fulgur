@@ -40,20 +40,26 @@ impl Sandbox {
         // Without a base directory the document is `about:blank`, against
         // which no relative name resolves: only absolute-URL names apply.
         let root = files.directory_url().ok();
-        let images = bundle
+        // Names visited in sorted order, so that when two names resolve to
+        // the same URL (`a b.png` and `a%20b.png`) the same one always wins.
+        let mut names: Vec<_> = bundle
             .into_iter()
             .flat_map(|bundle| bundle.images.iter())
-            .filter_map(|(name, data)| {
-                let url = Url::parse(name)
-                    .ok()
-                    .or_else(|| root.as_ref()?.join(name).ok())?;
-                let file = BundledFile {
-                    data: Arc::clone(data),
-                    content_type: content_type(Path::new(name)),
-                };
-                Some((without_fragment(url), file))
-            })
             .collect();
+        names.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut images = HashMap::new();
+        for (name, data) in names {
+            let Some(url) = Url::parse(name)
+                .ok()
+                .or_else(|| root.as_ref()?.join(name).ok())
+            else {
+                continue;
+            };
+            images.entry(key(url)).or_insert_with(|| BundledFile {
+                data: Arc::clone(data),
+                content_type: content_type(Path::new(name)),
+            });
+        }
         Self {
             images: Arc::new(images),
             files,
@@ -61,14 +67,20 @@ impl Sandbox {
     }
 }
 
-fn without_fragment(mut url: Url) -> Url {
+/// The identity of the resource at `url`. A fragment never names a separate
+/// resource. A query does not either for a `file:` URL: it reaches the same
+/// file on disk, so `logo.png?v=1` is the bundled `logo.png`.
+fn key(mut url: Url) -> Url {
     url.set_fragment(None);
+    if url.scheme() == "file" {
+        url.set_query(None);
+    }
     url
 }
 
 impl NetworkProvider for Sandbox {
     fn fetch_one_hop(&self, request: Request) -> std::result::Result<FetchOutcome, NetworkError> {
-        if let Some(file) = self.images.get(&without_fragment(request.url.clone())) {
+        if let Some(file) = self.images.get(&key(request.url.clone())) {
             return Ok(FetchOutcome::Body(FetchedResource {
                 bytes: file.data.as_slice().to_vec().into(),
                 content_type: file.content_type.map(str::to_string),

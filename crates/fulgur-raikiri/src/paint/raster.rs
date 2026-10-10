@@ -47,6 +47,9 @@ impl CustomImage for Pixels {
     }
 }
 
+/// The most tiles one background layer draws.
+const MAX_BACKGROUND_TILES: usize = 100_000;
+
 /// One `url()` background image layer as computed for a box.
 pub(super) struct BackgroundLayer<'s> {
     /// The computed `url()` value.
@@ -213,6 +216,11 @@ impl<'a> RasterCache<'a> {
         ) else {
             return Ok(());
         };
+        // Each axis is bounded already, but tiny tiles over a large area can
+        // still multiply into millions of draws; such a layer draws nothing.
+        if tiles.x.len().saturating_mul(tiles.y.len()) > MAX_BACKGROUND_TILES {
+            return Ok(());
+        }
         let Some(size) = Size::from_wh(tiles.width as f32, tiles.height as f32) else {
             return Ok(());
         };

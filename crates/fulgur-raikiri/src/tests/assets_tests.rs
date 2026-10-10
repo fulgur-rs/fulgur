@@ -437,3 +437,41 @@ fn html_string_bundles_resolve_against_the_base_directory_or_absolute_urls() {
     // name matches nothing.
     assert_eq!(drawn("dot.png", None), 0);
 }
+
+#[test]
+fn bundle_names_for_the_same_file_resolve_deterministically() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("a b.png", dot_png());
+    bundle.add_image("a%20b.png", b"not an image".to_vec());
+    // "a b.png" sorts first, so the valid image is the one served.
+    assert_eq!(
+        drawn_images(
+            &format!("{PAGE}<img src='a%20b.png' style='width:8px;height:8px'>"),
+            &bundle
+        ),
+        1
+    );
+}
+
+#[test]
+fn bundled_files_ignore_the_query_like_local_files() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    assert_eq!(
+        drawn_images(
+            &format!("{PAGE}<img src='dot.png?v=1' style='width:8px;height:8px'>"),
+            &bundle
+        ),
+        1
+    );
+}
+
+#[test]
+fn background_layers_with_too_many_tiles_draw_nothing() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    let html = format!(
+        "{PAGE}<div style='width:200px;height:200px;background-image:url(dot.png);background-size:.1px .1px'></div>"
+    );
+    assert_eq!(drawn_images(&html, &bundle), 0);
+}
