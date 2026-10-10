@@ -477,3 +477,22 @@ fn pdf_ua_takes_the_language_from_the_html() {
     let catalog = pdf.catalog().unwrap();
     assert_eq!(text(catalog, b"Lang"), "ja");
 }
+
+#[test]
+fn running_elements_are_footer_and_header_artifacts() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<style>@page {size:300px 200px; margin:40px; @top-center {content: element(hdr)}} \
+         body {margin:0} .hdr {position: running(hdr)}</style>\
+         <div class='hdr'><a href='https://example.com/'>Home</a></div><p>Body</p>",
+        &config,
+    );
+    let content =
+        String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1]).unwrap()).into_owned();
+    assert!(content.contains("/Header"), "{content}");
+    let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+    let annotation = resolve(&pdf, &page.get(b"Annots").unwrap().as_array().unwrap()[0])
+        .as_dict()
+        .unwrap();
+    assert_eq!(text(annotation, b"Contents"), "Home");
+}

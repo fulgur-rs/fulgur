@@ -65,8 +65,8 @@ impl Tags {
         self.0.is_some()
     }
 
-    /// Untagged output, for painting tests that have no document.
-    #[cfg(test)]
+    /// Untagged output: content drawn inside an artifact, and painting
+    /// tests that have no document.
     pub(crate) fn disabled() -> Self {
         Self(None)
     }
@@ -142,6 +142,23 @@ impl Tags {
             }
             None => pdf_page.add_annotation(annotation),
         }
+    }
+
+    /// Add a link annotation for the `<a>` element `owner` of `page`
+    /// without a structure element: a link inside a running element, whose
+    /// content is a pagination artifact.
+    pub(crate) fn annotate_artifact(
+        &self,
+        pdf_page: &mut PdfPage<'_>,
+        page: &Page<'_>,
+        owner: NodeId,
+        link: LinkAnnotation,
+    ) {
+        let alt = self
+            .0
+            .as_ref()
+            .and_then(|_| accessible_name(page.dom(), owner));
+        pdf_page.add_annotation(Annotation::new_link(link, alt));
     }
 
     /// The structure tree, or `None` when the output is not tagged.
