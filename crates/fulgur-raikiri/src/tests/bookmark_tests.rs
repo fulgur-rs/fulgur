@@ -260,7 +260,7 @@ fn bookmark_with_layout_discards_already_aborted_result() {
     controller.abort();
     let config = Config::builder().bookmarks(true).build();
     let result = with_layout(
-        &path,
+        Source::File(&path),
         &config,
         &RenderOptions::default(),
         LayoutConfig::builder()
