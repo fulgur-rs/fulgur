@@ -16,7 +16,7 @@ use krilla::surface::Surface;
 use krilla::tagging::{
     ArtifactType, ContentTag, Identifier, Node, SpanTag, Tag, TagGroup, TagKind, TagTree,
 };
-use raikiri_html::computed::{ComputedListStyleType, ComputedVisibility};
+use raikiri_html::computed::{ComputedDisplay, ComputedListStyleType, ComputedVisibility};
 use raikiri_html::{
     DocumentLayout, DomView, GeneratedKind, NodeId, NodeKind, Page, PageMarginBoxSlot,
     PositionedGlyphRun, RunSource,
@@ -150,7 +150,15 @@ impl Tags {
     }
 }
 
-/// The accessible name of the link `node`: its text, else its
+/// Whether `node` is an `<img>` with an empty `alt`.
+fn is_decorative_image(dom: DomView<'_>, node: NodeId) -> bool {
+    dom.local_name(node) == Some("img")
+        && dom
+            .attr(node, "alt")
+            .is_some_and(|alt| alt.trim().is_empty())
+}
+
+/// The accessible name of the link or heading `node`: its text, else its
 /// `aria-label` or `title`, else the `alt` text of an image inside it.
 fn accessible_name(dom: DomView<'_>, node: NodeId) -> Option<String> {
     let nonempty = |text: &str| Some(text.trim().to_owned()).filter(|text| !text.is_empty());
@@ -252,10 +260,17 @@ impl Structure {
             self.order.insert(node, (order, order));
             return;
         }
+        let style = page.computed(node);
+        // `display: none` generates no boxes for the element or its
+        // descendants, so none of them has content to tag.
+        if style.is_some_and(|style| matches!(style.display, ComputedDisplay::None)) {
+            self.skip(dom, node, depth, counter);
+            self.order.insert(node, (order, *counter - 1));
+            return;
+        }
         let mut child_parent = parent;
-        let visible = page
-            .computed(node)
-            .is_none_or(|style| matches!(style.visibility, ComputedVisibility::Visible));
+        let visible =
+            style.is_none_or(|style| matches!(style.visibility, ComputedVisibility::Visible));
         if let Some(name) = name
             && let Some(tag) = classify(page, dom, node, name)
             // An invisible figure or heading would lack the `/Alt` or title
@@ -271,8 +286,7 @@ impl Structure {
                     self.elements[element].alt = dom.attr(node, "alt").map(str::to_owned);
                 }
                 PdfTag::H { .. } => {
-                    let title = dom.text_content(node).trim().to_owned();
-                    self.elements[element].title = Some(title).filter(|text| !text.is_empty());
+                    self.elements[element].title = accessible_name(dom, node);
                 }
                 PdfTag::Li => {
                     // PDF/UA orders a list item's label before its body.
@@ -289,6 +303,19 @@ impl Structure {
             self.walk(page, dom, child, child_parent, depth + 1, counter);
         }
         self.order.insert(node, (order, *counter - 1));
+    }
+
+    /// Give the descendants of a skipped node their preorder positions.
+    fn skip(&mut self, dom: DomView<'_>, node: NodeId, depth: usize, counter: &mut u32) {
+        if depth >= MAX_DEPTH {
+            return;
+        }
+        for child in dom.children(node) {
+            let order = *counter;
+            *counter += 1;
+            self.skip(dom, child, depth + 1, counter);
+            self.order.insert(child, (order, *counter - 1));
+        }
     }
 
     fn push(&mut self, parent: Option<usize>, tag: PdfTag, order: u32) -> usize {
@@ -327,6 +354,11 @@ impl Structure {
 /// attributes and computed style the same way as the Blitz backend, plus
 /// `<a href>` as `Link`.
 fn classify(page: &Page<'_>, dom: DomView<'_>, node: NodeId, name: &str) -> Option<PdfTag> {
+    // An image with an empty `alt` is decorative (HTML §4.8.4.4.4): it is
+    // painted as an artifact rather than tagged as a figure.
+    if is_decorative_image(dom, node) {
+        return None;
+    }
     if name == "a" {
         return dom
             .attr(node, "href")
@@ -505,6 +537,9 @@ impl Tagger {
                 // already in the structure, or decorate it.
                 _ => return Mark::Artifact(ArtifactType::Other),
             },
+            Target::Replaced(node) if is_decorative_image(dom, node) => {
+                return Mark::Artifact(ArtifactType::Other);
+            }
             Target::Replaced(node) => (node, Some(node)),
             Target::MarkerImage(owner) => {
                 if self.is_repeat_copy(dom, owner) {

@@ -56,7 +56,7 @@ pub fn render_with_options(
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     config.validate()?;
-    metadata::build(config, None)?;
+    metadata::build(config, None, None)?;
     with_layout(
         input,
         config,

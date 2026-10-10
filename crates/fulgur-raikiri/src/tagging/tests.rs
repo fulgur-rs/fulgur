@@ -446,3 +446,34 @@ fn every_tag_converts_to_krilla() {
         }
     }
 }
+
+#[test]
+fn pdf_ua_skips_undisplayed_and_decorative_images() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<p>Text<img style='display: none' src='missing.png' width=10 height=10>\
+         <img alt='' src='missing.png' width=10 height=10></p>",
+        &config,
+    );
+    assert!(elements(&pdf, b"Figure").is_empty());
+    assert_eq!(outline(&pdf), "Document[P[#]]");
+}
+
+#[test]
+fn headings_without_text_take_their_accessible_name() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<h1 aria-label='Named'></h1><h2><img alt='Logo' src='missing.png' width=10 height=10></h2>",
+        &config,
+    );
+    assert_eq!(text(elements(&pdf, b"H1")[0], b"T"), "Named");
+    assert_eq!(text(elements(&pdf, b"H2")[0], b"T"), "Logo");
+}
+
+#[test]
+fn pdf_ua_takes_the_language_from_the_html() {
+    let config = Config::builder().pdf_ua(true).title("T").build();
+    let pdf = tagged_pdf("<html lang='ja'><body><p>本文</p></body></html>", &config);
+    let catalog = pdf.catalog().unwrap();
+    assert_eq!(text(catalog, b"Lang"), "ja");
+}

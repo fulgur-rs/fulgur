@@ -65,7 +65,12 @@ pub(crate) fn paint_document(
         krilla::Document::new()
     };
     let mut tags = Tags::new(document, tagged);
-    pdf.set_metadata(crate::metadata::build(config, html_title(document))?);
+    let lang = config.lang.clone().or_else(|| html_lang(document));
+    pdf.set_metadata(crate::metadata::build(
+        config,
+        html_title(document),
+        lang.clone(),
+    )?);
     if let Some(outline) = outline {
         pdf.set_outline(outline);
     }
@@ -84,7 +89,7 @@ pub(crate) fn paint_document(
             document_url,
         )?;
     }
-    if let Some(tree) = tags.finish(config.lang.clone()) {
+    if let Some(tree) = tags.finish(lang) {
         pdf.set_tag_tree(tree);
     }
     pdf.finish()
@@ -104,6 +109,16 @@ fn html_title(document: &DocumentLayout) -> Option<String> {
     let head = dom.children(html).find(|&node| element(node, "head"))?;
     let title = dom.children(head).find(|&node| element(node, "title"))?;
     Some(dom.text_content(title).trim().to_owned()).filter(|text| !text.is_empty())
+}
+
+/// The `lang` of the root `<html>` element, if set and non-empty.
+fn html_lang(document: &DocumentLayout) -> Option<String> {
+    let page = document.page(0)?;
+    let dom = page.dom();
+    let html = dom.children(dom.root()).find(|&node| {
+        dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some("html")
+    })?;
+    Some(dom.attr(html, "lang")?.trim().to_owned()).filter(|lang| !lang.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
