@@ -244,8 +244,14 @@ impl<'a> RasterCache<'a> {
     }
 
     /// The absolute image URL of a computed `url()` value, without its
-    /// fragment, which names no separate resource.
+    /// fragment, which names no separate resource. `url()` and `url(#id)`
+    /// name no external image, so they resolve to nothing rather than to
+    /// the document itself.
     fn resolve(&self, raw: &str) -> Option<Url> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
         let mut url = Url::parse(raw).or_else(|_| self.base.join(raw)).ok()?;
         url.set_fragment(None);
         Some(url)
@@ -259,5 +265,22 @@ impl<'a> RasterCache<'a> {
         static BASE: std::sync::LazyLock<Url> =
             std::sync::LazyLock::new(|| Url::parse("file:///").expect("valid URL"));
         Self::new(source, &BASE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RasterCache;
+
+    #[test]
+    fn local_and_empty_references_resolve_to_nothing() {
+        let cache = RasterCache::for_tests(None);
+        assert_eq!(cache.resolve("#frag"), None);
+        assert_eq!(cache.resolve(""), None);
+        assert_eq!(cache.resolve("  "), None);
+        assert_eq!(
+            cache.resolve("img/a.svg#x").map(|url| url.to_string()),
+            Some("file:///img/a.svg".to_string())
+        );
     }
 }

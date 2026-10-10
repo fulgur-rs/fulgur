@@ -239,6 +239,65 @@ fn background_url_tiles_follow_repeat_size_and_position() {
 }
 
 #[test]
+fn unusable_background_urls_draw_nothing() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    bundle.add_image("broken.png", b"not an image".to_vec());
+    let tiles = |style: &str| {
+        drawn_images(
+            &format!("{PAGE}<div style='width:32px;height:16px;{style}'></div>"),
+            &bundle,
+        )
+    };
+    assert_eq!(tiles("background-image:url(#frag)"), 0);
+    assert_eq!(tiles("background-image:url(missing.png)"), 0);
+    assert_eq!(tiles("background-image:url(broken.png)"), 0);
+    assert_eq!(
+        tiles("background-image:url(dot.png);background-size:0 0"),
+        0
+    );
+}
+
+#[test]
+fn background_url_clip_boxes_bound_the_tiles() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    let tiles = |style: &str| {
+        drawn_images(
+            &format!(
+                "{PAGE}<div style='width:16px;height:8px;padding:4px;border:4px solid red;\
+                 background-image:url(dot.png);{style}'>x</div>"
+            ),
+            &bundle,
+        )
+    };
+    // 8px tiles start at the padding box origin. The 24px x 16px padding box
+    // holds 3 x 2; the border box adds a partial tile on each side (5 x 4).
+    assert_eq!(tiles("background-clip:border-box"), 20);
+    assert_eq!(tiles("background-clip:padding-box"), 6);
+    // `text` clips inside the border box, so tiles cover all of it.
+    assert_eq!(tiles("background-clip:text"), 20);
+}
+
+#[test]
+fn margin_box_background_url_follows_origin_and_clip() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    let tiles = |style: &str| {
+        let html = format!(
+            "<style>@page{{size:200px 200px;margin:40px;@top-center{{content:'Header';\
+             padding:4px;background-image:url(dot.png);background-repeat:no-repeat;{style}}}}}</style>\
+             <p>Body</p>"
+        );
+        drawn_images(&html, &bundle)
+    };
+    assert_eq!(tiles("background-origin:content-box"), 1);
+    assert_eq!(tiles("background-clip:padding-box"), 1);
+    // Margin boxes have no glyph clip, so a `text` clip draws nothing.
+    assert_eq!(tiles("background-clip:text"), 0);
+}
+
+#[test]
 fn background_url_reads_local_files_without_a_bundle() {
     let (dir, path) = input(&format!(
         "{PAGE}<div style='width:8px;height:8px;background-image:url(dot.png)'></div>"
