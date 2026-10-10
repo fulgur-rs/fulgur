@@ -114,6 +114,25 @@ fn bookmark_state_controls_initial_outline_expansion() {
 }
 
 #[test]
+fn bookmark_labels_use_counters_and_named_strings() {
+    let (_dir, path) = input(&format!(
+        r#"{BOOK_CSS}<style>
+        body {{ counter-reset: chapter }}
+        h1 {{ counter-increment: chapter; string-set: part content(); bookmark-label: counter(chapter) ". " content() }}
+        h2 {{ bookmark-label: string(part) " / " content() }}
+        </style><h1>Intro</h1><h2>Scope</h2><h1>Usage</h1>"#
+    ));
+    let bytes = render(&path, &Config::builder().bookmarks(true).build()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let items = outline_children(&pdf, outline_root(&pdf));
+    assert_eq!(
+        items.iter().map(|item| title(item)).collect::<Vec<_>>(),
+        ["1. Intro", "2. Usage"]
+    );
+    assert_eq!(title(outline_children(&pdf, items[0])[0]), "Intro / Scope");
+}
+
+#[test]
 fn bookmark_author_level_label_and_none() {
     let (_dir, path) = input(&format!(
         r#"{BOOK_CSS}

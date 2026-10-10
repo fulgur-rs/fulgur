@@ -50,13 +50,16 @@ with the PDF coordinate transform applied once by Krilla.
 `--bookmarks` enables heading outlines. Raikiri receives resolved level and
 label values through render-local consumer callbacks, then builds destinations
 and hierarchy only after layout completes. Author CSS overrides the heading
-defaults; supported labels are literal strings, `attr(...)`, and
-`content(text)`. Invalid levels, empty labels, and non-rendered headings are
+defaults; supported labels are literal strings, `attr(...)`,
+`content(text)`, counters and named strings. Invalid levels, empty labels, and non-rendered headings are
 omitted. Empty or missing drawable boxes use the first rendered descendant.
 `bookmark-state: open | closed` sets each entry's initial expansion and
 defaults to `open` as in CSS GCPM 3, unlike the Blitz backend, whose outline
-always starts collapsed. Counter/string labels and general display:contents
-box suppression are not implemented in this backend. Aborted layout or callback errors return no PDF.
+always starts collapsed. Labels may also use `counter()`, `counters()` and
+`string()`: counters take their value at the heading, and `string()` takes the
+latest `string-set` assignment at or before it in document order. Page counters
+and general display:contents box suppression are not implemented in this
+backend. Aborted layout or callback errors return no PDF.
 
 Raikiri pages use paint order with one text event per paragraph line from the
 page's positioned runs. Source text, generated content and ellipses share their
