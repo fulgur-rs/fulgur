@@ -1702,7 +1702,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -3024,7 +3024,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 [[package]]
 name = "raikiri-dom"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "bitflags 2.11.0",
  "raikiri-style",
@@ -3042,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "raikiri-html"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3063,7 +3063,7 @@ dependencies = [
 [[package]]
 name = "raikiri-net"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "data-url",
  "image",
@@ -3075,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "raikiri-style"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3087,7 +3087,7 @@ dependencies = [
 [[package]]
 name = "raikiri-svg"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3101,7 +3101,7 @@ dependencies = [
 [[package]]
 name = "raikiri-traits"
 version = "0.2.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=7c3b42db77d42041cad2b6b056c790112be015d6#7c3b42db77d42041cad2b6b056c790112be015d6"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09#051d45c5fe5f9c7394aa82168d5dbcfeccc0fb09"
 dependencies = [
  "bytes",
  "libc",
@@ -3679,9 +3679,9 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shodo"
-version = "0.0.24"
+version = "0.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cb7bddeabd98b7dddac07738ef2a98d36232ac56944af3e3fc009ebaef52749"
+checksum = "9f2f842633d1a5e20cb6ed13d3dd156f3fa3b731c0421e9a93ccf232daa366fb"
 dependencies = [
  "foldhash 0.2.0",
  "fontique 0.11.1",
