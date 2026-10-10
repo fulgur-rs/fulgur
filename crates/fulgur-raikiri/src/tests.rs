@@ -866,16 +866,16 @@ fn background_clip_selects_the_painting_area() {
     assert_eq!(fills("border-box"), [20.0, 20.0]);
     assert_eq!(fills("padding-box"), [25.0, 25.0]);
     assert_eq!(fills("content-box"), [35.0, 35.0]);
-    // A percentage padding has no containing block width here and counts as
-    // zero, leaving the padding box.
+    // A percentage padding refers to the containing block's width: 10% of
+    // the 260px page area is 26px, read back from the layout's content box.
     let (_, operations) = operations(&format!(
-        "{CSS}<p style=\"border: 5px solid transparent; padding: 10%; \
+        "{CSS}<p style=\"border: 5px solid transparent; padding: 5px 10%; \
          background-color: rgb(0, 128, 0); background-clip: content-box\"></p>"
     ));
     let first_move = operations.iter().find(|op| op.operator == "m").unwrap();
     assert_eq!(
         floats(&lopdf::Object::Array(first_move.operands.clone())),
-        [25.0, 25.0]
+        [51.0, 30.0]
     );
 }
 
@@ -1540,6 +1540,8 @@ mod assets_tests;
 mod metadata_tests;
 
 mod navigation_tests;
+
+mod html_input_tests;
 
 mod bookmark_tests;
 

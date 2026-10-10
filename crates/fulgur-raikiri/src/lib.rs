@@ -1,6 +1,6 @@
 //! Raikiri layout backend for Fulgur's development CLI.
 //!
-//! The input is a file path and the output is PDF bytes. Drawing covers page
+//! The input is a file path or an HTML string and the output is PDF bytes. Drawing covers page
 //! geometry, box backgrounds and borders, text, and resolved images. No other backend is used
 //! as a fallback.
 
@@ -11,6 +11,7 @@ use raikiri_html::{
     parse_html_with_resources,
 };
 use raikiri_traits::PageBox;
+use std::borrow::Cow;
 use std::path::Path;
 
 /// Rendering resources for the Raikiri development backend.
@@ -57,10 +58,46 @@ pub fn render_with_options(
     config: &Config,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
+    render_source(Source::File(input), config, options)
+}
+
+/// Lay out and paint an HTML string using default rendering resources.
+///
+/// Relative URLs resolve against `base_dir`, and local resources are limited
+/// to that directory, as for a file inside it. Without a base directory the
+/// document behaves like `about:blank`: no resource is read and only
+/// same-document fragment links resolve.
+///
+/// # Errors
+/// Returns an error for invalid config, an unreadable base directory, layout,
+/// or PDF generation.
+pub fn render_html(html: &str, base_dir: Option<&Path>, config: &Config) -> Result<Vec<u8>> {
+    render_html_with_options(html, base_dir, config, &RenderOptions::default())
+}
+
+/// Render an HTML string with additional user stylesheets and bundled fonts.
+///
+/// # Errors
+/// Returns an asset error as [`render_with_options`] does; other errors match
+/// [`render_html`].
+pub fn render_html_with_options(
+    html: &str,
+    base_dir: Option<&Path>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+) -> Result<Vec<u8>> {
+    render_source(Source::Html { html, base_dir }, config, options)
+}
+
+fn render_source(
+    source: Source<'_>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+) -> Result<Vec<u8>> {
     config.validate()?;
     metadata::build(config)?;
     with_layout(
-        input,
+        source,
         config,
         options,
         LayoutConfig::default(),
@@ -68,6 +105,40 @@ pub fn render_with_options(
             draw(status, resources, config, collector, document_url, options)
         },
     )
+}
+
+/// Where the HTML comes from and which directory its resources come from.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// A file, read whole; resources come from its directory.
+    File(&'a Path),
+    /// HTML already in memory, with an optional base directory.
+    Html {
+        html: &'a str,
+        base_dir: Option<&'a Path>,
+    },
+}
+
+impl<'a> Source<'a> {
+    /// The HTML bytes, the file provider, and the document URL.
+    fn load(self) -> Result<(Cow<'a, [u8]>, files::BaseDirectoryProvider, url::Url)> {
+        match self {
+            Self::File(input) => {
+                let html = std::fs::read(input)?;
+                let files = files::BaseDirectoryProvider::for_input(input)?;
+                let document_url = files.document_url(input)?;
+                Ok((Cow::Owned(html), files, document_url))
+            }
+            Self::Html { html, base_dir } => {
+                let files = match base_dir {
+                    Some(dir) => files::BaseDirectoryProvider::for_directory(dir)?,
+                    None => files::BaseDirectoryProvider::none(),
+                };
+                let document_url = files.directory_url()?;
+                Ok((Cow::Borrowed(html.as_bytes()), files, document_url))
+            }
+        }
+    }
 }
 
 /// Draw a layout result as PDF bytes.
@@ -95,7 +166,7 @@ fn draw(
 #[cfg(test)]
 fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Result<LayoutStatus> {
     with_layout(
-        input,
+        Source::File(input),
         config,
         &RenderOptions::default(),
         layout_config,
@@ -104,7 +175,7 @@ fn layout_file(input: &Path, config: &Config, layout_config: LayoutConfig) -> Re
 }
 
 fn with_layout<T>(
-    input: &Path,
+    source: Source<'_>,
     config: &Config,
     options: &RenderOptions<'_>,
     layout_config: LayoutConfig,
@@ -116,9 +187,7 @@ fn with_layout<T>(
     ) -> Result<T>,
 ) -> Result<T> {
     let fonts = assets::fonts(options)?;
-    let html = std::fs::read(input)?;
-    let files = files::BaseDirectoryProvider::for_input(input)?;
-    let document_url = files.document_url(input)?;
+    let (html, files, document_url) = source.load()?;
     let images = raikiri_net::ImageResolver::new(files.clone());
     let resolver = images::OptionalImages(&images);
     let mut resources = RenderResources::new()
@@ -138,7 +207,7 @@ fn with_layout<T>(
     if let Some(fonts) = fonts {
         resources = resources.fonts(fonts);
     }
-    let document = parse_html_with_resources(html.as_slice(), &resources)
+    let document = parse_html_with_resources(html.as_ref(), &resources)
         .map_err(|error| Error::Layout(error.to_string()))?;
     let registrations = if config.bookmarks {
         bookmarks::registrations()
