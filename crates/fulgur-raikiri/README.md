@@ -58,7 +58,7 @@ Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
 An omitted creation date does not insert the current time.
 
-Tagged PDF (`Config::tagged`) builds the structure tree from the DOM with the
+Tagged PDF (`Config::enable_tagging`) builds the structure tree from the DOM with the
 same HTML mapping as the Blitz backend (`fulgur_core::tagging`): headings with
 their text as title, paragraphs, generic containers as `Div`, lists with
 `Lbl`/`LBody` items, tables with header scope, images as `Figure` with their
