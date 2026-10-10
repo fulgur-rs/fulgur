@@ -55,7 +55,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
         let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-        let mut raster = raster::RasterCache::new(
+        let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
                 .flatten(),
@@ -163,7 +163,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
         let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-        let mut raster = raster::RasterCache::new(
+        let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
                 .flatten(),
@@ -210,4 +210,93 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
             .count();
         assert_eq!(saves, restores);
     }
+}
+
+/// Reports a 4x2 image but hands out whatever pixels it was given.
+struct SizedPixels(Option<Arc<DecodedImage>>);
+
+impl ImagePixelSource for SizedPixels {
+    fn get_decoded(&self, _url: &url::Url) -> Option<Arc<DecodedImage>> {
+        self.0.clone()
+    }
+
+    fn intrinsic_size(&self, _url: &url::Url) -> Option<raikiri_traits::ImageIntrinsicSize> {
+        Some(raikiri_traits::ImageIntrinsicSize {
+            width: Some(4.0),
+            height: Some(2.0),
+            aspect_ratio: Some(2.0),
+        })
+    }
+}
+
+#[test]
+fn background_url_skips_missing_sources_and_unusable_pixels() {
+    let images = |pixels: Option<DecodedImage>, with_source: bool| {
+        let source = SizedPixels(pixels.map(Arc::new));
+        let resources = RenderResources::new().image_pixel_source(&source);
+        let document = raikiri_html::parse_html_with_resources(
+            &b"<style>@page{size:100px 100px;margin:0}body{margin:0}div{width:4px;height:2px;background-image:url(https://images.test/bg.png)}</style><div></div>"[..],
+            &resources,
+        )
+        .unwrap();
+        let LayoutStatus::Completed(layout) = raikiri_html::layout(
+            &document,
+            PageDefaults::default(),
+            LayoutConfig::default(),
+            LayoutOptions::new().resources(&resources),
+        )
+        .unwrap() else {
+            panic!("completed layout")
+        };
+        let page = layout.page(0).unwrap();
+        let mut pdf = krilla::Document::new();
+        let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
+        let mut surface = pdf_page.surface();
+        let mut fonts = FontCache::default();
+        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut raster = raster::RasterCache::for_tests(
+            with_source
+                .then(|| resources.image_pixel_source_ref())
+                .flatten(),
+        );
+        paint_legacy(
+            &mut surface,
+            &page,
+            &page.text_runs(),
+            &mut fonts,
+            &mut svg,
+            &mut raster,
+        )
+        .unwrap();
+        surface.finish();
+        pdf_page.finish();
+        let parsed = lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap();
+        parsed
+            .objects
+            .values()
+            .filter_map(|object| object.as_stream().ok())
+            .filter(|stream| {
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    == Some(b"Image".as_slice())
+            })
+            .count()
+    };
+    let red = DecodedImage {
+        width: 4,
+        height: 2,
+        rgba: [255, 0, 0, 255].repeat(8),
+    };
+    assert_eq!(images(Some(red.clone()), true), 1);
+    assert_eq!(images(Some(red), false), 0);
+    assert_eq!(images(None, true), 0);
+    let truncated = DecodedImage {
+        width: 4,
+        height: 2,
+        rgba: vec![0; 4],
+    };
+    assert_eq!(images(Some(truncated), true), 0);
 }

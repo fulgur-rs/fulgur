@@ -16,8 +16,10 @@ use std::path::Path;
 
 /// Rendering resources for the Raikiri development backend.
 ///
-/// Fonts supplied by the bundle are registered in order. Image bundles are
-/// rejected because bundle image URLs are not configured by this backend.
+/// Fonts supplied by the bundle are registered in order. Each bundle image
+/// is a file at the URL its name resolves to against the base directory (the
+/// input file's directory); documents reach it with ordinary URL resolution,
+/// ahead of the files in that directory.
 #[derive(Clone, Copy)]
 pub struct RenderOptions<'a> {
     /// Optional user stylesheets and bundled fonts.
@@ -51,8 +53,8 @@ pub fn render(input: &Path, config: &Config) -> Result<Vec<u8>> {
 /// The same resources remain alive throughout parsing, layout, and painting.
 ///
 /// # Errors
-/// Returns an asset error for invalid fonts, image bundles, or disabling system
-/// fonts without a bundled font; other errors match [`render`].
+/// Returns an asset error for invalid fonts or disabling system fonts without
+/// a bundled font; other errors match [`render`].
 pub fn render_with_options(
     input: &Path,
     config: &Config,
@@ -188,13 +190,14 @@ fn with_layout<T>(
 ) -> Result<T> {
     let fonts = assets::fonts(options)?;
     let (html, files, document_url) = source.load()?;
-    let images = raikiri_net::ImageResolver::new(files.clone());
+    let network = bundle::Sandbox::new(options.assets, files);
+    let images = raikiri_net::ImageResolver::new(network.clone());
     let resolver = images::OptionalImages(&images);
     let mut resources = RenderResources::new()
         .replaced_resolver(&resolver)
         .image_pixel_source(&images)
         .stylesheet(page_stylesheet(config))
-        .network_provider(&files)
+        .network_provider(&network)
         .base_url(document_url.clone());
     if config.bookmarks {
         resources = resources.stylesheet(bookmarks::heading_stylesheet());
@@ -287,6 +290,7 @@ fn important(set: bool) -> &'static str {
 #[cfg(test)]
 mod tests;
 
+mod bundle;
 mod files;
 mod images;
 mod paint;
