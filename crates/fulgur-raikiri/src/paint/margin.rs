@@ -3,7 +3,8 @@
 
 use super::raster::BackgroundLayer;
 use super::shape::{Edges, RoundedRect};
-use super::{FontCache, fill, paint_body, paint_glyph_run, raster, svg};
+use super::{FontCache, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
+use crate::tagging::{Tags, Target, margin_box_artifact};
 use fulgur_core::{Error, Result};
 use krilla::geom::Transform;
 use krilla::paint::FillRule;
@@ -12,6 +13,9 @@ use raikiri_html::computed::ComputedVisualBox;
 use raikiri_html::{MarginBox, Page, PaintInsets, PaintRect, PlacedRunningElement};
 
 /// Draw the margin boxes of `page` in Raikiri's order, below the page body.
+/// Margin boxes hold running headers and footers, which tagged output marks
+/// as pagination artifacts.
+///
 /// Returns the running elements drawn, with the border box each is clipped
 /// to, so their links can be placed on the page.
 pub(super) fn paint<'a>(
@@ -20,13 +24,17 @@ pub(super) fn paint<'a>(
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
 ) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
     let mut drawn = Vec::new();
     for margin_box in page.margin_boxes() {
         let running = page
             .margin_box_running_element(&margin_box)
             .map_err(|error| Error::Layout(error.to_string()))?;
-        paint_box(surface, &margin_box, running, fonts, svg, raster)?;
+        let artifact = Target::Artifact(margin_box_artifact(margin_box.slot));
+        tags.mark(surface, page, artifact, |surface| {
+            paint_box(surface, &margin_box, running, fonts, svg, raster)
+        })?;
         if let Some(running) = running {
             drawn.push((running, margin_box.rect));
         }
@@ -105,7 +113,16 @@ fn paint_box(
             running.origin.0,
             running.origin.1,
         ));
-        let painted = paint_body(surface, &running.layout.page(), fonts, svg, raster);
+        // The whole box is one artifact, and marked content does not nest,
+        // so the running element is drawn without tags of its own.
+        let painted = paint_body(
+            surface,
+            &running.layout.page(),
+            fonts,
+            svg,
+            raster,
+            &mut Tags::disabled(),
+        );
         surface.pop();
         surface.pop();
         return painted;
@@ -115,7 +132,7 @@ fn paint_box(
         return Ok(());
     }
     surface.push_clip_path(&border_box, &FillRule::NonZero);
-    for run in &runs {
+    for run in runs.iter().filter(|run| paints_glyphs(run)) {
         paint_glyph_run(surface, run, fonts);
     }
     surface.pop();

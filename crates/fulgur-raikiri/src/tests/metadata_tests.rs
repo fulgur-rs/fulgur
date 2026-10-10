@@ -112,14 +112,3 @@ fn metadata_supported_partial_dates_render() {
         assert!(stored.starts_with(expected), "{date}: {stored}");
     }
 }
-
-#[test]
-fn metadata_unsupported_tagging_returns_error() {
-    let (_dir, path) = input("<p>Hello</p>");
-    for config in [
-        Config::builder().tagged(true).build(),
-        Config::builder().pdf_ua(true).build(),
-    ] {
-        assert!(render(&path, &config).is_err());
-    }
-}

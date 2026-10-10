@@ -68,8 +68,11 @@ language, creator, producer, and creation date. The development CLI exposes
 `--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
 Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
-An omitted creation date does not insert the current time. Tagged PDF and
-PDF/UA requests through Raikiri return an explicit error.
+An omitted creation date does not insert the current time.
+
+`--tagged` generates a tagged PDF and `--pdf-ua` validates the output as
+PDF/UA-1 (implying `--tagged` and `--bookmarks`), for both engines. See the
+`fulgur-raikiri` README for what the Raikiri backend tags.
 
 Raikiri PDF links retain all quads supplied by the page API in one annotation
 per link per page. Fragment links use

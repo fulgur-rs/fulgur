@@ -1,23 +1,24 @@
 use fulgur_core::{Config, Error, Result};
 use krilla::metadata::{DateTime, Metadata};
 
-pub(super) fn build(config: &Config) -> Result<Metadata> {
-    if config.effective_tagging() {
-        return Err(Error::PdfGeneration(
-            "Raikiri tagged PDF and PDF/UA are not supported".into(),
-        ));
-    }
+/// The document metadata. `html_title` and `html_lang` are the document's
+/// `<title>` and root `lang`, used when the configuration sets neither.
+pub(super) fn build(
+    config: &Config,
+    html_title: Option<String>,
+    html_lang: Option<String>,
+) -> Result<Metadata> {
     let mut metadata = Metadata::new()
         .authors(config.authors.clone())
         .keywords(config.keywords.clone());
-    if let Some(value) = &config.title {
-        metadata = metadata.title(value.clone());
+    if let Some(value) = config.title.clone().or(html_title) {
+        metadata = metadata.title(value);
     }
     if let Some(value) = &config.description {
         metadata = metadata.description(value.clone());
     }
-    if let Some(value) = &config.lang {
-        metadata = metadata.language(value.clone());
+    if let Some(value) = config.lang.clone().or(html_lang) {
+        metadata = metadata.language(value);
     }
     if let Some(value) = &config.creator {
         metadata = metadata.creator(value.clone());

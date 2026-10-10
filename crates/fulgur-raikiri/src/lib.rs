@@ -97,7 +97,7 @@ fn render_source(
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     config.validate()?;
-    metadata::build(config)?;
+    metadata::build(config, None, None)?;
     with_layout(
         source,
         config,
@@ -159,12 +159,13 @@ fn draw(
             "Raikiri layout was aborted or did not complete".into(),
         ));
     };
-    let bookmarks = if config.bookmarks {
+    let want_bookmarks = config.effective_bookmarks();
+    let bookmarks = if want_bookmarks {
         bookmarks::outline(&document, collector)
     } else {
         bookmarks::BookmarkOutline::default()
     };
-    let outline = config.bookmarks.then_some(bookmarks.outline);
+    let outline = want_bookmarks.then_some(bookmarks.outline);
     let pdf = paint::paint_document(&document, resources, config, outline, document_url, options)?;
     bookmarks::apply_open_state(pdf, &bookmarks.open)
 }
@@ -203,7 +204,7 @@ fn with_layout<T>(
         .stylesheet(page_stylesheet(config))
         .network_provider(&network)
         .base_url(document_url.clone());
-    if config.bookmarks {
+    if config.effective_bookmarks() {
         resources = resources.stylesheet(bookmarks::heading_stylesheet());
     }
     if let Some(bundle) = options.assets {
@@ -216,14 +217,14 @@ fn with_layout<T>(
     }
     let document = parse_html_with_resources(html.as_ref(), &resources)
         .map_err(|error| Error::Layout(error.to_string()))?;
-    let registrations = if config.bookmarks {
+    let registrations = if config.effective_bookmarks() {
         bookmarks::registrations()
     } else {
         Vec::new()
     };
     let mut collector = bookmarks::BookmarkCollector::default();
     let mut layout_options = LayoutOptions::new().resources(&resources);
-    if config.bookmarks {
+    if config.effective_bookmarks() {
         layout_options = layout_options.consumer_properties(&registrations, &mut collector);
     }
     let status = layout(
@@ -304,3 +305,5 @@ mod assets;
 mod metadata;
 
 mod bookmarks;
+
+mod tagging;
