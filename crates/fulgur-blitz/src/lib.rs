@@ -311,7 +311,7 @@ pub(crate) const MAX_STRING_SET_STORE_BYTES: usize = 8 * 1024 * 1024;
 /// so only adversarial multi-item lists are clipped.
 pub(crate) const MAX_RESOLVED_CONTENT_BYTES: usize = 1024 * 1024;
 
-pub use fulgur_core::{asset, config, error, image, inspect, units};
+pub use fulgur_core::{asset, config, error, image, inspect, tagging, units};
 
 pub mod background;
 pub mod blitz_adapter;
@@ -333,7 +333,6 @@ pub mod paragraph;
 pub mod render;
 pub mod schema;
 pub mod svg;
-pub mod tagging;
 pub mod template;
 #[cfg(test)]
 mod test_fonts;

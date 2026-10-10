@@ -1,14 +1,18 @@
-//! Tagged PDF semantic layer (fulgur-izp.3).
+//! Tagged PDF semantic layer shared by Fulgur's layout backends.
 //!
-//! Carries a fulgur-internal classification of HTML elements that the
-//! render pass (`fulgur-izp.4`) and the StructTree builder
-//! (`fulgur-izp.5`) translate into Krilla `Tag` / `ContentTag` calls.
+//! Carries a fulgur-internal classification of HTML elements that each
+//! backend's render pass and StructTree builder translate into Krilla
+//! `Tag` / `ContentTag` calls. It depends only on Krilla, so the Blitz and
+//! Raikiri backends map HTML semantics the same way.
 //!
 //! See `docs/plans/2026-05-03-tagged-pdf-drawables-redesign.md` for the
 //! design and `docs/plans/2026-04-22-tagged-pdf-krilla-api-design.md`
 //! for the underlying Krilla API analysis.
 
-use crate::drawables::NodeId;
+/// Key of a semantic record: a backend node id, or a synthetic id the
+/// backend allocates for structure that has no node of its own (the `Lbl`
+/// and `LBody` children of a list item).
+pub type NodeId = usize;
 
 /// Subset of Krilla `tagging::Tag` variants that fulgur intends to map
 /// HTML semantics to. Render-side translation to the Krilla type
