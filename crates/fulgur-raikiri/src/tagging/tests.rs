@@ -237,6 +237,18 @@ fn box_decorations_and_margin_boxes_are_artifacts() {
 }
 
 #[test]
+fn text_shadows_are_artifacts() {
+    let pdf = tagged_pdf(
+        "<p style='text-shadow: 2px 2px red, 4px 4px blue'>Body</p>",
+        &tagged(),
+    );
+    let content =
+        String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1]).unwrap()).into_owned();
+    assert!(content.contains("/Artifact"), "{content}");
+    assert_eq!(outline(&pdf), "Document[P[#]]");
+}
+
+#[test]
 fn pdf_ua_output_validates() {
     let config = Config::builder()
         .pdf_ua(true)

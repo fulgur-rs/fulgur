@@ -82,12 +82,16 @@ with the PDF coordinate transform applied once by Krilla.
 `--bookmarks` enables heading outlines. Raikiri receives resolved level and
 label values through render-local consumer callbacks, then builds destinations
 and hierarchy only after layout completes. Author CSS overrides the heading
-defaults; supported labels are literal strings, `attr(...)`, and
-`content(text)`. Invalid levels, empty labels, and non-rendered headings are
+defaults; supported labels are literal strings, `attr(...)`,
+`content(text)`, counters and named strings. Invalid levels, empty labels, and non-rendered headings are
 omitted. Empty or missing drawable boxes use the first rendered descendant.
-Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
-counter/string labels, and general display:contents box suppression are not
-implemented in this backend. Aborted layout or callback errors return no PDF.
+`bookmark-state: open | closed` sets each entry's initial expansion and
+defaults to `open` as in CSS GCPM 3, unlike the Blitz backend, whose outline
+always starts collapsed. Labels may also use `counter()`, `counters()` and
+`string()`: counters take their value at the heading, and `string()` takes the
+latest `string-set` assignment at or before it in document order. Page counters
+and general display:contents box suppression are not implemented in this
+backend. Aborted layout or callback errors return no PDF.
 
 Raikiri pages use paint order with one text event per paragraph line from the
 page's positioned runs. Source text, generated content and ellipses share their
@@ -141,7 +145,19 @@ Underline and overline paint before glyphs, and line-through paints after
 them. Solid, double, dotted, dashed, and wavy styles retain their pattern
 phase across font and color run boundaries. Decorations share the text's
 active clip and opacity group; transparent glyphs can still have visible
-colored decorations. Margin-box decorations and text shadows are not drawn.
+colored decorations. Margin-box decorations are not drawn.
+
+Text shadows come from the glyph runs' used `text-shadow` list and paint below
+the line's decorations and glyphs, the first declared shadow on top; each
+shadow layer covers the whole line before the next, and neighboring runs that
+share a shadow are drawn as one shape, so font and color changes leave no seam.
+A sharp shadow is drawn as filled glyph outlines, so extracted text is not
+repeated. PDF has no blur, so a blurred shadow is rasterized at three pixels
+per CSS px (a Gaussian of half the blur radius, approximated by three box
+blurs) and drawn as an image with a soft mask; the shadow rasters of a document
+share a budget of 64M pixels. Shadows are not applied to text decorations,
+page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
+and color-only emoji glyphs) cast no shadow.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices

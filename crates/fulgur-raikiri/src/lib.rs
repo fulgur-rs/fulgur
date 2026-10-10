@@ -159,10 +159,15 @@ fn draw(
             "Raikiri layout was aborted or did not complete".into(),
         ));
     };
-    let outline = config
-        .effective_bookmarks()
-        .then(|| bookmarks::outline(&document, collector));
-    paint::paint_document(&document, resources, config, outline, document_url, options)
+    let want_bookmarks = config.effective_bookmarks();
+    let bookmarks = if want_bookmarks {
+        bookmarks::outline(&document, collector)
+    } else {
+        bookmarks::BookmarkOutline::default()
+    };
+    let outline = want_bookmarks.then_some(bookmarks.outline);
+    let pdf = paint::paint_document(&document, resources, config, outline, document_url, options)?;
+    bookmarks::apply_open_state(pdf, &bookmarks.open)
 }
 
 #[cfg(test)]
