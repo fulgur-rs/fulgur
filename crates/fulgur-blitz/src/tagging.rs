@@ -242,4 +242,23 @@ mod tests {
             assert_eq!(tag.level().get(), 6, "level={input} should clamp to H6");
         }
     }
+
+    #[test]
+    fn list_numbering_converts_every_variant() {
+        use krilla::tagging::ListNumbering as K;
+        let cases = [
+            (ListNumbering::None, K::None),
+            (ListNumbering::Disc, K::Disc),
+            (ListNumbering::Circle, K::Circle),
+            (ListNumbering::Square, K::Square),
+            (ListNumbering::Decimal, K::Decimal),
+            (ListNumbering::LowerRoman, K::LowerRoman),
+            (ListNumbering::UpperRoman, K::UpperRoman),
+            (ListNumbering::LowerAlpha, K::LowerAlpha),
+            (ListNumbering::UpperAlpha, K::UpperAlpha),
+        ];
+        for (numbering, expected) in cases {
+            assert_eq!(list_numbering(numbering), expected, "{numbering:?}");
+        }
+    }
 }

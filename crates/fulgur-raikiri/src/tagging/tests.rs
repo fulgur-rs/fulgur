@@ -322,3 +322,127 @@ fn repeated_links_stay_in_the_structure_tree() {
     kids(&pdf, links[0].get(b"K").unwrap(), &mut marks);
     assert_eq!(marks, format!("#{}", " @".repeat(pages.len())));
 }
+
+#[test]
+fn margin_boxes_map_to_header_footer_or_page_artifacts() {
+    use krilla::tagging::ArtifactType;
+    use raikiri_html::PageMarginBoxSlot::*;
+    for slot in [TopLeftCorner, TopLeft, TopCenter, TopRight, TopRightCorner] {
+        assert!(matches!(
+            super::margin_box_artifact(slot),
+            ArtifactType::Header
+        ));
+    }
+    for slot in [
+        BottomLeftCorner,
+        BottomLeft,
+        BottomCenter,
+        BottomRight,
+        BottomRightCorner,
+    ] {
+        assert!(matches!(
+            super::margin_box_artifact(slot),
+            ArtifactType::Footer
+        ));
+    }
+    for slot in [
+        LeftTop,
+        LeftMiddle,
+        LeftBottom,
+        RightTop,
+        RightMiddle,
+        RightBottom,
+    ] {
+        assert!(matches!(
+            super::margin_box_artifact(slot),
+            ArtifactType::Page
+        ));
+    }
+}
+
+#[test]
+fn list_style_types_map_to_list_numbering() {
+    use fulgur_core::tagging::ListNumbering;
+    use raikiri_html::computed::ComputedListStyleType as Style;
+    let cases = [
+        ("disc", ListNumbering::Disc),
+        ("circle", ListNumbering::Circle),
+        ("square", ListNumbering::Square),
+        ("decimal", ListNumbering::Decimal),
+        ("lower-alpha", ListNumbering::LowerAlpha),
+        ("lower-latin", ListNumbering::LowerAlpha),
+        ("upper-alpha", ListNumbering::UpperAlpha),
+        ("upper-latin", ListNumbering::UpperAlpha),
+        ("lower-roman", ListNumbering::LowerRoman),
+        ("upper-roman", ListNumbering::UpperRoman),
+        ("hiragana", ListNumbering::None),
+    ];
+    for (name, expected) in cases {
+        assert_eq!(
+            super::list_numbering(&Style::Named(name.into())),
+            expected,
+            "{name}"
+        );
+    }
+    assert_eq!(super::list_numbering(&Style::Disc), ListNumbering::Disc);
+    assert_eq!(super::list_numbering(&Style::None), ListNumbering::None);
+    assert_eq!(
+        super::list_numbering(&Style::String("-".into())),
+        ListNumbering::None
+    );
+}
+
+#[test]
+fn every_tag_converts_to_krilla() {
+    use fulgur_core::tagging::{ListNumbering, PdfTag, TableHeaderScope};
+    use krilla::tagging::TagKind;
+    let mut tags = vec![
+        PdfTag::P,
+        PdfTag::H { level: 0 },
+        PdfTag::H { level: 9 },
+        PdfTag::Div,
+        PdfTag::Span,
+        PdfTag::Figure,
+        PdfTag::Lbl,
+        PdfTag::LBody,
+        PdfTag::Li,
+        PdfTag::Table,
+        PdfTag::THead,
+        PdfTag::TBody,
+        PdfTag::TFoot,
+        PdfTag::Tr,
+        PdfTag::Td,
+        PdfTag::Link,
+    ];
+    tags.extend(
+        [
+            ListNumbering::None,
+            ListNumbering::Disc,
+            ListNumbering::Circle,
+            ListNumbering::Square,
+            ListNumbering::Decimal,
+            ListNumbering::LowerRoman,
+            ListNumbering::UpperRoman,
+            ListNumbering::LowerAlpha,
+            ListNumbering::UpperAlpha,
+        ]
+        .map(|numbering| PdfTag::L { numbering }),
+    );
+    tags.extend(
+        [
+            TableHeaderScope::Row,
+            TableHeaderScope::Column,
+            TableHeaderScope::Both,
+        ]
+        .map(|scope| PdfTag::Th { scope }),
+    );
+    for tag in &tags {
+        let kind = super::krilla_tag(tag, None, None);
+        match tag {
+            PdfTag::H { .. } => assert!(matches!(kind, TagKind::Hn(_))),
+            PdfTag::L { .. } => assert!(matches!(kind, TagKind::L(_))),
+            PdfTag::Th { .. } => assert!(matches!(kind, TagKind::TH(_))),
+            _ => {}
+        }
+    }
+}
