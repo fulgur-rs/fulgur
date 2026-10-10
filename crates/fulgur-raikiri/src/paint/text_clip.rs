@@ -25,12 +25,7 @@ pub(super) fn outlines(
     element: NodeId,
     runs: &[PositionedGlyphRun<'_>],
 ) -> Option<Path> {
-    let mut pen = Pen {
-        builder: PathBuilder::new(),
-        x: 0.0,
-        y: 0.0,
-        skew: 0.0,
-    };
+    let mut pen = Pen::new(PathBuilder::new());
     for run in runs {
         let mut node = run_element(dom, run);
         let inside = loop {
@@ -41,7 +36,7 @@ pub(super) fn outlines(
             }
         };
         if inside {
-            append_run(&mut pen, run);
+            append_run(&mut pen, run, true);
         }
     }
     pen.builder.finish()
@@ -52,23 +47,22 @@ pub(super) fn generated_outlines(
     piece: &GeneratedBox<'_>,
     runs: &[PositionedGlyphRun<'_>],
 ) -> Option<Path> {
-    let mut pen = Pen {
-        builder: PathBuilder::new(),
-        x: 0.0,
-        y: 0.0,
-        skew: 0.0,
-    };
+    let mut pen = Pen::new(PathBuilder::new());
     for run in runs {
         if run.line == piece.line && run.source == RunSource::Generated(piece.owner, piece.kind) {
-            append_run(&mut pen, run);
+            append_run(&mut pen, run, true);
         }
     }
     pen.builder.finish()
 }
 
 /// Append the outlines of one run, placed as `paint_text_run` draws it.
-/// Synthetic oblique is applied; synthetic bold is not.
-fn append_run(pen: &mut Pen, run: &PositionedGlyphRun<'_>) {
+/// Synthetic oblique is applied when `oblique` is set; synthetic bold is not.
+pub(super) fn append_run<B: PathSink>(
+    pen: &mut Pen<B>,
+    run: &PositionedGlyphRun<'_>,
+    oblique: bool,
+) {
     let Ok(font) = FontRef::from_index(run.font.data.as_bytes(), run.font.index) else {
         return;
     };
@@ -82,6 +76,7 @@ fn append_run(pen: &mut Pen, run: &PositionedGlyphRun<'_>) {
     pen.skew = run
         .synthesis
         .skew
+        .filter(|_| oblique)
         .map_or(0.0, |degrees| degrees.to_radians().tan());
     let mut x = run.origin.0;
     for glyph in &run.glyphs {
@@ -98,22 +93,62 @@ fn append_run(pen: &mut Pen, run: &PositionedGlyphRun<'_>) {
     }
 }
 
+/// A path builder the outlines are collected into.
+pub(super) trait PathSink {
+    fn move_to(&mut self, x: f32, y: f32);
+    fn line_to(&mut self, x: f32, y: f32);
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32);
+    fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32);
+    fn close(&mut self);
+}
+
+impl PathSink for PathBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        PathBuilder::move_to(self, x, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        PathBuilder::line_to(self, x, y);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        PathBuilder::quad_to(self, x1, y1, x, y);
+    }
+
+    fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        PathBuilder::cubic_to(self, x1, y1, x2, y2, x, y);
+    }
+
+    fn close(&mut self) {
+        PathBuilder::close(self);
+    }
+}
+
 /// Collects outlines in px: the font's y-up coordinates are flipped and
 /// offset to the glyph origin `(x, y)`, then slanted by `skew`.
-struct Pen {
-    builder: PathBuilder,
+pub(super) struct Pen<B> {
+    pub(super) builder: B,
     x: f32,
     y: f32,
     skew: f32,
 }
 
-impl Pen {
+impl<B> Pen<B> {
+    pub(super) fn new(builder: B) -> Self {
+        Self {
+            builder,
+            x: 0.0,
+            y: 0.0,
+            skew: 0.0,
+        }
+    }
+
     fn point(&self, x: f32, y: f32) -> (f32, f32) {
         (self.x + x + y * self.skew, self.y - y)
     }
 }
 
-impl OutlinePen for Pen {
+impl<B: PathSink> OutlinePen for Pen<B> {
     fn move_to(&mut self, x: f32, y: f32) {
         let (x, y) = self.point(x, y);
         self.builder.move_to(x, y);

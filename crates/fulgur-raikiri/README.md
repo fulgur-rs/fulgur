@@ -131,7 +131,19 @@ Underline and overline paint before glyphs, and line-through paints after
 them. Solid, double, dotted, dashed, and wavy styles retain their pattern
 phase across font and color run boundaries. Decorations share the text's
 active clip and opacity group; transparent glyphs can still have visible
-colored decorations. Margin-box decorations and text shadows are not drawn.
+colored decorations. Margin-box decorations are not drawn.
+
+Text shadows come from the glyph runs' used `text-shadow` list and paint below
+the line's decorations and glyphs, the first declared shadow on top; each
+shadow layer covers the whole line before the next, and neighboring runs that
+share a shadow are drawn as one shape, so font and color changes leave no seam.
+A sharp shadow is drawn as filled glyph outlines, so extracted text is not
+repeated. PDF has no blur, so a blurred shadow is rasterized at three pixels
+per CSS px (a Gaussian of half the blur radius, approximated by three box
+blurs) and drawn as an image with a soft mask; the shadow rasters of a document
+share a budget of 64M pixels. Shadows are not applied to text decorations,
+page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
+and color-only emoji glyphs) cast no shadow.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices

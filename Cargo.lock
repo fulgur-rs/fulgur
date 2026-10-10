@@ -1251,6 +1251,7 @@ dependencies = [
  "raikiri-traits",
  "skrifa 0.45.1",
  "tempfile",
+ "tiny-skia 0.11.4",
  "url",
  "usvg 0.45.1",
 ]

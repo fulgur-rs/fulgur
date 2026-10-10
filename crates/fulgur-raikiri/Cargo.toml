@@ -14,6 +14,7 @@ readme = "README.md"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
 usvg = "0.45"
+tiny-skia = "0.11"
 skrifa = "0.45"
 fulgur-core = { path = "../fulgur-core" }
 raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "76eb84e6cf8c2a3acd23c3297ce49aa8ab92b7b7" }

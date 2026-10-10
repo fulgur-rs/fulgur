@@ -14,6 +14,7 @@ mod margin;
 mod navigation;
 mod order;
 mod raster;
+mod shadow;
 mod shape;
 mod svg;
 mod text_clip;
@@ -33,7 +34,7 @@ use raikiri_html::computed::{
 };
 use raikiri_html::{
     DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
-    RunSource,
+    RunSource, TextShadow,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -308,7 +309,8 @@ fn paint_ordered(
     Ok(())
 }
 
-/// Keep the line's decorations below or above all neighboring glyph ink.
+/// Keep the line's decorations below or above all neighboring glyph ink,
+/// and the line's text shadows below both.
 fn paint_text_batch(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
@@ -317,7 +319,6 @@ fn paint_text_batch(
     runs: &[&PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
 ) {
-    let dom = page.dom();
     let mut indices = HashMap::new();
     let mut lines: Vec<Vec<&PositionedGlyphRun<'_>>> = Vec::new();
     for &run in runs {
@@ -330,26 +331,29 @@ fn paint_text_batch(
     // Reunite color and font slices of each line before painting its three
     // phases, without reordering independent lines that overlap on the page.
     for runs in lines {
+        // The shadows are below the line's decorations and glyphs. Each
+        // shadow layer is painted across the whole line before the next
+        // one, so a run's first shadow is not covered by the later shadows
+        // of the runs after it.
+        let layers = runs.iter().map(|run| run.shadows.len()).max().unwrap_or(0);
+        for layer in (0..layers).rev() {
+            paint_shadow_layer(
+                surface,
+                page,
+                clips,
+                active,
+                &runs,
+                layer,
+                &mut fonts.shadows,
+            );
+        }
         for phase in [
             Some(decoration::Phase::BeforeGlyphs),
             None,
             Some(decoration::Phase::AfterGlyphs),
         ] {
             for run in &runs {
-                let element = text_clip::run_element(dom, run);
-                // Standalone markers precede the item's own overflow clip.
-                let clip_owner = if run.is_standalone_marker() {
-                    element.and_then(|node| dom.parent(node))
-                } else {
-                    element
-                };
-                let area = PaintRect::new(
-                    run.origin.0,
-                    run.origin.1 - run.ascent,
-                    run.advance,
-                    run.ascent + run.descent,
-                );
-                let chain = clips.chain(page, clip_owner, area);
+                let chain = run_clip_chain(page, clips, run);
                 active.apply(surface, clips, &chain);
                 if let Some(phase) = phase {
                     decoration::paint(surface, &run.decorations, phase);
@@ -358,6 +362,66 @@ fn paint_text_batch(
                 }
             }
         }
+    }
+}
+
+/// The clips that apply to the text of `run`.
+fn run_clip_chain(
+    page: &Page<'_>,
+    clips: &ClipMap,
+    run: &PositionedGlyphRun<'_>,
+) -> Vec<clip::ClipKey> {
+    let dom = page.dom();
+    let element = text_clip::run_element(dom, run);
+    // Standalone markers precede the item's own overflow clip.
+    let clip_owner = if run.is_standalone_marker() {
+        element.and_then(|node| dom.parent(node))
+    } else {
+        element
+    };
+    let area = PaintRect::new(
+        run.origin.0,
+        run.origin.1 - run.ascent,
+        run.advance,
+        run.ascent + run.descent,
+    );
+    clips.chain(page, clip_owner, area)
+}
+
+/// Paint the shadow at `layer` of each run of one line. Neighboring runs
+/// with the same shadow and clips are painted as one shape, so a blurred
+/// shadow has no seam where a line changes font or color.
+fn paint_shadow_layer(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    clips: &ClipMap,
+    active: &mut ClipStack,
+    runs: &[&PositionedGlyphRun<'_>],
+    layer: usize,
+    budget: &mut shadow::Budget,
+) {
+    let mut group: Vec<&PositionedGlyphRun<'_>> = Vec::new();
+    let mut current: Option<(TextShadow, Vec<clip::ClipKey>)> = None;
+    for &run in runs {
+        let next = run
+            .shadows
+            .get(layer)
+            .map(|shadow| (*shadow, run_clip_chain(page, clips, run)));
+        if next != current {
+            if let Some((shadow, chain)) = current.take() {
+                active.apply(surface, clips, &chain);
+                shadow::paint(surface, &group, &shadow, budget);
+            }
+            group.clear();
+            current = next;
+        }
+        if current.is_some() {
+            group.push(run);
+        }
+    }
+    if let Some((shadow, chain)) = current {
+        active.apply(surface, clips, &chain);
+        shadow::paint(surface, &group, &shadow, budget);
     }
 }
 
@@ -513,9 +577,12 @@ pub(crate) fn fill(color: CssColor) -> Fill {
 /// Krilla fonts by Raikiri face and variation coordinates. `Font::new`
 /// parses the font, so each face is created once per document and every run
 /// that uses it shares the same PDF font object.
+///
+/// It also holds the raster budget of the document's blurred text shadows.
 #[derive(Default)]
 struct FontCache {
     fonts: HashMap<FontKey, Option<krilla::text::Font>>,
+    shadows: shadow::Budget,
 }
 
 /// A face plus its variation coordinates (axis tag, value bits).
