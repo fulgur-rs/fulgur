@@ -232,6 +232,25 @@ fn margin_boxes_draw_the_running_element_of_each_page() {
     assert!(fill_colors(&operations).contains(&[0, 128, 0]));
 }
 
+#[test]
+fn an_element_combined_with_other_content_draws_the_box_text() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; \
+         @top-center { content: \"Chapter: \" element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } .hdr { position: running(hdr) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    // `element()` cannot be combined with other values (CSS GCPM 3 §1.2.1):
+    // the box keeps its flattened text rather than losing the literal.
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>(),
+        ["Chapter:", "Alpha", "one"]
+    );
+}
+
 /// Render `html` and decode the drawing operations of every content stream:
 /// page contents and Form XObjects (Krilla draws some fills, such as
 /// translucent ones, through those).

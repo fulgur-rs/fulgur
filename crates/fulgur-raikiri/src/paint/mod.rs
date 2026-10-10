@@ -87,13 +87,28 @@ fn paint_page(
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
     // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts, svg, raster)?;
+    let running = margin::paint(&mut surface, page, fonts, svg, raster)?;
     paint_body(&mut surface, page, fonts, svg, raster)?;
 
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page, document_url)? {
+    for annotation in
+        navigation::annotations(document, page, navigation::Placement::PAGE, document_url)?
+    {
         pdf_page.add_annotation(annotation);
+    }
+    // Links inside the running elements drawn in margin boxes, clipped like
+    // their content to the box.
+    for (running, border_box) in running {
+        let placement = navigation::Placement {
+            origin: running.origin,
+            clip: Some(border_box),
+        };
+        let running_page = running.layout.page();
+        for annotation in navigation::annotations(document, &running_page, placement, document_url)?
+        {
+            pdf_page.add_annotation(annotation);
+        }
     }
     pdf_page.finish();
     Ok(())

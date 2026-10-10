@@ -7,23 +7,29 @@ use fulgur_core::{Error, Result};
 use krilla::geom::Transform;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::{MarginBox, Page, PlacedRunningElement};
+use raikiri_html::{MarginBox, Page, PaintRect, PlacedRunningElement};
 
 /// Draw the margin boxes of `page` in Raikiri's order, below the page body.
-pub(super) fn paint(
+/// Returns the running elements drawn, with the border box each is clipped
+/// to, so their links can be placed on the page.
+pub(super) fn paint<'a>(
     surface: &mut Surface<'_>,
-    page: &Page<'_>,
+    page: &Page<'a>,
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
-) -> Result<()> {
+) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
+    let mut drawn = Vec::new();
     for margin_box in page.margin_boxes() {
         let running = page
             .margin_box_running_element(&margin_box)
             .map_err(|error| Error::Layout(error.to_string()))?;
         paint_box(surface, &margin_box, running, fonts, svg, raster)?;
+        if let Some(running) = running {
+            drawn.push((running, margin_box.rect));
+        }
     }
-    Ok(())
+    Ok(drawn)
 }
 
 /// The background color, the solid borders, then the content clipped to the
