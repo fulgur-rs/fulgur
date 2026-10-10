@@ -17,7 +17,8 @@ pub(super) fn build(
     if let Some(value) = &config.description {
         metadata = metadata.description(value.clone());
     }
-    if let Some(value) = config.lang.clone().or(html_lang) {
+    let lang = config.lang.clone().filter(|lang| !lang.trim().is_empty());
+    if let Some(value) = lang.or(html_lang) {
         metadata = metadata.language(value);
     }
     if let Some(value) = &config.creator {

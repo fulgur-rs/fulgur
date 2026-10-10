@@ -3068,6 +3068,19 @@ fn pdf_ua_without_language_returns_error() {
 }
 
 #[test]
+fn pdf_ua_treats_a_blank_language_as_unset() {
+    let engine = Engine::builder().pdf_ua(true).title("T").lang(" ").build();
+    let error = engine
+        .render("<html><body><p>World</p></body></html>")
+        .unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+    let pdf = engine
+        .render("<html lang=\"de\"><body><h1>Heading</h1><p>World</p></body></html>")
+        .expect("<html lang> must replace a blank configured language");
+    assert!(String::from_utf8_lossy(&pdf).contains("/Lang (de)"));
+}
+
+#[test]
 fn pdf_ua_takes_the_language_from_html_lang() {
     let pdf = Engine::builder()
         .pdf_ua(true)

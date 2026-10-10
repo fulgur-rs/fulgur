@@ -784,12 +784,20 @@ impl Engine {
         // The document language comes from the configuration, falling back
         // to the root `<html lang>`. PDF/UA-1 requires one, and Krilla's
         // validator does not check for it, so reject the render here.
-        let config = match (&self.config.lang, html_lang) {
-            (None, Some(lang)) => std::borrow::Cow::Owned(Config {
-                lang: Some(lang),
+        // A blank configured language counts as unset.
+        let lang = self
+            .config
+            .lang
+            .clone()
+            .filter(|lang| !lang.trim().is_empty())
+            .or(html_lang);
+        let config = if lang == self.config.lang {
+            std::borrow::Cow::Borrowed(&self.config)
+        } else {
+            std::borrow::Cow::Owned(Config {
+                lang,
                 ..self.config.clone()
-            }),
-            _ => std::borrow::Cow::Borrowed(&self.config),
+            })
         };
         if config.pdf_ua && config.lang.is_none() {
             return Err(crate::error::Error::PdfGeneration(
