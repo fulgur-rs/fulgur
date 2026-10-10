@@ -59,8 +59,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Stacked pull requests: GitHub runs this workflow for every PR in a stack
+# as if it targeted the stack base, so one push in the middle of a stack
+# re-runs every PR above it. Jobs carrying the `stack` condition below run
+# only for PRs outside a stack, for the lowest unmerged PR (the one that
+# targets the stack base directly), and for the top PR (which carries the
+# whole stack's changes). Middle PRs skip this workflow's only job; ci.yml
+# still runs its cheap checks there. `stack` is null on push/schedule events and for PRs outside a stack, so those always run
+# everything. See
+# https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/optimizing-ci-for-stacked-pull-requests
 jobs:
   raikiri:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: raikiri backend
     runs-on: ubuntu-latest
     permissions:

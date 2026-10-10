@@ -19,6 +19,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Stacked pull requests: GitHub runs this workflow for every PR in a stack
+# as if it targeted the stack base, so one push in the middle of a stack
+# re-runs every PR above it. Jobs carrying the `stack` condition below run
+# only for PRs outside a stack, for the lowest unmerged PR (the one that
+# targets the stack base directly), and for the top PR (which carries the
+# whole stack's changes). Middle PRs keep the cheap checks. `stack` is null on
+# push/schedule events and for PRs outside a stack, so those always run
+# everything. See
+# https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/optimizing-ci-for-stacked-pull-requests
 jobs:
   markdownlint:
     runs-on: ubuntu-latest
@@ -71,6 +80,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --exclude fulgur-raikiri --exclude fulgur-dev -- -D warnings
 
   test:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     permissions:
       contents: read
       id-token: write
@@ -190,6 +200,7 @@ jobs:
           fail_ci_if_error: false
 
   wasm-check:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: WASM build check
     runs-on: ubuntu-latest
     # Strategic gate: keeps the `fulgur` library buildable on
@@ -212,6 +223,7 @@ jobs:
       - run: cargo check --target wasm32-unknown-unknown -p fulgur -p fulgur-wasm
 
   vrt:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: Visual Regression Tests
     runs-on: ubuntu-latest
     steps:
@@ -260,6 +272,7 @@ jobs:
       - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1
 
   wpt:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: wpt / ${{ matrix.phase }}
     runs-on: ubuntu-latest
     # WPT reftests are a reporting channel, not a blocker on PRs.
@@ -390,6 +403,7 @@ jobs:
         run: rm -rf target/wpt
 
   bindings-check:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: Bindings type-check
     # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
     # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
