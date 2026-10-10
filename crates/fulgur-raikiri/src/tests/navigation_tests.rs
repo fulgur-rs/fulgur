@@ -241,3 +241,42 @@ fn navigation_multiline_uses_one_annotation_with_all_quads() {
             .all(|point| point.as_float().unwrap().is_finite())
     );
 }
+
+#[test]
+fn links_in_running_elements_are_placed_in_their_margin_box() {
+    let (_dir, path) = input(
+        "<style>@page {size:300px 200px; margin:40px; @top-center {content: element(hdr)}} \
+         body {margin:0} .hdr {position: running(hdr)} \
+         .hdr a {display:block; width:20px; height:10px}</style>\
+         <div class='hdr'><a href='https://example.com/header'></a></div><p>Body</p>",
+    );
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 1);
+    let action = links[0].get(b"A").unwrap().as_dict().unwrap();
+    assert_eq!(
+        action.get(b"URI").unwrap().as_str().unwrap(),
+        b"https://example.com/header"
+    );
+    let rect = links[0].get(b"Rect").unwrap().as_array().unwrap();
+    let [x0, y0, x1, y1]: [f32; 4] = std::array::from_fn(|i| rect[i].as_float().unwrap());
+    // 20px x 10px, inside the top margin (PDF y from 120pt to 150pt).
+    assert_eq!((x1 - x0, y1 - y0), (15.0, 7.5));
+    assert!(x0 >= 0.0 && x1 <= 225.0);
+    assert!(y0 >= 120.0 && y1 <= 150.0, "{y0}..{y1}");
+}
+
+#[test]
+fn links_of_running_elements_outside_their_margin_box_are_dropped() {
+    let (_dir, path) = input(
+        "<style>@page {size:300px 200px; margin:40px; @top-center {content: element(hdr)}} \
+         body {margin:0} .hdr {position: running(hdr)} \
+         .hdr a {display:block; width:20px; height:10px; margin-top:500px}</style>\
+         <div class='hdr'><a href='https://example.com/header'></a></div><p>Body</p>",
+    );
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    // The link lies below the margin box, where its content is clipped away.
+    assert!(annotations(&pdf, 1).is_empty());
+}

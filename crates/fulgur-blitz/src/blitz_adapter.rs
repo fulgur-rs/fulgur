@@ -1373,6 +1373,18 @@ pub(crate) fn extract_column_style_table(
     crate::column_css::build_column_style_table(doc, &rules)
 }
 
+/// The `lang` attribute of the root `<html>` element, if set and non-blank.
+/// The returned string is whitespace-trimmed.
+pub fn extract_html_lang(doc: &HtmlDocument) -> Option<String> {
+    let root = doc.root_element();
+    let el = root.element_data()?;
+    if el.name.local.as_ref() != "html" {
+        return None;
+    }
+    let lang = el.attr(blitz_dom::LocalName::from("lang"))?.trim();
+    (!lang.is_empty()).then(|| lang.to_string())
+}
+
 /// Extract the text content of the HTML `<title>` element, if present.
 ///
 /// Returns `None` when no `<title>` element exists or its text content is
@@ -9488,6 +9500,16 @@ mod extract_html_title_tests {
 
     fn parse(html: &str, width: f32, _resources: &[()]) -> HtmlDocument {
         crate::blitz_adapter::parse(html, width, &[])
+    }
+
+    #[test]
+    fn extract_html_lang_reads_the_root_lang() {
+        let doc = parse(r#"<html lang=" ja "><body></body></html>"#, 600.0, &[]);
+        assert_eq!(super::extract_html_lang(&doc), Some("ja".to_string()));
+        let doc = parse(r#"<html lang=""><body></body></html>"#, 600.0, &[]);
+        assert_eq!(super::extract_html_lang(&doc), None);
+        let doc = parse("<p>no lang</p>", 600.0, &[]);
+        assert_eq!(super::extract_html_lang(&doc), None);
     }
 
     #[test]

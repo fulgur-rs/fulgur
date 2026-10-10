@@ -67,6 +67,7 @@ struct LayoutArtifacts {
     string_set_for_render: HashMap<usize, Vec<(String, String)>>,
     counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
     html_title: Option<String>,
+    html_lang: Option<String>,
     implicit_href_map: BTreeMap<usize, String>,
     collected_anchor_map: AnchorMap,
     needs_pass_two: bool,
@@ -737,6 +738,7 @@ impl Engine {
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
+        let html_lang = crate::blitz_adapter::extract_html_lang(&doc);
         // Reclaim the post-convert geometry without partially moving
         // `convert_ctx`, then drop it so its `&running_store` borrow ends and
         // `running_store` can be moved into the artifacts.
@@ -750,6 +752,7 @@ impl Engine {
             string_set_for_render,
             counter_ops_for_render,
             html_title,
+            html_lang,
             implicit_href_map,
             collected_anchor_map,
             needs_pass_two: needs_anchor_map_for_pass_two,
@@ -773,16 +776,41 @@ impl Engine {
             string_set_for_render,
             counter_ops_for_render,
             html_title,
+            html_lang,
             implicit_href_map,
             ..
         } = artifacts;
+
+        // The document language comes from the configuration, falling back
+        // to the root `<html lang>`. PDF/UA-1 requires one, and Krilla's
+        // validator does not check for it, so reject the render here.
+        // A blank configured language counts as unset.
+        let lang = self
+            .config
+            .lang
+            .clone()
+            .filter(|lang| !lang.trim().is_empty())
+            .or(html_lang);
+        let config = if lang == self.config.lang {
+            std::borrow::Cow::Borrowed(&self.config)
+        } else {
+            std::borrow::Cow::Owned(Config {
+                lang,
+                ..self.config.clone()
+            })
+        };
+        if config.pdf_ua && config.lang.is_none() {
+            return Err(crate::error::Error::PdfGeneration(
+                "PDF/UA requires a document language: set Config::lang or <html lang>".into(),
+            ));
+        }
 
         // Re-derive fonts / system_fonts from `&self` — byte-identical to the
         // value `layout_to_drawables` used for parsing.
         let fonts = self.fonts();
 
         crate::render::render_v2(
-            &self.config,
+            &config,
             &pagination_geometry,
             &drawables,
             &gcpm,

@@ -64,7 +64,7 @@ fn bookmark_default_heading_hierarchy() {
     let child = outline_children(&pdf, items[0]);
     assert_eq!(child.len(), 1);
     assert_eq!(title(child[0]), "B");
-    assert_eq!(items[0].get(b"Count").unwrap().as_i64().unwrap(), -1);
+    assert_eq!(count(items[0]), Some(1));
     let dest_a = outline_destination(&pdf, items[0]);
     let dest_b = outline_destination(&pdf, child[0]);
     let dest_c = outline_destination(&pdf, items[1]);
@@ -74,6 +74,62 @@ fn bookmark_default_heading_hierarchy() {
     assert_eq!(dest_b[3].as_float().unwrap(), 135.0);
     assert_eq!(dest_c[0].as_reference().unwrap(), pdf.get_pages()[&2]);
     assert_eq!(dest_c[3].as_float().unwrap(), 150.0);
+}
+
+fn count(item: &lopdf::Dictionary) -> Option<i64> {
+    item.get(b"Count").ok().map(|count| count.as_i64().unwrap())
+}
+
+#[test]
+fn bookmark_state_controls_initial_outline_expansion() {
+    let (_dir, path) = input(&format!(
+        r#"{BOOK_CSS}<style>:root {{ --state: closed }} .c {{ bookmark-state: closed; bookmark-state: ajar }}</style>
+        <h1>A</h1><h2>A1</h2><h3>A1a</h3><h2 style='bookmark-state:closed'>A2</h2>
+        <h1 style='bookmark-state:CLOSED'>B</h1><h2>B1</h2><h3>B1a</h3>
+        <h1 class=c>C</h1><h2>C1</h2>
+        <h1 style='bookmark-state:var(--state)'>D</h1><h2>D1</h2>"#
+    ));
+    let bytes = render(&path, &Config::builder().bookmarks(true).build()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let root = outline_root(&pdf);
+    let items = outline_children(&pdf, root);
+    assert_eq!(
+        items.iter().map(|item| title(item)).collect::<Vec<_>>(),
+        ["A", "B", "C", "D"]
+    );
+    // Open items count their visible descendants; closed items negate the
+    // count that reopening them would show (ISO 32000-2 §12.3.3).
+    assert_eq!(
+        items.iter().map(|item| count(item)).collect::<Vec<_>>(),
+        [Some(3), Some(-2), Some(-1), Some(-1)]
+    );
+    assert_eq!(count(root), Some(7));
+    let a = outline_children(&pdf, items[0]);
+    assert_eq!(
+        a.iter().map(|item| count(item)).collect::<Vec<_>>(),
+        [Some(1), None]
+    );
+    let b = outline_children(&pdf, items[1]);
+    assert_eq!(count(b[0]), Some(1));
+}
+
+#[test]
+fn bookmark_labels_use_counters_and_named_strings() {
+    let (_dir, path) = input(&format!(
+        r#"{BOOK_CSS}<style>
+        body {{ counter-reset: chapter }}
+        h1 {{ counter-increment: chapter; string-set: part content(); bookmark-label: counter(chapter) ". " content() }}
+        h2 {{ bookmark-label: string(part) " / " content() }}
+        </style><h1>Intro</h1><h2>Scope</h2><h1>Usage</h1>"#
+    ));
+    let bytes = render(&path, &Config::builder().bookmarks(true).build()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let items = outline_children(&pdf, outline_root(&pdf));
+    assert_eq!(
+        items.iter().map(|item| title(item)).collect::<Vec<_>>(),
+        ["1. Intro", "2. Usage"]
+    );
+    assert_eq!(title(outline_children(&pdf, items[0])[0]), "Intro / Scope");
 }
 
 #[test]
@@ -204,7 +260,7 @@ fn bookmark_with_layout_discards_already_aborted_result() {
     controller.abort();
     let config = Config::builder().bookmarks(true).build();
     let result = with_layout(
-        &path,
+        Source::File(&path),
         &config,
         &RenderOptions::default(),
         LayoutConfig::builder()

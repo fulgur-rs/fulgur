@@ -2,22 +2,35 @@
 
 Unpublished Raikiri backend for Fulgur development.
 
-The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
+The backend accepts an HTML file path, or an HTML string with an optional base
+directory, and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, text, text decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
+backgrounds and borders (including `url()` background images), text, text
+decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
 win over `@page`. Linked stylesheets, `@import`s, and other referenced files
 are read from the input file's directory; files outside it are not read.
+`render_html` and `render_html_with_options` take the HTML as `&str` and use
+the base directory in the same way. Without a base directory the document is
+treated as `about:blank`: no file is read and only same-document fragment
+links resolve.
 `render_with_options` accepts `RenderOptions { assets, system_fonts }`.
 Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
 and registered with Raikiri. Parsing, layout, and painting retain the same
 resources and local-file provider. Disabling system fonts requires a bundled
-font. Invalid fonts, TTC/OTC collections, and non-empty image bundles return
-an asset error. The pinned font API cannot select a collection face; use
+font. Invalid fonts and TTC/OTC collections return an asset error. Each bundle
+image is a file at the URL its name resolves to against the base directory
+(`img/logo.png`), or at its name when that is an absolute URL; HTML without a
+base directory is `about:blank`, so only absolute-URL names apply to it.
+Documents reach bundle images with browser URL resolution: `<img src>`
+against the document base URL, `url()` in a linked or imported stylesheet
+against that stylesheet's URL. Bundle images are served ahead of the files in
+the directory, for any resource kind. The pinned font
+API cannot select a collection face; use
 individual TTF/OTF fonts or WOFF2.
 Bundle CSS has document URL provenance; linked stylesheet imports retain
 stylesheet URL provenance.
@@ -25,6 +38,11 @@ stylesheet URL provenance.
 ```rust
 let pdf = fulgur_raikiri::render(
     std::path::Path::new("input.html"),
+    &fulgur_core::Config::default(),
+)?;
+let pdf = fulgur_raikiri::render_html(
+    "<p>Hello</p>",
+    Some(std::path::Path::new("assets")),
     &fulgur_core::Config::default(),
 )?;
 ```
@@ -48,8 +66,22 @@ language, creator, producer, and creation date. The development CLI exposes
 `--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
 Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
-An omitted creation date does not insert the current time. Tagged PDF and
-PDF/UA requests through Raikiri return an explicit error.
+An omitted creation date does not insert the current time.
+
+Tagged PDF (`Config::enable_tagging`) builds the structure tree from the DOM with the
+same HTML mapping as the Blitz backend (`fulgur_core::tagging`): headings with
+their text as title, paragraphs, generic containers as `Div`, lists with
+`Lbl`/`LBody` items, tables with header scope, images as `Figure` with their
+`alt`, and `<a href>` as `Link` holding its content and its tagged link
+annotation. Text, images and list markers are marked content of their element,
+in document order; text outside any classified element gets its own `P`.
+Backgrounds, borders, text decorations, column rules and margin boxes
+(`Header`/`Footer` for the top and bottom boxes) are artifacts, as are the
+repeated copies of table headers and `position: fixed` boxes after the page
+that first shows them. `Config::pdf_ua` adds Krilla's PDF/UA-1 validation and
+implies tagging and bookmarks. It takes the title and language from `Config`,
+falling back to `<title>` and `<html lang>`; rendering fails when no language
+is available.
 
 Raikiri PDF links use all quads supplied by the page API. Fragment links use
 rendered anchors (including percent-encoded names and the first duplicate
@@ -60,12 +92,16 @@ with the PDF coordinate transform applied once by Krilla.
 `--bookmarks` enables heading outlines. Raikiri receives resolved level and
 label values through render-local consumer callbacks, then builds destinations
 and hierarchy only after layout completes. Author CSS overrides the heading
-defaults; supported labels are literal strings, `attr(...)`, and
-`content(text)`. Invalid levels, empty labels, and non-rendered headings are
+defaults; supported labels are literal strings, `attr(...)`,
+`content(text)`, counters and named strings. Invalid levels, empty labels, and non-rendered headings are
 omitted. Empty or missing drawable boxes use the first rendered descendant.
-Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
-counter/string labels, and general display:contents box suppression are not
-implemented in this backend. Aborted layout or callback errors return no PDF.
+`bookmark-state: open | closed` sets each entry's initial expansion and
+defaults to `open` as in CSS GCPM 3, unlike the Blitz backend, whose outline
+always starts collapsed. Labels may also use `counter()`, `counters()` and
+`string()`: counters take their value at the heading, and `string()` takes the
+latest `string-set` assignment at or before it in document order. Page counters
+and general display:contents box suppression are not implemented in this
+backend. Aborted layout or callback errors return no PDF.
 
 Raikiri pages use paint order with one text event per paragraph line from the
 page's positioned runs. Source text, generated content and ellipses share their
@@ -119,7 +155,19 @@ Underline and overline paint before glyphs, and line-through paints after
 them. Solid, double, dotted, dashed, and wavy styles retain their pattern
 phase across font and color run boundaries. Decorations share the text's
 active clip and opacity group; transparent glyphs can still have visible
-colored decorations. Margin-box decorations and text shadows are not drawn.
+colored decorations. Margin-box decorations are not drawn.
+
+Text shadows come from the glyph runs' used `text-shadow` list and paint below
+the line's decorations and glyphs, the first declared shadow on top; each
+shadow layer covers the whole line before the next, and neighboring runs that
+share a shadow are drawn as one shape, so font and color changes leave no seam.
+A sharp shadow is drawn as filled glyph outlines, so extracted text is not
+repeated. PDF has no blur, so a blurred shadow is rasterized at three pixels
+per CSS px (a Gaussian of half the blur radius, approximated by three box
+blurs) and drawn as an image with a soft mask; the shadow rasters of a document
+share a budget of 64M pixels. Shadows are not applied to text decorations,
+page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
+and color-only emoji glyphs) cast no shadow.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices
@@ -130,9 +178,12 @@ Page-margin boxes come from Raikiri's per-page layout (`Page::margin_boxes`):
 the sixteen slots with their used rectangles, resolved generated content
 (`counter(page)`, `counter(pages)`, quotes, `string()` and `element()`), and
 glyph runs of their text. Each box paints below the page body: background
-color, solid borders, then its text clipped to the border box.
-`background-image: url()` and vertical-writing text in margin boxes are not
-drawn yet.
+color and `url()` image, solid borders, then its content clipped to the
+border box. A box whose `content` has `element()` draws the running element the page selects
+(`Page::margin_box_running_element`), laid out at the box's content width
+and drawn like a page body, with its links clipped to the box. Other boxes,
+including those that combine `element()` with other values, draw their text.
+Vertical-writing text in margin boxes is not drawn yet.
 
 Corner radii retain separate horizontal and vertical axes from Raikiri,
 including slash shorthand, two-value corner longhands, and percentages of

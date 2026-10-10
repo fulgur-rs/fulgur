@@ -155,6 +155,11 @@ impl RoundedRect {
         }
     }
 
+    /// The bounding rectangle, ignoring the corner curves.
+    pub(super) fn bounds(&self) -> PaintRect {
+        PaintRect::new(self.x, self.y, self.width, self.height)
+    }
+
     pub(super) fn is_rounded(&self) -> bool {
         self.radii.iter().flatten().any(|radius| *radius > 0.0)
     }

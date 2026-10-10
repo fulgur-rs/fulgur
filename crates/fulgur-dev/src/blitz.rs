@@ -48,7 +48,12 @@ pub(super) fn render(
     builder = builder
         .authors(config.authors.iter())
         .keywords(config.keywords.iter());
-    builder.bookmarks(config.bookmarks).build().render(&html)
+    builder
+        .bookmarks(config.bookmarks)
+        .tagged(config.enable_tagging)
+        .pdf_ua(config.pdf_ua)
+        .build()
+        .render(&html)
 }
 
 #[cfg(test)]

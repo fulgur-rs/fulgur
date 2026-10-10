@@ -12,10 +12,10 @@ use url::Url;
 /// Raikiri requests stylesheets, `@import`s, fonts, and images through this
 /// provider. A path that leaves the directory once symlinks and `..` are
 /// resolved is refused, as is every other URL scheme, so a document can only
-/// reach files next to it.
+/// reach files next to it. A provider without a directory refuses every URL.
 #[derive(Clone)]
 pub(crate) struct BaseDirectoryProvider {
-    root: PathBuf,
+    root: Option<PathBuf>,
     max_bytes: u64,
 }
 
@@ -26,10 +26,30 @@ impl BaseDirectoryProvider {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        Self::for_directory(parent)
+    }
+
+    /// A provider rooted at `directory`, which must be a directory.
+    pub(crate) fn for_directory(directory: &Path) -> Result<Self> {
+        let root = directory.canonicalize()?;
+        if !root.is_dir() {
+            return Err(Error::Layout(format!(
+                "{} is not a directory",
+                directory.display()
+            )));
+        }
         Ok(Self {
-            root: parent.canonicalize()?,
+            root: Some(root),
             max_bytes: DEFAULT_MAX_RESOURCE_BYTES,
         })
+    }
+
+    /// A provider that reads no files.
+    pub(crate) fn none() -> Self {
+        Self {
+            root: None,
+            max_bytes: DEFAULT_MAX_RESOURCE_BYTES,
+        }
     }
 
     /// The `file://` URL of `input`, used as the document base URL.
@@ -37,11 +57,33 @@ impl BaseDirectoryProvider {
         let name = input
             .file_name()
             .ok_or_else(|| Error::Layout(format!("{} is not a file", input.display())))?;
-        Url::from_file_path(self.root.join(name))
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| Error::Layout(format!("{} has no base directory", input.display())))?;
+        Url::from_file_path(root.join(name))
             .map_err(|()| Error::Layout(format!("{} has no file URL", input.display())))
     }
 
+    /// The document URL of HTML that has no file of its own.
+    ///
+    /// Relative URLs resolve against the directory, as they would for a file
+    /// inside it. Without a directory the document is `about:blank`, against
+    /// which only fragment-only references resolve, as in a browser.
+    pub(crate) fn directory_url(&self) -> Result<Url> {
+        match &self.root {
+            Some(root) => Url::from_directory_path(root)
+                .map_err(|()| Error::Layout(format!("{} has no file URL", root.display()))),
+            None => Ok(Url::parse("about:blank").expect("about:blank is a valid URL")),
+        }
+    }
+
     fn resolve(&self, url: &Url) -> std::result::Result<PathBuf, NetworkError> {
+        let Some(root) = &self.root else {
+            return Err(NetworkError::Other(format!(
+                "no base directory is set, so {url} is not read"
+            )));
+        };
         if url.scheme() != "file" {
             return Err(NetworkError::Other(format!(
                 "only file:// resources are read, got {url}"
@@ -56,10 +98,10 @@ impl BaseDirectoryProvider {
             .filter(|_| local)
             .ok_or_else(|| NetworkError::Other(format!("invalid file URL: {url}")))?;
         let path = path.canonicalize().map_err(NetworkError::Io)?;
-        if !path.starts_with(&self.root) {
+        if !path.starts_with(root) {
             return Err(NetworkError::Other(format!(
                 "{url} is outside {}",
-                self.root.display()
+                root.display()
             )));
         }
         Ok(path)

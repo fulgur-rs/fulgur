@@ -178,3 +178,12 @@ fn streaming_reports_a_missing_input() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn streaming_rejects_pdf_ua() {
+    let (_dir, path) = input("<p>Body</p>");
+    let config = Config::builder().pdf_ua(true).build();
+    let error = render_streaming(&path, &config, &RenderOptions::default())
+        .expect_err("PDF/UA needs the whole document");
+    assert!(error.to_string().contains("streaming"), "{error}");
+}

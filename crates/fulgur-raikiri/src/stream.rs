@@ -9,13 +9,14 @@
 //! [`crate::merge`] then lays under the original page and removes.
 
 use crate::bookmarks::{BookmarkCollector, OutlineBuilder};
-use crate::paint::Painter;
-use crate::paint::navigation::{Href, PageLink, links};
-use crate::{RenderOptions, bookmarks, metadata, with_resources};
+use crate::paint::navigation::PageLink;
+use crate::paint::{LinkTargets, Painter, document_lang, html_title};
+use crate::tagging::Tags;
+use crate::{RenderOptions, Source, bookmarks, metadata, page_defaults, with_resources};
 use fulgur_core::{Config, Error, Result};
 use raikiri_html::{
-    LayoutConfig, PageDefaults, PageSink, PaintRect, StreamPage, StreamStatus, StreamSummary,
-    StreamingLayout,
+    LayoutConfig, MarginBox, PageSink, PaintRect, RenderResources, StreamPage, StreamStatus,
+    StreamSummary, StreamingLayout,
 };
 use raikiri_traits::{ConsumerPropertyEvent, ConsumerPropertyObserver};
 use std::cell::RefCell;
@@ -34,57 +35,75 @@ const READ_CHUNK: usize = 64 * 1024;
 /// these differences, which keep delivered pages final: `<style>` elements
 /// inside `<body>` are ignored, as is a `position: fixed` element that
 /// starts after the first page was delivered. A heading whose element has
-/// no fragment of its own gets no bookmark.
+/// no fragment of its own gets no bookmark. On a page whose margin boxes
+/// show the page count, a margin box that shows a running element draws
+/// that element's text instead.
 ///
 /// # Errors
-/// Returns the errors of [`crate::render_with_options`].
+/// Returns the errors of [`crate::render_with_options`], and an error when
+/// the config asks for tagged PDF or PDF/UA, which need the whole document
+/// before the first page.
 pub fn render_streaming(
     input: &Path,
     config: &Config,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     config.validate()?;
-    metadata::build(config)?;
-    with_resources(input, config, options, |resources, document_url| {
-        let failure = Rc::new(RefCell::new(None));
-        let registrations = if config.bookmarks {
-            bookmarks::registrations()
-        } else {
-            Vec::new()
-        };
-        let sink = PdfSink {
-            painter: Painter::new(resources, config, options)?,
-            document_url,
-            outline: config.bookmarks.then(OutlineBuilder::default),
-            pages: Vec::new(),
-            failure: Rc::clone(&failure),
-        };
-        let mut stream = StreamingLayout::new(
-            resources,
-            PageDefaults::default(),
-            LayoutConfig::default(),
-            sink,
-        )
-        .consumer_properties(&registrations);
-        let mut file = std::fs::File::open(input)?;
-        let mut buffer = vec![0; READ_CHUNK];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
+    metadata::build(config, None, None)?;
+    if config.effective_tagging() {
+        return Err(Error::Other(
+            "tagged PDF and PDF/UA are not supported with streaming".into(),
+        ));
+    }
+    with_resources(
+        Source::File(input),
+        config,
+        options,
+        |resources, document_url| {
+            let failure = Rc::new(RefCell::new(None));
+            let registrations = if config.effective_bookmarks() {
+                bookmarks::registrations()
+            } else {
+                Vec::new()
+            };
+            let sink = PdfSink {
+                resources,
+                config,
+                options,
+                painter: None,
+                lang: None,
+                document_url,
+                outline: config.effective_bookmarks().then(OutlineBuilder::default),
+                pages: Vec::new(),
+                failure: Rc::clone(&failure),
+            };
+            let mut stream = StreamingLayout::new(
+                resources,
+                page_defaults(config),
+                LayoutConfig::default(),
+                sink,
+            )
+            .consumer_properties(&registrations);
+            let mut file = std::fs::File::open(input)?;
+            let mut buffer = vec![0; READ_CHUNK];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                if let Err(error) = stream.feed(&buffer[..read]) {
+                    return Err(failure.take().unwrap_or_else(|| layout_error(error)));
+                }
             }
-            if let Err(error) = stream.feed(&buffer[..read]) {
-                return Err(failure.take().unwrap_or_else(|| layout_error(error)));
+            match stream.finish() {
+                Ok(StreamStatus::Completed(result)) => result,
+                Ok(_) => Err(Error::Layout(
+                    "Raikiri layout was aborted or did not complete".into(),
+                )),
+                Err(error) => Err(failure.take().unwrap_or_else(|| layout_error(error))),
             }
-        }
-        match stream.finish() {
-            Ok(StreamStatus::Completed(result)) => result,
-            Ok(_) => Err(Error::Layout(
-                "Raikiri layout was aborted or did not complete".into(),
-            )),
-            Err(error) => Err(failure.take().unwrap_or_else(|| layout_error(error))),
-        }
-    })
+        },
+    )
 }
 
 fn layout_error(error: raikiri_traits::RenderError) -> Error {
@@ -100,7 +119,13 @@ struct PendingPage {
 }
 
 struct PdfSink<'a, 'u> {
-    painter: Painter<'a>,
+    resources: &'a RenderResources<'a>,
+    config: &'u Config,
+    options: &'u RenderOptions<'a>,
+    /// Started with the first page, whose `<head>` gives the metadata and
+    /// the base URL of images.
+    painter: Option<Painter<'a>>,
+    lang: Option<String>,
     document_url: &'u url::Url,
     outline: Option<OutlineBuilder>,
     pages: Vec<PendingPage>,
@@ -108,22 +133,47 @@ struct PdfSink<'a, 'u> {
     failure: Rc<RefCell<Option<Error>>>,
 }
 
-impl PdfSink<'_, '_> {
+impl<'a> PdfSink<'a, '_> {
+    /// Start the PDF with the metadata of `page`, the first page, and with
+    /// images resolving against `base`.
+    fn start(&mut self, page: Option<&raikiri_html::Page<'_>>, base: url::Url) -> Result<()> {
+        self.lang = document_lang(self.config, page);
+        let mut painter = Painter::new(
+            self.resources,
+            self.config,
+            self.options,
+            base,
+            Tags::disabled(),
+        );
+        painter.set_metadata(metadata::build(
+            self.config,
+            page.and_then(html_title),
+            self.lang.clone(),
+        )?);
+        self.painter = Some(painter);
+        Ok(())
+    }
+
     fn paint(&mut self, page: StreamPage<'_>, events: Vec<ConsumerPropertyEvent>) -> Result<()> {
         let index = page.index();
         let base_url = page.base_url();
         let page = page.page();
+        if self.painter.is_none() {
+            let base = base_url.unwrap_or(self.document_url).clone();
+            self.start(Some(&page), base)?;
+        }
+        let painter = self.painter.as_mut().expect("started above");
         let margin_boxes = page.margin_boxes();
         let deferred = margin_boxes
             .iter()
             .any(|margin_box| !margin_box.deferred.is_empty());
-        let (internal_links, external): (Vec<_>, Vec<_>) =
-            links(&page, base_url, self.document_url)
-                .into_iter()
-                .partition(|link| matches!(link.href, Href::Internal(_)));
-        let annotations = external.iter().filter_map(PageLink::external).collect();
-        let shown: &[_] = if deferred { &[] } else { &margin_boxes };
-        self.painter.page(&page, shown, annotations)?;
+        let shown: &[MarginBox] = if deferred { &[] } else { &margin_boxes };
+        let targets = LinkTargets {
+            base_url,
+            document_url: self.document_url,
+            anchors: None,
+        };
+        let internal_links = painter.page(&page, shown, &targets)?;
         if let Some(outline) = &mut self.outline {
             outline.add_page(&page);
             let mut collector = BookmarkCollector::default();
@@ -142,9 +192,18 @@ impl PdfSink<'_, '_> {
     }
 
     fn finish(mut self, summary: StreamSummary) -> Result<Vec<u8>> {
-        if let Some(outline) = self.outline.take() {
-            self.painter.set_outline(outline.finish());
+        if self.painter.is_none() {
+            self.start(None, self.document_url.clone())?;
         }
+        let mut painter = self.painter.take().expect("started above");
+        let open = match self.outline.take() {
+            Some(outline) => {
+                let outline = outline.finish();
+                painter.set_outline(outline.outline);
+                outline.open
+            }
+            None => Vec::new(),
+        };
         let mut margin_boxes: BTreeMap<_, _> =
             summary.page_count_margin_boxes.into_iter().collect();
         let mut extra_pages = Vec::new();
@@ -154,19 +213,24 @@ impl PdfSink<'_, '_> {
             } else {
                 Vec::new()
             };
-            let annotations: Vec<_> = page
+            let resolves = page
                 .internal_links
                 .iter()
-                .filter_map(|link| link.internal(&summary.anchors))
-                .collect();
-            if boxes.is_empty() && annotations.is_empty() {
+                .any(|link| link.annotation(Some(&summary.anchors)).is_some());
+            if boxes.is_empty() && !resolves {
                 continue;
             }
-            self.painter
-                .margin_page(page.page_box, &boxes, annotations)?;
+            painter.margin_page(
+                page.page_box,
+                &boxes,
+                &page.internal_links,
+                &summary.anchors,
+            )?;
             extra_pages.push(index as u32);
         }
-        let pdf = self.painter.finish()?;
+        let pdf = painter.finish(self.lang)?;
+        // Before the merge, whose object streams this rewrite would drop.
+        let pdf = bookmarks::apply_open_state(pdf, &open)?;
         if extra_pages.is_empty() {
             return Ok(pdf);
         }
