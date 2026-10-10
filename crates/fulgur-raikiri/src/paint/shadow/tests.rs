@@ -97,3 +97,23 @@ fn fitting_scale_bounds_the_rounded_area() {
     assert!(fitting_scale(1.0, 1.0, 4.0).is_nan());
     assert!(fitting_scale(1.0, 1.0, -5.0).is_nan());
 }
+
+/// Glyph outlines arrive as TrueType quadratics or CFF cubics, so both
+/// path sinks take every segment kind.
+#[test]
+fn path_sinks_take_every_segment_kind() {
+    fn draw<B: PathSink>(sink: &mut B) {
+        sink.move_to(0.0, 0.0);
+        sink.line_to(10.0, 0.0);
+        sink.quad_to(10.0, 10.0, 0.0, 10.0);
+        sink.cubic_to(-5.0, 7.0, -5.0, 3.0, 0.0, 0.0);
+        sink.close();
+    }
+    let mut skia = SkiaPath(tiny_skia::PathBuilder::new());
+    draw(&mut skia);
+    let path = skia.0.finish().expect("a path");
+    assert_eq!(path.verbs().len(), 5);
+    let mut krilla = PathBuilder::new();
+    draw(&mut krilla);
+    assert!(krilla.finish().is_some());
+}

@@ -303,16 +303,6 @@ fn paint_ordered(
     Ok(())
 }
 
-/// What one pass over a line's runs draws.
-#[derive(Clone, Copy)]
-enum TextPhase {
-    /// One text shadow of each run, by its index in the run's list. The
-    /// shadows are below the line's decorations and glyphs.
-    Shadow(usize),
-    Decorations(decoration::Phase),
-    Glyphs,
-}
-
 /// Keep the line's decorations below or above all neighboring glyph ink,
 /// and the line's text shadows below both.
 fn paint_text_batch(
@@ -335,37 +325,34 @@ fn paint_text_batch(
     // Reunite color and font slices of each line before painting its three
     // phases, without reordering independent lines that overlap on the page.
     for runs in lines {
-        // Each shadow layer is painted across the whole line before the
-        // next one, so a run's first shadow is not covered by the later
-        // shadows of the runs after it.
+        // The shadows are below the line's decorations and glyphs. Each
+        // shadow layer is painted across the whole line before the next
+        // one, so a run's first shadow is not covered by the later shadows
+        // of the runs after it.
         let layers = runs.iter().map(|run| run.shadows.len()).max().unwrap_or(0);
-        let phases = (0..layers).rev().map(TextPhase::Shadow).chain([
-            TextPhase::Decorations(decoration::Phase::BeforeGlyphs),
-            TextPhase::Glyphs,
-            TextPhase::Decorations(decoration::Phase::AfterGlyphs),
-        ]);
-        for phase in phases {
-            if let TextPhase::Shadow(layer) = phase {
-                paint_shadow_layer(
-                    surface,
-                    page,
-                    clips,
-                    active,
-                    &runs,
-                    layer,
-                    &mut fonts.shadows,
-                );
-                continue;
-            }
+        for layer in (0..layers).rev() {
+            paint_shadow_layer(
+                surface,
+                page,
+                clips,
+                active,
+                &runs,
+                layer,
+                &mut fonts.shadows,
+            );
+        }
+        for phase in [
+            Some(decoration::Phase::BeforeGlyphs),
+            None,
+            Some(decoration::Phase::AfterGlyphs),
+        ] {
             for run in &runs {
                 let chain = run_clip_chain(page, clips, run);
                 active.apply(surface, clips, &chain);
-                match phase {
-                    TextPhase::Shadow(_) => {}
-                    TextPhase::Decorations(phase) => {
-                        decoration::paint(surface, &run.decorations, phase);
-                    }
-                    TextPhase::Glyphs => paint_glyph_run(surface, run, fonts),
+                if let Some(phase) = phase {
+                    decoration::paint(surface, &run.decorations, phase);
+                } else {
+                    paint_glyph_run(surface, run, fonts);
                 }
             }
         }

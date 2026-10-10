@@ -132,3 +132,11 @@ fn overflowing_shadow_offsets_are_skipped() {
     assert_eq!(count(&ops, "f"), 0);
     assert_eq!(count(&ops, "Do"), 0);
 }
+
+#[test]
+fn runs_with_different_shadows_are_separate_shapes() {
+    let (_, ops) = operations(&format!(
+        "{SHADOW_CSS}<p style='text-shadow:1px 1px rgb(255,0,0)'>Red<span style='text-shadow:1px 1px rgb(0,0,255)'>Blue</span></p>"
+    ));
+    assert_eq!(shadow_fills(&ops), [[255, 0, 0], [0, 0, 255]]);
+}
