@@ -8,13 +8,7 @@ use skrifa::{
 use std::sync::Arc;
 
 pub(super) fn fonts(options: &RenderOptions<'_>) -> Result<Option<RenderFonts>> {
-    let bundle = options.assets;
-    if bundle.is_some_and(|bundle| !bundle.images.is_empty()) {
-        return Err(Error::Asset(
-            "Raikiri image bundles do not have configured resource URLs".into(),
-        ));
-    }
-    let Some(bundle) = bundle.filter(|bundle| !bundle.fonts.is_empty()) else {
+    let Some(bundle) = options.assets.filter(|bundle| !bundle.fonts.is_empty()) else {
         return if options.system_fonts {
             Ok(None)
         } else {
