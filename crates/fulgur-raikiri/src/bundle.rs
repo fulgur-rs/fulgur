@@ -2,9 +2,10 @@
 
 use crate::files::{BaseDirectoryProvider, content_type};
 use fulgur_core::AssetBundle;
+use percent_encoding::percent_decode_str;
 use raikiri_traits::net::{FetchOutcome, FetchedResource, NetworkError, NetworkProvider, Request};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use url::Url;
 
@@ -55,14 +56,13 @@ impl Sandbox {
             else {
                 continue;
             };
-            // Typed by the file the URL names, as on disk: `icon%2Esvg` is
-            // `icon.svg`.
-            let path = url
-                .to_file_path()
-                .unwrap_or_else(|()| PathBuf::from(url.path()));
+            // Typed by the decoded URL path, as a file on disk would be:
+            // `icon%2Esvg` is `icon.svg`.
+            let path = percent_decode_str(url.path()).decode_utf8_lossy();
+            let content_type = content_type(Path::new(path.as_ref()));
             images.entry(key(url)).or_insert_with(|| BundledFile {
                 data: Arc::clone(data),
-                content_type: content_type(&path),
+                content_type,
             });
         }
         Self {

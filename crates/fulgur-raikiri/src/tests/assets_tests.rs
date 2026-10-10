@@ -500,8 +500,11 @@ fn round_background_svgs_decode_at_the_rescaled_tile_size() {
 fn bundled_files_are_typed_by_the_decoded_url_path() {
     let mut bundle = AssetBundle::new();
     bundle.add_image("square%2Esvg", SQUARE_SVG.to_vec());
+    bundle.add_image("https://images.test/icon%2Esvg", SQUARE_SVG.to_vec());
     let html = format!(
-        "{PAGE}<div style='width:8px;height:8px;background-image:url(square%2Esvg)'></div>"
+        "{PAGE}<div style='width:8px;height:8px;background-image:url(square%2Esvg)'></div>\
+         <div style='width:8px;height:8px;\
+         background-image:url(https://images.test/icon%2Esvg)'></div>"
     );
-    assert_eq!(drawn_images(&html, &bundle), 1);
+    assert_eq!(drawn_images(&html, &bundle), 2);
 }
