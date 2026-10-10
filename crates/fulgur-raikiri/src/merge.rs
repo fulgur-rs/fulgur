@@ -147,3 +147,6 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn pdf_error(error: flpdf::Error) -> Error {
     Error::PdfGeneration(format!("merging streamed pages: {error}"))
 }
+
+#[cfg(test)]
+mod tests;

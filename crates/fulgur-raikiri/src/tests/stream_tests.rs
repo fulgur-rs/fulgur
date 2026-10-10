@@ -109,6 +109,31 @@ fn early_pages_show_the_real_page_count() {
     );
 }
 
+/// The pages that the link annotations of page `number` go to.
+fn destinations(pdf: &lopdf::Document, number: u32) -> Vec<lopdf::ObjectId> {
+    let page = pdf.get_dictionary(pdf.get_pages()[&number]).unwrap();
+    let Ok(annotations) = page.get(b"Annots") else {
+        return Vec::new();
+    };
+    annotations
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|annotation| {
+            let annotation = pdf
+                .get_dictionary(annotation.as_reference().unwrap())
+                .unwrap();
+            let action = annotation.get(b"A").unwrap().as_dict().unwrap();
+            let destination = pdf
+                .get_object(action.get(b"D").unwrap().as_reference().unwrap())
+                .unwrap()
+                .as_array()
+                .unwrap();
+            destination[0].as_reference().unwrap()
+        })
+        .collect()
+}
+
 #[test]
 fn links_to_later_anchors_resolve_on_early_pages() {
     let html = long_input(PAGE_CSS, 4, |index| match index {
@@ -124,29 +149,6 @@ fn links_to_later_anchors_resolve_on_early_pages() {
     let pdf = lopdf::Document::load_mem(&streamed).unwrap();
     let pages = pdf.get_pages();
     assert_eq!(pages.len(), batch.get_pages().len());
-    let destinations = |pdf: &lopdf::Document, number: u32| -> Vec<lopdf::ObjectId> {
-        let page = pdf.get_dictionary(pdf.get_pages()[&number]).unwrap();
-        let Ok(annotations) = page.get(b"Annots") else {
-            return Vec::new();
-        };
-        annotations
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|annotation| {
-                let annotation = pdf
-                    .get_dictionary(annotation.as_reference().unwrap())
-                    .unwrap();
-                let action = annotation.get(b"A").unwrap().as_dict().unwrap();
-                let destination = pdf
-                    .get_object(action.get(b"D").unwrap().as_reference().unwrap())
-                    .unwrap()
-                    .as_array()
-                    .unwrap();
-                destination[0].as_reference().unwrap()
-            })
-            .collect()
-    };
     let last = pages.len() as u32;
     assert_eq!(destinations(&pdf, 1), [pages[&last]]);
     assert_eq!(destinations(&pdf, last), [pages[&2]]);
@@ -186,4 +188,40 @@ fn streaming_rejects_pdf_ua() {
     let error = render_streaming(&path, &config, &RenderOptions::default())
         .expect_err("PDF/UA needs the whole document");
     assert!(error.to_string().contains("streaming"), "{error}");
+}
+
+#[test]
+fn links_in_running_elements_to_later_anchors_resolve_on_early_pages() {
+    let css = "<style>@page { size: 300px 200px; margin: 40px; \
+        @top-center { content: element(hdr) } } \
+        body { margin: 0 } p { margin: 0; break-after: page } \
+        .hdr { position: running(hdr) } \
+        .hdr a { display: block; width: 20px; height: 10px }</style>";
+    let html = long_input(css, 3, |index| match index {
+        0 => "<div class=hdr><a href='#end'></a></div><p>page 0</p>".to_owned(),
+        3 => "<p id=end>end</p>".to_owned(),
+        _ => format!("<p>page {index}</p>"),
+    });
+    let (_dir, path) = input(&html);
+    let streamed = render_streaming(&path, &Config::default(), &RenderOptions::default())
+        .expect("streamed PDF");
+    let pdf = lopdf::Document::load_mem(&streamed).unwrap();
+    let pages = pdf.get_pages();
+    let last = pages[&(pages.len() as u32)];
+    assert_eq!(destinations(&pdf, 1), [last]);
+}
+
+#[test]
+fn streaming_reports_layout_errors() {
+    let deep = "<div>".repeat(300);
+    let filler = format!("<!--{}-->", "x".repeat(70 * 1024));
+    // Too deep from the start, and too deep only after a checkpoint has
+    // passed, so that a later chunk fails while being fed.
+    for html in [deep.clone(), format!("{filler}{deep}{filler}{filler}")] {
+        let (_dir, path) = input(&html);
+        let batch = render(&path, &Config::default()).expect_err("too deep for the batch layout");
+        let streamed = render_streaming(&path, &Config::default(), &RenderOptions::default())
+            .expect_err("too deep for the streaming layout");
+        assert_eq!(streamed.to_string(), batch.to_string());
+    }
 }
