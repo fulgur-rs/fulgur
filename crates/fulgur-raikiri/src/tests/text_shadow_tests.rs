@@ -59,12 +59,9 @@ fn shadow_layers_span_every_run_of_the_line() {
         "{SHADOW_CSS}<p style='text-shadow:1px 1px rgb(255,0,0), 2px 2px rgb(0,0,255)'>Split<span style='color:rgb(0,128,0)'>Run</span></p>"
     ));
     assert_eq!(text_shows(&ops).len(), 2);
-    // The second shadow of both runs is painted before the first shadow of
-    // either, so no run's first shadow is covered.
-    assert_eq!(
-        shadow_fills(&ops),
-        [[0, 0, 255], [0, 0, 255], [255, 0, 0], [255, 0, 0]]
-    );
+    // Each layer is one shape over both runs, and the second shadow is
+    // painted before the first, so no run's first shadow is covered.
+    assert_eq!(shadow_fills(&ops), [[0, 0, 255], [255, 0, 0]]);
 }
 
 #[test]
@@ -115,4 +112,13 @@ fn blurred_shadow_is_a_soft_masked_image_below_the_text() {
     let height = images[0].dict.get(b"Height").unwrap().as_i64().unwrap();
     assert!(width > 3 * 2 * 6, "{width}");
     assert!(height > 3 * 2 * 6, "{height}");
+}
+
+#[test]
+fn blurred_shadow_of_a_split_line_is_one_image() {
+    let (_, ops) = operations(&format!(
+        "{SHADOW_CSS}<p style='text-shadow:2px 2px 4px rgb(255,0,0)'>Split<span style='color:rgb(0,128,0)'>Run</span></p>"
+    ));
+    assert_eq!(text_shows(&ops).len(), 2);
+    assert_eq!(count(&ops, "Do"), 1);
 }

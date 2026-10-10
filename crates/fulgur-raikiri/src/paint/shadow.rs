@@ -1,6 +1,6 @@
 //! Text shadows (CSS Text Decoration 3 §4).
 //!
-//! Each shadow is the run's glyphs filled with the shadow color and moved
+//! Each shadow is the glyphs filled with the shadow color and moved
 //! by the shadow offset. A sharp shadow is drawn as the glyph outlines, so
 //! that extracted or searched text holds the run's text once. PDF has no blur,
 //! so a blurred shadow is rasterized: the glyph outlines are filled into a
@@ -22,40 +22,81 @@ const RASTER_SCALE: f32 = 3.0;
 /// shadow is rasterized at a lower scale.
 const MAX_RASTER_PIXELS: f32 = 4_000_000.0;
 
-/// Draw the shadow of `run` at `layer` in its list, if it has one. The
-/// caller paints the layers last declared first, so that the first shadow
-/// is on top (CSS Text Decoration 3 §4).
-pub(super) fn paint(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, layer: usize) {
-    let Some(shadow) = run.shadows.get(layer) else {
-        return;
-    };
-    if run.glyphs.is_empty() || run.font_size <= 0.0 || shadow.color.a == 0 {
+/// Upper bound on the pixels of all blurred shadow rasters of a document,
+/// which bounds the memory and blur work a short style sheet can ask for.
+const DOCUMENT_RASTER_PIXELS: f32 = 64_000_000.0;
+
+/// The lowest scale a blurred shadow is rasterized at. A shadow that does
+/// not fit the remaining budget at this scale is not drawn.
+const MIN_RASTER_SCALE: f32 = 0.5;
+
+/// Raster pixels left for the blurred shadows of a document.
+pub(super) struct Budget {
+    pixels: f32,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            pixels: DOCUMENT_RASTER_PIXELS,
+        }
+    }
+}
+
+/// Draw `shadow` of the glyphs of `runs`, which share it. The caller
+/// paints the layers last declared first, so that the first shadow is on
+/// top (CSS Text Decoration 3 §4).
+pub(super) fn paint(
+    surface: &mut Surface<'_>,
+    runs: &[&PositionedGlyphRun<'_>],
+    shadow: &TextShadow,
+    budget: &mut Budget,
+) {
+    if shadow.color.a == 0 {
         return;
     }
     if shadow.blur_radius > 0.0 {
-        paint_blurred(surface, run, shadow);
+        let mut pen = Pen::new(SkiaPath(tiny_skia::PathBuilder::new()));
+        append_runs(&mut pen, runs);
+        if let Some(path) = pen.builder.0.finish() {
+            paint_blurred(surface, &path, shadow, budget);
+        }
     } else {
-        paint_sharp(surface, run, shadow);
+        let mut pen = Pen::new(PathBuilder::new());
+        append_runs(&mut pen, runs);
+        if let Some(path) = pen.builder.finish() {
+            surface.push_transform(&Transform::from_translate(shadow.offset.0, shadow.offset.1));
+            surface.set_fill(Some(fill(shadow.color)));
+            surface.draw_path(&path);
+            surface.pop();
+        }
     }
 }
 
-/// Fill the glyph outlines of `run`, moved by the shadow offset.
-fn paint_sharp(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, shadow: &TextShadow) {
-    let mut pen = Pen::new(PathBuilder::new());
-    // The glyphs are drawn without synthetic oblique, so their shadow is too.
-    append_run(&mut pen, run, false);
-    let Some(path) = pen.builder.finish() else {
-        return;
-    };
-    surface.push_transform(&Transform::from_translate(shadow.offset.0, shadow.offset.1));
-    surface.set_fill(Some(fill(shadow.color)));
-    surface.draw_path(&path);
-    surface.pop();
+/// Append the glyph outlines of `runs`. The glyphs are drawn without
+/// synthetic oblique, so their shadow is too.
+fn append_runs<B: PathSink>(pen: &mut Pen<B>, runs: &[&PositionedGlyphRun<'_>]) {
+    for run in runs {
+        if !run.glyphs.is_empty() && run.font_size > 0.0 {
+            append_run(pen, run, false);
+        }
+    }
 }
 
-/// Draw one blurred shadow of `run` as an image.
-fn paint_blurred(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, shadow: &TextShadow) {
-    let Some(image) = blurred_raster(run, shadow) else {
+/// Draw the outlines in `path`, blurred and moved by the shadow offset, as
+/// an image.
+fn paint_blurred(
+    surface: &mut Surface<'_>,
+    path: &tiny_skia::Path,
+    shadow: &TextShadow,
+    budget: &mut Budget,
+) {
+    let params = ShadowParams {
+        offset: shadow.offset,
+        blur_radius: shadow.blur_radius,
+        color: shadow.color,
+    };
+    let Some(image) = blurred_raster(path, params, budget) else {
         return;
     };
     let Some(size) = Size::from_wh(image.width, image.height) else {
@@ -67,6 +108,14 @@ fn paint_blurred(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, shadow
         size,
     );
     surface.pop();
+}
+
+/// The values of a [`TextShadow`] a raster is made from.
+#[derive(Clone, Copy)]
+struct ShadowParams {
+    offset: (f32, f32),
+    blur_radius: f32,
+    color: CssColor,
 }
 
 /// A blurred shadow rasterized for drawing: RGBA pixels and the rectangle
@@ -81,17 +130,18 @@ struct ShadowRaster {
     height: f32,
 }
 
-/// Rasterize the blurred `shadow` of `run`, or `None` when it has no ink.
+/// Rasterize the outlines in `path` with the blurred `shadow`, or `None`
+/// when it has no ink or does not fit the remaining budget.
 ///
 /// The blur is a Gaussian with a standard deviation of half the blur radius
 /// (CSS Backgrounds 3 §7.1), approximated by three box blurs. The raster
 /// extends three standard deviations past the outlines, where the Gaussian
 /// has fallen below one percent.
-fn blurred_raster(run: &PositionedGlyphRun<'_>, shadow: &TextShadow) -> Option<ShadowRaster> {
-    let mut pen = Pen::new(SkiaPath(tiny_skia::PathBuilder::new()));
-    // The glyphs are drawn without synthetic oblique, so their shadow is too.
-    append_run(&mut pen, run, false);
-    let path = pen.builder.0.finish()?;
+fn blurred_raster(
+    path: &tiny_skia::Path,
+    shadow: ShadowParams,
+    budget: &mut Budget,
+) -> Option<ShadowRaster> {
     let bounds = path.bounds();
     let sigma = shadow.blur_radius / 2.0;
     let extent = sigma * 3.0;
@@ -102,7 +152,11 @@ fn blurred_raster(run: &PositionedGlyphRun<'_>, shadow: &TextShadow) -> Option<S
     if !(width.is_finite() && height.is_finite()) {
         return None;
     }
-    let scale = RASTER_SCALE.min((MAX_RASTER_PIXELS / (width * height)).sqrt());
+    let pixels = MAX_RASTER_PIXELS.min(budget.pixels);
+    let scale = RASTER_SCALE.min((pixels / (width * height)).sqrt());
+    if scale.is_nan() || scale < MIN_RASTER_SCALE {
+        return None;
+    }
     // The raster starts on a whole pixel so the scale stays exact.
     let x = (left * scale).floor();
     let y = (top * scale).floor();
@@ -110,6 +164,7 @@ fn blurred_raster(run: &PositionedGlyphRun<'_>, shadow: &TextShadow) -> Option<S
     let pixel_height = ((top + height) * scale).ceil() - y;
     let (pixel_width, pixel_height) = (pixel_width as u32, pixel_height as u32);
     let mut mask = tiny_skia::Mask::new(pixel_width, pixel_height)?;
+    budget.pixels -= pixel_width as f32 * pixel_height as f32;
     let transform = tiny_skia::Transform::from_row(
         scale,
         0.0,
@@ -118,7 +173,7 @@ fn blurred_raster(run: &PositionedGlyphRun<'_>, shadow: &TextShadow) -> Option<S
         shadow.offset.0 * scale - x,
         shadow.offset.1 * scale - y,
     );
-    mask.fill_path(&path, tiny_skia::FillRule::Winding, true, transform);
+    mask.fill_path(path, tiny_skia::FillRule::Winding, true, transform);
     let mut coverage: Vec<f32> = mask.data().iter().map(|&value| f32::from(value)).collect();
     gaussian_blur(
         &mut coverage,

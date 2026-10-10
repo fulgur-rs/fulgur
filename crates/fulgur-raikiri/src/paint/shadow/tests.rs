@@ -42,3 +42,22 @@ fn box_blur_treats_pixels_past_the_edge_as_zero() {
     box_blur(&input, &mut output, 1, 1);
     assert_eq!(output, [1.0, 1.0, 0.0, 0.0]);
 }
+
+#[test]
+fn rasters_take_from_the_budget_and_stop_when_it_is_spent() {
+    let mut builder = tiny_skia::PathBuilder::new();
+    builder.push_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
+    let path = builder.finish().unwrap();
+    let shadow = ShadowParams {
+        offset: (0.0, 0.0),
+        blur_radius: 2.0,
+        color: CssColor::BLACK,
+    };
+    let mut budget = Budget::default();
+    let raster = blurred_raster(&path, shadow, &mut budget).expect("a raster");
+    let used = (raster.pixel_width * raster.pixel_height) as f32;
+    assert_eq!(budget.pixels, DOCUMENT_RASTER_PIXELS - used);
+    budget.pixels = 10.0;
+    assert!(blurred_raster(&path, shadow, &mut budget).is_none());
+    assert_eq!(budget.pixels, 10.0);
+}
