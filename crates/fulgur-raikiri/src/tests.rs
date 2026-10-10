@@ -201,6 +201,56 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
 
+#[test]
+fn margin_boxes_draw_the_running_element_of_each_page() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; @top-center { content: element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } \
+         .hdr { position: running(hdr); background: rgb(0, 128, 0) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>\
+         <div class=\"hdr\">Beta</div><p style=\"break-before: page\">two</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let words = |page: u32| {
+        let text = pdf.extract_text(&[page]).expect("extractable text");
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // Each page shows its own header, drawn before the page body, instead of
+    // the document-wide text of the last header.
+    assert_eq!(words(1), ["Alpha", "one"]);
+    assert_eq!(words(2), ["Beta", "two"]);
+    // The element is drawn as laid out, with its background.
+    let content = pdf
+        .get_page_content(*pdf.get_pages().get(&1).unwrap())
+        .unwrap();
+    let operations = lopdf::content::Content::decode(&content)
+        .unwrap()
+        .operations;
+    assert!(fill_colors(&operations).contains(&[0, 128, 0]));
+}
+
+#[test]
+fn an_element_combined_with_other_content_draws_the_box_text() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; \
+         @top-center { content: \"Chapter: \" element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } .hdr { position: running(hdr) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    // `element()` cannot be combined with other values (CSS GCPM 3 §1.2.1):
+    // the box keeps its flattened text rather than losing the literal.
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>(),
+        ["Chapter:", "Alpha", "one"]
+    );
+}
+
 /// Render `html` and decode the drawing operations of every content stream:
 /// page contents and Form XObjects (Krilla draws some fills, such as
 /// translucent ones, through those).
@@ -866,16 +916,16 @@ fn background_clip_selects_the_painting_area() {
     assert_eq!(fills("border-box"), [20.0, 20.0]);
     assert_eq!(fills("padding-box"), [25.0, 25.0]);
     assert_eq!(fills("content-box"), [35.0, 35.0]);
-    // A percentage padding has no containing block width here and counts as
-    // zero, leaving the padding box.
+    // A percentage padding refers to the containing block's width: 10% of
+    // the 260px page area is 26px, read back from the layout's content box.
     let (_, operations) = operations(&format!(
-        "{CSS}<p style=\"border: 5px solid transparent; padding: 10%; \
+        "{CSS}<p style=\"border: 5px solid transparent; padding: 5px 10%; \
          background-color: rgb(0, 128, 0); background-clip: content-box\"></p>"
     ));
     let first_move = operations.iter().find(|op| op.operator == "m").unwrap();
     assert_eq!(
         floats(&lopdf::Object::Array(first_move.operands.clone())),
-        [25.0, 25.0]
+        [51.0, 30.0]
     );
 }
 
@@ -1496,6 +1546,8 @@ mod assets_tests;
 mod metadata_tests;
 
 mod navigation_tests;
+
+mod html_input_tests;
 
 mod bookmark_tests;
 

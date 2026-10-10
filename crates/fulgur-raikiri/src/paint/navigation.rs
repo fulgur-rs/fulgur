@@ -6,7 +6,7 @@ use krilla::{
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{DocumentLayout, Page};
+use raikiri_html::{DocumentLayout, Page, PaintRect};
 
 enum LinkTarget {
     Internal(XyzDestination),
@@ -51,9 +51,41 @@ fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Opt
     Some(LinkTarget::External(uri.into()))
 }
 
+/// Where a page's links land on the PDF page: `page` itself, or a running
+/// element layout drawn at `origin` and clipped to a margin box.
+#[derive(Clone, Copy)]
+pub(super) struct Placement {
+    pub(super) origin: (f32, f32),
+    pub(super) clip: Option<PaintRect>,
+}
+
+impl Placement {
+    pub(super) const PAGE: Self = Self {
+        origin: (0.0, 0.0),
+        clip: None,
+    };
+
+    /// `quad` moved to the PDF page and cut to the clip, `None` when
+    /// nothing of it is visible.
+    fn place(self, quad: PaintRect) -> Option<PaintRect> {
+        let mut x0 = quad.x + self.origin.0;
+        let mut y0 = quad.y + self.origin.1;
+        let mut x1 = x0 + quad.width;
+        let mut y1 = y0 + quad.height;
+        if let Some(clip) = self.clip {
+            x0 = x0.max(clip.x);
+            y0 = y0.max(clip.y);
+            x1 = x1.min(clip.x + clip.width);
+            y1 = y1.min(clip.y + clip.height);
+        }
+        (x1 > x0 && y1 > y0).then(|| PaintRect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+}
+
 pub(super) fn annotations(
     document: &DocumentLayout,
     page: &Page<'_>,
+    placement: Placement,
     document_url: &url::Url,
 ) -> Result<Vec<Annotation>> {
     let mut annotations = Vec::new();
@@ -74,6 +106,9 @@ pub(super) fn annotations(
             {
                 continue;
             }
+            let Some(quad) = placement.place(*quad) else {
+                continue;
+            };
             let Some(rect) = Rect::from_xywh(
                 quad.x * PX_TO_PT,
                 quad.y * PX_TO_PT,
@@ -95,4 +130,31 @@ pub(super) fn annotations(
         annotations.push(Annotation::new_link(annotation, None));
     }
     Ok(annotations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Placement;
+    use raikiri_html::PaintRect;
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> PaintRect {
+        PaintRect::new(x, y, width, height)
+    }
+
+    #[test]
+    fn placed_quads_move_by_the_origin_and_are_cut_to_the_clip() {
+        let placement = Placement {
+            origin: (10.0, 20.0),
+            clip: Some(rect(0.0, 0.0, 40.0, 30.0)),
+        };
+        assert_eq!(
+            placement.place(rect(5.0, 5.0, 50.0, 50.0)),
+            Some(rect(15.0, 25.0, 25.0, 5.0))
+        );
+        assert_eq!(placement.place(rect(40.0, 0.0, 10.0, 10.0)), None);
+        assert_eq!(
+            Placement::PAGE.place(rect(1.0, 2.0, 3.0, 4.0)),
+            Some(rect(1.0, 2.0, 3.0, 4.0))
+        );
+    }
 }
