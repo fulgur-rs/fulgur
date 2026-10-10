@@ -3073,7 +3073,9 @@ fn pdf_ua_takes_the_language_from_html_lang() {
         .pdf_ua(true)
         .title("T")
         .build()
-        .render("<html lang=\"ja\"><body><h1>見出し</h1><p>本文</p></body></html>")
+        // ASCII text: CJK glyphs would need a font that not every CI host
+        // has, and a missing glyph fails PDF/UA validation on its own.
+        .render("<html lang=\"ja\"><body><h1>Heading</h1><p>Body</p></body></html>")
         .expect("pdf_ua with <html lang> must succeed");
     assert!(String::from_utf8_lossy(&pdf).contains("/Lang (ja)"));
 }
