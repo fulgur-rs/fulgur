@@ -19,7 +19,9 @@ use url::Url;
 /// document base URL, a stylesheet's `url()` against the stylesheet URL)
 /// and fetches the result; a request whose URL is a bundle image gets its
 /// bytes, whatever the resource kind, and any other request goes to the
-/// directory.
+/// directory, which refuses every file outside it (after symlinks and `..`
+/// are resolved). A bundle image only adds bytes the caller supplied; it
+/// never opens a path outside the directory.
 #[derive(Clone)]
 pub(crate) struct Sandbox {
     images: Arc<HashMap<Url, BundledFile>>,

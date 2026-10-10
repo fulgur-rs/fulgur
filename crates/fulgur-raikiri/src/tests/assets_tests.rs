@@ -159,6 +159,39 @@ fn stylesheet_urls_resolve_against_the_stylesheet_like_a_browser() {
 }
 
 #[test]
+fn images_outside_the_input_directory_are_not_read_even_with_a_bundle() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("secret.png"), dot_png()).unwrap();
+    let dir = outer.path().join("doc");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("input.html");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outer.path().join("secret.png"), dir.join("link.png")).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{PAGE}<img src='../secret.png'>\
+             <div style='width:8px;height:8px;background-image:url(../secret.png)'></div>\
+             <img src='link.png'>"
+        ),
+    )
+    .unwrap();
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("other.png", dot_png());
+    let options = RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: true,
+    };
+    let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let content = pdf.get_page_content(pdf.get_pages()[&1]).unwrap();
+    let operations = lopdf::content::Content::decode(&content)
+        .unwrap()
+        .operations;
+    assert_eq!(count(&operations, "Do"), 0);
+}
+
+#[test]
 fn bundled_images_take_precedence_over_local_files() {
     let (dir, path) = input(&format!("{PAGE}<img src='dot.png' style='width:8px'>"));
     // The file on disk is not an image; the bundle's copy is drawn.
