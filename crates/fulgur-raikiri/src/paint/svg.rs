@@ -1,5 +1,6 @@
 //! Inline SVG vector content inside the existing page paint stack.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use fulgur_core::{Error, Result};
@@ -14,9 +15,20 @@ use crate::RenderOptions;
 #[cfg(test)]
 mod tests;
 
+/// Upper bound on the SVG source bytes whose parsed trees are kept.
+const MAX_CACHED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+
 pub(super) struct SvgCache<'a> {
     options: RenderOptions<'a>,
     fonts: Option<Arc<usvg::fontdb::Database>>,
+    no_fonts: Arc<usvg::fontdb::Database>,
+    /// Parsed trees by prepared source, then by the host opacity removed from
+    /// the root (its bits), so an SVG repeated on every page, such as a logo
+    /// in a running header, is parsed once.
+    trees: HashMap<String, Vec<(Option<u32>, usvg::Tree)>>,
+    cached_source_bytes: usize,
+    /// The last tree parsed once the cache is full.
+    uncached: Option<usvg::Tree>,
 }
 
 impl<'a> SvgCache<'a> {
@@ -24,6 +36,10 @@ impl<'a> SvgCache<'a> {
         Self {
             options,
             fonts: None,
+            no_fonts: Arc::new(usvg::fontdb::Database::new()),
+            trees: HashMap::new(),
+            cached_source_bytes: 0,
+            uncached: None,
         }
     }
 
@@ -74,19 +90,11 @@ impl<'a> SvgCache<'a> {
         else {
             return Ok(());
         };
-        let options = usvg::Options {
-            fontdb: self.fonts(),
-            image_href_resolver: usvg::ImageHrefResolver {
-                resolve_data: Box::new(|_, _, _| None),
-                resolve_string: Box::new(|_, _| None),
-            },
-            ..usvg::Options::default()
+        let neutralized = match svg.host_opacity {
+            Some(alpha) if host_group => Some(alpha),
+            _ => None,
         };
-        let tree = parse(&svg.source, &options)?;
-        let tree = match svg.host_opacity {
-            Some(alpha) if host_group => neutralize_root_opacity(tree, &options, alpha)?,
-            _ => tree,
-        };
+        let tree = self.tree(svg.source, neutralized)?;
         let area = fragment.paint_rect();
         let clip = Rect::from_xywh(area.x, area.y, area.width, area.height)
             .ok_or_else(|| Error::PdfGeneration("invalid SVG fragment clip".into()))?;
@@ -100,10 +108,52 @@ impl<'a> SvgCache<'a> {
             .ok_or_else(|| Error::PdfGeneration("invalid SVG clip path".into()))?;
         surface.push_clip_path(&clip_path, &FillRule::NonZero);
         surface.push_transform(&Transform::from_translate(svg.viewport.x, svg.viewport.y));
-        let result = surface.draw_svg(&tree, size, SvgSettings::default());
+        let result = surface.draw_svg(tree, size, SvgSettings::default());
         surface.pop();
         surface.pop();
         result.ok_or_else(|| Error::PdfGeneration("SVG vector drawing failed".into()))
+    }
+
+    /// The parsed tree of `source`, with the root opacity `neutralized`
+    /// removed when given.
+    fn tree(&mut self, source: String, neutralized: Option<f32>) -> Result<&usvg::Tree> {
+        let key = neutralized.map(f32::to_bits);
+        let cached = self
+            .trees
+            .get(&source)
+            .and_then(|trees| trees.iter().position(|(alpha, _)| *alpha == key));
+        if let Some(index) = cached {
+            return Ok(&self.trees[&source][index].1);
+        }
+        // Scanning fonts is costly and only text needs them.
+        let fontdb = if source.contains("<text") || source.contains(":text") {
+            self.fonts()
+        } else {
+            self.no_fonts.clone()
+        };
+        let options = usvg::Options {
+            fontdb,
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_data: Box::new(|_, _, _| None),
+                resolve_string: Box::new(|_, _| None),
+            },
+            ..usvg::Options::default()
+        };
+        let tree = parse(&source, &options)?;
+        let tree = match neutralized {
+            Some(alpha) => neutralize_root_opacity(tree, &options, alpha)?,
+            None => tree,
+        };
+        let new_source = !self.trees.contains_key(&source);
+        let added = if new_source { source.len() } else { 0 };
+        if self.cached_source_bytes + added > MAX_CACHED_SOURCE_BYTES {
+            self.uncached = Some(tree);
+            return Ok(self.uncached.as_ref().expect("just stored"));
+        }
+        self.cached_source_bytes += added;
+        let trees = self.trees.entry(source).or_default();
+        trees.push((key, tree));
+        Ok(&trees.last().expect("just pushed").1)
     }
 }
 

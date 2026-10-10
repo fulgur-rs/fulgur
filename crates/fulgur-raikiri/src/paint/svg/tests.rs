@@ -185,3 +185,35 @@ fn document_font_rules_keep_relative_sizes_in_use_instances() {
     assert_eq!(span.font_size().get(), 20.0);
     assert_eq!(span.font().weight(), 700);
 }
+
+#[test]
+fn repeated_sources_reuse_one_parsed_tree() {
+    let mut cache = SvgCache::new(RenderOptions {
+        assets: None,
+        system_fonts: true,
+    });
+    let source = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><g opacity='0.5'><rect width='10' height='10'/></g></svg>";
+    let first: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
+    let second: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
+    assert_eq!(first, second);
+    let neutralized: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
+    assert_ne!(first, neutralized);
+    let again: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
+    assert_eq!(neutralized, again);
+    assert_eq!(cache.trees.len(), 1);
+    assert_eq!(cache.trees[source].len(), 2);
+    // No text, so the font database was never built.
+    assert!(cache.fonts.is_none());
+}
+
+#[test]
+fn text_sources_build_the_font_database() {
+    let mut cache = SvgCache::new(RenderOptions {
+        assets: None,
+        system_fonts: false,
+    });
+    let source =
+        "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><text y='8'>A</text></svg>";
+    cache.tree(source.into(), None).unwrap();
+    assert!(cache.fonts.is_some());
+}
