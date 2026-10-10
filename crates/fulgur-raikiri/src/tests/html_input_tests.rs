@@ -75,3 +75,25 @@ fn html_string_fragment_links_stay_internal_without_a_base_directory() {
     let action = link.get(b"A").unwrap().as_dict().unwrap();
     assert_eq!(action.get(b"S").unwrap().as_name().unwrap(), b"GoTo");
 }
+
+#[test]
+fn html_string_cannot_read_outside_the_base_directory() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("page.css"), PAGE_CSS).unwrap();
+    let base = outer.path().join("doc");
+    std::fs::create_dir(&base).unwrap();
+    let absolute =
+        url::Url::from_file_path(outer.path().canonicalize().unwrap().join("page.css")).unwrap();
+    let mut hrefs = vec!["../page.css".to_string(), absolute.to_string()];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outer.path().join("page.css"), base.join("link.css")).unwrap();
+        hrefs.push("link.css".into());
+    }
+    let unstyled = render_html("<p>Hello</p>", Some(&base), &Config::default()).unwrap();
+    for href in hrefs {
+        let html = format!("<link rel=stylesheet href='{href}'><p>Hello</p>");
+        let bytes = render_html(&html, Some(&base), &Config::default()).unwrap();
+        assert_eq!(media_box(&bytes), media_box(&unstyled), "{href}");
+    }
+}
