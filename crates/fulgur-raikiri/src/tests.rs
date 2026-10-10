@@ -1509,7 +1509,8 @@ fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
         "<style>@page { size: 300px 200px; margin: 40px; \
            @bottom-center { content: 'p.' counter(page) } } \
          @page :first { @top-center { content: 'FIRST'; background-color: rgb(0, 0, 255); \
-           border-bottom: 2px solid rgb(0, 255, 0) } @bottom-center { content: none } } \
+           border-bottom: 2px solid rgb(0, 255, 0) } @bottom-center { content: none } \
+           @left-middle { content: ''; border: 1px solid rgb(255, 0, 0) } } \
          body { margin: 0 } div { height: 120px }</style>\
          <div>one</div><div>two</div>",
     );
@@ -1517,6 +1518,12 @@ fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
     let colors = fill_colors(&operations);
     assert!(colors.contains(&[0, 0, 255]), "{colors:?}");
     assert!(colors.contains(&[0, 255, 0]), "{colors:?}");
+    // The empty left-middle box still draws its four border sides.
+    assert_eq!(
+        colors.iter().filter(|color| **color == [255, 0, 0]).count(),
+        4,
+        "{colors:?}"
+    );
     let first = pdf.extract_text(&[1]).expect("extractable text");
     assert_eq!(
         first.split_whitespace().collect::<Vec<_>>(),
