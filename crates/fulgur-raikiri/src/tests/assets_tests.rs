@@ -480,3 +480,28 @@ fn background_layers_with_too_many_tiles_draw_nothing() {
     );
     assert_eq!(drawn_images(&html, &bundle), 0);
 }
+
+const SQUARE_SVG: &[u8] =
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>";
+
+#[test]
+fn round_background_svgs_decode_at_the_rescaled_tile_size() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("square.svg", SQUARE_SVG.to_vec());
+    // `round` shrinks the huge tile to the 32px box: one tile, decoded small.
+    let html = format!(
+        "{PAGE}<div style='width:32px;height:32px;background-image:url(square.svg);\
+         background-size:100000px 100000px;background-repeat:round'></div>"
+    );
+    assert_eq!(drawn_images(&html, &bundle), 1);
+}
+
+#[test]
+fn bundled_files_are_typed_by_the_decoded_url_path() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("square%2Esvg", SQUARE_SVG.to_vec());
+    let html = format!(
+        "{PAGE}<div style='width:8px;height:8px;background-image:url(square%2Esvg)'></div>"
+    );
+    assert_eq!(drawn_images(&html, &bundle), 1);
+}

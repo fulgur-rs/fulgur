@@ -4,7 +4,7 @@ use crate::files::{BaseDirectoryProvider, content_type};
 use fulgur_core::AssetBundle;
 use raikiri_traits::net::{FetchOutcome, FetchedResource, NetworkError, NetworkProvider, Request};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
 
@@ -55,9 +55,14 @@ impl Sandbox {
             else {
                 continue;
             };
+            // Typed by the file the URL names, as on disk: `icon%2Esvg` is
+            // `icon.svg`.
+            let path = url
+                .to_file_path()
+                .unwrap_or_else(|()| PathBuf::from(url.path()));
             images.entry(key(url)).or_insert_with(|| BundledFile {
                 data: Arc::clone(data),
-                content_type: content_type(Path::new(name)),
+                content_type: content_type(&path),
             });
         }
         Self {

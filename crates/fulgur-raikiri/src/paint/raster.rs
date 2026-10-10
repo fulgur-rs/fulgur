@@ -224,9 +224,10 @@ impl<'a> RasterCache<'a> {
         let Some(size) = Size::from_wh(tiles.width as f32, tiles.height as f32) else {
             return Ok(());
         };
+        // `round` rescales the tile, so decode at the size actually drawn.
         let raster = ImageRasterSize {
-            width: width as f32,
-            height: height as f32,
+            width: tiles.width as f32,
+            height: tiles.height as f32,
         };
         let Some(pixels) = source.get_decoded_at_size(&url, raster, None) else {
             return Ok(());
