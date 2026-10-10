@@ -18,6 +18,7 @@ mod shape;
 mod svg;
 mod text_clip;
 
+use crate::tagging::{Tags, Target};
 use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
@@ -27,6 +28,7 @@ use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
+use krilla::tagging::ArtifactType;
 use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
     ComputedVisualBox, CssColor,
@@ -47,7 +49,22 @@ pub(crate) fn paint_document(
     document_url: &url::Url,
     options: &crate::RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
-    let mut pdf = krilla::Document::new();
+    let tagged = config.effective_tagging();
+    let mut pdf = if tagged {
+        let configuration = if config.pdf_ua {
+            krilla::configure::Configuration::new_with_validator(krilla::configure::Validator::UA1)
+        } else {
+            krilla::configure::Configuration::new()
+        };
+        krilla::Document::new_with(krilla::SerializeSettings {
+            enable_tagging: true,
+            configuration,
+            ..Default::default()
+        })
+    } else {
+        krilla::Document::new()
+    };
+    let mut tags = Tags::new(document, tagged);
     pdf.set_metadata(crate::metadata::build(config)?);
     if let Some(outline) = outline {
         pdf.set_outline(outline);
@@ -63,13 +80,18 @@ pub(crate) fn paint_document(
             &mut fonts,
             &mut svg,
             &mut raster,
+            &mut tags,
             document_url,
         )?;
+    }
+    if let Some(tree) = tags.finish(config.lang.clone()) {
+        pdf.set_tag_tree(tree);
     }
     pdf.finish()
         .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_page(
     pdf: &mut krilla::Document,
     document: &DocumentLayout,
@@ -77,6 +99,7 @@ fn paint_page(
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
     document_url: &url::Url,
 ) -> Result<()> {
     let page_box = page.geometry().page_box;
@@ -86,21 +109,23 @@ fn paint_page(
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
+    tags.begin_page(page);
     // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts);
+    margin::paint(&mut surface, page, fonts, tags);
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs) {
-        paint_ordered(&mut surface, page, &events, &runs, fonts, svg, raster)?;
+        paint_ordered(&mut surface, page, &events, &runs, fonts, svg, raster, tags)?;
     } else {
-        paint_legacy(&mut surface, page, &runs, fonts, svg, raster)?;
+        paint_legacy(&mut surface, page, &runs, fonts, svg, raster, tags)?;
     }
 
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page, document_url)? {
-        pdf_page.add_annotation(annotation);
+    for (owner, link) in navigation::links(document, page, document_url)? {
+        tags.annotate(&mut pdf_page, page, owner, link);
     }
+    tags.end_page();
     pdf_page.finish();
     Ok(())
 }
@@ -112,6 +137,7 @@ fn paint_legacy(
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
 ) -> Result<()> {
     let clips = ClipMap::new(page);
     let mut active = ClipStack::default();
@@ -130,12 +156,19 @@ fn paint_legacy(
             let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
             active.apply(surface, &clips, &chain);
             let text = || text_clip::outlines(dom, fragment.node(), runs);
-            paint_box(
+            tags.mark(
                 surface,
-                fragment.paint_rect(),
-                Slice::of(&fragment),
-                style,
-                text,
+                page,
+                Target::Artifact(ArtifactType::Other),
+                |surface| {
+                    paint_box(
+                        surface,
+                        fragment.paint_rect(),
+                        Slice::of(&fragment),
+                        style,
+                        text,
+                    )
+                },
             );
         }
     }
@@ -143,16 +176,16 @@ fn paint_legacy(
         let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
         active.apply(surface, &clips, &chain);
         // This painter has no opacity groups, so the SVG keeps its root opacity.
-        svg.paint(surface, page, &fragment, false)?;
-        raster.paint(surface, page, &fragment, false)?;
+        paint_replaced(surface, page, &fragment, svg, raster, tags, false)?;
     }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
-    paint_text_batch(surface, page, &clips, &mut active, &text, fonts);
+    paint_text_batch(surface, page, &clips, &mut active, &text, fonts, tags);
     active.clear(surface);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_ordered(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
@@ -161,6 +194,7 @@ fn paint_ordered(
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
 ) -> Result<()> {
     // Ordered painting consumes every producer clip directly. The legacy
     // DOM-based clip lookup would apply the same shape twice and cannot
@@ -188,7 +222,7 @@ fn paint_ordered(
             continue;
         }
         // Clip, opacity, box and stacking steps delimit a text paint batch.
-        paint_text_batch(surface, page, &clips, &mut active, &batch, fonts);
+        paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
         batch.clear();
         match event {
             PaintEvent::Box(fragment) => {
@@ -197,12 +231,19 @@ fn paint_ordered(
                         clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
                     active.apply(surface, &clips, &chain);
                     let text = || text_clip::outlines(dom, fragment.node(), runs);
-                    paint_box(
+                    tags.mark(
                         surface,
-                        fragment.paint_rect(),
-                        Slice::of(fragment),
-                        style,
-                        text,
+                        page,
+                        Target::Artifact(ArtifactType::Other),
+                        |surface| {
+                            paint_box(
+                                surface,
+                                fragment.paint_rect(),
+                                Slice::of(fragment),
+                                style,
+                                text,
+                            )
+                        },
                     );
                 }
             }
@@ -210,29 +251,42 @@ fn paint_ordered(
                 let chain = clips.chain(page, Some(piece.clip_owner), piece.rect);
                 active.apply(surface, &clips, &chain);
                 let text = || text_clip::generated_outlines(piece, runs);
-                paint_box(
+                tags.mark(
                     surface,
-                    piece.rect,
-                    Slice::generated(piece),
-                    piece.style,
-                    text,
+                    page,
+                    Target::Artifact(ArtifactType::Other),
+                    |surface| {
+                        paint_box(
+                            surface,
+                            piece.rect,
+                            Slice::generated(piece),
+                            piece.style,
+                            text,
+                        )
+                    },
                 );
             }
             PaintEvent::Replaced(fragment) => {
                 let chain = clips.chain(page, Some(fragment.node()), fragment.paint_rect());
                 active.apply(surface, &clips, &chain);
-                svg.paint(surface, page, fragment, true)?;
-                raster.paint(surface, page, fragment, true)?;
+                paint_replaced(surface, page, fragment, svg, raster, tags, true)?;
             }
             PaintEvent::ColumnRule(rule) => {
                 active.clear(surface);
-                border::paint_column_rule(surface, rule);
+                tags.mark(
+                    surface,
+                    page,
+                    Target::Artifact(ArtifactType::Other),
+                    |surface| border::paint_column_rule(surface, rule),
+                );
             }
             PaintEvent::MarkerImage(owner) => {
                 if let Some(placement) = raster.marker(page, *owner) {
                     let chain = clips.chain(page, placement.clip_owner, placement.rect);
                     active.apply(surface, &clips, &chain);
-                    raster.paint_placement(surface, page, &placement, true)?;
+                    tags.mark(surface, page, Target::MarkerImage(*owner), |surface| {
+                        raster.paint_placement(surface, page, &placement, true)
+                    })?;
                 }
             }
             PaintEvent::PushClip(shape, _) => {
@@ -267,9 +321,30 @@ fn paint_ordered(
             _ => {}
         }
     }
-    paint_text_batch(surface, page, &clips, &mut active, &batch, fonts);
+    paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
     active.clear(surface);
     Ok(())
+}
+
+/// The content of a replaced element, marked as that element's content.
+fn paint_replaced(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    fragment: &raikiri_html::Fragment<'_>,
+    svg: &mut svg::SvgCache<'_>,
+    raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
+    host_group: bool,
+) -> Result<()> {
+    let mut draw = |surface: &mut Surface<'_>| {
+        svg.paint(surface, page, fragment, host_group)?;
+        raster.paint(surface, page, fragment, host_group)
+    };
+    // Other fragments draw nothing here, so they need no marked content.
+    if fragment.kind() != FragmentKind::Replaced {
+        return draw(surface);
+    }
+    tags.mark(surface, page, Target::Replaced(fragment.node()), draw)
 }
 
 /// Keep the line's decorations below or above all neighboring glyph ink.
@@ -280,6 +355,7 @@ fn paint_text_batch(
     active: &mut ClipStack,
     runs: &[&PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
+    tags: &mut Tags,
 ) {
     let dom = page.dom();
     let mut indices = HashMap::new();
@@ -316,9 +392,18 @@ fn paint_text_batch(
                 let chain = clips.chain(page, clip_owner, area);
                 active.apply(surface, clips, &chain);
                 if let Some(phase) = phase {
-                    decoration::paint(surface, &run.decorations, phase);
-                } else {
-                    paint_glyph_run(surface, run, fonts);
+                    if !run.decorations.is_empty() {
+                        tags.mark(
+                            surface,
+                            page,
+                            Target::Artifact(ArtifactType::Other),
+                            |surface| decoration::paint(surface, &run.decorations, phase),
+                        );
+                    }
+                } else if paints_glyphs(run) {
+                    tags.mark(surface, page, Target::Run(run), |surface| {
+                        paint_glyph_run(surface, run, fonts)
+                    });
                 }
             }
         }
@@ -460,13 +545,18 @@ impl FontCache {
     }
 }
 
+/// Whether [`paint_glyph_run`] draws anything for `run`.
+fn paints_glyphs(run: &PositionedGlyphRun<'_>) -> bool {
+    !run.glyphs.is_empty() && run.font_size > 0.0 && run.color.a != 0
+}
+
 /// Draw one positioned glyph run.
 ///
 /// Raikiri reports glyph advances and offsets in px with y growing downward;
 /// Krilla takes them per unit of font size and subtracts `y_offset`, so both
 /// are divided by the font size and `y_offset` changes sign.
 fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
-    if run.glyphs.is_empty() || run.font_size <= 0.0 || run.color.a == 0 {
+    if !paints_glyphs(run) {
         return;
     }
     // A face Krilla cannot parse is skipped rather than failing the page.

@@ -49,6 +49,12 @@ pub(super) struct RenderArgs {
     /// Generate PDF bookmarks from headings and supported bookmark CSS.
     #[arg(long)]
     bookmarks: bool,
+    /// Generate a tagged PDF (structure tree).
+    #[arg(long)]
+    tagged: bool,
+    /// Validate as PDF/UA-1; implies --tagged and --bookmarks.
+    #[arg(long = "pdf-ua")]
+    pdf_ua: bool,
 }
 
 impl RenderArgs {
@@ -106,7 +112,11 @@ impl RenderArgs {
         builder = builder
             .authors(self.author.iter())
             .keywords(self.keyword.iter());
-        builder.bookmarks(self.bookmarks).build()
+        builder
+            .bookmarks(self.bookmarks)
+            .tagged(self.tagged)
+            .pdf_ua(self.pdf_ua)
+            .build()
     }
 }
 

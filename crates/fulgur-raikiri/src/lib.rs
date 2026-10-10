@@ -85,7 +85,7 @@ fn draw(
         ));
     };
     let outline = config
-        .bookmarks
+        .effective_bookmarks()
         .then(|| bookmarks::outline(&document, collector));
     paint::paint_document(&document, resources, config, outline, document_url, options)
 }
@@ -125,7 +125,7 @@ fn with_layout<T>(
         .stylesheet(page_stylesheet(config))
         .network_provider(&files)
         .base_url(document_url.clone());
-    if config.bookmarks {
+    if config.effective_bookmarks() {
         resources = resources.stylesheet(bookmarks::heading_stylesheet());
     }
     if let Some(bundle) = options.assets {
@@ -138,14 +138,14 @@ fn with_layout<T>(
     }
     let document = parse_html_with_resources(html.as_slice(), &resources)
         .map_err(|error| Error::Layout(error.to_string()))?;
-    let registrations = if config.bookmarks {
+    let registrations = if config.effective_bookmarks() {
         bookmarks::registrations()
     } else {
         Vec::new()
     };
     let mut collector = bookmarks::BookmarkCollector::default();
     let mut layout_options = LayoutOptions::new().resources(&resources);
-    if config.bookmarks {
+    if config.effective_bookmarks() {
         layout_options = layout_options.consumer_properties(&registrations, &mut collector);
     }
     let status = layout(
@@ -202,3 +202,5 @@ mod assets;
 mod metadata;
 
 mod bookmarks;
+
+mod tagging;

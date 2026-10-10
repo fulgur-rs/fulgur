@@ -33,6 +33,7 @@ fn legacy_pages_keep_inline_svg_root_opacity() {
         &mut fonts,
         &mut svg,
         &mut raster,
+        &mut crate::tagging::Tags::disabled(),
     )
     .unwrap();
     surface.finish();
@@ -77,6 +78,7 @@ fn legacy_pages_keep_inline_svg_vectors() {
         &mut fonts,
         &mut svg,
         &mut raster,
+        &mut crate::tagging::Tags::disabled(),
     )
     .unwrap();
     surface.finish();
@@ -154,6 +156,7 @@ fn producer_fragmentainer_clip_is_applied_before_its_opacity_group() {
         &mut FontCache::default(),
         &mut svg::SvgCache::new(crate::RenderOptions::default()),
         &mut raster::RasterCache::new(resources.image_pixel_source_ref()),
+        &mut crate::tagging::Tags::disabled(),
     )
     .unwrap();
     surface.finish();

@@ -67,6 +67,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
             &mut fonts,
             &mut svg,
             &mut raster,
+            &mut crate::tagging::Tags::disabled(),
         )
         .unwrap();
         surface.finish();
@@ -176,6 +177,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
             &mut fonts,
             &mut svg,
             &mut raster,
+            &mut crate::tagging::Tags::disabled(),
         )
         .unwrap();
         surface.finish();

@@ -516,3 +516,34 @@ fn dev_bookmark_opt_in_creates_outline() {
         );
     }
 }
+
+#[test]
+fn dev_tagged_and_pdf_ua_create_structure_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, "<h1>Heading</h1><p>Body</p>").unwrap();
+    for engine in ["blitz", "raikiri"] {
+        for args in [
+            vec![OsStr::new("--tagged")],
+            vec![
+                OsStr::new("--pdf-ua"),
+                OsStr::new("--title"),
+                OsStr::new("Report"),
+                OsStr::new("--language"),
+                OsStr::new("en"),
+            ],
+        ] {
+            let result = run_with_args(&input, &output, Some(engine), dir.path(), &args);
+            assert!(
+                result.status.success(),
+                "{engine} {args:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                load_pdf(&output).catalog().unwrap().has(b"StructTreeRoot"),
+                "{engine} {args:?}"
+            );
+        }
+    }
+}

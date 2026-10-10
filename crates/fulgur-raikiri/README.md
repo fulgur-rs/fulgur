@@ -38,8 +38,20 @@ language, creator, producer, and creation date. The development CLI exposes
 `--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
 Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
-An omitted creation date does not insert the current time. Tagged PDF and
-PDF/UA requests through Raikiri return an explicit error.
+An omitted creation date does not insert the current time.
+
+Tagged PDF (`Config::tagged`) builds the structure tree from the DOM with the
+same HTML mapping as the Blitz backend (`fulgur_core::tagging`): headings with
+their text as title, paragraphs, generic containers as `Div`, lists with
+`Lbl`/`LBody` items, tables with header scope, images as `Figure` with their
+`alt`, and `<a href>` as `Link` holding its content and its tagged link
+annotation. Text, images and list markers are marked content of their element,
+in document order; text outside any classified element gets its own `P`.
+Backgrounds, borders, text decorations, column rules and margin boxes
+(`Header`/`Footer` for the top and bottom boxes) are artifacts, as are the
+repeated copies of table headers and `position: fixed` boxes after the page
+that first shows them. `Config::pdf_ua` adds Krilla's PDF/UA-1 validation and
+implies tagging and bookmarks.
 
 Raikiri PDF links use all quads supplied by the page API. Fragment links use
 rendered anchors (including percent-encoded names and the first duplicate

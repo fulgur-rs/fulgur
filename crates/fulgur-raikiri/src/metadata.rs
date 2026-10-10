@@ -2,11 +2,6 @@ use fulgur_core::{Config, Error, Result};
 use krilla::metadata::{DateTime, Metadata};
 
 pub(super) fn build(config: &Config) -> Result<Metadata> {
-    if config.effective_tagging() {
-        return Err(Error::PdfGeneration(
-            "Raikiri tagged PDF and PDF/UA are not supported".into(),
-        ));
-    }
     let mut metadata = Metadata::new()
         .authors(config.authors.clone())
         .keywords(config.keywords.clone());

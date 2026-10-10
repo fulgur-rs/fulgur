@@ -1,12 +1,12 @@
 use fulgur_core::{Result, units::PX_TO_PT};
 use krilla::{
     action::{Action, LinkAction},
-    annotation::{Annotation, LinkAnnotation, Target},
+    annotation::{LinkAnnotation, Target},
     destination::XyzDestination,
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{DocumentLayout, Page};
+use raikiri_html::{DocumentLayout, NodeId, Page};
 
 enum LinkTarget {
     Internal(XyzDestination),
@@ -51,11 +51,12 @@ fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Opt
     Some(LinkTarget::External(uri.into()))
 }
 
-pub(super) fn annotations(
+/// The link annotations of `page`, each with its `<a>` element.
+pub(super) fn links(
     document: &DocumentLayout,
     page: &Page<'_>,
     document_url: &url::Url,
-) -> Result<Vec<Annotation>> {
+) -> Result<Vec<(NodeId, LinkAnnotation)>> {
     let mut annotations = Vec::new();
     for link in page.links() {
         if link.target.is_empty() {
@@ -92,7 +93,7 @@ pub(super) fn annotations(
                 target.annotation_target(),
             ),
         };
-        annotations.push(Annotation::new_link(annotation, None));
+        annotations.push((link.owner, annotation));
     }
     Ok(annotations)
 }

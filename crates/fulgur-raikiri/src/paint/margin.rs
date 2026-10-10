@@ -3,14 +3,25 @@
 
 use super::shape::RoundedRect;
 use super::{FontCache, fill, paint_glyph_run};
+use crate::tagging::{Tags, Target, margin_box_artifact};
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
 use raikiri_html::{MarginBox, Page};
 
 /// Draw the margin boxes of `page` in Raikiri's order, below the page body.
-pub(super) fn paint(surface: &mut Surface<'_>, page: &Page<'_>, fonts: &mut FontCache) {
+/// Margin boxes hold running headers and footers, which tagged output marks
+/// as pagination artifacts.
+pub(super) fn paint(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    fonts: &mut FontCache,
+    tags: &mut Tags,
+) {
     for margin_box in page.margin_boxes() {
-        paint_box(surface, &margin_box, fonts);
+        let artifact = Target::Artifact(margin_box_artifact(margin_box.slot));
+        tags.mark(surface, page, artifact, |surface| {
+            paint_box(surface, &margin_box, fonts)
+        });
     }
 }
 
