@@ -4,11 +4,13 @@
 //! geometry, box backgrounds and borders, text, and resolved images. No other backend is used
 //! as a fallback.
 
+use fulgur_core::units::F32Units;
 use fulgur_core::{AssetBundle, Config, Error, Result};
 use raikiri_html::{
     LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources, layout,
     parse_html_with_resources,
 };
+use raikiri_traits::PageBox;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -219,7 +221,7 @@ fn with_layout<T>(
     }
     let status = layout(
         &document,
-        PageDefaults::default(),
+        page_defaults(config),
         layout_config,
         layout_options,
     )
@@ -227,31 +229,54 @@ fn with_layout<T>(
     consume(status, &resources, &collector, &document_url)
 }
 
-/// The page size and margins of `config` as a user-origin `@page` rule.
+/// The configured page size as the page box Raikiri uses wherever CSS leaves
+/// the size to the user agent.
 ///
-/// User declarations lose to the document's own `@page` rules, which matches
-/// Fulgur's defaults: CSS `size` and `margin` win unless the caller set them
-/// explicitly. A field marked in [`Config::overrides`] is declared
-/// `!important`, and important user declarations beat every author
-/// declaration (CSS Cascade 4 §6.2).
-///
-/// Two cases still differ from the Blitz backend: a landscape-only override
-/// keeps the document's `@page size` as declared, orientation included,
-/// because CSS cannot override the orientation of a size it does not name;
-/// and `@page { size: auto }` resolves to A4 rather than the configured size.
-fn page_stylesheet(config: &Config) -> String {
-    let overrides = config.overrides;
-    let size = if config.landscape {
+/// That covers no `@page size`, `size: auto`, and an orientation alone
+/// (`size: landscape`), which rotates this box. This matches the Blitz backend,
+/// where the configured size is the default and `auto` means that size.
+fn page_defaults(config: &Config) -> PageDefaults {
+    let size = configured_page_size(config);
+    let mut page_box = PageBox::new();
+    page_box.width = size.width.as_pt().in_px().to_f32();
+    page_box.height = size.height.as_pt().in_px().to_f32();
+    PageDefaults::builder().page_box(page_box).build()
+}
+
+fn configured_page_size(config: &Config) -> fulgur_core::PageSize {
+    if config.landscape {
         config.page_size.landscape()
     } else {
         config.page_size
-    };
-    let size_priority = important(overrides.page_size);
+    }
+}
+
+/// The margins of `config`, and its page size when explicitly set, as a
+/// user-origin `@page` rule.
+///
+/// User declarations lose to the document's own `@page` rules, which matches
+/// Fulgur's defaults: CSS `margin` wins unless the caller set it explicitly.
+/// The default page size comes from [`page_defaults`] instead, so that
+/// `size: auto` and an orientation alone also resolve against it. A field
+/// marked in [`Config::overrides`] is declared `!important`, and important
+/// user declarations beat every author declaration (CSS Cascade 4 §6.2).
+///
+/// One case still differs from the Blitz backend: a landscape-only override
+/// keeps a document size that names an orientation or dimensions as
+/// declared, because CSS cannot override the orientation of a size it does
+/// not name.
+fn page_stylesheet(config: &Config) -> String {
     let margin = config.margin;
-    let margin_priority = important(overrides.margin);
+    let margin_priority = important(config.overrides.margin);
+    let size = if config.overrides.page_size {
+        let size = configured_page_size(config);
+        format!("size: {}pt {}pt !important; ", size.width, size.height)
+    } else {
+        String::new()
+    };
     format!(
-        "@page {{ size: {}pt {}pt{size_priority}; margin: {}pt {}pt {}pt {}pt{margin_priority}; }}",
-        size.width, size.height, margin.top, margin.right, margin.bottom, margin.left,
+        "@page {{ {size}margin: {}pt {}pt {}pt {}pt{margin_priority}; }}",
+        margin.top, margin.right, margin.bottom, margin.left,
     )
 }
 

@@ -1444,6 +1444,50 @@ fn landscape_only_override_keeps_the_document_page_size() {
 }
 
 #[test]
+fn ua_chosen_page_sizes_use_the_configured_page_size() {
+    let letter = Config {
+        page_size: PageSize::LETTER,
+        ..Config::default()
+    };
+    let landscape_letter = Config {
+        landscape: true,
+        ..letter.clone()
+    };
+    for (css, config, expected) in [
+        ("auto", &letter, (816.0, 1056.0)),
+        ("landscape", &letter, (1056.0, 816.0)),
+        ("portrait", &letter, (816.0, 1056.0)),
+        ("auto", &landscape_letter, (1056.0, 816.0)),
+        ("portrait", &landscape_letter, (816.0, 1056.0)),
+    ] {
+        let (_dir, path) = input(&format!(
+            "<style>@page {{ size: {css} }}</style><p>Hello</p>"
+        ));
+        let (width, height, _) = first_page_geometry(&path, config);
+        assert_near(width, expected.0);
+        assert_near(height, expected.1);
+    }
+}
+
+#[test]
+fn landscape_only_override_rotates_an_auto_page_size() {
+    let (_dir, path) = input("<style>@page { size: auto }</style><p>Hello</p>");
+    let config = Config::builder().landscape(true).build();
+    let (width, height, _) = first_page_geometry(&path, &config);
+    assert_near(width, 297.0 * 96.0 / 25.4);
+    assert_near(height, 210.0 * 96.0 / 25.4);
+}
+
+#[test]
+fn page_size_override_wins_over_document_orientation() {
+    let (_dir, path) = input("<style>@page { size: landscape }</style><p>Hello</p>");
+    let config = Config::builder().page_size(PageSize::A5).build();
+    let (width, height, _) = first_page_geometry(&path, &config);
+    assert_near(width, 148.0 * 96.0 / 25.4);
+    assert_near(height, 210.0 * 96.0 / 25.4);
+}
+
+#[test]
 fn input_path_without_a_file_name_is_a_layout_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("..");
