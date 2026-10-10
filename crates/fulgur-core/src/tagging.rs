@@ -2,8 +2,10 @@
 //!
 //! Carries a fulgur-internal classification of HTML elements that each
 //! backend's render pass and StructTree builder translate into Krilla
-//! `Tag` / `ContentTag` calls. It depends only on Krilla, so the Blitz and
-//! Raikiri backends map HTML semantics the same way.
+//! `Tag` / `ContentTag` calls. It does not depend on Krilla, so the Blitz
+//! and Raikiri backends map HTML semantics the same way even when they build
+//! against different Krilla versions; each backend converts [`PdfTag`] to its
+//! own Krilla `TagKind`.
 //!
 //! See `docs/plans/2026-05-03-tagged-pdf-drawables-redesign.md` for the
 //! design and `docs/plans/2026-04-22-tagged-pdf-krilla-api-design.md`
@@ -14,12 +16,9 @@
 /// and `LBody` children of a list item).
 pub type NodeId = usize;
 
-/// Subset of Krilla `tagging::Tag` variants that fulgur intends to map
-/// HTML semantics to. Render-side translation to the Krilla type
-/// happens in `fulgur-izp.5`; until then this enum is convert-side
-/// only, so it intentionally avoids carrying Krilla-specific types
-/// (alt text, heading title) — those flow from the DOM at render time
-/// once the wire-up lands.
+/// Subset of Krilla `tagging::Tag` variants that fulgur maps HTML
+/// semantics to. It carries no render-time data (alt text, heading
+/// title); backends take those from the DOM when they build the tree.
 /// `ListNumbering` is carried here because `ul`/`ol` distinction is
 /// known at classify time from the element local name.
 /// `TableHeaderScope` is carried here because it is determined by the
@@ -27,15 +26,11 @@ pub type NodeId = usize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfTag {
     P,
-    H {
-        level: u8,
-    },
+    H { level: u8 },
     Div,
     Span,
     Figure,
-    L {
-        numbering: krilla::tagging::ListNumbering,
-    },
+    L { numbering: ListNumbering },
     Lbl,
     LBody,
     Li,
@@ -44,11 +39,34 @@ pub enum PdfTag {
     TBody,
     TFoot,
     Tr,
-    Th {
-        scope: krilla::tagging::TableHeaderScope,
-    },
+    Th { scope: TableHeaderScope },
     Td,
     Link,
+}
+
+/// List numbering of an `L` structure element (PDF 1.7 Table 347), mirroring
+/// Krilla's `ListNumbering` so this crate stays independent of the Krilla
+/// version each backend uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListNumbering {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    LowerRoman,
+    UpperRoman,
+    LowerAlpha,
+    UpperAlpha,
+}
+
+/// Scope of a `TH` structure element (PDF 1.7 Table 349), mirroring Krilla's
+/// `TableHeaderScope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableHeaderScope {
+    Row,
+    Column,
+    Both,
 }
 
 /// Per-NodeId semantic record stored in `Drawables.semantics`.
@@ -90,10 +108,10 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
         "span" => Some(PdfTag::Span),
         "img" => Some(PdfTag::Figure),
         "ul" => Some(PdfTag::L {
-            numbering: krilla::tagging::ListNumbering::Disc,
+            numbering: ListNumbering::Disc,
         }),
         "ol" => Some(PdfTag::L {
-            numbering: krilla::tagging::ListNumbering::Decimal,
+            numbering: ListNumbering::Decimal,
         }),
         "li" => Some(PdfTag::Li),
         "table" => Some(PdfTag::Table),
@@ -102,54 +120,12 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
         "tfoot" => Some(PdfTag::TFoot),
         "tr" => Some(PdfTag::Tr),
         "th" => Some(PdfTag::Th {
-            scope: krilla::tagging::TableHeaderScope::Both,
+            scope: TableHeaderScope::Both,
         }),
         "td" => Some(PdfTag::Td),
         _ => None,
     }
 }
-
-/// Map a fulgur-internal [`PdfTag`] to the Krilla [`TagKind`] used when
-/// building the PDF StructTree.
-///
-/// `heading_title` is forwarded to [`krilla::tagging::Tag::Hn`] as the
-/// `/T` (Title) attribute required by PDF/UA-1. Pass `None` for non-heading
-/// tags or when the text is unavailable.
-///
-/// `alt_text` is forwarded to [`krilla::tagging::Tag::Figure`] as the
-/// `/Alt` attribute. `Some("")` marks a decorative image; `None` omits `/Alt`.
-pub fn pdf_tag_to_krilla_tag(
-    tag: &PdfTag,
-    heading_title: Option<String>,
-    alt_text: Option<String>,
-) -> krilla::tagging::TagKind {
-    use std::num::NonZeroU16;
-    match tag {
-        PdfTag::P => krilla::tagging::Tag::<krilla::tagging::kind::P>::P.into(),
-        PdfTag::H { level } => {
-            let level = NonZeroU16::new((*level).clamp(1, 6) as u16).unwrap();
-            krilla::tagging::Tag::Hn(level, heading_title).into()
-        }
-        PdfTag::Span => krilla::tagging::Tag::<krilla::tagging::kind::Span>::Span.into(),
-        PdfTag::Div => krilla::tagging::Tag::<krilla::tagging::kind::Div>::Div.into(),
-        PdfTag::Figure => {
-            krilla::tagging::Tag::<krilla::tagging::kind::Figure>::Figure(alt_text).into()
-        }
-        PdfTag::L { numbering } => krilla::tagging::Tag::L(*numbering).into(),
-        PdfTag::Lbl => krilla::tagging::Tag::<krilla::tagging::kind::Lbl>::Lbl.into(),
-        PdfTag::LBody => krilla::tagging::Tag::<krilla::tagging::kind::LBody>::LBody.into(),
-        PdfTag::Li => krilla::tagging::Tag::<krilla::tagging::kind::LI>::LI.into(),
-        PdfTag::Table => krilla::tagging::Tag::<krilla::tagging::kind::Table>::Table.into(),
-        PdfTag::THead => krilla::tagging::Tag::<krilla::tagging::kind::THead>::THead.into(),
-        PdfTag::TBody => krilla::tagging::Tag::<krilla::tagging::kind::TBody>::TBody.into(),
-        PdfTag::TFoot => krilla::tagging::Tag::<krilla::tagging::kind::TFoot>::TFoot.into(),
-        PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
-        PdfTag::Th { scope } => krilla::tagging::Tag::TH(*scope).into(),
-        PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
-        PdfTag::Link => krilla::tagging::Tag::<krilla::tagging::kind::Link>::Link.into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +167,6 @@ mod tests {
 
     #[test]
     fn classify_element_recognises_lists_and_tables() {
-        use krilla::tagging::ListNumbering;
         assert_eq!(
             classify_element("ul"),
             Some(PdfTag::L {
@@ -213,7 +188,7 @@ mod tests {
         assert_eq!(
             classify_element("th"),
             Some(PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Both
+                scope: TableHeaderScope::Both
             })
         );
         assert_eq!(classify_element("td"), Some(PdfTag::Td));
@@ -227,151 +202,6 @@ mod tests {
         assert_eq!(classify_element("a"), None);
         assert_eq!(classify_element("body"), None);
         assert_eq!(classify_element("html"), None);
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_p() {
-        let k = pdf_tag_to_krilla_tag(&PdfTag::P, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::P(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_headings() {
-        for level in 1u8..=6 {
-            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level }, None, None);
-            assert!(
-                matches!(k, krilla::tagging::TagKind::Hn(_)),
-                "level={level}"
-            );
-        }
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_span() {
-        let k = pdf_tag_to_krilla_tag(&PdfTag::Span, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_heading_with_title() {
-        // Heading title flows through to the Hn variant.
-        let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 2 }, Some("Chapter 1".to_owned()), None);
-        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_figure_none_alt_text() {
-        // None = alt attribute absent (not decorative).
-        let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_figure_empty_alt_text() {
-        // Some("") = decorative image.
-        let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some(String::new()));
-        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_l_decimal() {
-        let k = pdf_tag_to_krilla_tag(
-            &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Decimal,
-            },
-            None,
-            None,
-        );
-        assert!(matches!(k, krilla::tagging::TagKind::L(_)));
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_th_scope_variants() {
-        use krilla::tagging::{TableHeaderScope, TagKind};
-        for scope in [
-            TableHeaderScope::Row,
-            TableHeaderScope::Column,
-            TableHeaderScope::Both,
-        ] {
-            let k = pdf_tag_to_krilla_tag(&PdfTag::Th { scope }, None, None);
-            assert!(matches!(k, TagKind::TH(_)), "scope = {scope:?}");
-            if let TagKind::TH(tag) = k {
-                assert_eq!(tag.scope(), scope, "scope = {scope:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_covers_all_variants() {
-        use krilla::tagging::TagKind;
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Div, None, None),
-            TagKind::Div(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some("logo".to_owned())),
-            TagKind::Figure(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(
-                &PdfTag::L {
-                    numbering: krilla::tagging::ListNumbering::Disc
-                },
-                None,
-                None
-            ),
-            TagKind::L(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Lbl, None, None),
-            TagKind::Lbl(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::LBody, None, None),
-            TagKind::LBody(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Li, None, None),
-            TagKind::LI(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Table, None, None),
-            TagKind::Table(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::THead, None, None),
-            TagKind::THead(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::TBody, None, None),
-            TagKind::TBody(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::TFoot, None, None),
-            TagKind::TFoot(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Tr, None, None),
-            TagKind::TR(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(
-                &PdfTag::Th {
-                    scope: krilla::tagging::TableHeaderScope::Both
-                },
-                None,
-                None
-            ),
-            TagKind::TH(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Td, None, None),
-            TagKind::TD(_)
-        ));
-        assert!(matches!(
-            pdf_tag_to_krilla_tag(&PdfTag::Link, None, None),
-            TagKind::Link(_)
-        ));
     }
 
     // --- SemanticEntry construction and derived-trait coverage ---
@@ -446,7 +276,7 @@ mod tests {
             format!(
                 "{:?}",
                 PdfTag::L {
-                    numbering: krilla::tagging::ListNumbering::Disc
+                    numbering: ListNumbering::Disc
                 }
             )
             .contains("Disc"),
@@ -456,7 +286,7 @@ mod tests {
             format!(
                 "{:?}",
                 PdfTag::Th {
-                    scope: krilla::tagging::TableHeaderScope::Column
+                    scope: TableHeaderScope::Column
                 }
             )
             .contains("Column"),
@@ -476,7 +306,7 @@ mod tests {
     #[test]
     fn pdf_tag_clone_list_variant() {
         let original = PdfTag::L {
-            numbering: krilla::tagging::ListNumbering::Decimal,
+            numbering: ListNumbering::Decimal,
         };
         let cloned = original.clone();
         assert_eq!(original, cloned);
@@ -485,7 +315,7 @@ mod tests {
     #[test]
     fn pdf_tag_clone_th_variant() {
         let original = PdfTag::Th {
-            scope: krilla::tagging::TableHeaderScope::Row,
+            scope: TableHeaderScope::Row,
         };
         let cloned = original.clone();
         assert_eq!(original, cloned);
@@ -540,7 +370,7 @@ mod tests {
             format!(
                 "{:?}",
                 PdfTag::L {
-                    numbering: krilla::tagging::ListNumbering::Disc
+                    numbering: ListNumbering::Disc
                 }
             )
             .contains("L")
@@ -549,36 +379,11 @@ mod tests {
             format!(
                 "{:?}",
                 PdfTag::Th {
-                    scope: krilla::tagging::TableHeaderScope::Column
+                    scope: TableHeaderScope::Column
                 }
             )
             .contains("Th")
         );
-    }
-
-    // --- pdf_tag_to_krilla_tag heading-level clamping ---
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_heading_level_zero_clamped_to_one() {
-        // level=0 is invalid; clamp(1,6) → 1.  Verify the stored level, not just the variant.
-        let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, None, None);
-        let krilla::tagging::TagKind::Hn(tag) = k else {
-            panic!("expected TagKind::Hn for level=0");
-        };
-        assert_eq!(tag.level().get(), 1, "level=0 should clamp to H1");
-    }
-
-    #[test]
-    fn pdf_tag_to_krilla_tag_heading_level_above_max_clamped_to_six() {
-        // level=7 and level=255 are above the PDF maximum H6; both clamp to 6.
-        // Verify the stored level, not just the variant, to catch a regressed clamp.
-        for input in [7u8, 255u8] {
-            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: input }, None, None);
-            let krilla::tagging::TagKind::Hn(tag) = k else {
-                panic!("expected TagKind::Hn for level={input}");
-            };
-            assert_eq!(tag.level().get(), 6, "level={input} should clamp to H6");
-        }
     }
 
     // --- classify_element edge cases ---
@@ -637,17 +442,16 @@ mod tests {
     fn pdf_tag_partial_eq_list_numbering_inequality() {
         assert_ne!(
             PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Disc
+                numbering: ListNumbering::Disc
             },
             PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Decimal
+                numbering: ListNumbering::Decimal
             }
         );
     }
 
     #[test]
     fn pdf_tag_partial_eq_th_scope_inequality() {
-        use krilla::tagging::TableHeaderScope;
         assert_ne!(
             PdfTag::Th {
                 scope: TableHeaderScope::Row
@@ -670,13 +474,13 @@ mod tests {
     fn pdf_tag_partial_eq_field_variants_vs_unit_variants() {
         assert_ne!(
             PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Disc
+                numbering: ListNumbering::Disc
             },
             PdfTag::Li
         );
         assert_ne!(
             PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Both
+                scope: TableHeaderScope::Both
             },
             PdfTag::Td
         );

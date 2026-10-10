@@ -9,13 +9,12 @@
 //! as tagged annotations of their `<a>` element. After the last page the
 //! structure tree is assembled in document order.
 
-use fulgur_core::tagging::{PdfTag, classify_element, pdf_tag_to_krilla_tag};
+use fulgur_core::tagging::{ListNumbering, PdfTag, TableHeaderScope, classify_element};
 use krilla::annotation::{Annotation, LinkAnnotation};
 use krilla::page::Page as PdfPage;
 use krilla::surface::Surface;
 use krilla::tagging::{
-    ArtifactType, ContentTag, Identifier, ListNumbering, Node, SpanTag, TableHeaderScope, TagGroup,
-    TagTree,
+    ArtifactType, ContentTag, Identifier, Node, SpanTag, Tag, TagGroup, TagKind, TagTree,
 };
 use raikiri_html::computed::{ComputedListStyleType, ComputedVisibility};
 use raikiri_html::{
@@ -330,6 +329,52 @@ fn list_numbering(style: &ComputedListStyleType) -> ListNumbering {
     }
 }
 
+/// The Krilla structure type of `tag`. Kept in this crate rather than in
+/// `fulgur_core` so that the backend can move to another Krilla version on
+/// its own.
+fn krilla_tag(tag: &PdfTag, title: Option<String>, alt: Option<String>) -> TagKind {
+    use krilla::tagging::{ListNumbering as KN, TableHeaderScope as KS, kind};
+    match tag {
+        PdfTag::P => Tag::<kind::P>::P.into(),
+        PdfTag::H { level } => {
+            let level = std::num::NonZeroU16::new(u16::from((*level).clamp(1, 6)))
+                .unwrap_or(std::num::NonZeroU16::MIN);
+            Tag::Hn(level, title).into()
+        }
+        PdfTag::Div => Tag::<kind::Div>::Div.into(),
+        PdfTag::Span => Tag::<kind::Span>::Span.into(),
+        PdfTag::Figure => Tag::<kind::Figure>::Figure(alt).into(),
+        PdfTag::L { numbering } => Tag::L(match numbering {
+            ListNumbering::None => KN::None,
+            ListNumbering::Disc => KN::Disc,
+            ListNumbering::Circle => KN::Circle,
+            ListNumbering::Square => KN::Square,
+            ListNumbering::Decimal => KN::Decimal,
+            ListNumbering::LowerRoman => KN::LowerRoman,
+            ListNumbering::UpperRoman => KN::UpperRoman,
+            ListNumbering::LowerAlpha => KN::LowerAlpha,
+            ListNumbering::UpperAlpha => KN::UpperAlpha,
+        })
+        .into(),
+        PdfTag::Lbl => Tag::<kind::Lbl>::Lbl.into(),
+        PdfTag::LBody => Tag::<kind::LBody>::LBody.into(),
+        PdfTag::Li => Tag::<kind::LI>::LI.into(),
+        PdfTag::Table => Tag::<kind::Table>::Table.into(),
+        PdfTag::THead => Tag::<kind::THead>::THead.into(),
+        PdfTag::TBody => Tag::<kind::TBody>::TBody.into(),
+        PdfTag::TFoot => Tag::<kind::TFoot>::TFoot.into(),
+        PdfTag::Tr => Tag::<kind::TR>::TR.into(),
+        PdfTag::Th { scope } => Tag::TH(match scope {
+            TableHeaderScope::Row => KS::Row,
+            TableHeaderScope::Column => KS::Column,
+            TableHeaderScope::Both => KS::Both,
+        })
+        .into(),
+        PdfTag::Td => Tag::<kind::TD>::TD.into(),
+        PdfTag::Link => Tag::<kind::Link>::Link.into(),
+    }
+}
+
 struct Tagger {
     structure: Structure,
     /// Structure elements created for content outside every classified
@@ -481,7 +526,7 @@ impl Tagger {
 
     fn group(&mut self, index: usize) -> TagGroup {
         let element = &mut self.structure.elements[index];
-        let mut group = TagGroup::new(pdf_tag_to_krilla_tag(
+        let mut group = TagGroup::new(krilla_tag(
             &element.tag,
             element.title.take(),
             element.alt.take(),
