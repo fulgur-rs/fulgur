@@ -1502,3 +1502,46 @@ mod bookmark_tests;
 mod order_tests;
 
 mod decoration_tests;
+
+#[test]
+fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
+    let (pdf, operations) = operations(
+        "<style>@page { size: 300px 200px; margin: 40px; \
+           @bottom-center { content: 'p.' counter(page) } } \
+         @page :first { @top-center { content: 'FIRST'; background-color: rgb(0, 0, 255); \
+           border-bottom: 2px solid rgb(0, 255, 0) } @bottom-center { content: none } \
+           @left-middle { content: ''; border: 1px solid rgb(255, 0, 0) } } \
+         body { margin: 0 } div { height: 120px }</style>\
+         <div>one</div><div>two</div>",
+    );
+    assert_eq!(pdf.get_pages().len(), 2);
+    let colors = fill_colors(&operations);
+    assert!(colors.contains(&[0, 0, 255]), "{colors:?}");
+    assert!(colors.contains(&[0, 255, 0]), "{colors:?}");
+    // The empty left-middle box still draws its four border sides.
+    assert_eq!(
+        colors.iter().filter(|color| **color == [255, 0, 0]).count(),
+        4,
+        "{colors:?}"
+    );
+    let first = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(
+        first.split_whitespace().collect::<Vec<_>>(),
+        ["FIRST", "one"]
+    );
+    let second = pdf.extract_text(&[2]).expect("extractable text");
+    assert_eq!(
+        second.split_whitespace().collect::<Vec<_>>(),
+        ["p.2", "two"]
+    );
+    // The margin box text is clipped to its border box (the 220 x 40 px
+    // top-center strip of the first page).
+    assert!(
+        clip_bounds(&operations).iter().any(|bounds| bounds
+            .iter()
+            .zip([40.0, 0.0, 260.0, 40.0])
+            .all(|(value, expected)| (value - expected).abs() < 0.01)),
+        "{:?}",
+        clip_bounds(&operations)
+    );
+}
