@@ -16,9 +16,9 @@ krilla-svg = "0.7.0"
 usvg = "0.45"
 skrifa = "0.45"
 fulgur-core = { path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "3e2c4a32d5ce0ea5dfe70c67b2d5d75ef8b9d623" }
-raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "3e2c4a32d5ce0ea5dfe70c67b2d5d75ef8b9d623" }
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "3e2c4a32d5ce0ea5dfe70c67b2d5d75ef8b9d623" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "217f87063854bc5f6da13dce7ab2fe4d516f74a6" }
+raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "217f87063854bc5f6da13dce7ab2fe4d516f74a6" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "217f87063854bc5f6da13dce7ab2fe4d516f74a6" }
 url = "2.5"
 percent-encoding = "2"
 
