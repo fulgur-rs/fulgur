@@ -175,14 +175,45 @@ fn is_decorative_image(dom: DomView<'_>, node: NodeId) -> bool {
             .is_some_and(|alt| alt.trim().is_empty())
 }
 
-/// The accessible name of the link or heading `node`: its text, else its
+/// The accessible name of the link or heading `node`: the text of the
+/// elements its `aria-labelledby` refers to, else its text, else its
 /// `aria-label` or `title`, else the `alt` text of an image inside it.
 fn accessible_name(dom: DomView<'_>, node: NodeId) -> Option<String> {
     let nonempty = |text: &str| Some(text.trim().to_owned()).filter(|text| !text.is_empty());
-    nonempty(&dom.text_content(node))
+    dom.attr(node, "aria-labelledby")
+        .and_then(|ids| labelled_by(dom, ids))
+        .and_then(|text| nonempty(&text))
+        .or_else(|| nonempty(&dom.text_content(node)))
         .or_else(|| dom.attr(node, "aria-label").and_then(nonempty))
         .or_else(|| dom.attr(node, "title").and_then(nonempty))
         .or_else(|| image_alt(dom, node, 0))
+}
+
+/// The text of the elements named by the space-separated ID list `ids`,
+/// joined with spaces, following accname §2C. IDs that match no element
+/// are skipped.
+fn labelled_by(dom: DomView<'_>, ids: &str) -> Option<String> {
+    let parts: Vec<String> = ids
+        .split_ascii_whitespace()
+        .filter_map(|id| element_by_id(dom, id))
+        .map(|element| dom.text_content(element).trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// The first element in tree order whose `id` is `id`.
+fn element_by_id(dom: DomView<'_>, id: &str) -> Option<NodeId> {
+    let mut stack = vec![dom.root()];
+    while let Some(node) = stack.pop() {
+        if dom.kind(node) == Some(NodeKind::Element) && dom.attr(node, "id") == Some(id) {
+            return Some(node);
+        }
+        let start = stack.len();
+        stack.extend(dom.children(node));
+        stack[start..].reverse();
+    }
+    None
 }
 
 fn image_alt(dom: DomView<'_>, node: NodeId, depth: usize) -> Option<String> {

@@ -471,6 +471,22 @@ fn headings_without_text_take_their_accessible_name() {
 }
 
 #[test]
+fn aria_labelledby_names_links_and_headings() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<p id='a'>Chapter</p><p id='b'>One</p><h1 aria-labelledby='a missing b'></h1>\
+         <p><a href='https://example.com/' aria-labelledby='b' style='display:inline-block;width:20px;height:10px'></a></p>",
+        &config,
+    );
+    assert_eq!(text(elements(&pdf, b"H1")[0], b"T"), "Chapter One");
+    let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+    let annotation = resolve(&pdf, &page.get(b"Annots").unwrap().as_array().unwrap()[0])
+        .as_dict()
+        .unwrap();
+    assert_eq!(text(annotation, b"Contents"), "One");
+}
+
+#[test]
 fn pdf_ua_takes_the_language_from_the_html() {
     let config = Config::builder().pdf_ua(true).title("T").build();
     let pdf = tagged_pdf("<html lang='ja'><body><p>本文</p></body></html>", &config);
