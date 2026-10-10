@@ -398,6 +398,58 @@ fn dev_assets_css_and_fonts() {
 }
 
 #[test]
+fn dev_assets_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(
+        &input,
+        "<style>@page{size:200px 200px;margin:0}body{margin:0}</style>\
+         <img src='img/dot.png'>\
+         <div style='width:16px;height:8px;background-image:url(img/dot.png)'></div>",
+    )
+    .unwrap();
+    let image =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/list-style-image/bullet.png");
+    let spec = format!("img/dot.png={}", image.display());
+    for engine in ["blitz", "raikiri"] {
+        let result = run_with_args(
+            &input,
+            &output,
+            Some(engine),
+            dir.path(),
+            &[OsStr::new("--image"), OsStr::new(&spec)],
+        );
+        assert!(
+            result.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let pdf = load_pdf(&output);
+        let images = pdf
+            .objects
+            .values()
+            .filter_map(|object| object.as_stream().ok())
+            .filter(|stream| {
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .is_ok_and(|subtype| subtype.as_name().is_ok_and(|name| name == b"Image"))
+            })
+            .count();
+        assert!(images > 0, "{engine}: no image XObject");
+    }
+    let result = run_with_args(
+        &input,
+        &output,
+        Some("raikiri"),
+        dir.path(),
+        &[OsStr::new("--image"), OsStr::new("no-separator")],
+    );
+    assert!(!result.status.success());
+}
+
+#[test]
 fn dev_assets_invalid_font_does_not_write_output() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.html");
@@ -514,5 +566,75 @@ fn dev_bookmark_opt_in_creates_outline() {
             load_pdf(&output).catalog().unwrap().has(b"Outlines"),
             "{engine}"
         );
+    }
+}
+
+#[test]
+fn raikiri_stream_writes_pdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, HTML).unwrap();
+    let result = run_with_args(
+        &input,
+        &output,
+        Some("raikiri"),
+        dir.path(),
+        &[OsStr::new("--stream")],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(load_pdf(&output).get_pages().len(), 1);
+}
+
+#[test]
+fn stream_requires_raikiri() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, HTML).unwrap();
+    let result = run_with_args(
+        &input,
+        &output,
+        Some("blitz"),
+        dir.path(),
+        &[OsStr::new("--stream")],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--stream"));
+    assert!(!output.exists());
+}
+
+#[test]
+fn dev_tagged_and_pdf_ua_create_structure_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, "<h1>Heading</h1><p>Body</p>").unwrap();
+    for engine in ["blitz", "raikiri"] {
+        for args in [
+            vec![OsStr::new("--tagged")],
+            vec![
+                OsStr::new("--pdf-ua"),
+                OsStr::new("--title"),
+                OsStr::new("Report"),
+                OsStr::new("--language"),
+                OsStr::new("en"),
+            ],
+        ] {
+            let result = run_with_args(&input, &output, Some(engine), dir.path(), &args);
+            assert!(
+                result.status.success(),
+                "{engine} {args:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                load_pdf(&output).catalog().unwrap().has(b"StructTreeRoot"),
+                "{engine} {args:?}"
+            );
+        }
     }
 }

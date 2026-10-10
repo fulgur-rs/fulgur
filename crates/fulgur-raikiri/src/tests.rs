@@ -99,9 +99,11 @@ fn already_aborted_layout_returns_aborted() {
     assert!(matches!(
         draw(
             status,
+            &RenderResources::new(),
             &Config::default(),
-            &bookmarks::BookmarkCollector::default(),
+            bookmarks::BookmarkCollector::default(),
             &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
+            &RenderOptions::default(),
         ),
         Err(Error::Layout(_))
     ));
@@ -199,12 +201,69 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
 
+#[test]
+fn margin_boxes_draw_the_running_element_of_each_page() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; @top-center { content: element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } \
+         .hdr { position: running(hdr); background: rgb(0, 128, 0) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>\
+         <div class=\"hdr\">Beta</div><p style=\"break-before: page\">two</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let words = |page: u32| {
+        let text = pdf.extract_text(&[page]).expect("extractable text");
+        text.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // Each page shows its own header, drawn before the page body, instead of
+    // the document-wide text of the last header.
+    assert_eq!(words(1), ["Alpha", "one"]);
+    assert_eq!(words(2), ["Beta", "two"]);
+    // The element is drawn as laid out, with its background.
+    let content = pdf
+        .get_page_content(*pdf.get_pages().get(&1).unwrap())
+        .unwrap();
+    let operations = lopdf::content::Content::decode(&content)
+        .unwrap()
+        .operations;
+    assert!(fill_colors(&operations).contains(&[0, 128, 0]));
+}
+
+#[test]
+fn an_element_combined_with_other_content_draws_the_box_text() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; \
+         @top-center { content: \"Chapter: \" element(hdr) } } \
+         body { margin: 0 } p { margin: 0 } .hdr { position: running(hdr) }</style>\
+         <div class=\"hdr\">Alpha</div><p>one</p>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    // `element()` cannot be combined with other values (CSS GCPM 3 §1.2.1):
+    // the box keeps its flattened text rather than losing the literal.
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>(),
+        ["Chapter:", "Alpha", "one"]
+    );
+}
+
 /// Render `html` and decode the drawing operations of every content stream:
 /// page contents and Form XObjects (Krilla draws some fills, such as
 /// translucent ones, through those).
 fn operations(html: &str) -> (lopdf::Document, Vec<lopdf::content::Operation>) {
+    operations_with(html, &RenderOptions::default())
+}
+
+fn operations_with(
+    html: &str,
+    options: &RenderOptions<'_>,
+) -> (lopdf::Document, Vec<lopdf::content::Operation>) {
     let (_dir, path) = input(html);
-    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let bytes = render_with_options(&path, &Config::default(), options).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let mut operations = Vec::new();
     for page in pdf.get_pages().values() {
@@ -864,16 +923,16 @@ fn background_clip_selects_the_painting_area() {
     assert_eq!(fills("border-box"), [20.0, 20.0]);
     assert_eq!(fills("padding-box"), [25.0, 25.0]);
     assert_eq!(fills("content-box"), [35.0, 35.0]);
-    // A percentage padding has no containing block width here and counts as
-    // zero, leaving the padding box.
+    // A percentage padding refers to the containing block's width: 10% of
+    // the 260px page area is 26px, read back from the layout's content box.
     let (_, operations) = operations(&format!(
-        "{CSS}<p style=\"border: 5px solid transparent; padding: 10%; \
+        "{CSS}<p style=\"border: 5px solid transparent; padding: 5px 10%; \
          background-color: rgb(0, 128, 0); background-clip: content-box\"></p>"
     ));
     let first_move = operations.iter().find(|op| op.operator == "m").unwrap();
     assert_eq!(
         floats(&lopdf::Object::Array(first_move.operands.clone())),
-        [25.0, 25.0]
+        [51.0, 30.0]
     );
 }
 
@@ -1132,15 +1191,11 @@ fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
         .find(|f| page.dom().local_name(f.node()) == Some("body"))
         .unwrap()
         .paint_rect();
-    assert_eq!(
-        clip_bounds(&clipped),
-        [[
-            body.x + 5.0,
-            body.y + 5.0,
-            body.x + body.width - 5.0,
-            body.y + body.height - 5.0
-        ]]
-    );
+    assert_eq!(body, raikiri_html::PaintRect::new(20.0, 20.0, 260.0, 160.0));
+    // The body's content-box minimum is 160px; its two 5px borders make
+    // the whole box 170px tall. The page cuts the visible fragment, while
+    // the overflow clip keeps the whole padding box below the page cut.
+    assert_eq!(clip_bounds(&clipped), [[25.0, 25.0, 275.0, 185.0]]);
 }
 
 /// Decoded operations of one page's content stream.
@@ -1396,6 +1451,50 @@ fn landscape_only_override_keeps_the_document_page_size() {
 }
 
 #[test]
+fn ua_chosen_page_sizes_use_the_configured_page_size() {
+    let letter = Config {
+        page_size: PageSize::LETTER,
+        ..Config::default()
+    };
+    let landscape_letter = Config {
+        landscape: true,
+        ..letter.clone()
+    };
+    for (css, config, expected) in [
+        ("auto", &letter, (816.0, 1056.0)),
+        ("landscape", &letter, (1056.0, 816.0)),
+        ("portrait", &letter, (816.0, 1056.0)),
+        ("auto", &landscape_letter, (1056.0, 816.0)),
+        ("portrait", &landscape_letter, (816.0, 1056.0)),
+    ] {
+        let (_dir, path) = input(&format!(
+            "<style>@page {{ size: {css} }}</style><p>Hello</p>"
+        ));
+        let (width, height, _) = first_page_geometry(&path, config);
+        assert_near(width, expected.0);
+        assert_near(height, expected.1);
+    }
+}
+
+#[test]
+fn landscape_only_override_rotates_an_auto_page_size() {
+    let (_dir, path) = input("<style>@page { size: auto }</style><p>Hello</p>");
+    let config = Config::builder().landscape(true).build();
+    let (width, height, _) = first_page_geometry(&path, &config);
+    assert_near(width, 297.0 * 96.0 / 25.4);
+    assert_near(height, 210.0 * 96.0 / 25.4);
+}
+
+#[test]
+fn page_size_override_wins_over_document_orientation() {
+    let (_dir, path) = input("<style>@page { size: landscape }</style><p>Hello</p>");
+    let config = Config::builder().page_size(PageSize::A5).build();
+    let (width, height, _) = first_page_geometry(&path, &config);
+    assert_near(width, 148.0 * 96.0 / 25.4);
+    assert_near(height, 210.0 * 96.0 / 25.4);
+}
+
+#[test]
 fn input_path_without_a_file_name_is_a_layout_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("..");
@@ -1499,6 +1598,56 @@ mod metadata_tests;
 
 mod navigation_tests;
 
+mod html_input_tests;
+
 mod bookmark_tests;
 
 mod order_tests;
+
+mod decoration_tests;
+
+mod stream_tests;
+mod text_shadow_tests;
+
+#[test]
+fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
+    let (pdf, operations) = operations(
+        "<style>@page { size: 300px 200px; margin: 40px; \
+           @bottom-center { content: 'p.' counter(page) } } \
+         @page :first { @top-center { content: 'FIRST'; background-color: rgb(0, 0, 255); \
+           border-bottom: 2px solid rgb(0, 255, 0) } @bottom-center { content: none } \
+           @left-middle { content: ''; border: 1px solid rgb(255, 0, 0) } } \
+         body { margin: 0 } div { height: 120px }</style>\
+         <div>one</div><div>two</div>",
+    );
+    assert_eq!(pdf.get_pages().len(), 2);
+    let colors = fill_colors(&operations);
+    assert!(colors.contains(&[0, 0, 255]), "{colors:?}");
+    assert!(colors.contains(&[0, 255, 0]), "{colors:?}");
+    // The empty left-middle box still draws its four border sides.
+    assert_eq!(
+        colors.iter().filter(|color| **color == [255, 0, 0]).count(),
+        4,
+        "{colors:?}"
+    );
+    let first = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(
+        first.split_whitespace().collect::<Vec<_>>(),
+        ["FIRST", "one"]
+    );
+    let second = pdf.extract_text(&[2]).expect("extractable text");
+    assert_eq!(
+        second.split_whitespace().collect::<Vec<_>>(),
+        ["p.2", "two"]
+    );
+    // The margin box text is clipped to its border box (the 220 x 40 px
+    // top-center strip of the first page).
+    assert!(
+        clip_bounds(&operations).iter().any(|bounds| bounds
+            .iter()
+            .zip([40.0, 0.0, 260.0, 40.0])
+            .all(|(value, expected)| (value - expected).abs() < 0.01)),
+        "{:?}",
+        clip_bounds(&operations)
+    );
+}

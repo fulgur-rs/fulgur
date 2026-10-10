@@ -50,7 +50,17 @@ use individual TTF/OTF fonts or WOFF2.
 `--no-system-fonts` requires a bundled font. Raikiri registers bundle CSS as
 user stylesheets based on the input document URL; a CSS argument's file path
 is not retained as stylesheet provenance. Linked stylesheets resolve imports
-from their own URLs. Image bundles are unsupported by the Raikiri painter.
+from their own URLs.
+
+`--image NAME=PATH` (repeatable) bundles an image. With Raikiri the image is a
+file at the URL NAME resolves to against the input file's directory, and
+documents reach it with browser URL resolution: `--image img/logo.png=...`
+serves `<img src="img/logo.png">` and a `url(img/logo.png)` in an inline
+style, while `url(img/logo.png)` in `css/print.css` names `css/img/logo.png`.
+Blitz looks images up by the authored reference instead, so the two engines
+can differ for stylesheets outside the input directory. Raikiri draws `url()`
+backgrounds with the same tile geometry as its own painter; an SVG background
+is rasterized at its used size.
 
 PDF metadata supports title, repeated authors and keywords, description,
 language, creator, producer, and creation date. The development CLI exposes
@@ -58,8 +68,11 @@ language, creator, producer, and creation date. The development CLI exposes
 `--language`, `--creator`, `--producer`, and `--creation-date` for both engines.
 Raikiri validates dates in `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or
 `YYYY-MM-DDThh:mm:ss` (optional `Z`) form, including calendar validity.
-An omitted creation date does not insert the current time. Tagged PDF and
-PDF/UA requests through Raikiri return an explicit error.
+An omitted creation date does not insert the current time.
+
+`--tagged` generates a tagged PDF and `--pdf-ua` validates the output as
+PDF/UA-1 (implying `--tagged` and `--bookmarks`), for both engines. See the
+`fulgur-raikiri` README for what the Raikiri backend tags.
 
 Raikiri PDF links retain all quads supplied by the page API in one annotation
 per link per page. Fragment links use
@@ -79,22 +92,13 @@ Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
 counter/string labels, and general display:contents box suppression are not
 implemented in this backend. Aborted layout or callback errors return no PDF.
 
-Raikiri pages whose text nodes each map to one paint event use page paint order
-for boxes and text, with opacity composited as groups. Rounded and axis-aware
-clips retain the existing geometry. Generated content, duplicate or missing
-text events, and unknown run sources use the legacy rendering for the entire
-page, preserving text. Replaced/image content is still unsupported. The
-current pinned API exposes no ellipsis source; existing text-overflow output
-is preserved without claiming ellipsis rendering support.
-
-For pages whose events cover all ordinary text runs, Raikiri follows
-`Page::paint_order()` and composites opacity groups. It keeps the existing
-rounded and per-axis overflow geometry. Pages with generated text, repeated
-text events, or missing run events use the previous painter for the whole page
-to preserve their text. The pinned API has no ellipsis source variant; current
-`text-overflow:ellipsis` output remains at its existing baseline. Replaced
-content, SVG, background images, margin boxes, and generated-content ordering
-remain outside this development backend's supported API.
+Raikiri follows `Page::paint_order_for_text_runs()` when its events cover all
+page text lines, including generated text, anonymous text and ellipses. Each
+line is emitted once, and opacity is composited as groups. The backend retains
+its rounded and per-axis overflow geometry. Pages with incomplete line events
+or unknown run sources use the legacy painter for the whole page to preserve
+text. Replaced content, SVG, background images and margin boxes remain outside
+this development backend's supported API.
 
 ## Development validation
 

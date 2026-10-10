@@ -3,6 +3,10 @@
 use std::process::Command;
 
 fn raster(html: &str) -> image::RgbaImage {
+    raster_page(html, 1)
+}
+
+fn raster_page(html: &str, page: u32) -> image::RgbaImage {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.html");
     let pdf = dir.path().join("output.pdf");
@@ -20,8 +24,9 @@ fn raster(html: &str) -> image::RgbaImage {
         "{}",
         String::from_utf8_lossy(&render.stderr)
     );
+    let page = page.to_string();
     let output = Command::new("pdftocairo")
-        .args(["-png", "-singlefile", "-r", "96"])
+        .args(["-png", "-singlefile", "-r", "96", "-f", &page, "-l", &page])
         .arg(&pdf)
         .arg(&prefix)
         .output()
@@ -89,4 +94,26 @@ fn rounded_and_axis_clips_keep_inside_and_outside_colors() {
     assert_color(&image, 120, 30, [0, 0, 255, 255]);
     assert_color(&image, 120, 70, [0, 0, 255, 255]);
     assert_color(&image, 155, 30, [255, 255, 255, 255]);
+}
+
+#[test]
+fn percentage_overflow_curves_keep_the_whole_box_across_page_cuts() {
+    let html = "<style>@page{size:200px 100px;margin:0}body{margin:0;background:white}section{position:relative;box-sizing:border-box;width:100px;height:150px;border:4px solid transparent;border-radius:50%;overflow:hidden;opacity:.5}div{width:100px;height:150px;background:red}.overlap{position:absolute;left:0;top:0}</style><section><div></div><div class=overlap></div></section>";
+    let first = raster_page(html, 1);
+    assert_color(&first, 10, 30, [255; 4]);
+    assert_color(&first, 30, 30, [255, 128, 128, 255]);
+    assert_color(&first, 50, 90, [255, 128, 128, 255]);
+    let second = raster_page(html, 2);
+    assert_color(&second, 10, 20, [255; 4]);
+    assert_color(&second, 30, 20, [255, 128, 128, 255]);
+    assert_color(&second, 50, 40, [255, 128, 128, 255]);
+    assert_color(&second, 50, 48, [255; 4]);
+}
+
+#[test]
+fn open_axis_ancestor_clip_survives_without_an_own_box_on_the_next_page() {
+    let html = "<style>@page{size:200px 100px;margin:0}body{margin:0;background:white}#parent{width:40px;height:20px;overflow-x:clip;overflow-y:visible;opacity:.5}#child{width:80px;height:150px;background:blue;opacity:.5}</style><div id=parent><div id=child></div></div><div style='height:150px'></div>";
+    let second = raster_page(html, 2);
+    assert_color(&second, 10, 30, [191, 191, 255, 255]);
+    assert_color(&second, 60, 30, [255; 4]);
 }

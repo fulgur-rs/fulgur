@@ -12,13 +12,16 @@ readme = "README.md"
 
 [dependencies]
 krilla = "0.7.0"
+krilla-svg = "0.7.0"
+usvg = "0.45"
+tiny-skia = "0.11"
 skrifa = "0.47"
 fulgur-core = { path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "5783e542d5a64b86cc762755b2ddb0982898b613" }
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "5783e542d5a64b86cc762755b2ddb0982898b613" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
+raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
 url = "2.5"
 percent-encoding = "2"
-
-[dev-dependencies]
-tempfile = "3"
 lopdf = "0.42"
+flpdf = "0.10"
+tempfile = "3"
