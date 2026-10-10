@@ -1,12 +1,14 @@
 use fulgur_core::{Config, Error, Result};
 use krilla::metadata::{DateTime, Metadata};
 
-pub(super) fn build(config: &Config) -> Result<Metadata> {
+/// The document metadata. `html_title` is the document's `<title>`, used
+/// when the configuration sets no title.
+pub(super) fn build(config: &Config, html_title: Option<String>) -> Result<Metadata> {
     let mut metadata = Metadata::new()
         .authors(config.authors.clone())
         .keywords(config.keywords.clone());
-    if let Some(value) = &config.title {
-        metadata = metadata.title(value.clone());
+    if let Some(value) = config.title.clone().or(html_title) {
+        metadata = metadata.title(value);
     }
     if let Some(value) = &config.description {
         metadata = metadata.description(value.clone());

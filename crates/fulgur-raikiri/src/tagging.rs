@@ -60,6 +60,11 @@ impl Tags {
         Self(enabled.then(|| Tagger::new(document)))
     }
 
+    /// Whether the output is tagged.
+    pub(crate) fn enabled(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Untagged output, for painting tests that have no document.
     #[cfg(test)]
     pub(crate) fn disabled() -> Self {
@@ -113,6 +118,10 @@ impl Tags {
 
     /// Add a link annotation for the `<a>` element `owner`, as a tagged
     /// annotation of its `Link` structure element when there is one.
+    ///
+    /// Copies of a repeated link on later pages are tagged as well: their
+    /// content is an artifact, but PDF/UA-1 §7.18.1 requires every
+    /// annotation to be in the structure tree.
     pub(crate) fn annotate(
         &mut self,
         pdf_page: &mut PdfPage<'_>,
@@ -125,14 +134,13 @@ impl Tags {
             return;
         };
         let dom = page.dom();
-        let alt = Some(dom.text_content(owner).trim().to_owned()).filter(|text| !text.is_empty());
-        let annotation = Annotation::new_link(link, alt);
+        let annotation = Annotation::new_link(link, accessible_name(dom, owner));
         match tagger.structure.by_node.get(&owner) {
-            Some(&element) if !tagger.is_repeat_copy(dom, owner) => {
+            Some(&element) => {
                 let id = pdf_page.add_tagged_annotation(annotation);
                 tagger.annotations.entry(element).or_default().push(id);
             }
-            _ => pdf_page.add_annotation(annotation),
+            None => pdf_page.add_annotation(annotation),
         }
     }
 
@@ -140,6 +148,34 @@ impl Tags {
     pub(crate) fn finish(self, lang: Option<String>) -> Option<TagTree> {
         self.0.map(|tagger| tagger.finish(lang))
     }
+}
+
+/// The accessible name of the link `node`: its text, else its
+/// `aria-label` or `title`, else the `alt` text of an image inside it.
+fn accessible_name(dom: DomView<'_>, node: NodeId) -> Option<String> {
+    let nonempty = |text: &str| Some(text.trim().to_owned()).filter(|text| !text.is_empty());
+    nonempty(&dom.text_content(node))
+        .or_else(|| dom.attr(node, "aria-label").and_then(nonempty))
+        .or_else(|| dom.attr(node, "title").and_then(nonempty))
+        .or_else(|| image_alt(dom, node, 0))
+}
+
+fn image_alt(dom: DomView<'_>, node: NodeId, depth: usize) -> Option<String> {
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    dom.children(node).find_map(|child| {
+        if dom.kind(child) != Some(NodeKind::Element) {
+            return None;
+        }
+        if dom.local_name(child) == Some("img")
+            && let Some(alt) = dom.attr(child, "alt").map(str::trim)
+            && !alt.is_empty()
+        {
+            return Some(alt.to_owned());
+        }
+        image_alt(dom, child, depth + 1)
+    })
 }
 
 enum Mark {
@@ -217,21 +253,24 @@ impl Structure {
             return;
         }
         let mut child_parent = parent;
+        let visible = page
+            .computed(node)
+            .is_none_or(|style| matches!(style.visibility, ComputedVisibility::Visible));
         if let Some(name) = name
             && let Some(tag) = classify(page, dom, node, name)
+            // An invisible figure or heading would lack the `/Alt` or title
+            // that PDF/UA requires, and has no content of its own to tag.
+            && (visible || !matches!(tag, PdfTag::Figure | PdfTag::H { .. }))
         {
             let element = self.push(parent, tag.clone(), order);
             self.by_node.insert(node, element);
             self.content_of.insert(node, element);
             child_parent = Some(element);
-            let visible = page
-                .computed(node)
-                .is_none_or(|style| matches!(style.visibility, ComputedVisibility::Visible));
             match tag {
-                PdfTag::Figure if visible => {
+                PdfTag::Figure => {
                     self.elements[element].alt = dom.attr(node, "alt").map(str::to_owned);
                 }
-                PdfTag::H { .. } if visible => {
+                PdfTag::H { .. } => {
                     let title = dom.text_content(node).trim().to_owned();
                     self.elements[element].title = Some(title).filter(|text| !text.is_empty());
                 }
@@ -301,7 +340,11 @@ fn classify(page: &Page<'_>, dom: DomView<'_>, node: NodeId, name: &str) -> Opti
                 .map_or(numbering, |style| list_numbering(&style.list_style_type)),
         }),
         PdfTag::Th { .. } => Some(PdfTag::Th {
-            scope: match dom.attr(node, "scope") {
+            scope: match dom
+                .attr(node, "scope")
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
                 Some("row") => TableHeaderScope::Row,
                 Some("col" | "column") => TableHeaderScope::Column,
                 _ => TableHeaderScope::Both,
@@ -378,8 +421,11 @@ fn krilla_tag(tag: &PdfTag, title: Option<String>, alt: Option<String>) -> TagKi
 struct Tagger {
     structure: Structure,
     /// Structure elements created for content outside every classified
-    /// element, by the element that holds that content.
-    orphans: HashMap<Option<NodeId>, usize>,
+    /// element, by the element that holds that content and the classified
+    /// root before it, so that a classified sibling splits the paragraph.
+    orphans: HashMap<(Option<NodeId>, Option<usize>), usize>,
+    /// DOM preorder positions of the classified roots, ascending.
+    root_orders: Vec<u32>,
     annotations: HashMap<usize, Vec<Identifier>>,
     /// Nodes with a repeated fragment on the current page.
     page_repeats: HashSet<NodeId>,
@@ -390,9 +436,16 @@ struct Tagger {
 
 impl Tagger {
     fn new(document: &DocumentLayout) -> Self {
+        let structure = Structure::build(document);
+        let root_orders = structure
+            .roots
+            .iter()
+            .map(|&root| structure.elements[root].order)
+            .collect();
         Self {
-            structure: Structure::build(document),
+            structure,
             orphans: HashMap::new(),
+            root_orders,
             annotations: HashMap::new(),
             page_repeats: HashSet::new(),
             seen_repeats: HashSet::new(),
@@ -495,10 +548,13 @@ impl Tagger {
                 // Text directly inside `<body>` or another unclassified
                 // element: give it a paragraph of its own, since content
                 // cannot sit at the root of the structure tree.
+                let before = self.root_orders.partition_point(|&order| order < key);
+                let segment = before.checked_sub(1);
                 let order = element.map_or(key, |node| self.order(node).0);
+                let order = segment.map_or(order, |root| order.max(self.root_orders[root] + 1));
                 *self
                     .orphans
-                    .entry(element)
+                    .entry((element, segment))
                     .or_insert_with(|| self.structure.push(None, PdfTag::P, order))
             }
         };

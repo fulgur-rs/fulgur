@@ -34,8 +34,8 @@ use raikiri_html::computed::{
     ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
-    RunSource,
+    DocumentLayout, FontId, FragmentKind, NodeId, NodeKind, Page, PaintEvent, PaintRect,
+    PositionedGlyphRun, RunSource,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -65,7 +65,7 @@ pub(crate) fn paint_document(
         krilla::Document::new()
     };
     let mut tags = Tags::new(document, tagged);
-    pdf.set_metadata(crate::metadata::build(config)?);
+    pdf.set_metadata(crate::metadata::build(config, html_title(document))?);
     if let Some(outline) = outline {
         pdf.set_outline(outline);
     }
@@ -89,6 +89,21 @@ pub(crate) fn paint_document(
     }
     pdf.finish()
         .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
+}
+
+/// The trimmed text of the `<title>` in the document's `<head>`, if any.
+fn html_title(document: &DocumentLayout) -> Option<String> {
+    let page = document.page(0)?;
+    let dom = page.dom();
+    let element = |node: NodeId, name: &str| {
+        dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some(name)
+    };
+    let html = dom
+        .children(dom.root())
+        .find(|&node| element(node, "html"))?;
+    let head = dom.children(html).find(|&node| element(node, "head"))?;
+    let title = dom.children(head).find(|&node| element(node, "title"))?;
+    Some(dom.text_content(title).trim().to_owned()).filter(|text| !text.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -400,7 +415,9 @@ fn paint_text_batch(
                             |surface| decoration::paint(surface, &run.decorations, phase),
                         );
                     }
-                } else if paints_glyphs(run) {
+                } else if paints_glyphs(run) || (tags.enabled() && has_glyphs(run)) {
+                    // Transparent text is still content: tagged output
+                    // draws it at zero opacity so that it stays readable.
                     tags.mark(surface, page, Target::Run(run), |surface| {
                         paint_glyph_run(surface, run, fonts)
                     });
@@ -545,9 +562,14 @@ impl FontCache {
     }
 }
 
-/// Whether [`paint_glyph_run`] draws anything for `run`.
+/// Whether `run` paints visible glyphs.
 fn paints_glyphs(run: &PositionedGlyphRun<'_>) -> bool {
-    !run.glyphs.is_empty() && run.font_size > 0.0 && run.color.a != 0
+    has_glyphs(run) && run.color.a != 0
+}
+
+/// Whether `run` has glyphs to draw, whatever its color.
+fn has_glyphs(run: &PositionedGlyphRun<'_>) -> bool {
+    !run.glyphs.is_empty() && run.font_size > 0.0
 }
 
 /// Draw one positioned glyph run.
@@ -556,7 +578,7 @@ fn paints_glyphs(run: &PositionedGlyphRun<'_>) -> bool {
 /// Krilla takes them per unit of font size and subtracts `y_offset`, so both
 /// are divided by the font size and `y_offset` changes sign.
 fn paint_glyph_run(surface: &mut Surface<'_>, run: &PositionedGlyphRun<'_>, fonts: &mut FontCache) {
-    if !paints_glyphs(run) {
+    if !has_glyphs(run) {
         return;
     }
     // A face Krilla cannot parse is skipped rather than failing the page.

@@ -104,6 +104,18 @@ fn text_outside_classified_elements_gets_a_paragraph() {
 }
 
 #[test]
+fn loose_text_around_a_paragraph_keeps_reading_order() {
+    let pdf = tagged_pdf("Before<p>Middle</p>After", &tagged());
+    assert_eq!(outline(&pdf), "Document[P[#] P[#] P[#]]");
+}
+
+#[test]
+fn transparent_text_is_still_tagged() {
+    let pdf = tagged_pdf("<p style='color: transparent'>Hidden ink</p>", &tagged());
+    assert_eq!(outline(&pdf), "Document[P[#]]");
+}
+
+#[test]
 fn list_items_have_label_and_body() {
     let pdf = tagged_pdf("<ol><li>First</li><li>Second</li></ol>", &tagged());
     assert_eq!(
@@ -121,7 +133,7 @@ fn list_items_have_label_and_body() {
 #[test]
 fn tables_carry_header_scope() {
     let pdf = tagged_pdf(
-        "<table><thead><tr><th scope=col>H</th></tr></thead><tbody><tr><td>D</td></tr></tbody></table>",
+        "<table><thead><tr><th scope=COL>H</th></tr></thead><tbody><tr><td>D</td></tr></tbody></table>",
         &tagged(),
     );
     assert_eq!(
@@ -239,4 +251,74 @@ fn pdf_ua_output_validates() {
     let catalog = pdf.catalog().unwrap();
     assert!(catalog.has(b"StructTreeRoot"));
     assert!(catalog.has(b"Outlines"), "PDF/UA implies bookmarks");
+}
+
+fn pdf_ua() -> Config {
+    Config::builder().pdf_ua(true).lang("en").build()
+}
+
+#[test]
+fn pdf_ua_takes_the_title_from_the_html() {
+    let pdf = tagged_pdf(
+        "<html><head><title> From HTML </title></head><body><p>Body</p></body></html>",
+        &pdf_ua(),
+    );
+    let info = resolve(&pdf, pdf.trailer.get(b"Info").unwrap())
+        .as_dict()
+        .unwrap();
+    assert_eq!(text(info, b"Title"), "From HTML");
+}
+
+#[test]
+fn pdf_ua_omits_invisible_figures_and_headings() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<h1 style='visibility: hidden'>Gone</h1>\
+         <p><img style='visibility: hidden' alt='gone' src='missing.png' width=10 height=10></p>",
+        &config,
+    );
+    assert!(elements(&pdf, b"Figure").is_empty());
+    assert!(elements(&pdf, b"H1").is_empty());
+}
+
+#[test]
+fn image_links_are_named_by_their_alt_text() {
+    let config = Config::builder().pdf_ua(true).title("T").lang("en").build();
+    let pdf = tagged_pdf(
+        "<p><a href='https://example.com/'><img alt='Home' src='missing.png' width=10 height=10></a></p>",
+        &config,
+    );
+    let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+    let annotation = resolve(&pdf, &page.get(b"Annots").unwrap().as_array().unwrap()[0])
+        .as_dict()
+        .unwrap();
+    assert_eq!(text(annotation, b"Contents"), "Home");
+}
+
+#[test]
+fn repeated_links_stay_in_the_structure_tree() {
+    let pdf = tagged_pdf(
+        "<style>@page { size: 300px 200px; margin: 10px } body { margin: 0 }</style>\
+         <div style='position: fixed; top: 0; left: 0'><a href='https://example.com/'>Home</a></div>\
+         <p style='height: 150px'>One</p><p style='height: 150px'>Two</p>",
+        &tagged(),
+    );
+    let pages = pdf.get_pages();
+    assert!(pages.len() > 1);
+    for page in pages.values() {
+        let page = pdf.get_dictionary(*page).unwrap();
+        for annotation in page.get(b"Annots").unwrap().as_array().unwrap() {
+            assert!(
+                resolve(&pdf, annotation)
+                    .as_dict()
+                    .unwrap()
+                    .has(b"StructParent")
+            );
+        }
+    }
+    let links = elements(&pdf, b"Link");
+    assert_eq!(links.len(), 1);
+    let mut marks = String::new();
+    kids(&pdf, links[0].get(b"K").unwrap(), &mut marks);
+    assert_eq!(marks, format!("#{}", " @".repeat(pages.len())));
 }

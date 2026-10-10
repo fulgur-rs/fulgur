@@ -2,7 +2,7 @@
 //! page: the painter only draws the resolved boxes.
 
 use super::shape::RoundedRect;
-use super::{FontCache, fill, paint_glyph_run};
+use super::{FontCache, fill, paint_glyph_run, paints_glyphs};
 use crate::tagging::{Tags, Target, margin_box_artifact};
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
@@ -57,7 +57,7 @@ fn paint_box(surface: &mut Surface<'_>, margin_box: &MarginBox, fonts: &mut Font
         return;
     }
     surface.push_clip_path(&border_box, &FillRule::NonZero);
-    for run in &runs {
+    for run in runs.iter().filter(|run| paints_glyphs(run)) {
         paint_glyph_run(surface, run, fonts);
     }
     surface.pop();
