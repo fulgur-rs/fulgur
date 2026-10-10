@@ -266,3 +266,17 @@ fn links_in_running_elements_are_placed_in_their_margin_box() {
     assert!(x0 >= 0.0 && x1 <= 225.0);
     assert!(y0 >= 120.0 && y1 <= 150.0, "{y0}..{y1}");
 }
+
+#[test]
+fn links_of_running_elements_outside_their_margin_box_are_dropped() {
+    let (_dir, path) = input(
+        "<style>@page {size:300px 200px; margin:40px; @top-center {content: element(hdr)}} \
+         body {margin:0} .hdr {position: running(hdr)} \
+         .hdr a {display:block; width:20px; height:10px; margin-top:500px}</style>\
+         <div class='hdr'><a href='https://example.com/header'></a></div><p>Body</p>",
+    );
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    // The link lies below the margin box, where its content is clipped away.
+    assert!(annotations(&pdf, 1).is_empty());
+}
