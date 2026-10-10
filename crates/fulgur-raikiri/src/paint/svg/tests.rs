@@ -221,3 +221,18 @@ fn text_sources_build_the_font_database() {
     cache.tree(source.into(), None).unwrap();
     assert!(cache.fonts.is_some());
 }
+
+#[test]
+fn a_full_cache_parses_without_keeping_trees() {
+    let mut cache = SvgCache::new(RenderOptions {
+        assets: None,
+        system_fonts: false,
+    });
+    cache.cached_source_bytes = MAX_CACHED_SOURCE_BYTES;
+    let source = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10'/></svg>";
+    for _ in 0..3 {
+        cache.tree(source.into(), None).unwrap();
+    }
+    assert!(cache.trees.is_empty());
+    assert!(cache.uncached.is_some());
+}
