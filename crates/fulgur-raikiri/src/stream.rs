@@ -170,7 +170,7 @@ impl PdfSink<'_, '_> {
         if extra_pages.is_empty() {
             return Ok(pdf);
         }
-        crate::merge::merge_extra_pages(&pdf, &extra_pages)
+        crate::merge::merge_extra_pages(pdf, &extra_pages)
     }
 }
 

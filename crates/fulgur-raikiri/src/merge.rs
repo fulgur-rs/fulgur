@@ -9,18 +9,27 @@
 
 use flpdf::{Matrix, ObjectHandle, ObjectRef, PageDocumentHelper, PageObjectHelper, Pdf};
 use fulgur_core::{Error, Result};
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{BufReader, Seek, Write};
 use std::rc::Rc;
 
 /// Name of the form XObject in the resources of a merged page.
 const FORM_NAME: &[u8] = b"/FulgurMarginBoxes";
 
-type Document = Pdf<Cursor<Vec<u8>>>;
+type Document = Pdf<BufReader<File>>;
 
 /// Merge extra page `k` (counted after the last page) into page
 /// `targets[k]`, both zero-based, and remove the extra pages.
-pub(crate) fn merge_extra_pages(pdf: &[u8], targets: &[u32]) -> Result<Vec<u8>> {
-    let mut document = Pdf::open_mem_owned(pdf.to_vec()).map_err(pdf_error)?;
+///
+/// The PDF moves to a temporary file first: flpdf reads objects from its
+/// input as it needs them, so the input bytes are not held in memory next
+/// to the parsed objects and the output.
+pub(crate) fn merge_extra_pages(pdf: Vec<u8>, targets: &[u32]) -> Result<Vec<u8>> {
+    let mut file = tempfile::tempfile()?;
+    file.write_all(&pdf)?;
+    drop(pdf);
+    file.rewind()?;
+    let mut document = Pdf::open(BufReader::new(file)).map_err(pdf_error)?;
     let pages = flpdf::pages::page_refs(&mut document).map_err(pdf_error)?;
     let first_extra = pages
         .len()

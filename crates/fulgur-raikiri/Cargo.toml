@@ -22,7 +22,7 @@ raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "8422b801
 url = "2.5"
 percent-encoding = "2"
 flpdf = "0.10"
+tempfile = "3"
 
 [dev-dependencies]
 lopdf = "0.42"
-tempfile = "3"
