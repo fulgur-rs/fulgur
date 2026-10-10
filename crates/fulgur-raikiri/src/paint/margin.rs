@@ -2,25 +2,52 @@
 //! page: the painter only draws the resolved boxes.
 
 use super::shape::RoundedRect;
-use super::{FontCache, fill, paint_glyph_run};
+use super::{FontCache, fill, paint_body, paint_glyph_run, raster, svg};
+use fulgur_core::{Error, Result};
+use krilla::geom::Transform;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::{MarginBox, Page};
+use raikiri_html::{MarginBox, Page, PaintRect, PlacedRunningElement};
 
 /// Draw the margin boxes of `page` in Raikiri's order, below the page body.
-pub(super) fn paint(surface: &mut Surface<'_>, page: &Page<'_>, fonts: &mut FontCache) {
+/// Returns the running elements drawn, with the border box each is clipped
+/// to, so their links can be placed on the page.
+pub(super) fn paint<'a>(
+    surface: &mut Surface<'_>,
+    page: &Page<'a>,
+    fonts: &mut FontCache,
+    svg: &mut svg::SvgCache<'_>,
+    raster: &mut raster::RasterCache<'_>,
+) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
+    let mut drawn = Vec::new();
     for margin_box in page.margin_boxes() {
-        paint_box(surface, &margin_box, fonts);
+        let running = page
+            .margin_box_running_element(&margin_box)
+            .map_err(|error| Error::Layout(error.to_string()))?;
+        paint_box(surface, &margin_box, running, fonts, svg, raster)?;
+        if let Some(running) = running {
+            drawn.push((running, margin_box.rect));
+        }
     }
+    Ok(drawn)
 }
 
-/// The background color, the solid borders, then the text clipped to the
-/// border box. `background-image: url()` is not drawn, as for element boxes:
-/// the layout result carries no decoded image data.
-fn paint_box(surface: &mut Surface<'_>, margin_box: &MarginBox, fonts: &mut FontCache) {
+/// The background color, the solid borders, then the content clipped to the
+/// border box: the running element the box shows (CSS GCPM 3 §1.2.2), drawn
+/// like a page body, or else the box text. `background-image: url()` is not
+/// drawn, as for element boxes: the layout result carries no decoded image
+/// data.
+fn paint_box(
+    surface: &mut Surface<'_>,
+    margin_box: &MarginBox,
+    running: Option<PlacedRunningElement<'_>>,
+    fonts: &mut FontCache,
+    svg: &mut svg::SvgCache<'_>,
+    raster: &mut raster::RasterCache<'_>,
+) -> Result<()> {
     let rect = margin_box.rect;
     let Some(border_box) = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height).path() else {
-        return;
+        return Ok(());
     };
     if let Some(color) = margin_box.background_color {
         surface.set_fill(Some(fill(color)));
@@ -41,13 +68,25 @@ fn paint_box(surface: &mut Surface<'_>, margin_box: &MarginBox, fonts: &mut Font
             surface.draw_path(&path);
         }
     }
+    if let Some(running) = running {
+        surface.push_clip_path(&border_box, &FillRule::NonZero);
+        surface.push_transform(&Transform::from_translate(
+            running.origin.0,
+            running.origin.1,
+        ));
+        let painted = paint_body(surface, &running.layout.page(), fonts, svg, raster);
+        surface.pop();
+        surface.pop();
+        return painted;
+    }
     let runs = margin_box.text_runs();
     if runs.is_empty() {
-        return;
+        return Ok(());
     }
     surface.push_clip_path(&border_box, &FillRule::NonZero);
     for run in &runs {
         paint_glyph_run(surface, run, fonts);
     }
     surface.pop();
+    Ok(())
 }
