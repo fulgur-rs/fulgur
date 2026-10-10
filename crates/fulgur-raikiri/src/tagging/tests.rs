@@ -217,7 +217,7 @@ fn fixed_boxes_are_tagged_on_their_first_page_only() {
 #[test]
 fn multicolumn_text_is_tagged() {
     let pdf = tagged_pdf(
-        "<div style='column-count: 2'><p>Left</p><p>Right</p></div>",
+        "<div style='column-count: 2; column-rule: 1px solid black'><p>Left</p><p>Right</p></div>",
         &tagged(),
     );
     assert_eq!(outline(&pdf), "Document[Div[P[#] P[#]]]");
@@ -521,4 +521,49 @@ fn running_elements_are_footer_and_header_artifacts() {
         .as_dict()
         .unwrap();
     assert_eq!(text(annotation, b"Contents"), "Home");
+}
+
+#[test]
+fn generated_content_and_marker_images_are_tagged() {
+    let pdf = tagged_pdf(
+        "<style>p::before{content:'Pre '} p::after{content:' Post'} \
+         ul{list-style-image:url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+         width='8' height='8'><rect width='8' height='8'/></svg>\")}</style>\
+         <p>Body</p><ul><li>Item</li></ul>",
+        &tagged(),
+    );
+    assert_eq!(outline(&pdf), "Document[P[# # #] L[LI[Lbl[#] LBody[#]]]]");
+}
+
+#[test]
+fn links_are_named_by_nested_image_alt_text() {
+    let pdf = tagged_pdf(
+        "<p><a href='https://example.com/'><span> \
+         <img alt='Home' src='missing.png' width=10 height=10></span></a></p>",
+        &tagged(),
+    );
+    let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+    let annotation = resolve(&pdf, &page.get(b"Annots").unwrap().as_array().unwrap()[0])
+        .as_dict()
+        .unwrap();
+    assert_eq!(text(annotation, b"Contents"), "Home");
+}
+
+#[test]
+fn fixed_generated_content_and_marker_images_are_tagged_once() {
+    let pdf = tagged_pdf(
+        "<style>@page { size: 300px 200px; margin: 10px } body { margin: 0 } \
+         span::before { content: 'Pre ' } \
+         ul { list-style-image: url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+         width='8' height='8'><rect width='8' height='8'/></svg>\") }</style>\
+         <div style='position: fixed; top: 0; left: 0'><span>Fixed</span>\
+         <ul><li>Item</li></ul></div>\
+         <p style='height: 150px'>One</p><p style='height: 150px'>Two</p>",
+        &tagged(),
+    );
+    assert!(pdf.get_pages().len() > 1);
+    assert_eq!(
+        outline(&pdf),
+        "Document[Div[Span[# #] L[LI[Lbl[#] LBody[#]]]] P[#] P[#]]"
+    );
 }
