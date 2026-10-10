@@ -3054,6 +3054,31 @@ fn pdf_ua_without_title_returns_error() {
 }
 
 #[test]
+fn pdf_ua_without_language_returns_error() {
+    // PDF/UA-1 requires a document language. Neither config.lang nor
+    // <html lang> is provided, and Krilla does not validate this, so the
+    // engine rejects the render itself.
+    let error = Engine::builder()
+        .pdf_ua(true)
+        .title("T")
+        .build()
+        .render("<html><body><p>World</p></body></html>")
+        .unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+}
+
+#[test]
+fn pdf_ua_takes_the_language_from_html_lang() {
+    let pdf = Engine::builder()
+        .pdf_ua(true)
+        .title("T")
+        .build()
+        .render("<html lang=\"ja\"><body><h1>見出し</h1><p>本文</p></body></html>")
+        .expect("pdf_ua with <html lang> must succeed");
+    assert!(String::from_utf8_lossy(&pdf).contains("/Lang (ja)"));
+}
+
+#[test]
 fn pdf_ua_with_html_title_succeeds() {
     // PDF/UA-1 smoke: <title> in HTML head provides the document title,
     // satisfying krilla's UA1 requirement without explicit config.title.
@@ -3107,27 +3132,6 @@ fn pdf_ua_with_explicit_title_succeeds() {
         .build()
         .render(html)
         .expect("pdf_ua with explicit title must succeed");
-
-    assert!(!pdf.is_empty());
-}
-
-#[test]
-fn pdf_ua_without_lang_succeeds() {
-    // PDF/UA-1 strongly recommends lang but does NOT hard-fail
-    // when absent (krilla UA1 prohibits(NoDocumentLanguage) = false).
-    // Without lang, /Lang is absent from the catalog — semantically
-    // incomplete but valid per krilla's enforcement.
-    let html = r#"<!DOCTYPE html>
-<html>
-<head><title>No Lang</title></head>
-<body><h1>Hello</h1><p>World</p></body>
-</html>"#;
-
-    let pdf = Engine::builder()
-        .pdf_ua(true)
-        .build()
-        .render(html)
-        .expect("pdf_ua without lang must succeed");
 
     assert!(!pdf.is_empty());
 }
