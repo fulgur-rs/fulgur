@@ -21,7 +21,8 @@ raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "8422b801c49
 raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "8422b801c493cc5c7af0350046f8cdc54a7d9b2f" }
 url = "2.5"
 percent-encoding = "2"
-lopdf = "0.42"
+flpdf = "0.10"
 
 [dev-dependencies]
+lopdf = "0.42"
 tempfile = "3"

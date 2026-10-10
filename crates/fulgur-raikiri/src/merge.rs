@@ -7,17 +7,21 @@
 //! sits below the page body as margin boxes do, moves its annotations to
 //! the page, and removes the extra page.
 
+use flpdf::{Matrix, ObjectHandle, ObjectRef, PageDocumentHelper, PageObjectHelper, Pdf};
 use fulgur_core::{Error, Result};
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use std::io::Cursor;
+use std::rc::Rc;
 
 /// Name of the form XObject in the resources of a merged page.
-const FORM_NAME: &[u8] = b"FulgurMarginBoxes";
+const FORM_NAME: &[u8] = b"/FulgurMarginBoxes";
+
+type Document = Pdf<Cursor<Vec<u8>>>;
 
 /// Merge extra page `k` (counted after the last page) into page
 /// `targets[k]`, both zero-based, and remove the extra pages.
 pub(crate) fn merge_extra_pages(pdf: &[u8], targets: &[u32]) -> Result<Vec<u8>> {
-    let mut document = Document::load_mem(pdf).map_err(pdf_error)?;
-    let pages: Vec<ObjectId> = document.get_pages().into_values().collect();
+    let mut document = Pdf::open_mem_owned(pdf.to_vec()).map_err(pdf_error)?;
+    let pages = flpdf::pages::page_refs(&mut document).map_err(pdf_error)?;
     let first_extra = pages
         .len()
         .checked_sub(targets.len())
@@ -27,156 +31,107 @@ pub(crate) fn merge_extra_pages(pdf: &[u8], targets: &[u32]) -> Result<Vec<u8>> 
             .get(target as usize)
             .filter(|_| (target as usize) < first_extra)
             .ok_or_else(|| Error::PdfGeneration("extra page target out of range".into()))?;
-        merge_page(&mut document, pages[first_extra + offset], target)?;
+        merge_page(&mut document, pages[first_extra + offset], target).map_err(pdf_error)?;
     }
+    let mut helper = PageDocumentHelper::new(&mut document);
     for &extra in &pages[first_extra..] {
-        remove_page(&mut document, extra)?;
+        helper.remove_page(extra).map_err(pdf_error)?;
     }
-    document.prune_objects();
-    let mut out = Vec::new();
-    document.save_to(&mut out)?;
-    Ok(out)
+    update_page_count(&mut document, first_extra).map_err(pdf_error)?;
+    // The writer only keeps objects reachable from the trailer, so the
+    // removed pages and their content streams are dropped.
+    let mut writer = flpdf::PdfWriter::new(&mut document);
+    writer.set_output_memory().map_err(pdf_error)?;
+    writer.set_deterministic_id(true);
+    writer.write().map_err(pdf_error)?;
+    writer.get_buffer().map_err(pdf_error)
 }
 
-fn merge_page(document: &mut Document, extra: ObjectId, target: ObjectId) -> Result<()> {
-    let extra_page = document.get_dictionary(extra).map_err(pdf_error)?.clone();
-    if let Some(form) = form(document, &extra_page)? {
-        let form = document.add_object(form);
-        let mut resources = owned_dictionary(document, target, b"Resources")?;
-        let mut xobjects = match resources.get(b"XObject") {
-            Ok(object) => resolve_dictionary(document, object)?,
-            Err(_) => Dictionary::new(),
-        };
-        xobjects.set(FORM_NAME, Object::Reference(form));
-        resources.set("XObject", Object::Dictionary(xobjects));
-        let mut draw = b"q /".to_vec();
+fn merge_page(document: &mut Document, extra: ObjectRef, target: ObjectRef) -> flpdf::Result<()> {
+    if has_content(document, extra)? {
+        let form = PageObjectHelper::new(extra, document).get_form_xobject_for_page(false)?;
+        let resources = PageObjectHelper::new(target, document).get_resources(true)?;
+        if resources.try_is_null()? {
+            let fresh = ObjectHandle::dictionary(Vec::new());
+            document
+                .get_object_handle(target)
+                .replace_key(b"/Resources", fresh.clone())?;
+            add_form(&fresh, form)?;
+        } else {
+            add_form(&resources, form)?;
+        }
+        let mut draw = b"q ".to_vec();
         draw.extend_from_slice(FORM_NAME);
         draw.extend_from_slice(b" Do Q\n");
-        let draw = document.add_object(Stream::new(Dictionary::new(), draw));
-        let mut contents = vec![Object::Reference(draw)];
-        let page = document.get_dictionary(target).map_err(pdf_error)?;
-        match page.get(b"Contents") {
-            Ok(Object::Array(items)) => contents.extend(items.iter().cloned()),
-            Ok(object) => contents.push(object.clone()),
-            Err(_) => {}
+        let draw = document.new_stream_with_data(Rc::new(draw))?;
+        PageObjectHelper::new(target, document).add_page_contents(draw, true)?;
+    }
+    let extra_page = document.get_object_handle(extra);
+    PageObjectHelper::new(target, document).copy_annotations(extra_page, Matrix::default())
+}
+
+/// Register `form` under [`FORM_NAME`] in the XObjects of `resources`.
+fn add_form(resources: &ObjectHandle, form: ObjectHandle) -> flpdf::Result<()> {
+    let xobjects = resources.try_get_key(b"/XObject")?;
+    if xobjects.try_is_dictionary()? {
+        xobjects.replace_key(FORM_NAME, form)
+    } else {
+        resources.replace_key(
+            b"/XObject",
+            ObjectHandle::dictionary(vec![(FORM_NAME.to_vec(), form)]),
+        )
+    }
+}
+
+/// Whether the extra page draws anything; a page that only carries link
+/// annotations has empty contents.
+fn has_content(document: &mut Document, page: ObjectRef) -> flpdf::Result<bool> {
+    for stream in PageObjectHelper::new(page, document).get_page_contents()? {
+        let data = stream.get_stream_data(flpdf::DecodeLevel::Generalized)?;
+        if !data.iter().all(u8::is_ascii_whitespace) {
+            return Ok(true);
         }
-        let page = document.get_dictionary_mut(target).map_err(pdf_error)?;
-        page.set("Resources", Object::Dictionary(resources));
-        page.set("Contents", Object::Array(contents));
     }
-    let annotations = match extra_page.get(b"Annots") {
-        Ok(object) => resolve_array(document, object)?,
-        Err(_) => Vec::new(),
+    Ok(false)
+}
+
+/// Set the page count in the XMP metadata, which was written with the
+/// extra pages counted.
+fn update_page_count(document: &mut Document, count: usize) -> flpdf::Result<()> {
+    const OPEN: &[u8] = b"<xmpTPg:NPages>";
+    const CLOSE: &[u8] = b"</xmpTPg:NPages>";
+    let metadata = document
+        .trailer()
+        .try_get_key(b"/Root")?
+        .try_get_key(b"/Metadata")?;
+    if metadata.as_stream_dict().is_none() {
+        return Ok(());
+    }
+    let data = metadata.get_stream_data(flpdf::DecodeLevel::Generalized)?;
+    let Some(start) = find(&data, OPEN).map(|at| at + OPEN.len()) else {
+        return Ok(());
     };
-    if !annotations.is_empty() {
-        let mut merged = match document
-            .get_dictionary(target)
-            .map_err(pdf_error)?
-            .get(b"Annots")
-        {
-            Ok(object) => resolve_array(document, object)?,
-            Err(_) => Vec::new(),
-        };
-        merged.extend(annotations);
-        document
-            .get_dictionary_mut(target)
-            .map_err(pdf_error)?
-            .set("Annots", Object::Array(merged));
-    }
+    let Some(end) = find(&data[start..], CLOSE).map(|at| start + at) else {
+        return Ok(());
+    };
+    let mut updated = data[..start].to_vec();
+    updated.extend_from_slice(count.to_string().as_bytes());
+    updated.extend_from_slice(&data[end..]);
+    // The data is decoded, so any filter is dropped with it.
+    metadata.replace_stream_data(
+        Rc::new(updated),
+        Some(ObjectHandle::null()),
+        Some(ObjectHandle::null()),
+    );
     Ok(())
 }
 
-/// The content of `page` as a form XObject, or `None` when it has no
-/// content.
-fn form(document: &Document, page: &Dictionary) -> Result<Option<Stream>> {
-    let contents = match page.get(b"Contents") {
-        Ok(Object::Array(items)) => items.clone(),
-        Ok(object) => vec![object.clone()],
-        Err(_) => return Ok(None),
-    };
-    let mut content = Vec::new();
-    for item in &contents {
-        let (_, object) = document.dereference(item).map_err(pdf_error)?;
-        let stream = object.as_stream().map_err(pdf_error)?;
-        let bytes = if stream.dict.has(b"Filter") {
-            stream.decompressed_content().map_err(pdf_error)?
-        } else {
-            stream.content.clone()
-        };
-        content.extend_from_slice(&bytes);
-        content.push(b'\n');
-    }
-    if content.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
-    let media_box = page
-        .get(b"MediaBox")
-        .map_err(|_| Error::PdfGeneration("extra page without a media box".into()))?
-        .clone();
-    let mut dictionary = Dictionary::new();
-    dictionary.set("Type", Object::Name(b"XObject".to_vec()));
-    dictionary.set("Subtype", Object::Name(b"Form".to_vec()));
-    dictionary.set("BBox", media_box);
-    if let Ok(resources) = page.get(b"Resources") {
-        dictionary.set("Resources", resources.clone());
-    }
-    if let Ok(group) = page.get(b"Group") {
-        dictionary.set("Group", group.clone());
-    }
-    let mut stream = Stream::new(dictionary, content);
-    // Compression only fails for content it cannot shrink, which stays as is.
-    let _ = stream.compress();
-    Ok(Some(stream))
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
-/// Remove `page` from its parent's kids and from the page counts.
-fn remove_page(document: &mut Document, page: ObjectId) -> Result<()> {
-    let mut parent = document
-        .get_dictionary(page)
-        .map_err(pdf_error)?
-        .get(b"Parent")
-        .and_then(Object::as_reference)
-        .map_err(pdf_error)?;
-    let kids = document
-        .get_dictionary_mut(parent)
-        .map_err(pdf_error)?
-        .get_mut(b"Kids")
-        .and_then(Object::as_array_mut)
-        .map_err(pdf_error)?;
-    kids.retain(|kid| kid.as_reference().ok() != Some(page));
-    loop {
-        let tree = document.get_dictionary_mut(parent).map_err(pdf_error)?;
-        if let Ok(count) = tree.get(b"Count").and_then(Object::as_i64) {
-            tree.set("Count", count - 1);
-        }
-        match tree.get(b"Parent").and_then(Object::as_reference) {
-            Ok(next) => parent = next,
-            Err(_) => break,
-        }
-    }
-    document.delete_object(page);
-    Ok(())
-}
-
-/// A copy of the dictionary in entry `key` of dictionary `id`, empty when
-/// the entry is missing.
-fn owned_dictionary(document: &Document, id: ObjectId, key: &[u8]) -> Result<Dictionary> {
-    match document.get_dictionary(id).map_err(pdf_error)?.get(key) {
-        Ok(object) => resolve_dictionary(document, object),
-        Err(_) => Ok(Dictionary::new()),
-    }
-}
-
-fn resolve_dictionary(document: &Document, object: &Object) -> Result<Dictionary> {
-    let (_, object) = document.dereference(object).map_err(pdf_error)?;
-    object.as_dict().cloned().map_err(pdf_error)
-}
-
-fn resolve_array(document: &Document, object: &Object) -> Result<Vec<Object>> {
-    let (_, object) = document.dereference(object).map_err(pdf_error)?;
-    object.as_array().cloned().map_err(pdf_error)
-}
-
-fn pdf_error(error: lopdf::Error) -> Error {
+fn pdf_error(error: flpdf::Error) -> Error {
     Error::PdfGeneration(format!("merging streamed pages: {error}"))
 }

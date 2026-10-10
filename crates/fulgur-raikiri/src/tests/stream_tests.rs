@@ -100,6 +100,13 @@ fn early_pages_show_the_real_page_count() {
         );
     }
     assert!(merged > 0, "some pages were delivered early");
+    let npages = format!("<xmpTPg:NPages>{page_count}</xmpTPg:NPages>");
+    assert!(
+        streamed
+            .windows(npages.len())
+            .any(|window| window == npages.as_bytes()),
+        "the metadata counts the merged pages only"
+    );
 }
 
 #[test]
