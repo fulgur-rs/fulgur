@@ -62,6 +62,17 @@ fn html_string_with_a_missing_base_directory_is_an_error() {
 }
 
 #[test]
+fn html_string_with_a_file_as_the_base_directory_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("page.css");
+    std::fs::write(&file, PAGE_CSS).unwrap();
+    assert!(matches!(
+        render_html("<p>Hello</p>", Some(&file), &Config::default()),
+        Err(Error::Layout(_))
+    ));
+}
+
+#[test]
 fn html_string_fragment_links_stay_internal_without_a_base_directory() {
     let html = "<style>@page {size:300px 200px; margin:0} body {margin:0} a {display:block;width:40px;height:10px}</style><div id=target>T</div><a href='#target'></a>";
     let bytes = render_html(html, None, &Config::default()).unwrap();

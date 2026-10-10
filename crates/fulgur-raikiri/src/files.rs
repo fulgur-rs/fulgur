@@ -29,10 +29,17 @@ impl BaseDirectoryProvider {
         Self::for_directory(parent)
     }
 
-    /// A provider rooted at `directory`.
+    /// A provider rooted at `directory`, which must be a directory.
     pub(crate) fn for_directory(directory: &Path) -> Result<Self> {
+        let root = directory.canonicalize()?;
+        if !root.is_dir() {
+            return Err(Error::Layout(format!(
+                "{} is not a directory",
+                directory.display()
+            )));
+        }
         Ok(Self {
-            root: Some(directory.canonicalize()?),
+            root: Some(root),
             max_bytes: DEFAULT_MAX_RESOURCE_BYTES,
         })
     }
