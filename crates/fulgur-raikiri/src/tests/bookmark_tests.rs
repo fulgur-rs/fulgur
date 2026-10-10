@@ -244,7 +244,7 @@ fn bookmark_collection_is_discarded_on_abort_or_observer_error() {
                     status,
                     &resources,
                     &Config::builder().bookmarks(true).build(),
-                    &collector,
+                    collector,
                     &url::Url::parse("file:///input.html").unwrap(),
                     &RenderOptions::default(),
                 )

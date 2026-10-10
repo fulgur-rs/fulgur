@@ -280,3 +280,16 @@ fn links_of_running_elements_outside_their_margin_box_are_dropped() {
     // The link lies below the margin box, where its content is clipped away.
     assert!(annotations(&pdf, 1).is_empty());
 }
+
+#[test]
+fn links_of_running_elements_to_missing_anchors_are_dropped() {
+    let (_dir, path) = input(
+        "<style>@page {size:300px 200px; margin:40px; @top-center {content: element(hdr)}} \
+         body {margin:0} .hdr {position: running(hdr)} \
+         .hdr a {display:block; width:20px; height:10px}</style>\
+         <div class='hdr'><a href='#nowhere'></a></div><p>Body</p>",
+    );
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    assert!(annotations(&pdf, 1).is_empty());
+}

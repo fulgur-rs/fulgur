@@ -61,12 +61,12 @@ pub(super) struct BackgroundLayer<'s> {
 
 pub(super) struct RasterCache<'a> {
     source: Option<&'a dyn ImagePixelSource>,
-    base: &'a Url,
+    base: Url,
     images: HashMap<Url, (Arc<DecodedImage>, Image)>,
 }
 
 impl<'a> RasterCache<'a> {
-    pub(super) fn new(source: Option<&'a dyn ImagePixelSource>, base: &'a Url) -> Self {
+    pub(super) fn new(source: Option<&'a dyn ImagePixelSource>, base: Url) -> Self {
         Self {
             source,
             base,
@@ -271,9 +271,7 @@ impl<'a> RasterCache<'a> {
 impl<'a> RasterCache<'a> {
     /// A cache whose relative `url()` values resolve against `file:///`.
     pub(super) fn for_tests(source: Option<&'a dyn ImagePixelSource>) -> Self {
-        static BASE: std::sync::LazyLock<Url> =
-            std::sync::LazyLock::new(|| Url::parse("file:///").expect("valid URL"));
-        Self::new(source, &BASE)
+        Self::new(source, Url::parse("file:///").expect("valid URL"))
     }
 }
 

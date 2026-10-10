@@ -1,4 +1,5 @@
-use fulgur_core::{Result, units::PX_TO_PT};
+use super::LinkTargets;
+use fulgur_core::units::PX_TO_PT;
 use krilla::{
     action::{Action, LinkAction},
     annotation::{LinkAnnotation, Target},
@@ -6,37 +7,59 @@ use krilla::{
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{DocumentLayout, NodeId, Page, PaintRect};
+use raikiri_html::{AnchorIndex, NodeId, Page, PaintRect};
 
-enum LinkTarget {
-    Internal(XyzDestination),
+/// Where a link on a page points.
+pub(crate) enum Href {
+    /// An anchor of the document itself, by its percent-decoded name.
+    Internal(String),
+    /// Any other URL.
     External(String),
 }
 
-impl LinkTarget {
-    fn annotation_target(&self) -> Target {
-        Target::Action(match self {
-            Self::Internal(destination) => Action::Goto(destination.clone().into()),
-            Self::External(uri) => LinkAction::new(uri.clone()).into(),
+/// One link of a page: its `<a>` element, its target, and its areas on the
+/// PDF page in pt.
+pub(crate) struct PageLink {
+    pub(crate) owner: NodeId,
+    pub(crate) href: Href,
+    pub(crate) rects: Vec<Rect>,
+}
+
+impl PageLink {
+    /// The link annotation, `None` for an internal link whose destination
+    /// `anchors` does not have (or no anchors are known yet).
+    pub(crate) fn annotation(&self, anchors: Option<&AnchorIndex>) -> Option<LinkAnnotation> {
+        let target = match &self.href {
+            Href::External(uri) => Target::Action(LinkAction::new(uri.clone()).into()),
+            Href::Internal(name) => {
+                let anchor = anchors?.get(name)?;
+                if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
+                    return None;
+                }
+                let destination = XyzDestination::new(
+                    anchor.page_index as usize,
+                    Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
+                );
+                Target::Action(Action::Goto(destination.into()))
+            }
+        };
+        Some(match self.rects.as_slice() {
+            [rect] => LinkAnnotation::new(*rect, target),
+            rects => LinkAnnotation::new_with_quad_points(
+                rects.iter().copied().map(Quadrilateral::from).collect(),
+                target,
+            ),
         })
     }
-}
 
-fn anchor_target(document: &DocumentLayout, fragment: &str) -> Option<LinkTarget> {
-    let fragment = percent_decode_str(fragment).decode_utf8().ok()?;
-    let anchor = document.anchors().get(&fragment)?;
-    if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
-        return None;
+    /// Whether the link waits for anchors that are not known yet.
+    pub(crate) fn is_pending(&self, anchors: Option<&AnchorIndex>) -> bool {
+        anchors.is_none() && matches!(self.href, Href::Internal(_))
     }
-    Some(LinkTarget::Internal(XyzDestination::new(
-        anchor.page_index as usize,
-        Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
-    )))
 }
 
-fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Option<LinkTarget> {
-    let uri = document
-        .base_url()
+fn href(base_url: Option<&url::Url>, document_url: &url::Url, href: &str) -> Option<Href> {
+    let uri = base_url
         .map_or_else(|| url::Url::parse(href), |base| base.join(href))
         .ok()?;
     if let Some(fragment) = uri.fragment() {
@@ -45,22 +68,23 @@ fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Opt
         let mut target_url = uri.clone();
         target_url.set_fragment(None);
         if original_url == target_url {
-            return anchor_target(document, fragment);
+            let name = percent_decode_str(fragment).decode_utf8().ok()?;
+            return Some(Href::Internal(name.into_owned()));
         }
     }
-    Some(LinkTarget::External(uri.into()))
+    Some(Href::External(uri.into()))
 }
 
 /// Where a page's links land on the PDF page: `page` itself, or a running
 /// element layout drawn at `origin` and clipped to a margin box.
 #[derive(Clone, Copy)]
-pub(super) struct Placement {
-    pub(super) origin: (f32, f32),
-    pub(super) clip: Option<PaintRect>,
+pub(crate) struct Placement {
+    pub(crate) origin: (f32, f32),
+    pub(crate) clip: Option<PaintRect>,
 }
 
 impl Placement {
-    pub(super) const PAGE: Self = Self {
+    pub(crate) const PAGE: Self = Self {
         origin: (0.0, 0.0),
         clip: None,
     };
@@ -82,19 +106,18 @@ impl Placement {
     }
 }
 
-/// The link annotations of `page`, each with its `<a>` element.
-pub(super) fn links(
-    document: &DocumentLayout,
+/// The links of `page` that have a target and a visible area once placed.
+pub(crate) fn links(
     page: &Page<'_>,
     placement: Placement,
-    document_url: &url::Url,
-) -> Result<Vec<(NodeId, LinkAnnotation)>> {
-    let mut annotations = Vec::new();
+    targets: &LinkTargets<'_>,
+) -> Vec<PageLink> {
+    let mut links = Vec::new();
     for link in page.links() {
         if link.target.is_empty() {
             continue;
         }
-        let Some(target) = target(document, document_url, link.target) else {
+        let Some(href) = href(targets.base_url, targets.document_url, link.target) else {
             continue;
         };
         let mut rects = Vec::new();
@@ -120,17 +143,15 @@ pub(super) fn links(
             };
             rects.push(rect);
         }
-        let annotation = match rects.as_slice() {
-            [] => continue,
-            [rect] => LinkAnnotation::new(*rect, target.annotation_target()),
-            _ => LinkAnnotation::new_with_quad_points(
-                rects.into_iter().map(Quadrilateral::from).collect(),
-                target.annotation_target(),
-            ),
-        };
-        annotations.push((link.owner, annotation));
+        if !rects.is_empty() {
+            links.push(PageLink {
+                owner: link.owner,
+                href,
+                rects,
+            });
+        }
     }
-    Ok(annotations)
+    links
 }
 
 #[cfg(test)]

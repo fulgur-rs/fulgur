@@ -12,28 +12,36 @@ use krilla::surface::Surface;
 use raikiri_html::computed::ComputedVisualBox;
 use raikiri_html::{MarginBox, Page, PaintInsets, PaintRect, PlacedRunningElement};
 
-/// Draw the margin boxes of `page` in Raikiri's order, below the page body.
-/// Margin boxes hold running headers and footers, which tagged output marks
-/// as pagination artifacts.
+/// Draw `margin_boxes` in Raikiri's order, below the page body. Margin boxes
+/// hold running headers and footers, which tagged output marks as pagination
+/// artifacts.
+///
+/// The running elements the boxes show come from `page`; without a page the
+/// boxes draw their text instead, untagged.
 ///
 /// Returns the running elements drawn, with the border box each is clipped
 /// to, so their links can be placed on the page.
 pub(super) fn paint<'a>(
     surface: &mut Surface<'_>,
-    page: &Page<'a>,
+    page: Option<&Page<'a>>,
+    margin_boxes: &[MarginBox],
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
 ) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
     let mut drawn = Vec::new();
-    for margin_box in page.margin_boxes() {
+    for margin_box in margin_boxes {
+        let Some(page) = page else {
+            paint_box(surface, margin_box, None, fonts, svg, raster)?;
+            continue;
+        };
         let running = page
-            .margin_box_running_element(&margin_box)
+            .margin_box_running_element(margin_box)
             .map_err(|error| Error::Layout(error.to_string()))?;
         let artifact = Target::Artifact(margin_box_artifact(margin_box.slot));
         tags.mark(surface, page, artifact, |surface| {
-            paint_box(surface, &margin_box, running, fonts, svg, raster)
+            paint_box(surface, margin_box, running, fonts, svg, raster)
         })?;
         if let Some(running) = running {
             drawn.push((running, margin_box.rect));

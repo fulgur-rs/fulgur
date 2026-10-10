@@ -101,7 +101,7 @@ fn already_aborted_layout_returns_aborted() {
             status,
             &RenderResources::new(),
             &Config::default(),
-            &bookmarks::BookmarkCollector::default(),
+            bookmarks::BookmarkCollector::default(),
             &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
             &RenderOptions::default(),
         ),
@@ -1606,6 +1606,7 @@ mod order_tests;
 
 mod decoration_tests;
 
+mod stream_tests;
 mod text_shadow_tests;
 
 #[test]

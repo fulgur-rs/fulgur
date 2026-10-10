@@ -11,7 +11,7 @@ mod clip;
 mod decoration;
 mod gradient;
 mod margin;
-mod navigation;
+pub(crate) mod navigation;
 mod order;
 mod raster;
 mod shadow;
@@ -23,6 +23,7 @@ use crate::tagging::{Tags, Target};
 use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
+use krilla::annotation::Annotation;
 use krilla::color::rgb;
 use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
@@ -30,13 +31,14 @@ use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
+use navigation::PageLink;
 use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
     ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    DocumentLayout, FontId, FragmentKind, NodeId, NodeKind, Page, PaintEvent, PaintRect,
-    PositionedGlyphRun, RunSource, TextShadow,
+    AnchorIndex, DocumentLayout, FontId, FragmentKind, MarginBox, NodeId, NodeKind, Page,
+    PaintEvent, PaintRect, PositionedGlyphRun, RunSource, TextShadow,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -50,69 +52,53 @@ pub(crate) fn paint_document(
     document_url: &url::Url,
     options: &crate::RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
-    let tagged = config.effective_tagging();
-    let mut pdf = if tagged {
-        let configuration = if config.pdf_ua {
-            krilla::configure::Configuration::new_with_validator(krilla::configure::Validator::UA1)
-        } else {
-            krilla::configure::Configuration::new()
-        };
-        krilla::Document::new_with(krilla::SerializeSettings {
-            enable_tagging: true,
-            configuration,
-            ..Default::default()
-        })
-    } else {
-        krilla::Document::new()
-    };
-    let mut tags = Tags::new(document, tagged);
-    // A blank configured language counts as unset.
-    let lang = config
-        .lang
-        .clone()
-        .filter(|lang| !lang.trim().is_empty())
-        .or_else(|| html_lang(document));
+    let first_page = document.page(0);
+    let lang = document_lang(config, first_page.as_ref());
     if config.pdf_ua && lang.is_none() {
         return Err(Error::PdfGeneration(
             "PDF/UA requires a document language: set Config::lang or <html lang>".into(),
         ));
     }
-    pdf.set_metadata(crate::metadata::build(
-        config,
-        html_title(document),
-        lang.clone(),
-    )?);
-    if let Some(outline) = outline {
-        pdf.set_outline(outline);
-    }
-    let mut fonts = FontCache::default();
-    let mut svg = svg::SvgCache::new(*options);
+    let tags = Tags::new(document, config.effective_tagging());
     // Relative `url()` values resolve against the base Raikiri preloaded them
     // with: the document's `<base href>`, else its own URL.
     let base = document.base_url().unwrap_or(document_url);
-    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref(), base);
+    let mut painter = Painter::new(resources, config, options, base.clone(), tags);
+    painter.set_metadata(crate::metadata::build(
+        config,
+        first_page.as_ref().and_then(html_title),
+        lang.clone(),
+    )?);
+    if let Some(outline) = outline {
+        painter.set_outline(outline);
+    }
+    let targets = LinkTargets {
+        base_url: document.base_url(),
+        document_url,
+        anchors: Some(document.anchors()),
+    };
     for page in document.pages() {
-        paint_page(
-            &mut pdf,
-            document,
-            &page,
-            &mut fonts,
-            &mut svg,
-            &mut raster,
-            &mut tags,
-            document_url,
-        )?;
+        painter.page(&page, &page.margin_boxes(), &targets)?;
     }
-    if let Some(tree) = tags.finish(lang) {
-        pdf.set_tag_tree(tree);
-    }
-    pdf.finish()
-        .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
+    painter.finish(lang)
+}
+
+/// The document language: the configured one unless blank, else the `lang`
+/// of the root `<html>` element of `page`.
+pub(crate) fn document_lang(
+    config: &fulgur_core::Config,
+    page: Option<&Page<'_>>,
+) -> Option<String> {
+    // A blank configured language counts as unset.
+    config
+        .lang
+        .clone()
+        .filter(|lang| !lang.trim().is_empty())
+        .or_else(|| page.and_then(html_lang))
 }
 
 /// The trimmed text of the `<title>` in the document's `<head>`, if any.
-fn html_title(document: &DocumentLayout) -> Option<String> {
-    let page = document.page(0)?;
+pub(crate) fn html_title(page: &Page<'_>) -> Option<String> {
     let dom = page.dom();
     let element = |node: NodeId, name: &str| {
         dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some(name)
@@ -126,8 +112,7 @@ fn html_title(document: &DocumentLayout) -> Option<String> {
 }
 
 /// The `lang` of the root `<html>` element, if set and non-empty.
-fn html_lang(document: &DocumentLayout) -> Option<String> {
-    let page = document.page(0)?;
+fn html_lang(page: &Page<'_>) -> Option<String> {
     let dom = page.dom();
     let html = dom.children(dom.root()).find(|&node| {
         dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some("html")
@@ -135,51 +120,187 @@ fn html_lang(document: &DocumentLayout) -> Option<String> {
     Some(dom.attr(html, "lang")?.trim().to_owned()).filter(|lang| !lang.is_empty())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_page(
-    pdf: &mut krilla::Document,
-    document: &DocumentLayout,
-    page: &Page<'_>,
-    fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
-    raster: &mut raster::RasterCache<'_>,
-    tags: &mut Tags,
-    document_url: &url::Url,
-) -> Result<()> {
-    let page_box = page.geometry().page_box;
-    let settings = PageSettings::from_wh(page_box.width * PX_TO_PT, page_box.height * PX_TO_PT)
-        .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
-    let mut pdf_page = pdf.start_page_with(settings);
-    let mut surface = pdf_page.surface();
-    surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+/// What the links of a page resolve against.
+pub(crate) struct LinkTargets<'u> {
+    /// Resolves relative link targets.
+    pub(crate) base_url: Option<&'u url::Url>,
+    /// A target naming this URL with a fragment is an internal link.
+    pub(crate) document_url: &'u url::Url,
+    /// Destinations of internal links, `None` while they are not known yet.
+    pub(crate) anchors: Option<&'u AnchorIndex>,
+}
 
-    tags.begin_page(page);
-    // The margin boxes are drawn before the page body.
-    let running = margin::paint(&mut surface, page, fonts, svg, raster, tags)?;
-    paint_body(&mut surface, page, fonts, svg, raster, tags)?;
+/// A PDF being written page by page.
+pub(crate) struct Painter<'a> {
+    pdf: krilla::Document,
+    fonts: FontCache,
+    svg: svg::SvgCache<'a>,
+    raster: raster::RasterCache<'a>,
+    tags: Tags,
+}
 
-    surface.pop();
-    surface.finish();
-    for (owner, link) in
-        navigation::links(document, page, navigation::Placement::PAGE, document_url)?
-    {
-        tags.annotate(&mut pdf_page, page, owner, link);
-    }
-    // Links inside the running elements drawn in margin boxes, clipped like
-    // their content to the box.
-    for (running, border_box) in running {
-        let placement = navigation::Placement {
-            origin: running.origin,
-            clip: Some(border_box),
+impl<'a> Painter<'a> {
+    /// Start a PDF, tagged when `tags` is enabled. Relative image URLs
+    /// resolve against `base`.
+    pub(crate) fn new(
+        resources: &'a raikiri_html::RenderResources<'_>,
+        config: &fulgur_core::Config,
+        options: &crate::RenderOptions<'a>,
+        base: url::Url,
+        tags: Tags,
+    ) -> Self {
+        let pdf = if tags.enabled() {
+            let configuration = if config.pdf_ua {
+                krilla::configure::Configuration::new_with_validator(
+                    krilla::configure::Validator::UA1,
+                )
+            } else {
+                krilla::configure::Configuration::new()
+            };
+            krilla::Document::new_with(krilla::SerializeSettings {
+                enable_tagging: true,
+                configuration,
+                ..Default::default()
+            })
+        } else {
+            krilla::Document::new()
         };
-        let running_page = running.layout.page();
-        for (owner, link) in navigation::links(document, &running_page, placement, document_url)? {
-            tags.annotate_artifact(&mut pdf_page, &running_page, owner, link);
+        Self {
+            pdf,
+            fonts: FontCache::default(),
+            svg: svg::SvgCache::new(*options),
+            raster: raster::RasterCache::new(resources.image_pixel_source_ref(), base),
+            tags,
         }
     }
-    tags.end_page();
-    pdf_page.finish();
-    Ok(())
+
+    pub(crate) fn set_metadata(&mut self, metadata: krilla::metadata::Metadata) {
+        self.pdf.set_metadata(metadata);
+    }
+
+    pub(crate) fn set_outline(&mut self, outline: krilla::outline::Outline) {
+        self.pdf.set_outline(outline);
+    }
+
+    /// Draw `page` with `margin_boxes` below its body, and add its links.
+    ///
+    /// Returns the internal links left out because `targets` has no anchors
+    /// yet, placed on the page.
+    pub(crate) fn page(
+        &mut self,
+        page: &Page<'_>,
+        margin_boxes: &[MarginBox],
+        targets: &LinkTargets<'_>,
+    ) -> Result<Vec<PageLink>> {
+        let Self {
+            pdf,
+            fonts,
+            svg,
+            raster,
+            tags,
+        } = self;
+        let mut pdf_page = start_page(pdf, page.geometry().page_box)?;
+        let mut surface = pdf_page.surface();
+        surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+
+        tags.begin_page(page);
+        // The margin boxes are drawn before the page body.
+        let running = margin::paint(
+            &mut surface,
+            Some(page),
+            margin_boxes,
+            fonts,
+            svg,
+            raster,
+            tags,
+        )?;
+        paint_body(&mut surface, page, fonts, svg, raster, tags)?;
+
+        surface.pop();
+        surface.finish();
+        let mut pending = Vec::new();
+        for link in navigation::links(page, navigation::Placement::PAGE, targets) {
+            match link.annotation(targets.anchors) {
+                Some(annotation) => tags.annotate(&mut pdf_page, page, link.owner, annotation),
+                None if link.is_pending(targets.anchors) => pending.push(link),
+                None => {}
+            }
+        }
+        // Links inside the running elements drawn in margin boxes, clipped like
+        // their content to the box.
+        for (running, border_box) in running {
+            let placement = navigation::Placement {
+                origin: running.origin,
+                clip: Some(border_box),
+            };
+            let running_page = running.layout.page();
+            for link in navigation::links(&running_page, placement, targets) {
+                match link.annotation(targets.anchors) {
+                    Some(annotation) => {
+                        tags.annotate_artifact(&mut pdf_page, &running_page, link.owner, annotation)
+                    }
+                    None if link.is_pending(targets.anchors) => pending.push(link),
+                    None => {}
+                }
+            }
+        }
+        tags.end_page();
+        pdf_page.finish();
+        Ok(pending)
+    }
+
+    /// Add an untagged page of `page_box` size that holds only `margin_boxes`
+    /// and the internal `links` that resolve against `anchors`.
+    ///
+    /// The boxes are drawn without running elements, which need the page
+    /// they belong to, so a box showing one falls back to its text.
+    pub(crate) fn margin_page(
+        &mut self,
+        page_box: PaintRect,
+        margin_boxes: &[MarginBox],
+        links: &[PageLink],
+        anchors: &AnchorIndex,
+    ) -> Result<()> {
+        let mut pdf_page = start_page(&mut self.pdf, page_box)?;
+        let mut surface = pdf_page.surface();
+        surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+        margin::paint(
+            &mut surface,
+            None,
+            margin_boxes,
+            &mut self.fonts,
+            &mut self.svg,
+            &mut self.raster,
+            &mut Tags::disabled(),
+        )?;
+        surface.pop();
+        surface.finish();
+        for link in links {
+            if let Some(annotation) = link.annotation(Some(anchors)) {
+                pdf_page.add_annotation(Annotation::new_link(annotation, None));
+            }
+        }
+        pdf_page.finish();
+        Ok(())
+    }
+
+    /// Finish the PDF, with the structure tree in `lang` when tagged, and
+    /// return its bytes.
+    pub(crate) fn finish(mut self, lang: Option<String>) -> Result<Vec<u8>> {
+        if let Some(tree) = self.tags.finish(lang) {
+            self.pdf.set_tag_tree(tree);
+        }
+        self.pdf
+            .finish()
+            .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
+    }
+}
+
+/// Start a PDF page of `page_box` size, given in CSS px.
+fn start_page(pdf: &mut krilla::Document, page_box: PaintRect) -> Result<krilla::page::Page<'_>> {
+    let settings = PageSettings::from_wh(page_box.width * PX_TO_PT, page_box.height * PX_TO_PT)
+        .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+    Ok(pdf.start_page_with(settings))
 }
 
 /// Draw the boxes, text and replaced content of `page`, without its margin

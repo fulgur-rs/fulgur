@@ -122,22 +122,29 @@ enum Source<'a> {
 }
 
 impl<'a> Source<'a> {
-    /// The HTML bytes, the file provider, and the document URL.
-    fn load(self) -> Result<(Cow<'a, [u8]>, files::BaseDirectoryProvider, url::Url)> {
+    /// The HTML bytes.
+    fn html(self) -> Result<Cow<'a, [u8]>> {
+        Ok(match self {
+            Self::File(input) => Cow::Owned(std::fs::read(input)?),
+            Self::Html { html, .. } => Cow::Borrowed(html.as_bytes()),
+        })
+    }
+
+    /// The file provider and the document URL.
+    fn files(self) -> Result<(files::BaseDirectoryProvider, url::Url)> {
         match self {
             Self::File(input) => {
-                let html = std::fs::read(input)?;
                 let files = files::BaseDirectoryProvider::for_input(input)?;
                 let document_url = files.document_url(input)?;
-                Ok((Cow::Owned(html), files, document_url))
+                Ok((files, document_url))
             }
-            Self::Html { html, base_dir } => {
+            Self::Html { base_dir, .. } => {
                 let files = match base_dir {
                     Some(dir) => files::BaseDirectoryProvider::for_directory(dir)?,
                     None => files::BaseDirectoryProvider::none(),
                 };
                 let document_url = files.directory_url()?;
-                Ok((Cow::Borrowed(html.as_bytes()), files, document_url))
+                Ok((files, document_url))
             }
         }
     }
@@ -148,7 +155,7 @@ fn draw(
     status: LayoutStatus,
     resources: &RenderResources<'_>,
     config: &Config,
-    collector: &bookmarks::BookmarkCollector,
+    collector: bookmarks::BookmarkCollector,
     document_url: &url::Url,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
@@ -189,12 +196,45 @@ fn with_layout<T>(
     consume: impl FnOnce(
         LayoutStatus,
         &RenderResources<'_>,
-        &bookmarks::BookmarkCollector,
+        bookmarks::BookmarkCollector,
         &url::Url,
     ) -> Result<T>,
 ) -> Result<T> {
+    with_resources(source, config, options, |resources, document_url| {
+        let html = source.html()?;
+        let document = parse_html_with_resources(html.as_ref(), resources)
+            .map_err(|error| Error::Layout(error.to_string()))?;
+        let registrations = if config.effective_bookmarks() {
+            bookmarks::registrations()
+        } else {
+            Vec::new()
+        };
+        let mut collector = bookmarks::BookmarkCollector::default();
+        let mut layout_options = LayoutOptions::new().resources(resources);
+        if config.effective_bookmarks() {
+            layout_options = layout_options.consumer_properties(&registrations, &mut collector);
+        }
+        let status = layout(
+            &document,
+            page_defaults(config),
+            layout_config,
+            layout_options,
+        )
+        .map_err(|error| Error::Layout(error.to_string()))?;
+        consume(status, resources, collector, document_url)
+    })
+}
+
+/// Build the parse and layout resources for `source` and pass them to
+/// `consume` with the URL of the document.
+fn with_resources<T>(
+    source: Source<'_>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+    consume: impl FnOnce(&RenderResources<'_>, &url::Url) -> Result<T>,
+) -> Result<T> {
     let fonts = assets::fonts(options)?;
-    let (html, files, document_url) = source.load()?;
+    let (files, document_url) = source.files()?;
     let network = bundle::Sandbox::new(options.assets, files);
     let images = raikiri_net::ImageResolver::new(network.clone());
     let resolver = images::OptionalImages(&images);
@@ -215,26 +255,7 @@ fn with_layout<T>(
     if let Some(fonts) = fonts {
         resources = resources.fonts(fonts);
     }
-    let document = parse_html_with_resources(html.as_ref(), &resources)
-        .map_err(|error| Error::Layout(error.to_string()))?;
-    let registrations = if config.effective_bookmarks() {
-        bookmarks::registrations()
-    } else {
-        Vec::new()
-    };
-    let mut collector = bookmarks::BookmarkCollector::default();
-    let mut layout_options = LayoutOptions::new().resources(&resources);
-    if config.effective_bookmarks() {
-        layout_options = layout_options.consumer_properties(&registrations, &mut collector);
-    }
-    let status = layout(
-        &document,
-        page_defaults(config),
-        layout_config,
-        layout_options,
-    )
-    .map_err(|error| Error::Layout(error.to_string()))?;
-    consume(status, &resources, &collector, &document_url)
+    consume(&resources, &document_url)
 }
 
 /// The configured page size as the page box Raikiri uses wherever CSS leaves
@@ -307,3 +328,8 @@ mod metadata;
 mod bookmarks;
 
 mod tagging;
+
+mod merge;
+mod stream;
+
+pub use stream::render_streaming;
