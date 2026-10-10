@@ -73,7 +73,7 @@ fn draw(
     status: LayoutStatus,
     resources: &RenderResources<'_>,
     config: &Config,
-    collector: &bookmarks::BookmarkCollector,
+    collector: bookmarks::BookmarkCollector,
     document_url: &url::Url,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
@@ -109,12 +109,44 @@ fn with_layout<T>(
     consume: impl FnOnce(
         LayoutStatus,
         &RenderResources<'_>,
-        &bookmarks::BookmarkCollector,
+        bookmarks::BookmarkCollector,
         &url::Url,
     ) -> Result<T>,
 ) -> Result<T> {
+    with_resources(input, config, options, |resources, document_url| {
+        let html = std::fs::read(input)?;
+        let document = parse_html_with_resources(html.as_slice(), resources)
+            .map_err(|error| Error::Layout(error.to_string()))?;
+        let registrations = if config.bookmarks {
+            bookmarks::registrations()
+        } else {
+            Vec::new()
+        };
+        let mut collector = bookmarks::BookmarkCollector::default();
+        let mut layout_options = LayoutOptions::new().resources(resources);
+        if config.bookmarks {
+            layout_options = layout_options.consumer_properties(&registrations, &mut collector);
+        }
+        let status = layout(
+            &document,
+            PageDefaults::default(),
+            layout_config,
+            layout_options,
+        )
+        .map_err(|error| Error::Layout(error.to_string()))?;
+        consume(status, resources, collector, document_url)
+    })
+}
+
+/// Build the parse and layout resources for `input` and pass them to
+/// `consume` with the URL of the input file.
+fn with_resources<T>(
+    input: &Path,
+    config: &Config,
+    options: &RenderOptions<'_>,
+    consume: impl FnOnce(&RenderResources<'_>, &url::Url) -> Result<T>,
+) -> Result<T> {
     let fonts = assets::fonts(options)?;
-    let html = std::fs::read(input)?;
     let files = files::BaseDirectoryProvider::for_input(input)?;
     let document_url = files.document_url(input)?;
     let images = raikiri_net::ImageResolver::new(files.clone());
@@ -136,26 +168,7 @@ fn with_layout<T>(
     if let Some(fonts) = fonts {
         resources = resources.fonts(fonts);
     }
-    let document = parse_html_with_resources(html.as_slice(), &resources)
-        .map_err(|error| Error::Layout(error.to_string()))?;
-    let registrations = if config.bookmarks {
-        bookmarks::registrations()
-    } else {
-        Vec::new()
-    };
-    let mut collector = bookmarks::BookmarkCollector::default();
-    let mut layout_options = LayoutOptions::new().resources(&resources);
-    if config.bookmarks {
-        layout_options = layout_options.consumer_properties(&registrations, &mut collector);
-    }
-    let status = layout(
-        &document,
-        PageDefaults::default(),
-        layout_config,
-        layout_options,
-    )
-    .map_err(|error| Error::Layout(error.to_string()))?;
-    consume(status, &resources, &collector, &document_url)
+    consume(&resources, &document_url)
 }
 
 /// The page size and margins of `config` as a user-origin `@page` rule.
@@ -202,3 +215,8 @@ mod assets;
 mod metadata;
 
 mod bookmarks;
+
+mod merge;
+mod stream;
+
+pub use stream::render_streaming;

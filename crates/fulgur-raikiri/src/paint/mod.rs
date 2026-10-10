@@ -11,7 +11,7 @@ mod clip;
 mod decoration;
 mod gradient;
 mod margin;
-mod navigation;
+pub(crate) mod navigation;
 mod order;
 mod raster;
 mod shape;
@@ -21,6 +21,7 @@ mod text_clip;
 use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
+use krilla::annotation::Annotation;
 use krilla::color::rgb;
 use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
@@ -32,8 +33,8 @@ use raikiri_html::computed::{
     ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    DocumentLayout, FontId, FragmentKind, Page, PaintEvent, PaintRect, PositionedGlyphRun,
-    RunSource,
+    DocumentLayout, FontId, FragmentKind, MarginBox, Page, PaintEvent, PaintRect,
+    PositionedGlyphRun, RunSource,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -47,58 +48,113 @@ pub(crate) fn paint_document(
     document_url: &url::Url,
     options: &crate::RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
-    let mut pdf = krilla::Document::new();
-    pdf.set_metadata(crate::metadata::build(config)?);
+    let mut painter = Painter::new(resources, config, options)?;
     if let Some(outline) = outline {
-        pdf.set_outline(outline);
+        painter.set_outline(outline);
     }
-    let mut fonts = FontCache::default();
-    let mut svg = svg::SvgCache::new(*options);
-    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
     for page in document.pages() {
-        paint_page(
-            &mut pdf,
-            document,
-            &page,
-            &mut fonts,
-            &mut svg,
-            &mut raster,
-            document_url,
-        )?;
+        let annotations =
+            navigation::annotations(&page, document.base_url(), document_url, document.anchors());
+        painter.page(&page, &page.margin_boxes(), annotations)?;
     }
-    pdf.finish()
-        .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
+    painter.finish()
 }
 
-fn paint_page(
+/// A PDF being written page by page.
+pub(crate) struct Painter<'a> {
+    pdf: krilla::Document,
+    fonts: FontCache,
+    svg: svg::SvgCache<'a>,
+    raster: raster::RasterCache<'a>,
+}
+
+impl<'a> Painter<'a> {
+    /// Start a PDF with the metadata of `config`.
+    pub(crate) fn new(
+        resources: &'a raikiri_html::RenderResources<'_>,
+        config: &fulgur_core::Config,
+        options: &crate::RenderOptions<'a>,
+    ) -> Result<Self> {
+        let mut pdf = krilla::Document::new();
+        pdf.set_metadata(crate::metadata::build(config)?);
+        Ok(Self {
+            pdf,
+            fonts: FontCache::default(),
+            svg: svg::SvgCache::new(*options),
+            raster: raster::RasterCache::new(resources.image_pixel_source_ref()),
+        })
+    }
+
+    pub(crate) fn set_outline(&mut self, outline: krilla::outline::Outline) {
+        self.pdf.set_outline(outline);
+    }
+
+    /// Draw `page` with `margin_boxes` below its body, and add `annotations`.
+    pub(crate) fn page(
+        &mut self,
+        page: &Page<'_>,
+        margin_boxes: &[MarginBox],
+        annotations: Vec<Annotation>,
+    ) -> Result<()> {
+        let Self {
+            pdf,
+            fonts,
+            svg,
+            raster,
+        } = self;
+        draw_page(pdf, page.geometry().page_box, annotations, |surface| {
+            // The margin boxes are drawn before the page body.
+            margin::paint(surface, margin_boxes, fonts);
+            let runs = page.text_runs();
+            let events = page.paint_order_for_text_runs(&runs);
+            if order::supported(&events, &runs) {
+                paint_ordered(surface, page, &events, &runs, fonts, svg, raster)
+            } else {
+                paint_legacy(surface, page, &runs, fonts, svg, raster)
+            }
+        })
+    }
+
+    /// Add a page of `page_box` size that holds only `margin_boxes` and
+    /// `annotations`.
+    pub(crate) fn margin_page(
+        &mut self,
+        page_box: PaintRect,
+        margin_boxes: &[MarginBox],
+        annotations: Vec<Annotation>,
+    ) -> Result<()> {
+        let fonts = &mut self.fonts;
+        draw_page(&mut self.pdf, page_box, annotations, |surface| {
+            margin::paint(surface, margin_boxes, fonts);
+            Ok(())
+        })
+    }
+
+    /// Finish the PDF and return its bytes.
+    pub(crate) fn finish(self) -> Result<Vec<u8>> {
+        self.pdf
+            .finish()
+            .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
+    }
+}
+
+/// Add a page of `page_box` size, draw on it in CSS px with `draw`, then add
+/// `annotations`.
+fn draw_page(
     pdf: &mut krilla::Document,
-    document: &DocumentLayout,
-    page: &Page<'_>,
-    fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
-    raster: &mut raster::RasterCache<'_>,
-    document_url: &url::Url,
+    page_box: PaintRect,
+    annotations: Vec<Annotation>,
+    draw: impl FnOnce(&mut Surface<'_>) -> Result<()>,
 ) -> Result<()> {
-    let page_box = page.geometry().page_box;
     let settings = PageSettings::from_wh(page_box.width * PX_TO_PT, page_box.height * PX_TO_PT)
         .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
     let mut pdf_page = pdf.start_page_with(settings);
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
-
-    // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts);
-    let runs = page.text_runs();
-    let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs) {
-        paint_ordered(&mut surface, page, &events, &runs, fonts, svg, raster)?;
-    } else {
-        paint_legacy(&mut surface, page, &runs, fonts, svg, raster)?;
-    }
-
+    draw(&mut surface)?;
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page, document_url)? {
+    for annotation in annotations {
         pdf_page.add_annotation(annotation);
     }
     pdf_page.finish();

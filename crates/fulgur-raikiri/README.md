@@ -29,6 +29,16 @@ let pdf = fulgur_raikiri::render(
 )?;
 ```
 
+`render_streaming` takes the same arguments and paints each page as soon as
+Raikiri finalizes it, while the input file is still being read. Pages that
+are painted before the end of the input cannot show `counter(pages)` or link
+to anchors that come later, so their margin boxes and internal links are
+drawn on an extra page once the layout ends; the extra page is then merged
+under the original page and removed. Delivered pages never change, so
+`<style>` elements inside `<body>` are ignored, as is a `position: fixed`
+element that starts after the first page was painted. The development CLI
+selects it with `--engine raikiri --stream`.
+
 Raikiri is a Git dependency pinned to a specific revision. This crate is not
 used by Fulgur's published facade, CLI, or bindings.
 

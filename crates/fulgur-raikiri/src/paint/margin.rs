@@ -5,12 +5,12 @@ use super::shape::RoundedRect;
 use super::{FontCache, fill, paint_glyph_run};
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::{MarginBox, Page};
+use raikiri_html::MarginBox;
 
-/// Draw the margin boxes of `page` in Raikiri's order, below the page body.
-pub(super) fn paint(surface: &mut Surface<'_>, page: &Page<'_>, fonts: &mut FontCache) {
-    for margin_box in page.margin_boxes() {
-        paint_box(surface, &margin_box, fonts);
+/// Draw the margin boxes of a page in Raikiri's order.
+pub(super) fn paint(surface: &mut Surface<'_>, margin_boxes: &[MarginBox], fonts: &mut FontCache) {
+    for margin_box in margin_boxes {
+        paint_box(surface, margin_box, fonts);
     }
 }
 

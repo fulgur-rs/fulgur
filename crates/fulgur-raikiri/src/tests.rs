@@ -101,7 +101,7 @@ fn already_aborted_layout_returns_aborted() {
             status,
             &RenderResources::new(),
             &Config::default(),
-            &bookmarks::BookmarkCollector::default(),
+            bookmarks::BookmarkCollector::default(),
             &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
             &RenderOptions::default(),
         ),
@@ -1502,6 +1502,8 @@ mod bookmark_tests;
 mod order_tests;
 
 mod decoration_tests;
+
+mod stream_tests;
 
 #[test]
 fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {

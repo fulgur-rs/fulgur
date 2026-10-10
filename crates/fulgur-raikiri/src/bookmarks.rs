@@ -5,7 +5,7 @@ use krilla::{
     outline::{Outline, OutlineNode},
 };
 use raikiri_html::{
-    ConsumerPropertyRegistration, DocumentLayout, DomView, FragmentKind, NodeId,
+    ConsumerPropertyRegistration, DocumentLayout, DomView, FragmentKind, NodeId, Page,
     computed::ComputedVisibility,
 };
 use raikiri_traits::{
@@ -72,20 +72,42 @@ fn first_descendant(
     None
 }
 
-pub(super) fn outline(document: &DocumentLayout, collector: &BookmarkCollector) -> Outline {
-    let mut outline = Outline::new();
-    let Some(first_page) = document.page(0) else {
-        return outline;
-    };
-    let dom = first_page.dom();
-    let visible = |node| {
-        first_page
-            .computed(node)
-            .is_some_and(|style| matches!(style.visibility, ComputedVisibility::Visible))
-    };
-    let mut positions = HashMap::new();
-    let mut boxes = HashMap::new();
+/// The document outline of a laid-out document.
+pub(super) fn outline(document: &DocumentLayout, collector: BookmarkCollector) -> Outline {
+    let mut builder = OutlineBuilder::default();
     for page in document.pages() {
+        builder.add_page(&page);
+    }
+    if let Some(first_page) = document.page(0) {
+        builder.add_headings(&first_page, collector);
+    }
+    builder.finish()
+}
+
+/// A heading placed in the outline.
+struct Entry {
+    source_order: u32,
+    node: NodeId,
+    level: i32,
+    label: String,
+    position: XyzDestination,
+}
+
+/// Builds the outline from pages that arrive in order.
+///
+/// Each heading takes the position of its first box fragment, or else of
+/// the first fragment of its descendants, among the pages added so far.
+#[derive(Default)]
+pub(super) struct OutlineBuilder {
+    positions: HashMap<NodeId, XyzDestination>,
+    boxes: HashMap<NodeId, XyzDestination>,
+    entries: Vec<Entry>,
+}
+
+impl OutlineBuilder {
+    /// Record the positions of the visible fragments of `page`.
+    pub(super) fn add_page(&mut self, page: &Page<'_>) {
+        let dom = page.dom();
         for fragment in page.fragments() {
             let node = fragment.node();
             let element = if dom.kind(node) == Some(NodeKind::Text) {
@@ -94,7 +116,7 @@ pub(super) fn outline(document: &DocumentLayout, collector: &BookmarkCollector) 
                 node
             };
             let rect = fragment.rect();
-            if !visible(element)
+            if !visible(page, element)
                 || ![rect.x, rect.y, rect.width, rect.height]
                     .iter()
                     .all(|value| value.is_finite())
@@ -107,54 +129,81 @@ pub(super) fn outline(document: &DocumentLayout, collector: &BookmarkCollector) 
                 page.index() as usize,
                 Point::from_xy(rect.x * PX_TO_PT, rect.y * PX_TO_PT),
             );
-            positions.entry(node).or_insert_with(|| position.clone());
+            self.positions
+                .entry(node)
+                .or_insert_with(|| position.clone());
             if fragment.kind() == FragmentKind::Box {
-                boxes.entry(node).or_insert(position);
+                self.boxes.entry(node).or_insert(position);
             }
         }
     }
-    let mut headings: Vec<_> = collector.headings.iter().collect();
-    headings.sort_by_key(|(node, heading)| (heading.source_order, **node));
-    let mut pending: Vec<(i32, OutlineNode)> = Vec::new();
-    let attach = |pending: &mut Vec<(i32, OutlineNode)>, outline: &mut Outline| {
-        if let Some((_, node)) = pending.pop() {
-            if let Some((_, parent)) = pending.last_mut() {
-                parent.push_child(node);
-            } else {
-                outline.push_child(node);
+
+    /// Place the headings of `collector`, using the DOM and styles of `page`.
+    pub(super) fn add_headings(&mut self, page: &Page<'_>, collector: BookmarkCollector) {
+        let dom = page.dom();
+        for (node, heading) in collector.headings {
+            let Some(level) = heading.level.filter(|level| *level > 0) else {
+                continue;
+            };
+            let Some(label) = heading.label else {
+                continue;
+            };
+            let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            if label.is_empty() || !visible(page, node) {
+                continue;
             }
+            let Some(position) = self
+                .boxes
+                .get(&node)
+                .cloned()
+                .or_else(|| first_descendant(dom, node, &self.positions))
+            else {
+                continue;
+            };
+            self.entries.push(Entry {
+                source_order: heading.source_order,
+                node,
+                level,
+                label,
+                position,
+            });
         }
-    };
-    for (&node, heading) in headings {
-        let Some(level) = heading.level.filter(|level| *level > 0) else {
-            continue;
+    }
+
+    /// Nest the placed headings by level, in source order.
+    pub(super) fn finish(mut self) -> Outline {
+        self.entries
+            .sort_by_key(|entry| (entry.source_order, entry.node));
+        let mut outline = Outline::new();
+        let mut pending: Vec<(i32, OutlineNode)> = Vec::new();
+        let attach = |pending: &mut Vec<(i32, OutlineNode)>, outline: &mut Outline| {
+            if let Some((_, node)) = pending.pop() {
+                if let Some((_, parent)) = pending.last_mut() {
+                    parent.push_child(node);
+                } else {
+                    outline.push_child(node);
+                }
+            }
         };
-        let Some(label) = &heading.label else {
-            continue;
-        };
-        let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-        if label.is_empty() || !visible(node) {
-            continue;
+        for entry in self.entries {
+            while pending
+                .last()
+                .is_some_and(|(parent_level, _)| *parent_level >= entry.level)
+            {
+                attach(&mut pending, &mut outline);
+            }
+            pending.push((entry.level, OutlineNode::new(entry.label, entry.position)));
         }
-        let Some(position) = boxes
-            .get(&node)
-            .cloned()
-            .or_else(|| first_descendant(dom, node, &positions))
-        else {
-            continue;
-        };
-        while pending
-            .last()
-            .is_some_and(|(parent_level, _)| *parent_level >= level)
-        {
+        while !pending.is_empty() {
             attach(&mut pending, &mut outline);
         }
-        pending.push((level, OutlineNode::new(label, position)));
+        outline
     }
-    while !pending.is_empty() {
-        attach(&mut pending, &mut outline);
-    }
-    outline
+}
+
+fn visible(page: &Page<'_>, node: NodeId) -> bool {
+    page.computed(node)
+        .is_some_and(|style| matches!(style.visibility, ComputedVisibility::Visible))
 }
 
 #[cfg(test)]

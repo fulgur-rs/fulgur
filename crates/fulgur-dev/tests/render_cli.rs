@@ -516,3 +516,42 @@ fn dev_bookmark_opt_in_creates_outline() {
         );
     }
 }
+
+#[test]
+fn raikiri_stream_writes_pdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, HTML).unwrap();
+    let result = run_with_args(
+        &input,
+        &output,
+        Some("raikiri"),
+        dir.path(),
+        &[OsStr::new("--stream")],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(load_pdf(&output).get_pages().len(), 1);
+}
+
+#[test]
+fn stream_requires_raikiri() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, HTML).unwrap();
+    let result = run_with_args(
+        &input,
+        &output,
+        Some("blitz"),
+        dir.path(),
+        &[OsStr::new("--stream")],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--stream"));
+    assert!(!output.exists());
+}

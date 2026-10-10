@@ -1,4 +1,4 @@
-use fulgur_core::{Result, units::PX_TO_PT};
+use fulgur_core::units::PX_TO_PT;
 use krilla::{
     action::{Action, LinkAction},
     annotation::{Annotation, LinkAnnotation, Target},
@@ -6,37 +6,57 @@ use krilla::{
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{DocumentLayout, Page};
+use raikiri_html::{AnchorIndex, Page};
 
-enum LinkTarget {
-    Internal(XyzDestination),
+/// Where a link on a page points.
+pub(crate) enum Href {
+    /// An anchor of the document itself, by its percent-decoded name.
+    Internal(String),
+    /// Any other URL.
     External(String),
 }
 
-impl LinkTarget {
-    fn annotation_target(&self) -> Target {
-        Target::Action(match self {
-            Self::Internal(destination) => Action::Goto(destination.clone().into()),
-            Self::External(uri) => LinkAction::new(uri.clone()).into(),
-        })
+/// One link of a page: its target and its areas in PDF pt.
+pub(crate) struct PageLink {
+    pub(crate) href: Href,
+    pub(crate) rects: Vec<Rect>,
+}
+
+impl PageLink {
+    /// The link annotation for an external link.
+    pub(crate) fn external(&self) -> Option<Annotation> {
+        match &self.href {
+            Href::External(uri) => Some(annotation(
+                &self.rects,
+                Target::Action(LinkAction::new(uri.clone()).into()),
+            )),
+            Href::Internal(_) => None,
+        }
+    }
+
+    /// The link annotation for an internal link, if `anchors` has its
+    /// destination.
+    pub(crate) fn internal(&self, anchors: &AnchorIndex) -> Option<Annotation> {
+        let Href::Internal(name) = &self.href else {
+            return None;
+        };
+        let anchor = anchors.get(name)?;
+        if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
+            return None;
+        }
+        let destination = XyzDestination::new(
+            anchor.page_index as usize,
+            Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
+        );
+        Some(annotation(
+            &self.rects,
+            Target::Action(Action::Goto(destination.into())),
+        ))
     }
 }
 
-fn anchor_target(document: &DocumentLayout, fragment: &str) -> Option<LinkTarget> {
-    let fragment = percent_decode_str(fragment).decode_utf8().ok()?;
-    let anchor = document.anchors().get(&fragment)?;
-    if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
-        return None;
-    }
-    Some(LinkTarget::Internal(XyzDestination::new(
-        anchor.page_index as usize,
-        Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
-    )))
-}
-
-fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Option<LinkTarget> {
-    let uri = document
-        .base_url()
+fn href(base_url: Option<&url::Url>, document_url: &url::Url, href: &str) -> Option<Href> {
+    let uri = base_url
         .map_or_else(|| url::Url::parse(href), |base| base.join(href))
         .ok()?;
     if let Some(fragment) = uri.fragment() {
@@ -45,23 +65,28 @@ fn target(document: &DocumentLayout, document_url: &url::Url, href: &str) -> Opt
         let mut target_url = uri.clone();
         target_url.set_fragment(None);
         if original_url == target_url {
-            return anchor_target(document, fragment);
+            let name = percent_decode_str(fragment).decode_utf8().ok()?;
+            return Some(Href::Internal(name.into_owned()));
         }
     }
-    Some(LinkTarget::External(uri.into()))
+    Some(Href::External(uri.into()))
 }
 
-pub(super) fn annotations(
-    document: &DocumentLayout,
+/// The links of `page` that have a target and a visible area.
+///
+/// `base_url` resolves relative targets; a target that names `document_url`
+/// with a fragment is an internal link.
+pub(crate) fn links(
     page: &Page<'_>,
+    base_url: Option<&url::Url>,
     document_url: &url::Url,
-) -> Result<Vec<Annotation>> {
-    let mut annotations = Vec::new();
+) -> Vec<PageLink> {
+    let mut links = Vec::new();
     for link in page.links() {
         if link.target.is_empty() {
             continue;
         }
-        let Some(target) = target(document, document_url, link.target) else {
+        let Some(href) = href(base_url, document_url, link.target) else {
             continue;
         };
         let mut rects = Vec::new();
@@ -84,15 +109,33 @@ pub(super) fn annotations(
             };
             rects.push(rect);
         }
-        let annotation = match rects.as_slice() {
-            [] => continue,
-            [rect] => LinkAnnotation::new(*rect, target.annotation_target()),
-            _ => LinkAnnotation::new_with_quad_points(
-                rects.into_iter().map(Quadrilateral::from).collect(),
-                target.annotation_target(),
-            ),
-        };
-        annotations.push(Annotation::new_link(annotation, None));
+        if !rects.is_empty() {
+            links.push(PageLink { href, rects });
+        }
     }
-    Ok(annotations)
+    links
+}
+
+/// The annotations of `page`, with internal links resolved by `anchors`.
+pub(super) fn annotations(
+    page: &Page<'_>,
+    base_url: Option<&url::Url>,
+    document_url: &url::Url,
+    anchors: &AnchorIndex,
+) -> Vec<Annotation> {
+    links(page, base_url, document_url)
+        .iter()
+        .filter_map(|link| link.external().or_else(|| link.internal(anchors)))
+        .collect()
+}
+
+fn annotation(rects: &[Rect], target: Target) -> Annotation {
+    let link = match rects {
+        [rect] => LinkAnnotation::new(*rect, target),
+        _ => LinkAnnotation::new_with_quad_points(
+            rects.iter().copied().map(Quadrilateral::from).collect(),
+            target,
+        ),
+    };
+    Annotation::new_link(link, None)
 }
