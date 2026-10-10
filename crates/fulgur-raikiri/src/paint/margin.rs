@@ -1,14 +1,16 @@
 //! Page-margin boxes (CSS Paged Media 3 §4.2), laid out by Raikiri for each
 //! page: the painter only draws the resolved boxes.
 
-use super::shape::RoundedRect;
+use super::raster::BackgroundLayer;
+use super::shape::{Edges, RoundedRect};
 use super::{FontCache, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
 use crate::tagging::{Tags, Target, margin_box_artifact};
 use fulgur_core::{Error, Result};
 use krilla::geom::Transform;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::{MarginBox, Page, PaintRect, PlacedRunningElement};
+use raikiri_html::computed::ComputedVisualBox;
+use raikiri_html::{MarginBox, Page, PaintInsets, PaintRect, PlacedRunningElement};
 
 /// Draw the margin boxes of `page` in Raikiri's order, below the page body.
 /// Margin boxes hold running headers and footers, which tagged output marks
@@ -40,11 +42,9 @@ pub(super) fn paint<'a>(
     Ok(drawn)
 }
 
-/// The background color, the solid borders, then the content clipped to the
-/// border box: the running element the box shows (CSS GCPM 3 §1.2.2), drawn
-/// like a page body, or else the box text. `background-image: url()` is not
-/// drawn, as for element boxes: the layout result carries no decoded image
-/// data.
+/// The background color and image, the solid borders, then the content
+/// clipped to the border box: the running element the box shows (CSS GCPM 3
+/// §1.2.2), drawn like a page body, or else the box text.
 fn paint_box(
     surface: &mut Surface<'_>,
     margin_box: &MarginBox,
@@ -54,12 +54,43 @@ fn paint_box(
     raster: &mut raster::RasterCache<'_>,
 ) -> Result<()> {
     let rect = margin_box.rect;
-    let Some(border_box) = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height).path() else {
+    let outer = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height);
+    let Some(border_box) = outer.path() else {
         return Ok(());
     };
     if let Some(color) = margin_box.background_color {
         surface.set_fill(Some(fill(color)));
         surface.draw_path(&border_box);
+    }
+    if let Some(image) = &margin_box.background_image {
+        let borders = edges(margin_box.border_widths());
+        let padding = edges(margin_box.padding);
+        let visual_box = |visual: ComputedVisualBox| match visual {
+            ComputedVisualBox::PaddingBox => Some(outer.inset(borders)),
+            ComputedVisualBox::ContentBox => Some(outer.inset(borders.add(padding))),
+            ComputedVisualBox::BorderBox => Some(outer),
+            // Margin boxes have no glyph or border-area clip shapes here;
+            // Raikiri's own painter skips the image in these cases too.
+            _ => None,
+        };
+        if let (Some(positioning), Some(painting)) =
+            (visual_box(image.origin), visual_box(image.clip))
+            && let Some(area) = painting.path()
+        {
+            let layer = BackgroundLayer {
+                url: &image.url,
+                size: &image.size,
+                position: &image.position,
+                repeat: &image.repeat,
+            };
+            raster.paint_background(
+                surface,
+                &layer,
+                positioning.bounds(),
+                painting.bounds(),
+                (&area, FillRule::NonZero),
+            )?;
+        }
     }
     for (side, border) in margin_box.borders.iter().enumerate() {
         let Some(border) = border else { continue };
@@ -106,4 +137,13 @@ fn paint_box(
     }
     surface.pop();
     Ok(())
+}
+
+fn edges(insets: PaintInsets) -> Edges {
+    Edges {
+        top: insets.top,
+        right: insets.right,
+        bottom: insets.bottom,
+        left: insets.left,
+    }
 }

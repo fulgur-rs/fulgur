@@ -19,6 +19,10 @@ pub(super) struct RenderArgs {
     /// Bundled font file, repeatable (TTF/OTF/WOFF2; TTC only with Blitz).
     #[arg(long)]
     font: Vec<PathBuf>,
+    /// Bundled image as NAME=PATH, repeatable. NAME is the URL path relative
+    /// to the input file's directory, e.g. `img/logo.png=assets/logo.png`.
+    #[arg(long, value_parser = parse_image)]
+    image: Vec<(String, PathBuf)>,
     /// Disable system fonts; requires at least one bundled font.
     #[arg(long, requires = "font")]
     no_system_fonts: bool,
@@ -65,6 +69,9 @@ impl RenderArgs {
         }
         for path in &self.font {
             bundle.add_font_file(path)?;
+        }
+        for (name, path) in &self.image {
+            bundle.add_image_file(name, path)?;
         }
         for data in &bundle.fonts {
             let file = skrifa::raw::FileRef::new(data)
@@ -117,6 +124,15 @@ impl RenderArgs {
             .tagged(self.tagged)
             .pdf_ua(self.pdf_ua)
             .build()
+    }
+}
+
+fn parse_image(s: &str) -> Result<(String, PathBuf), String> {
+    match s.split_once('=') {
+        Some((name, path)) if !name.is_empty() && !path.is_empty() => {
+            Ok((name.to_string(), PathBuf::from(path)))
+        }
+        _ => Err("expected NAME=PATH".into()),
     }
 }
 

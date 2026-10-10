@@ -6,7 +6,8 @@ The backend accepts an HTML file path, or an HTML string with an optional base
 directory, and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
-backgrounds and borders, text, text decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
+backgrounds and borders (including `url()` background images), text, text
+decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
 
 The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
@@ -21,8 +22,15 @@ Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
 and registered with Raikiri. Parsing, layout, and painting retain the same
 resources and local-file provider. Disabling system fonts requires a bundled
-font. Invalid fonts, TTC/OTC collections, and non-empty image bundles return
-an asset error. The pinned font API cannot select a collection face; use
+font. Invalid fonts and TTC/OTC collections return an asset error. Each bundle
+image is a file at the URL its name resolves to against the base directory
+(`img/logo.png`), or at its name when that is an absolute URL; HTML without a
+base directory is `about:blank`, so only absolute-URL names apply to it.
+Documents reach bundle images with browser URL resolution: `<img src>`
+against the document base URL, `url()` in a linked or imported stylesheet
+against that stylesheet's URL. Bundle images are served ahead of the files in
+the directory, for any resource kind. The pinned font
+API cannot select a collection face; use
 individual TTF/OTF fonts or WOFF2.
 Bundle CSS has document URL provenance; linked stylesheet imports retain
 stylesheet URL provenance.
@@ -144,13 +152,12 @@ Page-margin boxes come from Raikiri's per-page layout (`Page::margin_boxes`):
 the sixteen slots with their used rectangles, resolved generated content
 (`counter(page)`, `counter(pages)`, quotes, `string()` and `element()`), and
 glyph runs of their text. Each box paints below the page body: background
-color, solid borders, then its content clipped to the border box. A box
-whose `content` has `element()` draws the running element the page selects
+color and `url()` image, solid borders, then its content clipped to the
+border box. A box whose `content` has `element()` draws the running element the page selects
 (`Page::margin_box_running_element`), laid out at the box's content width
 and drawn like a page body, with its links clipped to the box. Other boxes,
 including those that combine `element()` with other values, draw their text.
-`background-image: url()` and vertical-writing text in margin boxes are not
-drawn yet.
+Vertical-writing text in margin boxes is not drawn yet.
 
 Corner radii retain separate horizontal and vertical axes from Raikiri,
 including slash shorthand, two-value corner longhands, and percentages of

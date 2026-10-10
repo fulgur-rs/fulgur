@@ -25,7 +25,7 @@ fn legacy_pages_keep_inline_svg_root_opacity() {
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
+    let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());
     paint_legacy(
         &mut surface,
         &page,
@@ -70,7 +70,7 @@ fn legacy_pages_keep_inline_svg_vectors() {
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
-    let mut raster = raster::RasterCache::new(resources.image_pixel_source_ref());
+    let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());
     paint_legacy(
         &mut surface,
         &page,
@@ -155,7 +155,7 @@ fn producer_fragmentainer_clip_is_applied_before_its_opacity_group() {
         &[],
         &mut FontCache::default(),
         &mut svg::SvgCache::new(crate::RenderOptions::default()),
-        &mut raster::RasterCache::new(resources.image_pixel_source_ref()),
+        &mut raster::RasterCache::for_tests(resources.image_pixel_source_ref()),
         &mut crate::tagging::Tags::disabled(),
     )
     .unwrap();
