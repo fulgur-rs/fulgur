@@ -256,6 +256,11 @@ fn unusable_background_urls_draw_nothing() {
         tiles("background-image:url(dot.png);background-size:0 0"),
         0
     );
+    // More than 10,000 tiles on one axis leaves no tile origins at all.
+    assert_eq!(
+        tiles("background-image:url(dot.png);background-size:0.001px 0.001px"),
+        0
+    );
 }
 
 #[test]
