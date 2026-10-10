@@ -52,7 +52,12 @@ pub(super) fn paint(
     shadow: &TextShadow,
     budget: &mut Budget,
 ) {
-    if shadow.color.a == 0 {
+    // An overflowing length leaves a non-finite offset or blur radius,
+    // which has no drawable shadow.
+    let finite = shadow.offset.0.is_finite()
+        && shadow.offset.1.is_finite()
+        && shadow.blur_radius.is_finite();
+    if shadow.color.a == 0 || !finite {
         return;
     }
     if shadow.blur_radius > 0.0 {
@@ -153,7 +158,7 @@ fn blurred_raster(
         return None;
     }
     let pixels = MAX_RASTER_PIXELS.min(budget.pixels);
-    let scale = RASTER_SCALE.min((pixels / (width * height)).sqrt());
+    let scale = RASTER_SCALE.min(fitting_scale(width, height, pixels));
     if scale.is_nan() || scale < MIN_RASTER_SCALE {
         return None;
     }
@@ -163,8 +168,12 @@ fn blurred_raster(
     let pixel_width = ((left + width) * scale).ceil() - x;
     let pixel_height = ((top + height) * scale).ceil() - y;
     let (pixel_width, pixel_height) = (pixel_width as u32, pixel_height as u32);
+    let area = u64::from(pixel_width) * u64::from(pixel_height);
+    if area as f32 > pixels {
+        return None;
+    }
     let mut mask = tiny_skia::Mask::new(pixel_width, pixel_height)?;
-    budget.pixels -= pixel_width as f32 * pixel_height as f32;
+    budget.pixels -= area as f32;
     let transform = tiny_skia::Transform::from_row(
         scale,
         0.0,
@@ -199,6 +208,24 @@ fn blurred_raster(
         width: pixel_width as f32 / scale,
         height: pixel_height as f32 / scale,
     })
+}
+
+/// The largest scale at which a `width` by `height` rectangle, with its
+/// edges rounded out to whole pixels, has at most `pixels` pixels.
+///
+/// Rounding out adds less than one pixel at each edge, so each side is
+/// below `side * scale + 2`. The scale solves
+/// `(width * scale + 2) * (height * scale + 2) = pixels`, which bounds
+/// the rounded raster even when one side is far smaller than a pixel.
+fn fitting_scale(width: f32, height: f32, pixels: f32) -> f32 {
+    let spare = pixels - 4.0;
+    if spare.is_nan() || spare <= 0.0 {
+        return f32::NAN;
+    }
+    let edges = 2.0 * (width + height);
+    // The root of `width * height * s² + edges * s - spare`, written so
+    // that it stays exact when `width * height` is tiny.
+    2.0 * spare / (edges + (edges * edges + 4.0 * width * height * spare).sqrt())
 }
 
 /// Blur `pixels` (row-major, `width` by `height`) with a Gaussian of

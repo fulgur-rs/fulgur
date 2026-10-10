@@ -119,8 +119,9 @@ A sharp shadow is drawn as filled glyph outlines, so extracted text is not
 repeated. PDF has no blur, so a blurred shadow is rasterized at three pixels
 per CSS px (a Gaussian of half the blur radius, approximated by three box
 blurs) and drawn as an image with a soft mask; the shadow rasters of a document
-share a budget of 64M pixels. Shadows are not applied to text decorations, and
-page-margin box text has no shadows.
+share a budget of 64M pixels. Shadows are not applied to text decorations,
+page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
+and color-only emoji glyphs) cast no shadow.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices

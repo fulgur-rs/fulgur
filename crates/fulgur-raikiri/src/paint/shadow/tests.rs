@@ -61,3 +61,39 @@ fn rasters_take_from_the_budget_and_stop_when_it_is_spent() {
     assert!(blurred_raster(&path, shadow, &mut budget).is_none());
     assert_eq!(budget.pixels, 10.0);
 }
+
+#[test]
+fn rounded_rasters_stay_within_the_pixel_limit() {
+    let shadow = ShadowParams {
+        offset: (0.3, 0.7),
+        blur_radius: 0.01,
+        color: CssColor::BLACK,
+    };
+    // A long, very thin shape: rounding its height up to a pixel must not
+    // let the raster grow past the limit.
+    for (width, height) in [(1.0e8_f32, 0.001_f32), (3000.0, 2000.0), (0.5, 0.5)] {
+        let mut builder = tiny_skia::PathBuilder::new();
+        builder.push_rect(tiny_skia::Rect::from_xywh(0.25, 0.25, width, height).unwrap());
+        let path = builder.finish().unwrap();
+        let mut budget = Budget::default();
+        if let Some(raster) = blurred_raster(&path, shadow, &mut budget) {
+            let area = u64::from(raster.pixel_width) * u64::from(raster.pixel_height);
+            assert!(area as f32 <= MAX_RASTER_PIXELS, "{width}x{height}: {area}");
+        }
+    }
+}
+
+#[test]
+fn fitting_scale_bounds_the_rounded_area() {
+    for (width, height, pixels) in [
+        (100.0_f32, 50.0_f32, 4.0e6_f32),
+        (1.0e8, 0.001, 4.0e6),
+        (0.001, 0.001, 100.0),
+    ] {
+        let scale = fitting_scale(width, height, pixels);
+        let area = (width * scale + 2.0) * (height * scale + 2.0);
+        assert!(area <= pixels * 1.0001, "{width}x{height}: {area}");
+    }
+    assert!(fitting_scale(1.0, 1.0, 4.0).is_nan());
+    assert!(fitting_scale(1.0, 1.0, -5.0).is_nan());
+}

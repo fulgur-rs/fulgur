@@ -122,3 +122,13 @@ fn blurred_shadow_of_a_split_line_is_one_image() {
     assert_eq!(text_shows(&ops).len(), 2);
     assert_eq!(count(&ops, "Do"), 1);
 }
+
+#[test]
+fn overflowing_shadow_offsets_are_skipped() {
+    let (_, ops) = operations(&format!(
+        "{SHADOW_CSS}<p style='text-shadow:1e40px 1px, 1px 1e40px 2px'>Far</p>"
+    ));
+    assert_eq!(text_shows(&ops).len(), 1);
+    assert_eq!(count(&ops, "f"), 0);
+    assert_eq!(count(&ops, "Do"), 0);
+}
