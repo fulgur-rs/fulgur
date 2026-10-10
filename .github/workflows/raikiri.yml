@@ -1,0 +1,105 @@
+name: Raikiri
+
+# The unpublished Raikiri backend (crates/fulgur-raikiri + crates/fulgur-dev)
+# is checked here instead of in ci.yml, so:
+#   - a Raikiri-side failure never blocks Blitz PRs (this workflow is not a
+#     required check), and
+#   - the five-cell `test` matrix in ci.yml no longer compiles Raikiri.
+# PRs run it only when they touch the Raikiri backend, its direct
+# dependencies, or the Raikiri pin (Cargo.lock). The nightly schedule catches
+# breakage that slips in from elsewhere (e.g. a fulgur-blitz API change that
+# fulgur-dev consumes).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/raikiri.yml"
+      - ".config/nextest.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "codecov.yml"
+      - "crates/fulgur-core/**"
+      - "crates/fulgur-raikiri/**"
+      - "crates/fulgur-dev/**"
+      - "scripts/compare-raikiri-dev.py"
+      - "scripts/compare_raikiri_dev_tests.py"
+  pull_request:
+    paths:
+      - ".github/workflows/raikiri.yml"
+      - ".config/nextest.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "codecov.yml"
+      - "crates/fulgur-core/**"
+      - "crates/fulgur-raikiri/**"
+      - "crates/fulgur-dev/**"
+      - "scripts/compare-raikiri-dev.py"
+      - "scripts/compare_raikiri_dev_tests.py"
+  schedule:
+    # 02:30 UTC daily (11:30 JST), after WPT nightly starts.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  raikiri:
+    name: raikiri backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur-raikiri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install poppler-utils (for fulgur-dev raster tests)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+      - name: Configure mold linker
+        run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # cargo-llvm-cov
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@dfd6a81ff1efc1c100332d760e0c9edfe2ae0a51 # nextest
+      - name: Test development backend comparison script
+        run: python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
+      - name: Clippy
+        run: cargo clippy -p fulgur-raikiri -p fulgur-dev --all-targets -- -D warnings
+      # Run the tests under coverage so Codecov patch coverage keeps working
+      # on Raikiri PRs now that ci.yml excludes these crates. The upload is
+      # flagged `raikiri` and carried forward (codecov.yml) on commits where
+      # this workflow does not run.
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov nextest -p fulgur-raikiri -p fulgur-dev --profile ci --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: lcov.info
+          flags: raikiri
+          use_oidc: true
+          fail_ci_if_error: false

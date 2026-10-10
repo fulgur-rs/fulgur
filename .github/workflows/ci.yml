@@ -60,10 +60,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Test development backend comparison script
-        run: python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # fulgur-raikiri / fulgur-dev are linted by raikiri.yml instead, so a
+      # Raikiri-side breakage never blocks Blitz PRs.
+      - run: cargo clippy --workspace --all-targets --exclude fulgur-raikiri --exclude fulgur-dev -- -D warnings
 
   test:
     permissions:
@@ -122,7 +122,7 @@ jobs:
         with:
           shared-key: ${{ matrix.cache-key }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install poppler-utils (for fulgur-wpt and fulgur-dev raster tests)
+      - name: Install poppler-utils (for fulgur-wpt raster tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - name: Configure mold linker
@@ -144,18 +144,23 @@ jobs:
       # Codecov. The WPT coverage surface is exercised by the `wpt` matrix
       # job (in this same workflow) and by nightly; Codecov numbers here
       # only reflect unit-test coverage.
+      #
+      # fulgur-raikiri / fulgur-dev (the unpublished Raikiri backend) are
+      # excluded from every cell, coverage included: they run in raikiri.yml
+      # as a single non-blocking Linux job, so a Raikiri-side failure never
+      # blocks the Blitz pipeline and no cell here pays to compile Raikiri.
       - name: Build tests
         if: ${{ !matrix.coverage }}
-        run: cargo nextest run --workspace --exclude fulgur-vrt --no-run
+        run: cargo nextest run --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --no-run
       - name: Run tests
         if: ${{ !matrix.coverage }}
-        run: cargo nextest run --workspace --exclude fulgur-vrt
+        run: cargo nextest run --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev
       - name: Run tests with coverage
         if: matrix.coverage
         run: |
           cargo llvm-cov clean --workspace
-          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --no-report
-          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --features fulgur/parallel --profile ci --no-report
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --profile ci --no-report
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --features fulgur/parallel --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
