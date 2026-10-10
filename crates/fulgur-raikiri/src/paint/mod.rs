@@ -90,22 +90,49 @@ fn paint_page(
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
     // The margin boxes are drawn before the page body.
-    margin::paint(&mut surface, page, fonts, raster)?;
-    let runs = page.text_runs();
-    let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs) {
-        paint_ordered(&mut surface, page, &events, &runs, fonts, svg, raster)?;
-    } else {
-        paint_legacy(&mut surface, page, &runs, fonts, svg, raster)?;
-    }
+    let running = margin::paint(&mut surface, page, fonts, svg, raster)?;
+    paint_body(&mut surface, page, fonts, svg, raster)?;
 
     surface.pop();
     surface.finish();
-    for annotation in navigation::annotations(document, page, document_url)? {
+    for annotation in
+        navigation::annotations(document, page, navigation::Placement::PAGE, document_url)?
+    {
         pdf_page.add_annotation(annotation);
+    }
+    // Links inside the running elements drawn in margin boxes, clipped like
+    // their content to the box.
+    for (running, border_box) in running {
+        let placement = navigation::Placement {
+            origin: running.origin,
+            clip: Some(border_box),
+        };
+        let running_page = running.layout.page();
+        for annotation in navigation::annotations(document, &running_page, placement, document_url)?
+        {
+            pdf_page.add_annotation(annotation);
+        }
     }
     pdf_page.finish();
     Ok(())
+}
+
+/// Draw the boxes, text and replaced content of `page`, without its margin
+/// boxes. A running element laid out for a margin box is drawn the same way.
+fn paint_body(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    fonts: &mut FontCache,
+    svg: &mut svg::SvgCache<'_>,
+    raster: &mut raster::RasterCache<'_>,
+) -> Result<()> {
+    let runs = page.text_runs();
+    let events = page.paint_order_for_text_runs(&runs);
+    if order::supported(&events, &runs) {
+        paint_ordered(surface, page, &events, &runs, fonts, svg, raster)
+    } else {
+        paint_legacy(surface, page, &runs, fonts, svg, raster)
+    }
 }
 
 fn paint_legacy(
@@ -137,6 +164,7 @@ fn paint_legacy(
                 surface,
                 raster,
                 fragment.paint_rect(),
+                fragment.content_rect(),
                 Slice::of(&fragment),
                 style,
                 text,
@@ -205,6 +233,7 @@ fn paint_ordered(
                         surface,
                         raster,
                         fragment.paint_rect(),
+                        fragment.content_rect(),
                         Slice::of(fragment),
                         style,
                         text,
@@ -219,6 +248,7 @@ fn paint_ordered(
                     surface,
                     raster,
                     piece.rect,
+                    None,
                     Slice::generated(piece),
                     piece.style,
                     text,
@@ -331,7 +361,8 @@ fn paint_text_batch(
     }
 }
 
-/// Background and borders of one box fragment (`rect` is its border box).
+/// Background and borders of one box fragment (`rect` is its border box,
+/// `content` the whole element's content box from layout, if known).
 ///
 /// The fragment is drawn as its own box, apart from its broken edges: the
 /// corner radii (percentages and the §5.5 scaling) and the background
@@ -343,6 +374,7 @@ fn paint_box(
     surface: &mut Surface<'_>,
     raster: &mut raster::RasterCache<'_>,
     rect: PaintRect,
+    content: Option<PaintRect>,
     slice: Slice,
     style: &ComputedValues,
     text: impl FnOnce() -> Option<Path>,
@@ -351,7 +383,8 @@ fn paint_box(
         return Ok(());
     }
     let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
-    paint_background(surface, raster, &border_box, slice, style, text)?;
+    let padding = padding(style, rect, content);
+    paint_background(surface, raster, &border_box, padding, slice, style, text)?;
     border::paint_borders(surface, &border_box, style, slice);
     Ok(())
 }
@@ -365,12 +398,13 @@ fn paint_background(
     surface: &mut Surface<'_>,
     raster: &mut raster::RasterCache<'_>,
     border_box: &RoundedRect,
+    padding: Edges,
     slice: Slice,
     style: &ComputedValues,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     let borders = slice.edges(border::widths(style));
-    let padding = slice.edges(padding(style));
+    let padding = slice.edges(padding);
     let visual_box = |visual: ComputedVisualBox| match visual {
         ComputedVisualBox::PaddingBox => border_box.inset(borders),
         ComputedVisualBox::ContentBox => border_box.inset(borders.add(padding)),
@@ -436,18 +470,35 @@ fn paint_background(
     Ok(())
 }
 
-/// Used padding widths. A percentage refers to the containing block's
-/// width, which the fragment does not carry, so it counts as zero.
-fn padding(style: &ComputedValues) -> Edges {
-    let px = |value: ComputedLengthPercentage| match value {
+/// Used padding widths of the box whose border box is `rect`.
+///
+/// A percentage refers to the containing block's width (CSS Box 4 §4),
+/// which the fragment does not carry. The layout's `content` box already
+/// subtracts the resolved padding, so a percentage side is read back as the
+/// gap between the border box, less its border, and the content box. The
+/// content box covers the whole element before page cuts in the same
+/// page-local coordinates as `rect`, so the top and bottom gaps are only
+/// meaningful on the fragments that hold those edges; the broken edges are
+/// zeroed by the caller's slice anyway. Without a content box (generated
+/// pieces, inline boxes split over several lines) a percentage counts as
+/// zero.
+fn padding(style: &ComputedValues, rect: PaintRect, content: Option<PaintRect>) -> Edges {
+    let borders = border::widths(style);
+    let used = content.map(|content| Edges {
+        top: content.y - rect.y - borders.top,
+        right: rect.x + rect.width - borders.right - (content.x + content.width),
+        bottom: rect.y + rect.height - borders.bottom - (content.y + content.height),
+        left: content.x - rect.x - borders.left,
+    });
+    let px = |value: ComputedLengthPercentage, used: Option<f32>| match value {
         ComputedLengthPercentage::Px(px) => px.max(0.0),
-        ComputedLengthPercentage::Percent(_) => 0.0,
+        ComputedLengthPercentage::Percent(_) => used.unwrap_or(0.0).max(0.0),
     };
     Edges {
-        top: px(style.padding.top),
-        right: px(style.padding.right),
-        bottom: px(style.padding.bottom),
-        left: px(style.padding.left),
+        top: px(style.padding.top, used.map(|edges| edges.top)),
+        right: px(style.padding.right, used.map(|edges| edges.right)),
+        bottom: px(style.padding.bottom, used.map(|edges| edges.bottom)),
+        left: px(style.padding.left, used.map(|edges| edges.left)),
     }
 }
 

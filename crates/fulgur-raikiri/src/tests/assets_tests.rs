@@ -409,3 +409,31 @@ fn bundled_font_collection_is_rejected() {
     );
     assert!(matches!(result, Err(Error::Asset(message)) if message.contains("collections")));
 }
+
+#[test]
+fn html_string_bundles_resolve_against_the_base_directory_or_absolute_urls() {
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("dot.png", dot_png());
+    bundle.add_image("https://images.test/dot.png", dot_png());
+    let options = RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: true,
+    };
+    let drawn = |src: &str, base_dir: Option<&Path>| {
+        let html = format!("{PAGE}<img src='{src}' style='width:8px;height:8px'>");
+        let bytes =
+            render_html_with_options(&html, base_dir, &Config::default(), &options).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        let content = pdf.get_page_content(pdf.get_pages()[&1]).unwrap();
+        let operations = lopdf::content::Content::decode(&content)
+            .unwrap()
+            .operations;
+        count(&operations, "Do")
+    };
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(drawn("dot.png", Some(dir.path())), 1);
+    assert_eq!(drawn("https://images.test/dot.png", None), 1);
+    // Without a base directory the document is about:blank, so a relative
+    // name matches nothing.
+    assert_eq!(drawn("dot.png", None), 0);
+}

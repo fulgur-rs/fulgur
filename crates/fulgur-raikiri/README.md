@@ -2,7 +2,8 @@
 
 Unpublished Raikiri backend for Fulgur development.
 
-The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
+The backend accepts an HTML file path, or an HTML string with an optional base
+directory, and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
 backgrounds and borders (including `url()` background images), text, text
@@ -12,14 +13,19 @@ The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
 win over `@page`. Linked stylesheets, `@import`s, and other referenced files
 are read from the input file's directory; files outside it are not read.
+`render_html` and `render_html_with_options` take the HTML as `&str` and use
+the base directory in the same way. Without a base directory the document is
+treated as `about:blank`: no file is read and only same-document fragment
+links resolve.
 `render_with_options` accepts `RenderOptions { assets, system_fonts }`.
 Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
 and registered with Raikiri. Parsing, layout, and painting retain the same
 resources and local-file provider. Disabling system fonts requires a bundled
 font. Invalid fonts and TTC/OTC collections return an asset error. Each bundle
-image is a file at the URL its name resolves to against the input file's
-directory (`img/logo.png`), or at its name when that is an absolute URL.
+image is a file at the URL its name resolves to against the base directory
+(`img/logo.png`), or at its name when that is an absolute URL; HTML without a
+base directory is `about:blank`, so only absolute-URL names apply to it.
 Documents reach bundle images with browser URL resolution: `<img src>`
 against the document base URL, `url()` in a linked or imported stylesheet
 against that stylesheet's URL. Bundle images are served ahead of the files in
@@ -32,6 +38,11 @@ stylesheet URL provenance.
 ```rust
 let pdf = fulgur_raikiri::render(
     std::path::Path::new("input.html"),
+    &fulgur_core::Config::default(),
+)?;
+let pdf = fulgur_raikiri::render_html(
+    "<p>Hello</p>",
+    Some(std::path::Path::new("assets")),
     &fulgur_core::Config::default(),
 )?;
 ```
@@ -127,8 +138,12 @@ Page-margin boxes come from Raikiri's per-page layout (`Page::margin_boxes`):
 the sixteen slots with their used rectangles, resolved generated content
 (`counter(page)`, `counter(pages)`, quotes, `string()` and `element()`), and
 glyph runs of their text. Each box paints below the page body: background
-color and `url()` image, solid borders, then its text clipped to the border
-box. Vertical-writing text in margin boxes is not drawn yet.
+color and `url()` image, solid borders, then its content clipped to the
+border box. A box whose `content` has `element()` draws the running element the page selects
+(`Page::margin_box_running_element`), laid out at the box's content width
+and drawn like a page body, with its links clipped to the box. Other boxes,
+including those that combine `element()` with other values, draw their text.
+Vertical-writing text in margin boxes is not drawn yet.
 
 Corner radii retain separate horizontal and vertical axes from Raikiri,
 including slash shorthand, two-value corner longhands, and percentages of

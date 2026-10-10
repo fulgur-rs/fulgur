@@ -9,12 +9,13 @@ use std::sync::Arc;
 use url::Url;
 
 /// The resources a document can fetch: the bundle's images, then the files
-/// in the input file's directory.
+/// in the document's base directory.
 ///
 /// Every bundle image is a file at a URL, like a file served next to the
-/// document. A name is a URL reference resolved against the input file's
-/// directory (`img/logo.png` is `file:///…/dir/img/logo.png`), or an
-/// absolute URL (`https://example.com/logo.png`). Raikiri resolves each
+/// document. A name is a URL reference resolved against the base directory
+/// (`img/logo.png` is `file:///…/dir/img/logo.png`), or an absolute URL
+/// (`https://example.com/logo.png`). HTML without a base directory is
+/// `about:blank`, so only absolute-URL names apply to it. Raikiri resolves each
 /// reference in a document by the usual rules (an `<img src>` against the
 /// document base URL, a stylesheet's `url()` against the stylesheet URL)
 /// and fetches the result; a request whose URL is a bundle image gets its
@@ -36,12 +37,16 @@ struct BundledFile {
 
 impl Sandbox {
     pub(crate) fn new(bundle: Option<&AssetBundle>, files: BaseDirectoryProvider) -> Self {
-        let root = files.root_url();
+        // Without a base directory the document is `about:blank`, against
+        // which no relative name resolves: only absolute-URL names apply.
+        let root = files.directory_url().ok();
         let images = bundle
             .into_iter()
             .flat_map(|bundle| bundle.images.iter())
             .filter_map(|(name, data)| {
-                let url = Url::parse(name).or_else(|_| root.join(name)).ok()?;
+                let url = Url::parse(name)
+                    .ok()
+                    .or_else(|| root.as_ref()?.join(name).ok())?;
                 let file = BundledFile {
                     data: Arc::clone(data),
                     content_type: content_type(Path::new(name)),
