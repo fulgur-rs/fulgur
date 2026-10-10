@@ -43,6 +43,9 @@ pub(crate) fn merge_extra_pages(pdf: &[u8], targets: &[u32]) -> Result<Vec<u8>> 
     let mut writer = flpdf::PdfWriter::new(&mut document);
     writer.set_output_memory().map_err(pdf_error)?;
     writer.set_deterministic_id(true);
+    // Krilla writes no object streams; packing the objects into them makes
+    // the merged PDF smaller than the PDF of a batch render.
+    writer.set_object_stream_mode(flpdf::ObjectStreamMode::Generate);
     writer.write().map_err(pdf_error)?;
     writer.get_buffer().map_err(pdf_error)
 }
