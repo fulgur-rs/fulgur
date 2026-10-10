@@ -2,7 +2,8 @@
 
 Unpublished Raikiri backend for Fulgur development.
 
-The backend accepts an HTML file path and a `fulgur_core::Config`, and returns
+The backend accepts an HTML file path, or an HTML string with an optional base
+directory, and a `fulgur_core::Config`, and returns
 `Result<Vec<u8>>` with the PDF bytes. It reads, parses, and lays out the
 document with Raikiri, then draws the pages with Krilla: page geometry, box
 backgrounds and borders, text, text decorations, PNG/JPEG images, and inline SVG. It does not fall back to Blitz.
@@ -11,6 +12,10 @@ The config's page size and margins act as defaults that the document's own
 `@page` rules override; fields the caller set explicitly (`Config::overrides`)
 win over `@page`. Linked stylesheets, `@import`s, and other referenced files
 are read from the input file's directory; files outside it are not read.
+`render_html` and `render_html_with_options` take the HTML as `&str` and use
+the base directory in the same way. Without a base directory the document is
+treated as `about:blank`: no file is read and only same-document fragment
+links resolve.
 `render_with_options` accepts `RenderOptions { assets, system_fonts }`.
 Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
@@ -25,6 +30,11 @@ stylesheet URL provenance.
 ```rust
 let pdf = fulgur_raikiri::render(
     std::path::Path::new("input.html"),
+    &fulgur_core::Config::default(),
+)?;
+let pdf = fulgur_raikiri::render_html(
+    "<p>Hello</p>",
+    Some(std::path::Path::new("assets")),
     &fulgur_core::Config::default(),
 )?;
 ```

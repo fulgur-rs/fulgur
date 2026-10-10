@@ -1497,6 +1497,8 @@ mod metadata_tests;
 
 mod navigation_tests;
 
+mod html_input_tests;
+
 mod bookmark_tests;
 
 mod order_tests;
