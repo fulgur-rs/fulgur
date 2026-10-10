@@ -116,6 +116,14 @@ line identities keep coincident lines distinct and join font/color slices
 of the same line, so earlier decorations cannot cover later overlapping
 text merely because both are in one paint batch.
 
+Page-margin boxes come from Raikiri's per-page layout (`Page::margin_boxes`):
+the sixteen slots with their used rectangles, resolved generated content
+(`counter(page)`, `counter(pages)`, quotes, `string()` and `element()`), and
+glyph runs of their text. Each box paints below the page body: background
+color, solid borders, then its text clipped to the border box.
+`background-image: url()` and vertical-writing text in margin boxes are not
+drawn yet.
+
 Corner radii retain separate horizontal and vertical axes from Raikiri,
 including slash shorthand, two-value corner longhands, and percentages of
 the border box. Both painters use the shared used-value calculation, with

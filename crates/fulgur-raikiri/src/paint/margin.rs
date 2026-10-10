@@ -1,0 +1,53 @@
+//! Page-margin boxes (CSS Paged Media 3 §4.2), laid out by Raikiri for each
+//! page: the painter only draws the resolved boxes.
+
+use super::shape::RoundedRect;
+use super::{FontCache, fill, paint_glyph_run};
+use krilla::paint::FillRule;
+use krilla::surface::Surface;
+use raikiri_html::{MarginBox, Page};
+
+/// Draw the margin boxes of `page` in Raikiri's order, below the page body.
+pub(super) fn paint(surface: &mut Surface<'_>, page: &Page<'_>, fonts: &mut FontCache) {
+    for margin_box in page.margin_boxes() {
+        paint_box(surface, &margin_box, fonts);
+    }
+}
+
+/// The background color, the solid borders, then the text clipped to the
+/// border box. `background-image: url()` is not drawn, as for element boxes:
+/// the layout result carries no decoded image data.
+fn paint_box(surface: &mut Surface<'_>, margin_box: &MarginBox, fonts: &mut FontCache) {
+    let rect = margin_box.rect;
+    let Some(border_box) = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height).path() else {
+        return;
+    };
+    if let Some(color) = margin_box.background_color {
+        surface.set_fill(Some(fill(color)));
+        surface.draw_path(&border_box);
+    }
+    for (side, border) in margin_box.borders.iter().enumerate() {
+        let Some(border) = border else { continue };
+        let width = border.width;
+        // Each side covers the full length of its edge; corners overlap.
+        let strip = match side {
+            0 => RoundedRect::rect(rect.x, rect.y, rect.width, width),
+            1 => RoundedRect::rect(rect.x + rect.width - width, rect.y, width, rect.height),
+            2 => RoundedRect::rect(rect.x, rect.y + rect.height - width, rect.width, width),
+            _ => RoundedRect::rect(rect.x, rect.y, width, rect.height),
+        };
+        if let Some(path) = strip.path() {
+            surface.set_fill(Some(fill(border.color)));
+            surface.draw_path(&path);
+        }
+    }
+    let runs = margin_box.text_runs();
+    if runs.is_empty() {
+        return;
+    }
+    surface.push_clip_path(&border_box, &FillRule::NonZero);
+    for run in &runs {
+        paint_glyph_run(surface, run, fonts);
+    }
+    surface.pop();
+}

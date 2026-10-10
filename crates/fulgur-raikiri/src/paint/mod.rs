@@ -10,6 +10,7 @@ mod border;
 mod clip;
 mod decoration;
 mod gradient;
+mod margin;
 mod navigation;
 mod order;
 mod raster;
@@ -85,6 +86,8 @@ fn paint_page(
     let mut surface = pdf_page.surface();
     surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
+    // The margin boxes are drawn before the page body.
+    margin::paint(&mut surface, page, fonts);
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs) {
