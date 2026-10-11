@@ -79,7 +79,8 @@ for full details.
 cargo build
 
 # Run tests
-cargo test -p fulgur --lib
+cargo test -p fulgur-blitz --lib
+cargo test -p fulgur-core --lib
 cargo test -p fulgur
 cargo test -p fulgur --test gcpm_integration
 
@@ -96,7 +97,7 @@ cargo run --bin fulgur -- render input.html -o output.pdf
 
 Before submitting a PR, please verify:
 
-- [ ] Tests pass (`cargo test -p fulgur` — substitute the appropriate crate if
+- [ ] Tests pass (`cargo test -p fulgur -p fulgur-blitz -p fulgur-core` — substitute the appropriate crate if
       your change is in bindings)
 - [ ] Clippy is clean (`cargo clippy`)
 - [ ] Formatting is correct (`cargo fmt --check`)

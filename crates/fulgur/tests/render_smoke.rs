@@ -3054,6 +3054,46 @@ fn pdf_ua_without_title_returns_error() {
 }
 
 #[test]
+fn pdf_ua_without_language_returns_error() {
+    // PDF/UA-1 requires a document language. Neither config.lang nor
+    // <html lang> is provided, and Krilla does not validate this, so the
+    // engine rejects the render itself.
+    let error = Engine::builder()
+        .pdf_ua(true)
+        .title("T")
+        .build()
+        .render("<html><body><p>World</p></body></html>")
+        .unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+}
+
+#[test]
+fn pdf_ua_treats_a_blank_language_as_unset() {
+    let engine = Engine::builder().pdf_ua(true).title("T").lang(" ").build();
+    let error = engine
+        .render("<html><body><p>World</p></body></html>")
+        .unwrap_err();
+    assert!(error.to_string().contains("document language"), "{error}");
+    let pdf = engine
+        .render("<html lang=\"de\"><body><h1>Heading</h1><p>World</p></body></html>")
+        .expect("<html lang> must replace a blank configured language");
+    assert!(String::from_utf8_lossy(&pdf).contains("/Lang (de)"));
+}
+
+#[test]
+fn pdf_ua_takes_the_language_from_html_lang() {
+    let pdf = Engine::builder()
+        .pdf_ua(true)
+        .title("T")
+        .build()
+        // ASCII text: CJK glyphs would need a font that not every CI host
+        // has, and a missing glyph fails PDF/UA validation on its own.
+        .render("<html lang=\"ja\"><body><h1>Heading</h1><p>Body</p></body></html>")
+        .expect("pdf_ua with <html lang> must succeed");
+    assert!(String::from_utf8_lossy(&pdf).contains("/Lang (ja)"));
+}
+
+#[test]
 fn pdf_ua_with_html_title_succeeds() {
     // PDF/UA-1 smoke: <title> in HTML head provides the document title,
     // satisfying krilla's UA1 requirement without explicit config.title.
@@ -3107,27 +3147,6 @@ fn pdf_ua_with_explicit_title_succeeds() {
         .build()
         .render(html)
         .expect("pdf_ua with explicit title must succeed");
-
-    assert!(!pdf.is_empty());
-}
-
-#[test]
-fn pdf_ua_without_lang_succeeds() {
-    // PDF/UA-1 strongly recommends lang but does NOT hard-fail
-    // when absent (krilla UA1 prohibits(NoDocumentLanguage) = false).
-    // Without lang, /Lang is absent from the catalog — semantically
-    // incomplete but valid per krilla's enforcement.
-    let html = r#"<!DOCTYPE html>
-<html>
-<head><title>No Lang</title></head>
-<body><h1>Hello</h1><p>World</p></body>
-</html>"#;
-
-    let pdf = Engine::builder()
-        .pdf_ua(true)
-        .build()
-        .render(html)
-        .expect("pdf_ua without lang must succeed");
 
     assert!(!pdf.is_empty());
 }
@@ -3701,6 +3720,128 @@ fn bookmark_label_string_appears_in_outline() {
         .expect("render");
     let titles = outline_titles(&pdf);
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
+}
+
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the fulgur-smlr
+/// document-order GCPM cascade fold — the lower-level `blitz_adapter` unit
+/// tests and `tests/gcpm_cascade_order.rs`'s integration tests cover the
+/// fold walk / Part 0 remap directly, but neither drives it through the
+/// full `Engine::render` path with a real `AssetBundle`, so this pins that
+/// route too.
+///
+/// Two competing `bookmark-level`/`bookmark-label` rules from DIFFERENT
+/// sources (AssetBundle CSS and a `<link>`-loaded file) target the SAME
+/// element with DIFFERENT specificity tiers: AssetBundle declares a `Class`
+/// selector, the linked file declares an `Id` selector. Per
+/// `ParsedSelector`'s specificity ordering (`Tag < Class < Id`), the `Id`
+/// rule must win regardless of document order — even though AssetBundle's
+/// injected `<style>` lands LAST in `<head>` (and would win an
+/// equal-specificity tie, see `gcpm_cascade_order.rs`'s
+/// `assetbundle_vs_link_equal_specificity_assetbundle_wins`), specificity
+/// still takes priority over document order when the two differ.
+#[test]
+fn bookmark_specificity_wins_across_assetbundle_and_link_sources() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("link.css"),
+        r#"#intro { bookmark-level: 1; bookmark-label: "FROM_LINK_ID"; }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::new();
+    assets.add_css(r#".chapter { bookmark-level: 2; bookmark-label: "FROM_ASSETBUNDLE_CLASS"; }"#);
+
+    let html = r#"<!doctype html><html><head>
+        <link rel="stylesheet" href="link.css">
+    </head><body>
+        <div class="chapter" id="intro">Content</div>
+    </body></html>"#;
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty(), "PDF must be non-empty");
+
+    let titles = outline_titles(&pdf);
+    assert_eq!(
+        titles,
+        vec!["FROM_LINK_ID".to_string()],
+        "the higher-specificity Id rule (from the <link>) must win over the \
+         lower-specificity Class rule (from AssetBundle), regardless of \
+         which source is later in document order, got {titles:?}"
+    );
+}
+
+/// Coverage-scope companion (CLAUDE.md "Coverage scope") for the
+/// `Engine::render` gate around `document_ordered_gcpm_mappings`
+/// (`blitz_adapter::document_has_style_import`, codex review PR #768
+/// discussion r4039213856). AssetBundle's own CSS here declares the
+/// `@top-center` margin box DIRECTLY (so `gcpm.margin_boxes` — which the
+/// gate's fix does not touch; that field still keeps the old flat
+/// concatenation order, a separate deferred gap — is populated regardless)
+/// but reaches `position: running()` ONLY through an `@import`. A bare,
+/// import-blind parse of the AssetBundle CSS text (what the gate used to
+/// check) therefore finds no direct running rule, and `bookmarks` is left
+/// at its default `false`. Before the fix this made the gate skip the
+/// whole document-order recompute, so the import was never resolved and
+/// `pageHeader`'s running mapping was never discovered: `RunningElementPass`
+/// never fired for it, it stayed in normal body flow, and the `@top-center`
+/// margin box stayed empty on every page. With the fix, the header is
+/// pulled out of flow and replayed via the margin box on each page, so it
+/// must appear more than once in the extracted PDF text of a multi-page
+/// document.
+#[test]
+fn assetbundle_import_only_running_mapping_is_discovered() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("header.css"),
+        r#".pageHeader { position: running(pageHeader); }"#,
+    )
+    .unwrap();
+
+    let mut assets = AssetBundle::default();
+    assets.add_css(
+        r#"@import "header.css"; @page { @top-center { content: element(pageHeader); } }"#,
+    );
+
+    let mut html =
+        String::from(r#"<!doctype html><html><body><div class="pageHeader">RUNNING TEXT</div>"#);
+    for i in 0..200 {
+        html.push_str(&format!(
+            "<p>Paragraph {i} filler content to force pagination.</p>"
+        ));
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .assets(assets)
+        .base_path(dir.path())
+        .build()
+        .render(&html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+    let pages = page_count(&pdf);
+    assert!(
+        pages >= 2,
+        "expected filler content to force pagination to >=2 pages, got {pages}"
+    );
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    let occurrences = text.matches("RUNNING TEXT").count();
+    assert!(
+        occurrences >= 2,
+        "expected the running header (mapping only reachable through \
+         AssetBundle's own @import) to repeat via the @top-center margin \
+         box on every page — got {occurrences} occurrence(s) in extracted \
+         text: {text:?}"
+    );
 }
 
 /// End-to-end coverage-scope companion (CLAUDE.md "Coverage scope") for the
@@ -6713,4 +6854,119 @@ body { margin:0; font-size:14px; line-height:1.4; }</style>
          fit on a compact page 2 — a stale-cursor stretch instead pushes both onto \
          a spurious extra page, got {pages}"
     );
+}
+
+#[test]
+fn tagged_padded_paragraph_with_link_uses_run_tagging_in_dispatch() {
+    // Covers render.rs lines 1152-1153 — `use_run_tagging=true` in
+    // `dispatch_fragment`'s block+para arm.
+    //
+    // A `<p>` with `padding` triggers `needs_block_wrapper()=true`, creating
+    // both `block_styles[p_id]` AND `paragraphs[p_id]` at the same node_id.
+    // In tagged mode with a link run, `run_tag_target` returns Some for `<p>`
+    // (it has `PdfTag::P` in the semantic map), so `use_run_tagging=true` and
+    // `canvas.link_run_node_id` is set instead of `try_start_tagged`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p style="padding: 8px"><a href="https://example.com">link text</a></p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged padded p with link must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(
+        s.contains("/S /Link") || s.contains("/S/Link"),
+        "must have /Link structure element"
+    );
+    assert!(s.contains("/Annots"), "must have link annotation on page");
+}
+
+#[test]
+fn tagged_multicol_spanning_text_with_link_uses_run_tagging_in_paint_slices() {
+    // Covers render.rs lines 1374-1380 — `use_run_tagging=true` inside
+    // `paint_multicol_paragraph_slices`.
+    //
+    // The text is long enough to span both columns of the narrow container,
+    // so `paragraph_slices` is populated and `paint_multicol_paragraph_slices`
+    // is called. In tagged mode with a link run and a semantic node for the
+    // source paragraph, `use_run_tagging=true` and `canvas.link_run_node_id`
+    // is set inside the function.
+    //
+    // The existing `tagged_pdf_link_in_multicol_produces_link_struct_element`
+    // test uses a short `<p>` that fits in one column and therefore does not
+    // create paragraph slices; this test uses enough text to guarantee spanning.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="columns:2;column-gap:10px;width:160px;font-size:10px">
+            Lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+            eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim
+            ad minim veniam quis nostrud exercitation ullamco laboris nisi ut
+            aliquip ex ea commodo consequat and here is
+            <a href="https://example.com">a link</a> in the middle of enough
+            text to overflow the first column into the second column of this
+            narrow two-column container so that paragraph slices are created.
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged multicol spanning text with link must render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn opacity_inline_root_with_pseudo_image_reaches_para_for_block_in_draw_under_opacity() {
+    // Covers render.rs lines 2295-2321 — `para_for_block = Some` inside
+    // `draw_under_opacity`'s else branch.
+    //
+    // A `<p>` with opacity + visual style (background + padding) is BOTH an
+    // inline root (giving `paragraphs[p_id]`) and a styled block (giving
+    // `block_styles[p_id]`). The `::before` pseudo image registers as a
+    // separate drawable that goes into `opacity_descendants`, causing
+    // `draw_under_opacity` to be called for `p_id`. Inside the function,
+    // `para_for_block = drawables.paragraphs.get(&p_id) = Some`, reaching
+    // lines 2295-2321. Tagged mode with a link run also exercises the
+    // `use_run_tagging=true` sub-path at lines 2299-2301.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .fancy::before { content: url("dot.png"); }
+        .fancy { opacity: 0.5; background: #eee; padding: 4px; }
+    </style></head><body>
+        <p class="fancy"><a href="https://example.com">link text</a></p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("opacity inline root with pseudo image must render");
+    assert!(!pdf.is_empty());
+}
+
+/// 非 sRGB 色空間 (`hsl()` / `hwb()` / `oklch()` / `lab()`) を background /
+/// color / border に指定した文書の end-to-end smoke test (fulgur-xfzo)。
+///
+/// 色の抽出は `convert/style/mod.rs` の `absolute_to_rgba` に集約されており、
+/// Stylo は著者が書いた色空間のまま成分を保持するため、sRGB へ変換してから
+/// 読まないと別の色が塗られる。等価性そのものは
+/// `crates/fulgur/tests/color_space_test.rs` が PDF byte 比較で検証しているが、
+/// CLAUDE.md "Coverage scope" の方針どおり描画経路の smoke test も
+/// ここに置いておく。
+#[test]
+fn test_render_non_srgb_color_spaces_smoke() {
+    let html = r#"<!doctype html>
+<html><body>
+<div style="width:120px;height:60px;background:hsl(120,100%,50%)"></div>
+<div style="width:120px;height:60px;background:hwb(240 0% 0%)"></div>
+<div style="width:120px;height:60px;border:8px solid oklch(62.8% 0.2577 29.23)"></div>
+<p style="color:lab(50% 40 -30);font-size:20px">colour</p>
+</body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render non-sRGB colour spaces");
+    assert!(!pdf.is_empty());
 }

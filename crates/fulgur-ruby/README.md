@@ -151,13 +151,21 @@ bundle.image_file "icon", "icon.png"
 ### `Fulgur::PageSize`
 
 ```ruby
-Fulgur::PageSize::A4
-Fulgur::PageSize::LETTER
 Fulgur::PageSize::A3
+Fulgur::PageSize::A4
+Fulgur::PageSize::A5
+Fulgur::PageSize::B4
+Fulgur::PageSize::B5
+Fulgur::PageSize::JIS_B4
+Fulgur::PageSize::JIS_B5
+Fulgur::PageSize::LETTER
+Fulgur::PageSize::LEGAL
+Fulgur::PageSize::LEDGER
 Fulgur::PageSize.custom(100, 200)  # width/height in mm
 ```
 
-Engine kwargs and builder also accept `:a4`, `"A4"`, etc. as shorthand.
+Engine kwargs and builder also accept `:a4`, `"A4"`, `"JIS-B4"`, etc. as shorthand
+(the full CSS Paged Media Level 3 keyword set, case-insensitive).
 
 ### `Fulgur::Margin`
 

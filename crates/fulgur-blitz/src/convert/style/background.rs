@@ -1,0 +1,1572 @@
+//! background-color and background-image-layers extraction.
+
+use super::{StyleContext, absolute_to_rgba};
+use crate::convert::extract_asset_name;
+use crate::draw_primitives::{
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockStyle,
+};
+use crate::image::ImageRender;
+use crate::units::{F32Units, Pt};
+use std::sync::Arc;
+
+pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
+    // Background color — access the computed value directly
+    let bg = ctx.styles.clone_background_color();
+    let bg_rgba = absolute_to_rgba(bg.resolve_to_absolute(ctx.current_color));
+    if bg_rgba[3] > 0 {
+        style.background_color = Some(bg_rgba);
+    }
+
+    // Background image layers. Skip the six secondary `clone_*` calls
+    // (sizes/positions/repeats/origins/clips) if no layer is actually
+    // populated — the vast majority of DOM nodes have only `Image::None`.
+    let bg_images = ctx.styles.clone_background_image();
+    let has_real_bg_image = bg_images
+        .0
+        .iter()
+        .any(|i| !matches!(i, style::values::computed::image::Image::None));
+    if has_real_bg_image {
+        let bg_sizes = ctx.styles.clone_background_size();
+        let bg_pos_x = ctx.styles.clone_background_position_x();
+        let bg_pos_y = ctx.styles.clone_background_position_y();
+        let bg_repeats = ctx.styles.clone_background_repeat();
+        let bg_origins = ctx.styles.clone_background_origin();
+        let bg_clips = ctx.styles.clone_background_clip();
+
+        for (i, image) in bg_images.0.iter().enumerate() {
+            use style::values::computed::image::Image;
+
+            // Resolve `content` + intrinsic size per image kind. URL images
+            // require an `AssetBundle`; gradients are self-contained.
+            let resolved: Option<(BgImageContent, f32, f32)> = match image {
+                Image::Url(url) => ctx.assets.and_then(|a| {
+                    let raw_src = match url {
+                        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
+                        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+                    };
+                    let src = extract_asset_name(raw_src);
+                    let data = a.get_image(src)?;
+
+                    use crate::image::AssetKind;
+                    match AssetKind::detect(data) {
+                        AssetKind::Raster(format) => {
+                            let (iw, ih) =
+                                ImageRender::decode_dimensions(data, format).unwrap_or((1, 1));
+                            Some((
+                                BgImageContent::Raster {
+                                    data: Arc::clone(data),
+                                    format,
+                                },
+                                iw as f32,
+                                ih as f32,
+                            ))
+                        }
+                        AssetKind::Svg => {
+                            let opts = usvg::Options::default();
+                            match usvg::Tree::from_data(data, &opts) {
+                                Ok(tree) => {
+                                    let svg_size = tree.size();
+                                    Some((
+                                        BgImageContent::Svg {
+                                            tree: Arc::new(tree),
+                                        },
+                                        svg_size.width(),
+                                        svg_size.height(),
+                                    ))
+                                }
+                                Err(e) => {
+                                    log::warn!("failed to parse SVG background-image '{src}': {e}");
+                                    None
+                                }
+                            }
+                        }
+                        AssetKind::Unknown => None,
+                    }
+                }),
+                Image::Gradient(g) => {
+                    use style::values::computed::image::Gradient;
+                    // g: &Box<Gradient> なので as_ref() で &Gradient を取って match。
+                    match g.as_ref() {
+                        Gradient::Linear { .. } => resolve_linear_gradient(g, ctx.current_color),
+                        Gradient::Radial { .. } => resolve_radial_gradient(g, ctx.current_color),
+                        Gradient::Conic { .. } => resolve_conic_gradient(g, ctx.current_color),
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some((content, intrinsic_width, intrinsic_height)) = resolved {
+                let size = convert_bg_size(&bg_sizes.0, i);
+                let (px, py) = convert_bg_position(&bg_pos_x.0, &bg_pos_y.0, i);
+                let (rx, ry) = convert_bg_repeat(&bg_repeats.0, i);
+                let origin = convert_bg_origin(&bg_origins.0, i);
+                let clip = convert_bg_clip(&bg_clips.0, i);
+
+                style.background_layers.push(BackgroundLayer {
+                    content,
+                    intrinsic_width,
+                    intrinsic_height,
+                    size,
+                    position_x: px,
+                    position_y: py,
+                    repeat_x: rx,
+                    repeat_y: ry,
+                    origin,
+                    clip,
+                });
+            }
+        }
+    }
+}
+
+/// Convert a Stylo computed `Gradient` into fulgur's `BgImageContent`.
+///
+/// Phase 1 supports `linear-gradient(...)` only:
+/// - Direction via explicit angle, `to top/right/bottom/left` keyword, or
+///   `to <h> <v>` corner. Corner directions are stored as a flag and
+///   resolved against the gradient box at draw time (CSS Images 3 §3.1.1
+///   defines them in terms of W and H).
+/// - Color stops with explicit `<percentage>` positions, plus auto stops
+///   (positions filled in via even spacing between adjacent fixed stops, per
+///   CSS Images §3.5.1).
+/// - Length-typed stops (`linear-gradient(red 50px, blue)`) are unsupported
+///   in Phase 1 because resolving them requires the gradient line length,
+///   which depends on the box dimensions (only known at draw time). Falls
+///   back to `None` for now.
+/// - Repeating gradients, `radial-gradient`, `conic-gradient`, color
+///   interpolation methods, and interpolation hints are unsupported.
+///
+/// Returned tuple: `(content, intrinsic_w, intrinsic_h)`. Gradients have no
+/// intrinsic size, so we return `(0.0, 0.0)` and the draw path special-cases
+/// gradients to fill the origin rect directly (`background.rs` does not
+/// route gradients through `resolve_size` / tiling).
+fn resolve_linear_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::draw_primitives::{LinearGradientCorner, LinearGradientDirection};
+    use style::values::computed::image::{Gradient, LineDirection};
+    use style::values::generics::image::GradientFlags;
+    use style::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
+
+    let (direction, items, flags) = match g {
+        Gradient::Linear {
+            direction,
+            items,
+            flags,
+            ..
+        } => (direction, items, flags),
+        Gradient::Radial { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    let repeating = flags.contains(GradientFlags::REPEATING);
+    // Non-default `color_interpolation_method` (e.g. `in oklch`) would change
+    // the rendered colors. Phase 1 interpolates in sRGB only, so bail rather
+    // than silently misrender.
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        return None;
+    }
+
+    let direction = match direction {
+        LineDirection::Angle(a) => LinearGradientDirection::Angle(a.radians()),
+        LineDirection::Horizontal(HorizontalPositionKeyword::Right) => {
+            LinearGradientDirection::Angle(std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Horizontal(HorizontalPositionKeyword::Left) => {
+            LinearGradientDirection::Angle(3.0 * std::f32::consts::FRAC_PI_2)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Top) => {
+            LinearGradientDirection::Angle(0.0)
+        }
+        LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
+            LinearGradientDirection::Angle(std::f32::consts::PI)
+        }
+        LineDirection::Corner(h, v) => {
+            use HorizontalPositionKeyword::*;
+            use VerticalPositionKeyword::*;
+            let corner = match (h, v) {
+                (Left, Top) => LinearGradientCorner::TopLeft,
+                (Right, Top) => LinearGradientCorner::TopRight,
+                (Left, Bottom) => LinearGradientCorner::BottomLeft,
+                (Right, Bottom) => LinearGradientCorner::BottomRight,
+            };
+            LinearGradientDirection::Corner(corner)
+        }
+    };
+
+    let stops = resolve_color_stops(items, current_color, "linear-gradient")?;
+
+    Some((
+        BgImageContent::LinearGradient {
+            direction,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+/// CSS gradient items から GradientStop ベクタを解決する。linear / radial 共通。
+///
+/// position は `GradientStopPosition` で保持され (Auto / Fraction / LengthPx)、
+/// draw 時に `background::resolve_gradient_stops` で gradient line 長さを
+/// 使って fraction 化される。convert 時の fixup は行わない。
+///
+/// Bail 条件:
+/// - stops.len() < 2 (規定上 invalid)
+/// - interpolation hint (Phase 2 別 issue)
+/// - position が percentage でも length でもない (calc() 等 — Phase 2)
+fn resolve_color_stops(
+    items: &[style::values::generics::image::GenericGradientItem<
+        style::values::computed::Color,
+        style::values::computed::LengthPercentage,
+    >],
+    current_color: &style::color::AbsoluteColor,
+    gradient_kind: &'static str,
+) -> Option<Vec<crate::draw_primitives::GradientStop>> {
+    use crate::draw_primitives::{GradientStop, GradientStopPosition};
+    use style::values::generics::image::GradientItem;
+
+    // Cap the retained *color-stop* count: `items` is an attacker-controllable,
+    // unbounded stop list, and this vector is cloned into every element's
+    // `BackgroundLayer` (O(elements × stops)). Bounding it here also bounds the
+    // draw-time repeating expansion (`total_copies × stops.len()`). Count only
+    // color stops toward the cap (not interpolation hints) and stop right after
+    // the cap-th stop, so truncation never ends on a dangling hint — that would
+    // trip the trailing-hint guard below and drop an otherwise-valid gradient.
+    // A well-formed gradient with <= MAX_GRADIENT_STOPS color stops is therefore
+    // never truncated no matter how many hints it interleaves; the retained
+    // vector stays bounded at <= 2*MAX_GRADIENT_STOPS (stops + interior hints).
+    let mut out: Vec<GradientStop> =
+        Vec::with_capacity(items.len().min(2 * crate::MAX_GRADIENT_STOPS));
+    let mut stop_count = 0usize;
+    for item in items.iter() {
+        if stop_count >= crate::MAX_GRADIENT_STOPS {
+            break;
+        }
+        match item {
+            GradientItem::SimpleColorStop(c) => {
+                let abs = c.resolve_to_absolute(current_color);
+                out.push(GradientStop {
+                    position: GradientStopPosition::Auto,
+                    rgba: absolute_to_rgba(abs),
+                    is_hint: false,
+                });
+                stop_count += 1;
+            }
+            GradientItem::ComplexColorStop { color, position } => {
+                let abs = color.resolve_to_absolute(current_color);
+                let pos = if let Some(pct) = position.to_percentage() {
+                    GradientStopPosition::Fraction(pct.0)
+                } else if let Some(len) = position.to_length() {
+                    GradientStopPosition::LengthPx(len.px())
+                } else {
+                    log::warn!(
+                        "{gradient_kind}: stop position is neither percentage \
+                         nor length (calc() etc.). Layer dropped."
+                    );
+                    return None;
+                };
+                out.push(GradientStop {
+                    position: pos,
+                    rgba: absolute_to_rgba(abs),
+                    is_hint: false,
+                });
+                stop_count += 1;
+            }
+            GradientItem::InterpolationHint(lp) => {
+                // CSS Images 3 §3.5.3: hint は 2 つの color stop の間にしか
+                // 置けない (先頭/連続/末尾は syntactically invalid)。
+                if out.is_empty() {
+                    log::warn!("{gradient_kind}: leading interpolation hint. Layer dropped.");
+                    return None;
+                }
+                if out.last().is_some_and(|s| s.is_hint) {
+                    log::warn!("{gradient_kind}: consecutive interpolation hints. Layer dropped.");
+                    return None;
+                }
+                let pos = if let Some(pct) = lp.to_percentage() {
+                    GradientStopPosition::Fraction(pct.0)
+                } else if let Some(len) = lp.to_length() {
+                    GradientStopPosition::LengthPx(len.px())
+                } else {
+                    // calc() etc. unsupported (Phase 2 別 issue) — Layer drop.
+                    log::warn!(
+                        "{gradient_kind}: hint position is neither percentage \
+                         nor length (calc() etc.). Layer dropped."
+                    );
+                    return None;
+                };
+                out.push(GradientStop {
+                    position: pos,
+                    rgba: [0; 4], // is_hint=true のとき意味なし
+                    is_hint: true,
+                });
+            }
+        }
+    }
+
+    // 末尾 hint は不正
+    if out.last().is_some_and(|s| s.is_hint) {
+        log::warn!("{gradient_kind}: trailing interpolation hint. Layer dropped.");
+        return None;
+    }
+    if out.len() < 2 {
+        return None;
+    }
+
+    Some(out)
+}
+
+/// Convert a Stylo computed `Gradient::Radial` into fulgur's `BgImageContent::RadialGradient`.
+///
+/// Phase 1 scope (per beads issue fulgur-gm56 design):
+/// - shape: circle / ellipse
+/// - size: extent keyword (closest-side / farthest-side / closest-corner / farthest-corner) or
+///   explicit length / length-percentage radii (resolved at draw time against gradient box)
+/// - position: keyword + length-percentage の組合せ (BgLengthPercentage 経由)
+/// - stops: linear と共通の resolve_color_stops を使用
+///
+/// Bail conditions (return None) — match resolve_linear_gradient:
+/// - non-default color interpolation method
+/// - length-typed / 範囲外 stop position, interpolation hint (resolve_color_stops 内)
+///
+/// `repeating-radial-gradient(...)` は `repeating: true` で受け、draw 時に
+/// stop の周期展開で表現する (Krilla の RadialGradient は SpreadMethod::Pad のみ)。
+fn resolve_radial_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use crate::draw_primitives::{RadialGradientShape, RadialGradientSize};
+    use style::values::computed::image::Gradient;
+    use style::values::generics::image::{Circle, Ellipse, EndingShape, GradientFlags};
+
+    let (shape, position, items, flags) = match g {
+        Gradient::Radial {
+            shape,
+            position,
+            items,
+            flags,
+            ..
+        } => (shape, position, items, flags),
+        Gradient::Linear { .. } | Gradient::Conic { .. } => return None,
+    };
+
+    let repeating = flags.contains(GradientFlags::REPEATING);
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        return None;
+    }
+
+    let (out_shape, out_size) = match shape {
+        EndingShape::Circle(Circle::Radius(r)) => {
+            // r: NonNegativeLength = NonNegative<Length>。.0.px() で CSS px、.as_px().in_pt() で pt 化。
+            let len_pt = r.0.px().as_px().in_pt();
+            (
+                RadialGradientShape::Circle,
+                RadialGradientSize::Explicit {
+                    rx: BgLengthPercentage::Length(len_pt),
+                    ry: BgLengthPercentage::Length(len_pt),
+                },
+            )
+        }
+        EndingShape::Circle(Circle::Extent(ext)) => (
+            RadialGradientShape::Circle,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+        EndingShape::Ellipse(Ellipse::Radii(rx, ry)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Explicit {
+                rx: try_convert_lp_to_bg(&rx.0)?,
+                ry: try_convert_lp_to_bg(&ry.0)?,
+            },
+        ),
+        EndingShape::Ellipse(Ellipse::Extent(ext)) => (
+            RadialGradientShape::Ellipse,
+            RadialGradientSize::Extent(map_extent(*ext)),
+        ),
+    };
+
+    // computed::Position::horizontal / vertical はどちらも LengthPercentage 直接 (wrapper なし)。
+    // calc() 等 resolve 不能な値は silent 0 で誤描画させずに layer drop する。
+    let position_x = try_convert_lp_to_bg(&position.horizontal)?;
+    let position_y = try_convert_lp_to_bg(&position.vertical)?;
+
+    let stops = resolve_color_stops(items, current_color, "radial-gradient")?;
+
+    Some((
+        BgImageContent::RadialGradient {
+            shape: out_shape,
+            size: out_size,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+/// Convert Stylo `Gradient::Conic` into `BgImageContent::ConicGradient`.
+///
+/// stop position は `<angle>` を `angle / 2π` で fraction 化、`<percentage>` は
+/// そのまま fraction として `GradientStopPosition::Fraction(f32)` に格納する。
+/// `[0, 1]` 範囲外の生値もそのまま許容し (例: `-30deg → -0.083`, `120% → 1.2`)、
+/// 最終的な周期展開 / 範囲ハンドリングは `background.rs::draw_conic_gradient`
+/// と `sample_conic_color` 側に委ねる。
+fn resolve_conic_gradient(
+    g: &style::values::computed::Gradient,
+    current_color: &style::color::AbsoluteColor,
+) -> Option<(BgImageContent, f32, f32)> {
+    use style::values::computed::AngleOrPercentage;
+    use style::values::computed::image::Gradient;
+    use style::values::generics::image::{GradientFlags, GradientItem};
+
+    let (angle, position, items, flags) = match g {
+        Gradient::Conic {
+            angle,
+            position,
+            items,
+            flags,
+            ..
+        } => (angle, position, items, flags),
+        Gradient::Linear { .. } | Gradient::Radial { .. } => return None,
+    };
+
+    if !flags.contains(GradientFlags::HAS_DEFAULT_COLOR_INTERPOLATION_METHOD) {
+        log::warn!(
+            "conic-gradient: non-default color-interpolation-method is not yet \
+             supported. Layer dropped."
+        );
+        return None;
+    }
+
+    let from_angle = angle.radians();
+    let position_x = try_convert_lp_to_bg(&position.horizontal)?;
+    let position_y = try_convert_lp_to_bg(&position.vertical)?;
+    let repeating = flags.contains(GradientFlags::REPEATING);
+
+    // Cap the retained stop count (see `resolve_color_stops`): the conic
+    // stop list is a separate attacker-controllable, unbounded input, and
+    // this vector is likewise cloned per element and period-expanded at draw.
+    let mut stops: Vec<crate::draw_primitives::GradientStop> =
+        Vec::with_capacity(items.len().min(crate::MAX_GRADIENT_STOPS));
+    for item in items.iter().take(crate::MAX_GRADIENT_STOPS) {
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+        match item {
+            GradientItem::SimpleColorStop(c) => {
+                let abs = c.resolve_to_absolute(current_color);
+                stops.push(GradientStop {
+                    position: GradientStopPosition::Auto,
+                    rgba: absolute_to_rgba(abs),
+                    is_hint: false,
+                });
+            }
+            GradientItem::ComplexColorStop { color, position } => {
+                let abs = color.resolve_to_absolute(current_color);
+                let frac = match position {
+                    AngleOrPercentage::Percentage(p) => p.0,
+                    AngleOrPercentage::Angle(a) => a.radians() / std::f32::consts::TAU,
+                };
+                stops.push(GradientStop {
+                    position: GradientStopPosition::Fraction(frac),
+                    rgba: absolute_to_rgba(abs),
+                    is_hint: false,
+                });
+            }
+            GradientItem::InterpolationHint(_) => {
+                log::warn!(
+                    "conic-gradient: interpolation hints are not yet supported. \
+                     Layer dropped."
+                );
+                return None;
+            }
+        }
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+
+    Some((
+        BgImageContent::ConicGradient {
+            from_angle,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        },
+        0.0,
+        0.0,
+    ))
+}
+
+fn map_extent(
+    e: style::values::generics::image::ShapeExtent,
+) -> crate::draw_primitives::RadialExtent {
+    use crate::draw_primitives::RadialExtent;
+    use style::values::generics::image::ShapeExtent;
+    match e {
+        ShapeExtent::ClosestSide => RadialExtent::ClosestSide,
+        ShapeExtent::FarthestSide => RadialExtent::FarthestSide,
+        ShapeExtent::ClosestCorner => RadialExtent::ClosestCorner,
+        ShapeExtent::FarthestCorner => RadialExtent::FarthestCorner,
+        // CSS Images §3.6.1: Contain == ClosestSide のエイリアス、Cover == FarthestCorner のエイリアス。
+        ShapeExtent::Contain => RadialExtent::ClosestSide,
+        ShapeExtent::Cover => RadialExtent::FarthestCorner,
+    }
+}
+
+fn convert_bg_size(sizes: &[style::values::computed::BackgroundSize], i: usize) -> BgSize {
+    use style::values::generics::background::BackgroundSize as StyloBS;
+    use style::values::generics::length::GenericLengthPercentageOrAuto as LPAuto;
+    let s = &sizes[i % sizes.len()];
+    match s {
+        StyloBS::Cover => BgSize::Cover,
+        StyloBS::Contain => BgSize::Contain,
+        StyloBS::ExplicitSize { width, height } => {
+            let w = match width {
+                LPAuto::Auto => None,
+                LPAuto::LengthPercentage(lp) => Some(convert_lp_to_bg(&lp.0)),
+            };
+            let h = match height {
+                LPAuto::Auto => None,
+                LPAuto::LengthPercentage(lp) => Some(convert_lp_to_bg(&lp.0)),
+            };
+            if w.is_none() && h.is_none() {
+                BgSize::Auto
+            } else {
+                BgSize::Explicit(w, h)
+            }
+        }
+    }
+}
+
+/// Convert Stylo LengthPercentage to BgLengthPercentage.
+/// Note: calc() values (e.g. `calc(50% + 10px)`) are not fully supported —
+/// they fall back to 0.0 if neither pure percentage nor pure length.
+/// 呼び出し側が "silent 0.0 で良い" 場面 (background-position / -size の Phase 1) のみ
+/// 使うこと。radial-gradient の半径や中心位置のように 0 が誤描画になる場面では
+/// `try_convert_lp_to_bg` を使って calc() を None にして bail する。
+fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthPercentage {
+    if let Some(pct) = lp.to_percentage() {
+        BgLengthPercentage::Percentage(pct.0)
+    } else {
+        BgLengthPercentage::Length(
+            lp.to_length()
+                .map(|l| l.px().as_px().in_pt())
+                .unwrap_or(Pt::ZERO),
+        )
+    }
+}
+
+/// `convert_lp_to_bg` の Option 版。calc() 等の resolve 不能な値で `None` を返す。
+/// silent 0.0 fallback では誤描画になる radial-gradient の半径 / 中心位置で使う
+/// (CodeRabbit #238 で指摘)。
+fn try_convert_lp_to_bg(
+    lp: &style::values::computed::LengthPercentage,
+) -> Option<BgLengthPercentage> {
+    if let Some(pct) = lp.to_percentage() {
+        Some(BgLengthPercentage::Percentage(pct.0))
+    } else {
+        lp.to_length()
+            .map(|l| BgLengthPercentage::Length(l.px().as_px().in_pt()))
+    }
+}
+
+fn convert_bg_position(
+    pos_x: &[style::values::computed::LengthPercentage],
+    pos_y: &[style::values::computed::LengthPercentage],
+    i: usize,
+) -> (BgLengthPercentage, BgLengthPercentage) {
+    let px = &pos_x[i % pos_x.len()];
+    let py = &pos_y[i % pos_y.len()];
+    (convert_lp_to_bg(px), convert_lp_to_bg(py))
+}
+
+fn convert_bg_repeat(
+    repeats: &[style::values::specified::background::BackgroundRepeat],
+    i: usize,
+) -> (BgRepeat, BgRepeat) {
+    use style::values::specified::background::BackgroundRepeatKeyword as BRK;
+    let r = &repeats[i % repeats.len()];
+    let map = |k: BRK| match k {
+        BRK::Repeat => BgRepeat::Repeat,
+        BRK::NoRepeat => BgRepeat::NoRepeat,
+        BRK::Space => BgRepeat::Space,
+        BRK::Round => BgRepeat::Round,
+    };
+    (map(r.0), map(r.1))
+}
+
+fn convert_bg_origin(
+    origins: &[style::properties::longhands::background_origin::single_value::computed_value::T],
+    i: usize,
+) -> BgBox {
+    use style::properties::longhands::background_origin::single_value::computed_value::T as O;
+    match origins[i % origins.len()] {
+        O::BorderBox => BgBox::BorderBox,
+        O::PaddingBox => BgBox::PaddingBox,
+        O::ContentBox => BgBox::ContentBox,
+    }
+}
+
+fn convert_bg_clip(
+    clips: &[style::properties::longhands::background_clip::single_value::computed_value::T],
+    i: usize,
+) -> BgClip {
+    use style::properties::longhands::background_clip::single_value::computed_value::T as C;
+    match clips[i % clips.len()] {
+        C::BorderBox => BgClip::BorderBox,
+        C::PaddingBox => BgClip::PaddingBox,
+        C::ContentBox => BgClip::ContentBox,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{AssetBundle, Engine};
+
+    /// 1×1 red PNG (minimal valid file with correct CRC sums).
+    const PNG_1X1_RED: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn render_bg(bg_css: &str) -> Vec<u8> {
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{bg_css}"></div></body></html>"#
+        );
+        Engine::builder()
+            .build()
+            .render(&html)
+            .expect("render should succeed")
+    }
+
+    fn assert_pdf(pdf: &[u8], label: &str) {
+        assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF header");
+    }
+
+    fn render_with_style(style: &str, label: &str) {
+        let html = format!(r#"<html><body><div style="{style}"></div></body></html>"#);
+        let pdf = Engine::builder()
+            .build()
+            .render(&html)
+            .unwrap_or_else(|_| panic!("render failed for {label}"));
+        assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF");
+    }
+
+    // ── resolve_linear_gradient: direction arms ───────────────────────────────
+
+    /// Exercises all nine `LineDirection` arms of `resolve_linear_gradient`:
+    /// `Angle`, `Horizontal(Left)`, `Horizontal(Right)`, `Vertical(Top)`,
+    /// `Vertical(Bottom)`, and all four `Corner` variants.
+    #[test]
+    fn linear_gradient_direction_variants() {
+        let cases = [
+            ("angle", "linear-gradient(45deg,red,blue)"),
+            ("to_right", "linear-gradient(to right,red,blue)"),
+            ("to_left", "linear-gradient(to left,red,blue)"),
+            ("to_top", "linear-gradient(to top,red,blue)"),
+            ("to_bottom", "linear-gradient(to bottom,red,blue)"),
+            ("to_top_right", "linear-gradient(to top right,red,blue)"),
+            ("to_top_left", "linear-gradient(to top left,red,blue)"),
+            ("to_bottom_left", "linear-gradient(to bottom left,red,blue)"),
+            (
+                "to_bottom_right",
+                "linear-gradient(to bottom right,red,blue)",
+            ),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    // ── resolve_radial_gradient: shape arms ───────────────────────────────────
+
+    /// Exercises `EndingShape::Circle(Circle::Radius(...))`.
+    #[test]
+    fn radial_gradient_circle_explicit_radius() {
+        assert_pdf(
+            &render_bg("radial-gradient(circle 40px at center,red,blue)"),
+            "circle_radius",
+        );
+    }
+
+    /// Exercises `Circle::Extent` and `Ellipse::Extent` for all four
+    /// `ShapeExtent` keyword values (ClosestSide / FarthestSide /
+    /// ClosestCorner / FarthestCorner), which also covers `map_extent`.
+    #[test]
+    fn radial_gradient_extent_variants() {
+        let cases = [
+            (
+                "circle_closest_side",
+                "radial-gradient(closest-side circle,red,blue)",
+            ),
+            (
+                "circle_farthest_side",
+                "radial-gradient(farthest-side circle,red,blue)",
+            ),
+            (
+                "circle_closest_corner",
+                "radial-gradient(closest-corner circle,red,blue)",
+            ),
+            (
+                "circle_farthest_corner",
+                "radial-gradient(farthest-corner circle,red,blue)",
+            ),
+            (
+                "ellipse_closest_side",
+                "radial-gradient(closest-side ellipse,red,blue)",
+            ),
+            (
+                "ellipse_farthest_side",
+                "radial-gradient(farthest-side ellipse,red,blue)",
+            ),
+            (
+                "ellipse_closest_corner",
+                "radial-gradient(closest-corner ellipse,red,blue)",
+            ),
+            (
+                "ellipse_farthest_corner",
+                "radial-gradient(farthest-corner ellipse,red,blue)",
+            ),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    /// Exercises `EndingShape::Ellipse(Ellipse::Radii(...))` and the
+    /// `try_convert_lp_to_bg` calls for both rx and ry.
+    #[test]
+    fn radial_gradient_ellipse_explicit_radii() {
+        assert_pdf(
+            &render_bg("radial-gradient(ellipse 50px 30px at center,red,blue)"),
+            "ellipse_radii",
+        );
+    }
+
+    /// Exercises the `position_x` / `position_y` arms of
+    /// `resolve_radial_gradient` with a percentage center.
+    #[test]
+    fn radial_gradient_percentage_position() {
+        assert_pdf(
+            &render_bg("radial-gradient(circle at 25% 75%,red,blue)"),
+            "radial_at_position",
+        );
+    }
+
+    /// `repeating-radial-gradient` exercises the `repeating: true` flag.
+    #[test]
+    fn radial_gradient_repeating() {
+        assert_pdf(
+            &render_bg("repeating-radial-gradient(circle 30px,red,blue)"),
+            "radial_repeating",
+        );
+    }
+
+    // ── resolve_conic_gradient: arms ─────────────────────────────────────────
+
+    /// Exercises the `from_angle` field and basic `SimpleColorStop` items.
+    #[test]
+    fn conic_gradient_from_angle() {
+        assert_pdf(
+            &render_bg("conic-gradient(from 45deg,red,blue)"),
+            "conic_from_angle",
+        );
+    }
+
+    /// Exercises position_x / position_y via `at <position>`.
+    #[test]
+    fn conic_gradient_at_position() {
+        assert_pdf(
+            &render_bg("conic-gradient(at 30% 70%,red,blue)"),
+            "conic_at_pos",
+        );
+    }
+
+    /// `ComplexColorStop` with `Percentage` → `GradientStopPosition::Fraction`.
+    #[test]
+    fn conic_gradient_percentage_stops() {
+        assert_pdf(
+            &render_bg("conic-gradient(red 0%,blue 50%,red 100%)"),
+            "conic_pct_stops",
+        );
+    }
+
+    /// `ComplexColorStop` with `Angle` → fraction via `angle / TAU`.
+    #[test]
+    fn conic_gradient_angle_stops() {
+        assert_pdf(
+            &render_bg("conic-gradient(red 0deg,blue 90deg,red 360deg)"),
+            "conic_angle_stops",
+        );
+    }
+
+    /// `repeating-conic-gradient` exercises the `repeating: true` flag.
+    #[test]
+    fn conic_gradient_repeating() {
+        assert_pdf(
+            &render_bg("repeating-conic-gradient(red 0deg,blue 30deg)"),
+            "conic_repeating",
+        );
+    }
+
+    // ── resolve_color_stops: GradientStopPosition variants ───────────────────
+
+    /// `ComplexColorStop` with `to_length()` → `GradientStopPosition::LengthPx`.
+    #[test]
+    fn linear_gradient_length_px_stops() {
+        assert_pdf(
+            &render_bg("linear-gradient(red 0px,blue 80px)"),
+            "length_px_stops",
+        );
+    }
+
+    /// `ComplexColorStop` with `to_percentage()` → `GradientStopPosition::Fraction`.
+    #[test]
+    fn linear_gradient_fraction_stops() {
+        assert_pdf(
+            &render_bg("linear-gradient(red 0%,blue 100%)"),
+            "fraction_stops",
+        );
+    }
+
+    /// Valid interpolation hint between two color stops. The hint is at 30%
+    /// and drives the power-curve expansion in `expand_interpolation_hints`.
+    #[test]
+    fn linear_gradient_valid_interpolation_hint() {
+        assert_pdf(&render_bg("linear-gradient(red,30%,blue)"), "valid_hint");
+    }
+
+    /// Invalid hint placements cause `resolve_color_stops` to return `None`
+    /// (layer dropped). The element still renders — just without the gradient.
+    #[test]
+    fn linear_gradient_invalid_hint_cases_drop_layer() {
+        let cases = [
+            ("leading_hint", "linear-gradient(30%,red,blue)"),
+            ("trailing_hint", "linear-gradient(red,blue,70%)"),
+            ("consecutive_hints", "linear-gradient(red,30%,60%,blue)"),
+        ];
+        for (name, css) in cases {
+            assert_pdf(&render_bg(css), name);
+        }
+    }
+
+    // ── convert_bg_size: BackgroundSize variant arms ──────────────────────────
+
+    /// All `background-size` keyword / value combinations exercise every arm
+    /// of `convert_bg_size` (Cover, Contain, ExplicitSize with various
+    /// auto/length/percentage combinations).
+    #[test]
+    fn bg_size_variants() {
+        let cases = [
+            ("cover", "background-size:cover"),
+            ("contain", "background-size:contain"),
+            ("explicit_px", "background-size:50px 40px"),
+            ("auto_height", "background-size:50px auto"),
+            ("auto_width", "background-size:auto 40px"),
+            ("auto_auto", "background-size:auto auto"),
+            ("pct", "background-size:50% 50%"),
+        ];
+        for (name, size_css) in cases {
+            render_with_style(
+                &format!("width:120px;height:80px;background:linear-gradient(red,blue);{size_css}"),
+                name,
+            );
+        }
+    }
+
+    // ── convert_bg_repeat: BackgroundRepeat variant arms ─────────────────────
+
+    /// All four `BackgroundRepeatKeyword` values exercise every arm of
+    /// `convert_bg_repeat`.
+    #[test]
+    fn bg_repeat_variants() {
+        let cases = [
+            ("repeat", "background-repeat:repeat"),
+            ("no_repeat", "background-repeat:no-repeat"),
+            ("space", "background-repeat:space"),
+            ("round", "background-repeat:round"),
+        ];
+        for (name, repeat_css) in cases {
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;background:linear-gradient(red,blue);background-size:30px 20px;{repeat_css}"
+                ),
+                name,
+            );
+        }
+    }
+
+    // ── convert_bg_origin / convert_bg_clip: box-type variant arms ───────────
+
+    /// All three `background-origin` + `background-clip` keyword pairs exercise
+    /// every arm of `convert_bg_origin` and `convert_bg_clip`.
+    #[test]
+    fn bg_origin_clip_variants() {
+        let cases = [
+            (
+                "border_box",
+                "background-origin:border-box;background-clip:border-box",
+            ),
+            (
+                "padding_box",
+                "background-origin:padding-box;background-clip:padding-box",
+            ),
+            (
+                "content_box",
+                "background-origin:content-box;background-clip:content-box",
+            ),
+        ];
+        for (name, extra_css) in cases {
+            render_with_style(
+                &format!(
+                    "width:120px;height:80px;padding:10px;background:linear-gradient(red,blue);{extra_css}"
+                ),
+                name,
+            );
+        }
+    }
+
+    // ── apply_to: background-image URL arms ──────────────────────────────────
+
+    /// `Image::Url` → `AssetKind::Raster` → `BgImageContent::Raster` arm.
+    #[test]
+    fn bg_image_url_raster_png() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render raster bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → `AssetKind::Svg` → `BgImageContent::Svg` arm.
+    #[test]
+    fn bg_image_url_svg() {
+        let svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='red'/></svg>";
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("bg.svg", svg.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(bg.svg)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render svg bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → SVG bytes that fail `usvg::Tree::from_data` → `None` arm
+    /// (layer dropped; element still renders).
+    #[test]
+    fn bg_image_url_invalid_svg_falls_back() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("broken.svg", b"<svg<<NOT_VALID_XML".to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(broken.svg)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render broken-svg bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` → `AssetKind::Unknown` arm → `None` (layer dropped).
+    #[test]
+    fn bg_image_url_unknown_asset_kind() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("file.dat", b"NOT_AN_IMAGE_OR_SVG".to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(file.dat)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render unknown-asset bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `Image::Url` when no `AssetBundle` is set → `ctx.assets.is_none()` →
+    /// `and_then` returns `None` (layer dropped silently).
+    #[test]
+    fn bg_image_url_without_bundle_returns_none() {
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(img.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render missing-bundle bg");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// Scan `drawables` for the first gradient background layer and return its
+    /// stop count, or `None` if no gradient layer exists.  Non-gradient layers
+    /// (`Raster`, `Svg`) exercise the `_ => None` arm of the inner `find_map`
+    /// when called with asset-backed drawables.
+    fn gradient_stop_count_in_drawables(drawables: &crate::drawables::Drawables) -> Option<usize> {
+        use crate::draw_primitives::BgImageContent;
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        gradient_stop_count_in_drawables(&drawables)
+    }
+
+    /// Security regression: an unbounded `column-stop` list must not be
+    /// retained verbatim per element. A gradient with far more stops than
+    /// [`crate::MAX_GRADIENT_STOPS`] is clamped when convert builds the
+    /// `BackgroundLayer` vector, bounding the O(elements × stops) retention
+    /// (and the downstream repeating period expansion). Real gradients use a
+    /// handful of stops, so this only affects pathological input.
+    #[test]
+    fn gradient_stop_count_is_defensively_capped() {
+        // ~2000 alternating color stops — far above MAX_GRADIENT_STOPS (256).
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("linear gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "gradient stops must be capped, got {count}"
+        );
+    }
+
+    /// A valid gradient with fewer than MAX_GRADIENT_STOPS *color stops* but
+    /// more than MAX_GRADIENT_STOPS total *items* (stops interleaved with
+    /// interpolation hints) must NOT be dropped. Regression for the item-vs-stop
+    /// cap bug: capping on items could truncate on a hint, tripping the
+    /// trailing-hint guard and discarding an otherwise-valid layer.
+    #[test]
+    fn gradient_with_many_hints_under_stop_cap_is_not_dropped() {
+        // 200 color stops interleaved with 199 hints = 399 items (> 256), but
+        // only 200 color stops (< MAX_GRADIENT_STOPS = 256).
+        let mut parts: Vec<String> = Vec::new();
+        for i in 0..200 {
+            parts.push(if i % 2 == 0 {
+                "red".into()
+            } else {
+                "blue".into()
+            });
+            if i < 199 {
+                // Interpolation hint (bare percentage between two color stops).
+                parts.push(format!("{}%", (i as f32) * 0.4));
+            }
+        }
+        let css = format!("linear-gradient({})", parts.join(","));
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:{css}"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html)
+            .expect("valid gradient with <256 stops must not be dropped");
+        // All 200 color stops (plus interior hints) are retained; nothing is
+        // truncated because the stop count stays under the cap.
+        assert!(count >= 200, "expected >=200 retained entries, got {count}");
+    }
+
+    /// Same cap on the conic-gradient stop-building path (a separate loop).
+    #[test]
+    fn conic_gradient_stop_count_is_defensively_capped() {
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("conic gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "conic gradient stops must be capped, got {count}"
+        );
+    }
+
+    // ── map_extent: ShapeExtent::Contain / Cover aliases ─────────────────────
+
+    /// CSS `radial-gradient(contain, …)` maps to `ShapeExtent::Contain`,
+    /// which is an alias for `closest-side` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::ClosestSide`.
+    #[test]
+    fn radial_gradient_contain_extent() {
+        // Stylo rejects `contain` as an unknown token in radial-gradient(), so
+        // no gradient layer is produced. The test documents that this input
+        // produces a valid PDF without a crash.
+        assert_pdf(
+            &render_bg("radial-gradient(contain,red,blue)"),
+            "radial_contain",
+        );
+    }
+
+    /// CSS `radial-gradient(cover, …)` maps to `ShapeExtent::Cover`,
+    /// which is an alias for `farthest-corner` (CSS Images §3.6.1).
+    /// `map_extent` converts it to `RadialExtent::FarthestCorner`.
+    #[test]
+    fn radial_gradient_cover_extent() {
+        // Stylo's modern mode rejects `cover` as an unknown token in
+        // radial-gradient(), so no gradient layer is produced via CSS parsing.
+        // See map_extent_cover_maps_to_farthest_corner for the direct unit test.
+        assert_pdf(
+            &render_bg("radial-gradient(cover,red,blue)"),
+            "radial_cover",
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Contain)` must return `RadialExtent::ClosestSide`.
+    /// Stylo's modern-mode CSS parser rejects `contain` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_contain_maps_to_closest_side() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Contain),
+            RadialExtent::ClosestSide
+        );
+    }
+
+    /// `map_extent(ShapeExtent::Cover)` must return `RadialExtent::FarthestCorner`.
+    /// Stylo's modern-mode CSS parser rejects `cover` in `radial-gradient()`,
+    /// so this arm is tested directly rather than through CSS parsing.
+    #[test]
+    fn map_extent_cover_maps_to_farthest_corner() {
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert_eq!(
+            super::map_extent(ShapeExtent::Cover),
+            RadialExtent::FarthestCorner
+        );
+    }
+
+    // ── resolve_color_stops: < 2 effective stops ──────────────────────────────
+
+    /// A linear gradient with only one color stop is technically invalid CSS;
+    /// `resolve_color_stops` bails at the `out.len() < 2` guard and returns
+    /// `None`, so the layer is dropped. The element still renders (no background
+    /// image but a valid PDF).
+    #[test]
+    fn linear_gradient_single_stop_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "single-stop linear-gradient must drop the layer (Stylo or fulgur bails at <2 stops)"
+        );
+    }
+
+    /// A conic gradient with only one color stop — triggers the
+    /// `stops.len() < 2` guard at the end of `resolve_conic_gradient`.
+    #[test]
+    fn conic_gradient_single_stop_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red 0deg)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "single-stop conic-gradient must drop the layer"
+        );
+    }
+
+    // ── resolve_color_stops: calc() color stop position ───────────────────────
+
+    /// A color stop with a `calc()` position is neither a pure percentage
+    /// nor a pure length. `resolve_color_stops` hits the `else` branch
+    /// (L267-271) and returns `None`, dropping the layer. Element still
+    /// renders.
+    #[test]
+    fn linear_gradient_calc_stop_position_drops_layer() {
+        // calc(10px + 5%) is a mixed-unit calc that resolves to neither
+        // to_percentage() nor to_length(), triggering the bail-out.
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient(red calc(10px + 5%),blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "mixed-unit calc() stop position must drop the layer"
+        );
+    }
+
+    // ── resolve_color_stops: interpolation hint at length position ────────────
+
+    /// An interpolation hint expressed as a length value (`10px` instead of
+    /// a percentage) exercises the `to_length()` branch inside the hint arm
+    /// of `resolve_color_stops` (L293-294). The hint is stored as
+    /// `GradientStopPosition::LengthPx` and the gradient renders normally.
+    #[test]
+    fn linear_gradient_hint_at_length_position() {
+        // `red, 20px, blue` — if Stylo generates this as an InterpolationHint
+        // with a length LengthPercentage, the `to_length()` branch fires.
+        // If Stylo instead discards it or doesn't support it, the gradient
+        // still renders as a valid PDF (no panic).
+        assert_pdf(
+            &render_bg("linear-gradient(red,20px,blue)"),
+            "linear_hint_length",
+        );
+    }
+
+    // ── resolve_color_stops: conic gradient interpolation hint ───────────────
+
+    /// A conic gradient containing an interpolation hint fires the
+    /// `GradientItem::InterpolationHint` arm in `resolve_conic_gradient`,
+    /// which logs a warning and returns `None` (layer dropped).
+    /// The standalone `50%` is an interpolation hint (CSS Images L4 §2.3),
+    /// so Stylo either emits an `InterpolationHint` (fulgur drops the layer)
+    /// or rejects the syntax entirely (no layer either way).
+    #[test]
+    fn conic_gradient_with_interpolation_hint_drops_layer() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient(red,50%,blue)"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "conic-gradient with interpolation hint must drop the layer (Stylo emits \
+             InterpolationHint or rejects syntax; neither produces a retained layer)"
+        );
+    }
+
+    // ── first_gradient_stop_count helper: BgImageContent::Raster / Svg arm ───
+
+    /// A raster background image does not produce a gradient stop count.
+    /// Exercises the `_ => None` catch-all arm of the `find_map` closure
+    /// inside `first_gradient_stop_count`.
+    #[test]
+    fn first_gradient_stop_count_returns_none_for_raster_bg_image() {
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        use crate::draw_primitives::BgImageContent;
+        // First verify that a Raster layer was actually produced — otherwise
+        // count.is_none() could succeed vacuously (no layer at all).
+        let has_raster = drawables.block_styles.values().any(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .any(|layer| matches!(&layer.content, BgImageContent::Raster { .. }))
+        });
+        assert!(
+            has_raster,
+            "url(dot.png) must produce a BgImageContent::Raster layer"
+        );
+        // Call the shared helper with the asset-backed drawables so the
+        // `_ => None` arm for BgImageContent::Raster is actually executed.
+        let gradient_count = gradient_stop_count_in_drawables(&drawables);
+        assert!(
+            gradient_count.is_none(),
+            "raster background image must not produce a gradient stop count"
+        );
+    }
+
+    /// Same cap on the radial-gradient stop-building path.  Exercises the
+    /// `BgImageContent::RadialGradient { stops, .. }` arm of the
+    /// `first_gradient_stop_count` helper (previously uncovered).
+    #[test]
+    fn radial_gradient_stop_count_is_defensively_capped() {
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:radial-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("radial gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "radial gradient stops must be capped, got {count}"
+        );
+    }
+
+    /// A document with only `background-color` (no `background-image`) produces
+    /// no gradient layers; `first_gradient_stop_count` must return `None`.
+    #[test]
+    fn first_gradient_stop_count_returns_none_without_gradient() {
+        let count = first_gradient_stop_count(
+            r#"<html><body><div style="width:80px;height:80px;background-color:red"></div></body></html>"#,
+        );
+        assert!(
+            count.is_none(),
+            "solid background-color should not produce a gradient stop count"
+        );
+    }
+
+    // ── Image::Url with bundle present but asset missing ─────────────────────
+
+    /// `Image::Url` → AssetBundle is set but does not contain the requested
+    /// asset → `get_image` returns `None` → layer dropped silently.
+    ///
+    /// This covers the `a.get_image(src)?` short-circuit path when the bundle
+    /// is present but the image name was never registered.
+    #[test]
+    fn bg_image_url_missing_from_bundle_skips_layer() {
+        let bundle = AssetBundle::default(); // empty — "missing.png" not registered
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(missing.png)"></div></body></html>"#;
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render with bundle present but image absent");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── calc() gradient center positions ─────────────────────────────────────
+
+    /// `radial-gradient(… at calc(50% + 10px) …)` produces a computed
+    /// `LengthPercentage` that is neither a pure percentage nor a pure length.
+    /// `try_convert_lp_to_bg` returns `None` for such values, causing the
+    /// gradient layer to be dropped (element still renders without the
+    /// background image).
+    #[test]
+    fn radial_gradient_calc_center_position_drops_layer() {
+        let pdf = render_bg("radial-gradient(circle at calc(50% + 10px) 50%,red,blue)");
+        assert_pdf(&pdf, "radial_calc_center");
+    }
+
+    /// Same for `conic-gradient(… at calc(…) …)`: `try_convert_lp_to_bg`
+    /// returns `None` for a mixed-unit calc, so the layer is dropped.
+    #[test]
+    fn conic_gradient_calc_center_position_drops_layer() {
+        let pdf = render_bg("conic-gradient(at calc(50% + 10px) 50%,red,blue)");
+        assert_pdf(&pdf, "conic_calc_center");
+    }
+
+    // ── non-default color interpolation method ───────────────────────────────
+
+    /// A gradient that specifies a non-default color interpolation space
+    /// (`in hsl`) sets the `HAS_DEFAULT_COLOR_INTERPOLATION_METHOD` flag to
+    /// false; `resolve_linear_gradient` bails early and returns `None` so the
+    /// layer is dropped. Element still renders (no background image, but valid
+    /// PDF).
+    #[test]
+    fn linear_gradient_non_default_interpolation_drops_layer() {
+        // `in hsl` is a non-default color-interpolation-method (CSS Color 4).
+        // If Stylo supports this syntax the flag will be absent and the layer
+        // is dropped by fulgur's bail-out. If Stylo doesn't support it yet the
+        // gradient is also silently ignored. Either way the result must be a
+        // valid PDF.
+        let pdf = render_bg("linear-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "linear_nondefault_interp");
+    }
+
+    /// Same for radial-gradient with a non-default interpolation method.
+    #[test]
+    fn radial_gradient_non_default_interpolation_drops_layer() {
+        let pdf = render_bg("radial-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "radial_nondefault_interp");
+    }
+
+    /// Same for conic-gradient with a non-default interpolation method.
+    #[test]
+    fn conic_gradient_non_default_interpolation_drops_layer() {
+        let pdf = render_bg("conic-gradient(in hsl,red,blue)");
+        assert_pdf(&pdf, "conic_nondefault_interp");
+    }
+
+    // ── conic-gradient interpolation hint ────────────────────────────────────
+
+    /// An interpolation hint inside a `conic-gradient` is not yet supported.
+    /// `resolve_conic_gradient` returns `None` (layer dropped) when it
+    /// encounters `GradientItem::InterpolationHint`.  The element still
+    /// renders without the gradient background.
+    #[test]
+    fn conic_gradient_interpolation_hint_drops_layer() {
+        // `30%` between two color stops is a color hint in CSS Images 4.
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:conic-gradient(red,30%,blue)"></div></body></html>"#,
+        );
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("render should succeed");
+        assert_pdf(&pdf, "conic_hint_drop");
+        // The layer must have been dropped: no gradient in background_layers.
+        assert_eq!(
+            first_gradient_stop_count(html),
+            None,
+            "interpolation hint must drop the conic-gradient layer"
+        );
+    }
+
+    // ── map_extent: Contain and Cover alias keywords ──────────────────────────
+
+    /// Returns the `RadialGradientSize` of the first radial-gradient layer, or
+    /// `None` if no radial gradient layer is present.
+    fn first_radial_gradient_size(
+        html: &str,
+    ) -> Option<crate::draw_primitives::RadialGradientSize> {
+        use crate::draw_primitives::BgImageContent;
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::RadialGradient { size, .. } => Some(size.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Verifies `first_radial_gradient_size` returns `Some` for a standard
+    /// `radial-gradient` that Stylo parses, covering the `Some(size.clone())`
+    /// arm in the helper.
+    #[test]
+    fn first_radial_gradient_size_returns_some_for_standard_gradient() {
+        use crate::draw_primitives::{RadialExtent, RadialGradientSize};
+        let html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(closest-side circle,red,blue)"></div></body></html>"#,
+        );
+        let size =
+            first_radial_gradient_size(html).expect("standard radial-gradient must yield a layer");
+        assert!(
+            matches!(size, RadialGradientSize::Extent(RadialExtent::ClosestSide)),
+            "closest-side circle must map to ClosestSide, got {size:?}"
+        );
+    }
+
+    /// CSS Images §3.6.1 defines `contain` / `cover` as aliases for
+    /// `closest-side` / `farthest-corner`, but the current Stylo build rejects
+    /// both tokens as unknown in `radial-gradient()`, so the layer is dropped.
+    /// Verifies both that the PDF is still valid and that no radial layer was
+    /// produced.  If a future Stylo update accepts these keywords the test will
+    /// fail and should be updated to assert the correct `RadialExtent` instead.
+    #[test]
+    fn radial_gradient_contain_and_cover_size_keywords() {
+        // contain → layer dropped (Stylo parse error)
+        let contain_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(contain circle,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(contain_html)
+                .expect("render should succeed"),
+            "contain",
+        );
+        assert!(
+            first_radial_gradient_size(contain_html).is_none(),
+            "Stylo rejects 'contain', so no radial-gradient layer must be present"
+        );
+
+        // cover → layer dropped (Stylo parse error)
+        let cover_html = concat!(
+            r#"<html><body><div style="width:120px;height:80px;"#,
+            r#"background:radial-gradient(cover,red,blue)"></div></body></html>"#,
+        );
+        assert_pdf(
+            &Engine::builder()
+                .build()
+                .render(cover_html)
+                .expect("render should succeed"),
+            "cover",
+        );
+        assert!(
+            first_radial_gradient_size(cover_html).is_none(),
+            "Stylo rejects 'cover', so no radial-gradient layer must be present"
+        );
+    }
+
+    /// Calls `map_extent` directly with the two alias variants (`Contain` and
+    /// `Cover`) that Stylo's CSS parser rejects in `radial-gradient()`, so they
+    /// cannot be reached via end-to-end HTML rendering.  Per CSS Images §3.6.1
+    /// these are aliases for `ClosestSide` and `FarthestCorner` respectively.
+    #[test]
+    fn map_extent_contain_and_cover_aliases() {
+        use super::map_extent;
+        use crate::draw_primitives::RadialExtent;
+        use style::values::generics::image::ShapeExtent;
+        assert!(
+            matches!(map_extent(ShapeExtent::Contain), RadialExtent::ClosestSide),
+            "Contain must alias ClosestSide"
+        );
+        assert!(
+            matches!(map_extent(ShapeExtent::Cover), RadialExtent::FarthestCorner),
+            "Cover must alias FarthestCorner"
+        );
+    }
+
+    // ── BgImageContent::Raster arm (non-gradient URL background) ─────────────
+
+    /// A PNG `url(...)` background resolves to `BgImageContent::Raster`, not a
+    /// gradient.  Verifies both that the raster layer is present and that no
+    /// gradient stop count is exposed — ensuring the non-gradient variant is
+    /// actually exercised and the absence of a gradient is not due to a missing
+    /// layer.
+    #[test]
+    fn first_gradient_stop_count_none_for_raster_background() {
+        use crate::draw_primitives::BgImageContent;
+        let mut bundle = AssetBundle::default();
+        bundle.add_image("dot.png", PNG_1X1_RED.to_vec());
+        let html = r#"<html><body><div style="width:80px;height:80px;background:url(dot.png)"></div></body></html>"#;
+        let drawables = Engine::builder()
+            .assets(bundle)
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+
+        // The PNG must have been resolved: at least one Raster layer must exist.
+        assert!(
+            drawables.block_styles.values().any(|block| {
+                block
+                    .style
+                    .background_layers
+                    .iter()
+                    .any(|layer| matches!(layer.content, BgImageContent::Raster { .. }))
+            }),
+            "url(dot.png) background should resolve to a Raster layer"
+        );
+
+        // No gradient layer may be present.
+        let has_gradient = drawables.block_styles.values().any(|block| {
+            block.style.background_layers.iter().any(|layer| {
+                matches!(
+                    layer.content,
+                    BgImageContent::LinearGradient { .. }
+                        | BgImageContent::RadialGradient { .. }
+                        | BgImageContent::ConicGradient { .. }
+                )
+            })
+        });
+        assert!(
+            !has_gradient,
+            "a raster URL background should not produce a gradient layer"
+        );
+    }
+}

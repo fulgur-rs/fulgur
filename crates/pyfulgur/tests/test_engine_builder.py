@@ -18,6 +18,15 @@ def test_builder_page_size_accepts_string():
     assert engine is not None
 
 
+def test_builder_page_size_accepts_newly_added_keyword_string():
+    # fulgur-5oav: A5/B4/B5/JIS-B4/JIS-B5/Legal/Ledger must resolve through
+    # the string path too, not just A4/LETTER/A3.
+    engine = Engine.builder().page_size("A5").build()
+    assert engine is not None
+    engine = Engine.builder().page_size("jis-b4").build()
+    assert engine is not None
+
+
 def test_builder_page_size_invalid_string_raises_value_error():
     with pytest.raises(ValueError, match="unknown page size"):
         Engine.builder().page_size("Z99").build()

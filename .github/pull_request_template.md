@@ -16,7 +16,7 @@
 
 <!-- How was this tested? What did you verify manually? -->
 
-- [ ] `cargo test -p fulgur`
+- [ ] `cargo test -p fulgur -p fulgur-blitz -p fulgur-core`
 - [ ] `cargo clippy`
 - [ ] `cargo fmt --check`
 - [ ] `npx markdownlint-cli2 '**/*.md'` (if docs changed)
