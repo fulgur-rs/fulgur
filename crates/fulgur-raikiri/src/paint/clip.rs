@@ -2,30 +2,30 @@
 //!
 //! A box whose `overflow` is anything but `visible` on an axis clips its
 //! descendants' painting on that axis to its padding box. Raikiri's
-//! fragments are a flat list, so the clips that apply to a fragment are
-//! found by walking the DOM ancestors of its node.
+//! legacy fragments are a flat list, so the fallback painter finds clips by
+//! walking DOM ancestors. Ordered painting consumes producer clip events
+//! directly, including the geometry of each column placement.
 //!
 //! An absolutely or fixed positioned descendant whose containing block is
 //! outside the clipping box should escape its clip. `ComputedValues::position`
 //! has a type that `raikiri_html::computed` does not name, so the painter
 //! cannot tell those descendants apart and clips them like in-flow ones.
 
-use super::border;
-use super::shape::{RoundedRect, Slice};
+use super::shape::RoundedRect;
 use krilla::geom::Path;
 use krilla::paint::FillRule;
 use krilla::surface::Surface;
-use raikiri_html::computed::{ComputedDisplay, ComputedValues, OverflowValue};
-use raikiri_html::{FragmentKind, NodeId, Page, PaintRect};
+use raikiri_html::{NodeId, Page, PaintClip, PaintRect};
 use std::collections::HashMap;
 
 /// One clipping box fragment: the node and the fragment's position among
 /// that node's fragments on the page.
 pub(super) type ClipKey = (NodeId, usize);
 
-/// The overflow clip paths of the box fragments on one page, by node. A
-/// node broken into several fragments on the page (columns) has one clip
-/// per fragment, each at that fragment's padding box.
+/// Resolved overflow clip paths on one page, by source node. Includes
+/// ancestors whose own boxes do not reach the page but whose descendants do.
+/// Raikiri retains each whole padding-edge shape across page cuts.
+#[derive(Default)]
 pub(super) struct ClipMap {
     clips: HashMap<NodeId, Vec<(PaintRect, Path)>>,
 }
@@ -34,22 +34,12 @@ impl ClipMap {
     pub(super) fn new(page: &Page<'_>) -> Self {
         let bounds = page.geometry().page_box;
         let mut clips: HashMap<NodeId, Vec<(PaintRect, Path)>> = HashMap::new();
-        let mut fragments: Vec<_> = page
-            .fragments()
-            .filter(|fragment| fragment.kind() == FragmentKind::Box)
-            .collect();
-        fragments.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
-        for fragment in fragments {
-            let node = fragment.node();
-            let Some(style) = page.computed(node) else {
-                continue;
-            };
-            if propagates_to_viewport(page, node) {
-                continue;
-            }
-            let rect = fragment.paint_rect();
-            if let Some(path) = clip_path(rect, Slice::of(&fragment), style, bounds) {
-                clips.entry(node).or_default().push((rect, path));
+        for clip in page.overflow_clips() {
+            if let Some(path) = clip_path(clip.clip, bounds) {
+                clips
+                    .entry(clip.node)
+                    .or_default()
+                    .push((clip.border_box, path));
             }
         }
         Self { clips }
@@ -108,72 +98,36 @@ fn nearest(rects: &[PaintRect], target: PaintRect) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
-/// CSS Overflow 3 §3.3: the root element's `overflow` applies to the
-/// viewport (the page here), and so does the `body` element's when the
-/// root's is `visible` on both axes. Such an `overflow` does not clip the
-/// element's own box.
-fn propagates_to_viewport(page: &Page<'_>, node: NodeId) -> bool {
-    let dom = page.dom();
-    let Some(parent) = dom.parent(node) else {
-        return false;
-    };
-    let is_root_element = |element: NodeId| {
-        dom.local_name(element) == Some("html") && dom.parent(element) == Some(dom.root())
-    };
-    if is_root_element(node) {
-        return true;
+/// Draw Raikiri's resolved padding-edge clip without resolving percentages
+/// on the page slice or normalizing a cropped inner ellipse again.
+pub(super) fn clip_path(clip: PaintClip, bounds: PaintRect) -> Option<Path> {
+    let rect = clip.rect;
+    if clip.clip_x && clip.clip_y {
+        return RoundedRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            radii: clip.corner_radii.unwrap_or([[0.0; 2]; 4]),
+        }
+        .path()
+        .or_else(empty_path);
     }
-    if !(is_root_element(parent) && dom.local_name(node) == Some("body")) {
-        return false;
-    }
-    page.computed(parent).is_some_and(|root| {
-        matches!(root.overflow.x, OverflowValue::Visible)
-            && matches!(root.overflow.y, OverflowValue::Visible)
-    })
-}
-
-/// The clip of one box fragment, or `None` when it does not clip. §3.1: the
-/// `hidden`, `clip`, `scroll` and `auto` values all clip; the cascade has
-/// already applied the rule that couples the two axes.
-fn clip_path(
-    rect: PaintRect,
-    slice: Slice,
-    style: &ComputedValues,
-    bounds: PaintRect,
-) -> Option<Path> {
-    let clip_x = !matches!(style.overflow.x, OverflowValue::Visible);
-    let clip_y = !matches!(style.overflow.y, OverflowValue::Visible);
-    // Overflow applies to block containers, flex and grid containers; an
-    // inline box never clips.
-    if !(clip_x || clip_y) || matches!(style.display, ComputedDisplay::Inline) {
-        return None;
-    }
-    let padding_box = RoundedRect::border_box(rect, &style.border_radius)
-        .sliced(slice)
-        .inset(slice.edges(border::widths(style)));
-    if clip_x && clip_y {
-        // §3.1 and CSS Backgrounds 3 §5.3: the clip follows the curve of
-        // the padding edge.
-        return padding_box.path().or_else(empty_path);
-    }
-    // One axis clips: the other extends over the whole page. The corner
-    // curves do not apply to a clip open on one side.
-    let (x, width) = if clip_x {
-        (padding_box.x, padding_box.width)
+    // An open axis extends over the page; it has no corner curves.
+    let (x, width) = if clip.clip_x {
+        (rect.x, rect.width)
     } else {
         (
-            bounds.x.min(padding_box.x),
-            (bounds.x + bounds.width).max(padding_box.x + padding_box.width)
-                - bounds.x.min(padding_box.x),
+            bounds.x.min(rect.x),
+            (bounds.x + bounds.width).max(rect.x + rect.width) - bounds.x.min(rect.x),
         )
     };
-    let (y, height) = if clip_y {
-        (padding_box.y, padding_box.height)
+    let (y, height) = if clip.clip_y {
+        (rect.y, rect.height)
     } else {
         (
-            bounds.y.min(padding_box.y),
-            (bounds.y + bounds.height).max(padding_box.y + padding_box.height)
-                - bounds.y.min(padding_box.y),
+            bounds.y.min(rect.y),
+            (bounds.y + bounds.height).max(rect.y + rect.height) - bounds.y.min(rect.y),
         )
     };
     RoundedRect::rect(x, y, width, height)
@@ -226,25 +180,4 @@ impl ClipStack {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_item_is_clipped_by_the_fragment_it_lies_in() {
-        // Two columns of one box on a page.
-        let columns = [
-            PaintRect::new(20.0, 20.0, 120.0, 160.0),
-            PaintRect::new(160.0, 20.0, 120.0, 160.0),
-        ];
-        assert_eq!(nearest(&columns, PaintRect::new(30.0, 40.0, 50.0, 20.0)), 0);
-        assert_eq!(
-            nearest(&columns, PaintRect::new(170.0, 40.0, 50.0, 20.0)),
-            1
-        );
-        // Overflowing below the second column, it still belongs to it.
-        assert_eq!(
-            nearest(&columns, PaintRect::new(170.0, 190.0, 50.0, 20.0)),
-            1
-        );
-    }
-}
+mod tests;

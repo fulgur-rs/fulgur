@@ -121,7 +121,7 @@ fulgur render --pdf-ua --language en -o report.pdf report.html
 | `-l, --landscape` | Landscape orientation | false |
 | `--margin` | Page margins in mm (CSS shorthand: `"20"`, `"20 30"`, `"10 20 30"`, `"10 20 30 40"`) | — |
 | `--title` | PDF title metadata | — |
-| `--language` | Document language tag (BCP 47, e.g. `en`, `ja`). Required for PDF/UA-1. | — |
+| `--language` | Document language tag (BCP 47, e.g. `en`, `ja`). Required for PDF/UA-1 unless the document sets `<html lang>`. | — |
 | `-f, --font` | Font files to bundle (repeatable) | — |
 | `--css` | CSS files to include (repeatable) | — |
 | `-i, --image` | Image files to bundle as name=path (repeatable) | — |
@@ -238,7 +238,7 @@ fulgur render --pdf-ua --language en -o report.pdf report.html
 ### Limitations
 
 - Alt text is propagated from `<img alt>` attributes only. CSS background images are not tagged.
-- PDF/UA-1 requires a document language. Always pass `--language` (CLI) or `.lang()` (Rust API) when using `--pdf-ua`.
+- PDF/UA-1 requires a document language. Pass `--language` (CLI) or `.lang()` (Rust API), or set `<html lang>` in the document; rendering fails when neither is present.
 - Python and Ruby bindings do not yet expose `tagged` / `pdf_ua`. Follow-up work is tracked separately.
 
 ## Architecture

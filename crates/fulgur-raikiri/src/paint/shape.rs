@@ -3,11 +3,7 @@
 
 use krilla::geom::{Path, PathBuilder};
 use raikiri_html::PaintRect;
-use raikiri_html::computed::{ComputedBorderRadius, ComputedLengthPercentage};
-
-/// Cubic Bézier control-point distance for a quarter ellipse, as a fraction
-/// of the radius.
-const KAPPA: f32 = 0.552_284_8;
+use raikiri_html::computed::ComputedBorderRadius;
 
 /// Lengths for the four sides of a box, in px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -38,14 +34,16 @@ impl Edges {
     }
 }
 
-/// Which block-direction edges of a box fragment are fragmentation breaks
-/// rather than edges of the box. With the initial `box-decoration-break:
+/// Which physical edges are breaks between page or inline fragments rather
+/// than edges of the box. With the initial `box-decoration-break:
 /// slice` (CSS Fragmentation 3 §5.4), a fragment is a slice of one
 /// unbroken box: a broken edge has no border, padding or corner rounding.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Slice {
     pub top: bool,
     pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
 }
 
 impl Slice {
@@ -55,6 +53,22 @@ impl Slice {
         Self {
             top: !fragment.is_first_fragment().unwrap_or(true),
             bottom: !fragment.is_last_fragment().unwrap_or(true),
+            ..Self::default()
+        }
+    }
+
+    /// The physical inline edges missing from one generated line piece.
+    pub(super) fn generated(piece: &raikiri_html::GeneratedBox<'_>) -> Self {
+        let (left, right) =
+            if piece.style.direction == raikiri_html::computed::ComputedDirection::Rtl {
+                (!piece.has_end_edge, !piece.has_start_edge)
+            } else {
+                (!piece.has_start_edge, !piece.has_end_edge)
+            };
+        Self {
+            left,
+            right,
+            ..Self::default()
         }
     }
 
@@ -65,6 +79,12 @@ impl Slice {
         }
         if self.bottom {
             edges.bottom = 0.0;
+        }
+        if self.left {
+            edges.left = 0.0;
+        }
+        if self.right {
+            edges.right = 0.0;
         }
         edges
     }
@@ -82,35 +102,25 @@ pub(super) struct RoundedRect {
     pub radii: [[f32; 2]; 4],
 }
 
+#[derive(Clone, Copy)]
+struct CornerPath {
+    start: [f32; 2],
+    curve: Option<[[f32; 2]; 3]>,
+}
+
 impl RoundedRect {
     /// The border box of a fragment with its used corner radii.
     ///
-    /// CSS Backgrounds 3 §5.1: a percentage radius refers to the border box,
-    /// its width for the horizontal radius and its height for the vertical
-    /// one. The computed value has one value per corner, so both radii come
-    /// from it. §5.5: when the radii of two adjacent corners do not fit
-    /// along a side, every radius is scaled by the same factor.
+    /// Resolve both axes and the common overlap scale through Raikiri's
+    /// used-value API (CSS Backgrounds 3 §§4.1, 4.5).
     pub(super) fn border_box(rect: PaintRect, radius: &ComputedBorderRadius) -> Self {
-        let corner = |value: ComputedLengthPercentage| match value {
-            ComputedLengthPercentage::Px(px) => [px.max(0.0), px.max(0.0)],
-            ComputedLengthPercentage::Percent(percent) => [
-                (rect.width * percent / 100.0).max(0.0),
-                (rect.height * percent / 100.0).max(0.0),
-            ],
-        };
         Self {
             x: rect.x,
             y: rect.y,
             width: rect.width.max(0.0),
             height: rect.height.max(0.0),
-            radii: [
-                corner(radius.top_left),
-                corner(radius.top_right),
-                corner(radius.bottom_right),
-                corner(radius.bottom_left),
-            ],
+            radii: radius.used(rect.width, rect.height),
         }
-        .clamped()
     }
 
     /// This shape with square corners along the broken edges of `slice`.
@@ -122,6 +132,14 @@ impl RoundedRect {
         if slice.bottom {
             self.radii[2] = [0.0; 2];
             self.radii[3] = [0.0; 2];
+        }
+        if slice.left {
+            self.radii[0] = [0.0; 2];
+            self.radii[3] = [0.0; 2];
+        }
+        if slice.right {
+            self.radii[1] = [0.0; 2];
+            self.radii[2] = [0.0; 2];
         }
         self
     }
@@ -137,36 +155,9 @@ impl RoundedRect {
         }
     }
 
-    /// Make every corner with a zero radius square (CSS Backgrounds 3
-    /// §5.1: "If either length is zero, the corner is square, not
-    /// rounded"), then scale every radius by `f = min(Li / Si)` over the
-    /// four sides, where `Li` is the side length and `Si` the sum of the two
-    /// radii along it (§5.5), when `f < 1`.
-    fn clamped(mut self) -> Self {
-        for corner in &mut self.radii {
-            if corner[0] <= 0.0 || corner[1] <= 0.0 {
-                *corner = [0.0; 2];
-            }
-        }
-        let r = self.radii;
-        let fit = |length: f32, sum: f32| {
-            if sum > length && sum > 0.0 {
-                length / sum
-            } else {
-                1.0
-            }
-        };
-        let factor = fit(self.width, r[0][0] + r[1][0])
-            .min(fit(self.height, r[1][1] + r[2][1]))
-            .min(fit(self.width, r[2][0] + r[3][0]))
-            .min(fit(self.height, r[3][1] + r[0][1]));
-        if factor < 1.0 {
-            for corner in &mut self.radii {
-                corner[0] *= factor;
-                corner[1] *= factor;
-            }
-        }
-        self
+    /// The bounding rectangle, ignoring the corner curves.
+    pub(super) fn bounds(&self) -> PaintRect {
+        PaintRect::new(self.x, self.y, self.width, self.height)
     }
 
     pub(super) fn is_rounded(&self) -> bool {
@@ -178,9 +169,10 @@ impl RoundedRect {
     }
 
     /// This shape moved inward by `edges`, as the padding edge is from the
-    /// border edge. CSS Backgrounds 3 §5.2: the inner radius of a corner is
+    /// border edge. CSS Backgrounds 3 §4.2: the inner radius of a corner is
     /// the outer radius minus the adjacent border width, floored at zero.
-    /// Insets larger than the box collapse it to an empty one.
+    /// Insets larger than the box collapse it to an empty one. Opposite
+    /// edges crop inner curves when drawing, without rescaling their radii.
     pub(super) fn inset(&self, edges: Edges) -> Self {
         let r = self.radii;
         let horizontal = edges.left + edges.right;
@@ -209,39 +201,158 @@ impl RoundedRect {
                 [(r[1][0] - right).max(0.0), (r[1][1] - top).max(0.0)],
                 [(r[2][0] - right).max(0.0), (r[2][1] - bottom).max(0.0)],
                 [(r[3][0] - left).max(0.0), (r[3][1] - bottom).max(0.0)],
-            ],
+            ]
+            .map(|corner| {
+                if corner[0] == 0.0 || corner[1] == 0.0 {
+                    [0.0; 2]
+                } else {
+                    corner
+                }
+            }),
         }
-        .clamped()
     }
 
-    /// Append this shape as one closed subpath, clockwise from the end of
-    /// the top-left corner. Nothing is appended for an empty shape.
+    /// Append one clockwise subpath, starting at the top-left curve's end.
+    /// Inner ellipses retain their radii and are cropped at opposite edges
+    /// (CSS Backgrounds 3 §4.2). An empty intersection appends nothing.
     pub(super) fn append_to(&self, builder: &mut PathBuilder) {
         if self.is_empty() {
             return;
         }
-        let (x0, y0) = (self.x, self.y);
-        let (x1, y1) = (self.x + self.width, self.y + self.height);
-        let [tl, tr, br, bl] = self.radii;
-        let k = 1.0 - KAPPA;
-        builder.move_to(x0 + tl[0], y0);
-        builder.line_to(x1 - tr[0], y0);
-        if tr[0] > 0.0 && tr[1] > 0.0 {
-            builder.cubic_to(x1 - tr[0] * k, y0, x1, y0 + tr[1] * k, x1, y0 + tr[1]);
+        // Validate every corner before mutating a border ring's builder.
+        let Some(corners) = self.corner_paths() else {
+            return;
+        };
+        if self.intersecting_corners() {
+            let points = self.common_outline(&corners);
+            if points.len() < 3 {
+                return;
+            }
+            builder.move_to(points[0][0] as f32, points[0][1] as f32);
+            for point in &points[1..] {
+                builder.line_to(point[0] as f32, point[1] as f32);
+            }
+            builder.close();
+            return;
         }
-        builder.line_to(x1, y1 - br[1]);
-        if br[0] > 0.0 && br[1] > 0.0 {
-            builder.cubic_to(x1, y1 - br[1] * k, x1 - br[0] * k, y1, x1 - br[0], y1);
-        }
-        builder.line_to(x0 + bl[0], y1);
-        if bl[0] > 0.0 && bl[1] > 0.0 {
-            builder.cubic_to(x0 + bl[0] * k, y1, x0, y1 - bl[1] * k, x0, y1 - bl[1]);
-        }
-        builder.line_to(x0, y0 + tl[1]);
-        if tl[0] > 0.0 && tl[1] > 0.0 {
-            builder.cubic_to(x0, y0 + tl[1] * k, x0 + tl[0] * k, y0, x0 + tl[0], y0);
+        let start = corners[0]
+            .curve
+            .map_or(corners[0].start, |points| points[2]);
+        builder.move_to(start[0], start[1]);
+        for index in [1, 2, 3, 0] {
+            let corner = corners[index];
+            builder.line_to(corner.start[0], corner.start[1]);
+            if let Some([a, b, end]) = corner.curve {
+                builder.cubic_to(a[0], a[1], b[0], b[1], end[0], end[1]);
+            }
         }
         builder.close();
+    }
+
+    fn intersecting_corners(&self) -> bool {
+        let r = self.radii.map(|corner| corner.map(f64::from));
+        let (width, height) = (f64::from(self.width), f64::from(self.height));
+        let cropped = r
+            .iter()
+            .any(|corner| corner[0] > width || corner[1] > height);
+        cropped
+            && [(0, 2), (1, 3)].into_iter().any(|(a, b)| {
+                r[a].iter().chain(&r[b]).all(|radius| *radius > 0.0)
+                    && r[a][0] + r[b][0] > width
+                    && r[a][1] + r[b][1] > height
+            })
+    }
+
+    /// Intersect the rectangle with every convex corner constraint. Flatten
+    /// only when cropped diagonal arcs can cross; individual corners keep
+    /// their cubic paths. The clipping chords bound a single common outline.
+    fn common_outline(&self, corners: &[CornerPath; 4]) -> Vec<[f64; 2]> {
+        let (x0, y0) = (f64::from(self.x), f64::from(self.y));
+        let (x1, y1) = (x0 + f64::from(self.width), y0 + f64::from(self.height));
+        let mut polygon = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        for corner in corners {
+            if let Some([a, b, end]) = corner.curve {
+                let curve = [corner.start, a, b, end].map(|p| p.map(f64::from));
+                let mut points = vec![curve[0]];
+                flatten_corner(curve, 0, &mut points);
+                for edge in points.windows(2) {
+                    polygon = clip_convex_polygon(polygon, edge[0], edge[1]);
+                    if polygon.len() < 3 {
+                        return Vec::new();
+                    }
+                }
+            }
+        }
+        polygon
+    }
+
+    fn corner_paths(&self) -> Option<[CornerPath; 4]> {
+        let (x0, y0) = (f64::from(self.x), f64::from(self.y));
+        let (x1, y1) = (x0 + f64::from(self.width), y0 + f64::from(self.height));
+        let square = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let mut paths = square.map(|point| CornerPath {
+            start: point.map(|v| v as f32),
+            curve: None,
+        });
+        for (index, [rx, ry]) in self.radii.map(|r| r.map(f64::from)).into_iter().enumerate() {
+            if rx <= 0.0 || ry <= 0.0 {
+                continue;
+            }
+            let (cx, cy) = match index {
+                0 => (x0 + rx, y0 + ry),
+                1 => (x1 - rx, y0 + ry),
+                2 => (x1 - rx, y1 - ry),
+                _ => (x0 + rx, y1 - ry),
+            };
+            let (lower, upper) = match index {
+                0 => ((cy - y1) / ry, (cx - x1) / rx),
+                1 => ((x0 - cx) / rx, (cy - y1) / ry),
+                2 => ((y0 - cy) / ry, (x0 - cx) / rx),
+                _ => ((cx - x1) / rx, (y0 - cy) / ry),
+            };
+            let start = lower.clamp(0.0, 1.0).asin();
+            let end = upper.clamp(0.0, 1.0).acos();
+            if start >= end {
+                return None;
+            }
+            let point_and_tangent = |angle: f64| {
+                let (sin, cos) = angle.sin_cos();
+                match index {
+                    0 => ([cx - rx * cos, cy - ry * sin], [rx * sin, -ry * cos]),
+                    1 => ([cx + rx * sin, cy - ry * cos], [rx * cos, ry * sin]),
+                    2 => ([cx + rx * cos, cy + ry * sin], [-rx * sin, ry * cos]),
+                    _ => ([cx - rx * sin, cy + ry * cos], [-rx * cos, -ry * sin]),
+                }
+            };
+            let (mut from, from_tangent) = point_and_tangent(start);
+            let (mut to, to_tangent) = point_and_tangent(end);
+            // Place intersections exactly on their clipping edge.
+            if lower > 0.0 {
+                match index {
+                    0 => from[1] = y1,
+                    1 => from[0] = x0,
+                    2 => from[1] = y0,
+                    _ => from[0] = x1,
+                }
+            }
+            if upper > 0.0 {
+                match index {
+                    0 => to[0] = x1,
+                    1 => to[1] = y1,
+                    2 => to[0] = x0,
+                    _ => to[1] = y0,
+                }
+            }
+            // Tangent controls approximate this arc (at most a quarter turn).
+            let alpha = (4.0 / 3.0) * ((end - start) / 4.0).tan();
+            let a = std::array::from_fn(|axis| from[axis] + alpha * from_tangent[axis]);
+            let b = std::array::from_fn(|axis| to[axis] - alpha * to_tangent[axis]);
+            paths[index] = CornerPath {
+                start: from.map(|v| v as f32),
+                curve: Some([a, b, to].map(|point| point.map(|v| v as f32))),
+            };
+        }
+        Some(paths)
     }
 
     /// The outline of this shape, or `None` when it is empty.
@@ -250,6 +361,62 @@ impl RoundedRect {
         self.append_to(&mut builder);
         builder.finish()
     }
+}
+
+/// Subdivide a convex cubic until its control hull is within 0.05px of
+/// its chord. Depth is bounded to 10 (1024 chords) for extreme coordinates.
+fn flatten_corner(curve: [[f64; 2]; 4], depth: u8, points: &mut Vec<[f64; 2]>) {
+    let [from, a, b, to] = curve;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let length = dx.hypot(dy);
+    let distance = |point: [f64; 2]| {
+        let (px, py) = (point[0] - from[0], point[1] - from[1]);
+        if length == 0.0 {
+            px.hypot(py)
+        } else {
+            (dx * py - dy * px).abs() / length
+        }
+    };
+    if depth == 10 || distance(a).max(distance(b)) <= 0.05 {
+        points.push(to);
+        return;
+    }
+    let midpoint = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    let ab = midpoint(from, a);
+    let bc = midpoint(a, b);
+    let cd = midpoint(b, to);
+    let abc = midpoint(ab, bc);
+    let bcd = midpoint(bc, cd);
+    let center = midpoint(abc, bcd);
+    flatten_corner([from, ab, abc, center], depth + 1, points);
+    flatten_corner([center, bcd, cd, to], depth + 1, points);
+}
+
+/// Keep the half-plane to the clockwise contour's interior side of `a`→`b`.
+fn clip_convex_polygon(polygon: Vec<[f64; 2]>, a: [f64; 2], b: [f64; 2]) -> Vec<[f64; 2]> {
+    let Some(&last) = polygon.last() else {
+        return polygon;
+    };
+    let distance =
+        |point: [f64; 2]| (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
+    let mut out = Vec::with_capacity(polygon.len() + 1);
+    let mut previous = last;
+    let mut previous_distance = distance(previous);
+    for current in polygon {
+        let current_distance = distance(current);
+        if (previous_distance >= 0.0) != (current_distance >= 0.0) {
+            let t = previous_distance / (previous_distance - current_distance);
+            out.push(std::array::from_fn(|axis| {
+                previous[axis] + t * (current[axis] - previous[axis])
+            }));
+        }
+        if current_distance >= 0.0 {
+            out.push(current);
+        }
+        previous = current;
+        previous_distance = current_distance;
+    }
+    out
 }
 
 /// The area between `outer` and `inner`, to fill with the even-odd rule.
@@ -276,69 +443,4 @@ pub(super) fn polygon(points: &[(f32, f32)]) -> Option<Path> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn radius(px: f32) -> ComputedBorderRadius {
-        ComputedBorderRadius::all(raikiri_html::computed::ComputedLength(px))
-    }
-
-    #[test]
-    fn overlapping_radii_scale_by_the_smallest_side_ratio() {
-        // 100 x 40 with 30px corners: the vertical sides need 60px but have
-        // 40, so f = 40 / 60 and every radius becomes 20px.
-        let shape = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 40.0), &radius(30.0));
-        for corner in shape.radii {
-            assert!((corner[0] - 20.0).abs() < 1e-4, "{corner:?}");
-            assert!((corner[1] - 20.0).abs() < 1e-4, "{corner:?}");
-        }
-    }
-
-    #[test]
-    fn percentage_radius_refers_to_each_axis_of_the_border_box() {
-        let all = ComputedLengthPercentage::Percent(50.0);
-        let shape = RoundedRect::border_box(
-            PaintRect::new(0.0, 0.0, 80.0, 40.0),
-            &ComputedBorderRadius::corners(all, all, all, all),
-        );
-        assert_eq!(shape.radii[0], [40.0, 20.0]);
-    }
-
-    #[test]
-    fn inner_radius_subtracts_the_adjacent_border_width() {
-        let outer = RoundedRect::border_box(PaintRect::new(0.0, 0.0, 100.0, 100.0), &radius(10.0));
-        let inner = outer.inset(Edges {
-            top: 4.0,
-            right: 12.0,
-            bottom: 4.0,
-            left: 2.0,
-        });
-        assert_eq!(
-            (inner.x, inner.y, inner.width, inner.height),
-            (2.0, 4.0, 86.0, 92.0)
-        );
-        assert_eq!(inner.radii[0], [8.0, 6.0]);
-        // The right border (12px) exceeds the 10px radius: one inner radius
-        // is zero, so the corner is square (§5.1), not [0, 6].
-        assert_eq!(inner.radii[1], [0.0, 0.0]);
-    }
-
-    #[test]
-    fn insets_larger_than_the_box_collapse_it_in_proportion() {
-        let outer = RoundedRect::rect(0.0, 0.0, 10.0, 6.0);
-        // 15px of horizontal and 12px of vertical inset in a 10 x 6 box:
-        // each side keeps its share, and the inner box is empty.
-        let inner = outer.inset(Edges {
-            top: 4.0,
-            right: 10.0,
-            bottom: 8.0,
-            left: 5.0,
-        });
-        assert!((inner.x - 10.0 / 3.0).abs() < 1e-5, "{inner:?}");
-        assert_eq!((inner.y, inner.width, inner.height), (2.0, 0.0, 0.0));
-        assert!(inner.is_empty());
-        assert!(inner.path().is_none());
-        // The ring of an empty inner box is the whole outer box.
-        assert!(ring(&outer, &inner).is_some());
-    }
-}
+mod tests;

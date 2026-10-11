@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+skrifa = "0.47"
 fulgur-core = { path = "../fulgur-core" }
 fulgur-blitz = { path = "../fulgur-blitz" }
 fulgur-raikiri = { path = "../fulgur-raikiri" }
@@ -23,6 +24,7 @@ fulgur-raikiri = { path = "../fulgur-raikiri" }
 [dev-dependencies]
 tempfile = "3"
 lopdf = "0.42"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # Blitz enables dynamic loading in the shared fontconfig-sys dependency.
