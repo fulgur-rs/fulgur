@@ -1210,8 +1210,7 @@ mod tests {
     #[test]
     fn collect_from_stmt_ifcond_arm_merges_both_branch_vars() {
         // Each branch sets a *different* variable so both merge loops (lines 274-278)
-        // must execute to pass the assertions below.  Using the same key in both
-        // branches would let one loop silently skip without failing the test.
+        // must execute to pass the assertions below.
         let stmt = parse(
             "{% if cond %}{% set user_var = user %}{% else %}{% set admin_var = admin %}{% endif %}",
             "test.html",
@@ -1219,37 +1218,30 @@ mod tests {
             WhitespaceConfig::default(),
         )
         .unwrap();
-        if let ast::Stmt::Template(t) = &stmt {
-            if let Some(ifcond) = t.children.first() {
-                let mut root = BTreeMap::new();
-                let mut scope = BTreeMap::new();
-                collect_from_stmt(ifcond, &mut root, &mut scope);
-                // cond is collected from the condition expression
-                assert!(root.contains_key("cond"), "cond not collected");
-                // set variables must not leak to root
-                assert!(
-                    !root.contains_key("user_var"),
-                    "user_var must not leak to root"
-                );
-                assert!(
-                    !root.contains_key("admin_var"),
-                    "admin_var must not leak to root"
-                );
-                // both variables from both branches must appear in scope after merge
-                assert!(
-                    scope.contains_key("user_var"),
-                    "user_var (true branch) must be in scope"
-                );
-                assert!(
-                    scope.contains_key("admin_var"),
-                    "admin_var (false branch) must be in scope"
-                );
-            } else {
-                panic!("expected IfCond child");
-            }
-        } else {
-            panic!("expected Template root");
-        }
+        let ifcond = match &stmt {
+            ast::Stmt::Template(t) => t.children.first().expect("expected IfCond child"),
+            _ => panic!("expected Template root"),
+        };
+        let mut root = BTreeMap::new();
+        let mut scope = BTreeMap::new();
+        collect_from_stmt(ifcond, &mut root, &mut scope);
+        assert!(root.contains_key("cond"), "cond not collected");
+        assert!(
+            !root.contains_key("user_var"),
+            "user_var must not leak to root"
+        );
+        assert!(
+            !root.contains_key("admin_var"),
+            "admin_var must not leak to root"
+        );
+        assert!(
+            scope.contains_key("user_var"),
+            "user_var (true branch) must be in scope"
+        );
+        assert!(
+            scope.contains_key("admin_var"),
+            "admin_var (false branch) must be in scope"
+        );
     }
 
     // ── collect_if_cond_scopes: else branch (line 172) ───────────────────────
@@ -1363,16 +1355,15 @@ mod tests {
             WhitespaceConfig::default(),
         )
         .unwrap();
-        if let ast::Stmt::Template(t) = &stmt {
-            if let Some(ast::Stmt::EmitExpr(e)) = t.children.first() {
-                // e.expr is Expr::BinOp — neither Var nor List
-                let names = extract_var_names(&e.expr);
-                assert!(names.is_empty(), "BinOp target must yield no var names");
-            } else {
-                panic!("expected EmitExpr child");
-            }
-        } else {
-            panic!("expected Template root");
-        }
+        let e = match &stmt {
+            ast::Stmt::Template(t) => match t.children.first() {
+                Some(ast::Stmt::EmitExpr(e)) => e,
+                _ => panic!("expected EmitExpr child"),
+            },
+            _ => panic!("expected Template root"),
+        };
+        // e.expr is Expr::BinOp — neither Var nor List
+        let names = extract_var_names(&e.expr);
+        assert!(names.is_empty(), "BinOp target must yield no var names");
     }
 }
