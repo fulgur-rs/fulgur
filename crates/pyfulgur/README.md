@@ -53,7 +53,7 @@ engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 - `Engine.render_html(html: str) -> bytes` — render to PDF bytes (releases the GIL)
 - `Engine.render_html_to_file(html: str, path: str | os.PathLike) -> None` — render to a file
 - `AssetBundle`: `add_css`, `add_css_file`, `add_font_file`, `add_image`, `add_image_file`
-- `PageSize`: `A4`, `LETTER`, `A3`, `custom(w_mm, h_mm)`, `.landscape()`
+- `PageSize`: `A3`, `A4`, `A5`, `B4`, `B5`, `JIS_B4`, `JIS_B5`, `LETTER`, `LEGAL`, `LEDGER`, `custom(w_mm, h_mm)`, `.landscape()`
 - `Margin`: `Margin(top, right, bottom, left)`, `Margin.uniform(pt)`, `Margin.symmetric(v, h)`, `Margin.uniform_mm(mm)`
 - Exceptions: `FileNotFoundError`, `ValueError`, `pyfulgur.RenderError`
 

@@ -1,0 +1,6 @@
+# Raikiri backend coverage is uploaded by raikiri.yml, which only runs when
+# the Raikiri crates change. Carry the last `raikiri` upload forward on other
+# commits so project coverage does not dip when that workflow is skipped.
+flags:
+  raikiri:
+    carryforward: true

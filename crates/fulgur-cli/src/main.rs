@@ -7,6 +7,46 @@ use std::path::PathBuf;
 
 mod plugin;
 
+/// Forwards `log::warn!` / `log::error!` from `fulgur` (e.g. the unknown
+/// CSS page-size keyword diagnostic in `gcpm::page_settings`) to stderr.
+///
+/// Without a logger installed, `log`'s facade discards every record: the
+/// CLI would otherwise silently drop diagnostics the library goes out of
+/// its way to emit. This mirrors the existing `eprintln!("Warning: ...")` /
+/// `eprintln!("Error: ...")` style used elsewhere in this file rather than
+/// pulling in a formatting-heavy crate like `env_logger` for two levels.
+struct CliLogger;
+
+impl log::Log for CliLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let label = match record.level() {
+                log::Level::Error => "Error",
+                _ => "Warning",
+            };
+            eprintln!("{label}: {}", record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static CLI_LOGGER: CliLogger = CliLogger;
+
+/// Installs [`CliLogger`] as the global logger, at `Warn` level. Safe to
+/// call even if a logger is somehow already installed (e.g. under a test
+/// harness that ran `main` more than once in-process) — `set_logger`
+/// failing just means diagnostics keep going wherever they already were.
+fn init_logging() {
+    if log::set_logger(&CLI_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+}
+
 /// Isolate the real stdout from noise emitted by the render pipeline so that
 /// PDF bytes written to stdout (`-o -`) cannot be corrupted by incidental
 /// output from dependencies.
@@ -159,7 +199,8 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Page size: keyword (A4, Letter, A3) or custom WxH with units
+        /// Page size: keyword (A3, A4, A5, B4, B5, JIS-B4, JIS-B5, Letter,
+        /// Legal, Ledger) or custom WxH with units
         /// (units mm/cm/in/pt/px; 'x' or space separator),
         /// e.g. 210x297mm or 2352.6ptx3481.39pt.
         /// Takes priority over CSS @page { size }, including orientation:
@@ -283,22 +324,25 @@ enum TemplateCommands {
 
 fn parse_page_size(s: &str) -> PageSize {
     let s = s.trim();
-    match s.to_uppercase().as_str() {
-        "A4" => PageSize::A4,
-        "A3" => PageSize::A3,
-        "LETTER" => PageSize::LETTER,
-        _ => parse_custom_size(s).unwrap_or_else(|| {
-            eprintln!(
-                "Unknown page size '{}', defaulting to A4. \
-                 Use a keyword (A4, Letter, A3) or custom WxH with units \
-                 (e.g. 210x297mm, 2352.6ptx3481.39pt; units mm/cm/in/pt/px, \
-                 'x' or space separator), or set the size via CSS \
-                 @page {{ size }} and omit --size.",
-                s
-            );
-            PageSize::A4
-        }),
+    // The keyword table is `PageSize::from_css_keyword` (CSS Paged Media
+    // Level 3 §4.1.1) so `--size` and CSS `@page { size }` always accept the
+    // same spellings. Before fulgur-5oav the two lists were maintained
+    // separately and both stopped at A4/A3/Letter.
+    if let Some(size) = PageSize::from_css_keyword(s) {
+        return size;
     }
+    parse_custom_size(s).unwrap_or_else(|| {
+        eprintln!(
+            "Unknown page size '{}', defaulting to A4. \
+             Use a keyword ({}) or custom WxH with units \
+             (e.g. 210x297mm, 2352.6ptx3481.39pt; units mm/cm/in/pt/px, \
+             'x' or space separator), or set the size via CSS \
+             @page {{ size }} and omit --size.",
+            s,
+            PageSize::CSS_KEYWORDS.join(", ")
+        );
+        PageSize::A4
+    })
 }
 
 /// Known absolute CSS length units accepted for `--size`. All are two ASCII
@@ -441,6 +485,7 @@ fn parse_margin(s: &str) -> Margin {
 }
 
 fn main() {
+    init_logging();
     let cli = Cli::parse();
 
     match cli.command {
@@ -811,6 +856,29 @@ mod tests {
             PageSize::LETTER.height
         ));
         assert!(approx(parse_page_size("A3").width, PageSize::A3.width));
+    }
+
+    /// fulgur-5oav: `--size` shares its keyword table with CSS
+    /// `@page { size }`, so the sheets that CSS accepts work here too.
+    /// Before the fix `--size A5` fell through to the "unknown size"
+    /// branch and rendered A4.
+    #[test]
+    fn keyword_covers_the_full_css_set() {
+        assert!(approx(parse_page_size("A5").width, PageSize::A5.width));
+        assert!(approx(
+            parse_page_size("legal").height,
+            PageSize::LEGAL.height
+        ));
+        assert!(approx(
+            parse_page_size("JIS-B5").width,
+            PageSize::JIS_B5.width
+        ));
+        assert!(approx(
+            parse_page_size("ledger").height,
+            PageSize::LEDGER.height
+        ));
+        // A5 must not be A4 under another name.
+        assert!(!approx(parse_page_size("A5").width, PageSize::A4.width));
     }
 
     #[test]

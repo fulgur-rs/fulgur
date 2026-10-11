@@ -17,12 +17,12 @@ Blitz/Taffy (CSS px) ──Px::in_pt()──► Pageable tree / Krilla (PDF pt)
 | Taffy `final_layout` | CSS px | extract via `layout_in_pt()` / `size_in_pt()` |
 | Pageable tree internals | PDF pt | |
 | Krilla Surface | PDF pt | |
-| `PageSize::custom(w, h)` | **mm** | `config.rs:22` — converted to pt internally |
+| `PageSize::custom(w, h)` | **mm** | `fulgur-core` `config.rs` — converted to pt internally |
 | `Margin::uniform(v)` | **pt** | |
 | `Margin::uniform_mm(v)` | **mm** | |
 
 Conversion constant: `1 CSS px = 0.75 PDF pt` (`PX_TO_PT = 0.75`, defined in
-`crates/fulgur/src/units.rs`; applied via `units::Px::in_pt` / `units::Pt::in_px`).
+`crates/fulgur-core/src/units.rs`; applied via `units::Px::in_pt` / `units::Pt::in_px`).
 
 ## Reading the `Px` / `Pt` vocabulary in a diff
 
@@ -50,7 +50,7 @@ the origin — always read the *first* hop.
 
 The authoritative version of this key, with a `compile_fail` doctest proving
 `.as_px()` can never be called on a `Pt`, lives in the `crate::units` module
-docstring (`crates/fulgur/src/units.rs`).
+docstring (`crates/fulgur-core/src/units.rs`).
 
 ## Blitz boundary conversion rules (most important)
 
@@ -80,8 +80,8 @@ let (width, height) = size_in_pt(node.final_layout.size);
 let (x, y, width, height) = layout_in_pt(&node.final_layout);
 ```
 
-Helper definitions: `size_in_pt` / `layout_in_pt` in `crates/fulgur/src/convert/mod.rs`;
-`units::{Px, Pt, F32Units}` and `PX_TO_PT` in `crates/fulgur/src/units.rs`.
+Helper definitions: `size_in_pt` / `layout_in_pt` in `crates/fulgur-blitz/src/convert/mod.rs`;
+`units::{Px, Pt, F32Units}` and `PX_TO_PT` in `crates/fulgur-core/src/units.rs`.
 
 ## Exception: `compute_transform` arguments
 
@@ -171,7 +171,8 @@ Track the CTM stack (`q`/`Q`) to obtain final page coordinates.
 
 ## References
 
-- `crates/fulgur/src/convert.rs:29-63` — conversion constants and helper definitions
-- `crates/fulgur/src/config.rs:22` — `PageSize::custom` mm definition
+- `crates/fulgur-blitz/src/convert/mod.rs` — `size_in_pt` / `layout_in_pt` helper definitions
+- `crates/fulgur-core/src/units.rs` — `PX_TO_PT` and the `Px::in_pt` / `Pt::in_px` conversions
+- `crates/fulgur-core/src/config.rs` — `PageSize::custom` mm definition
 - `docs/plans/2026-04-17-viewport-pt-to-css-px.md` — deep-dive on the px/pt boundary bug
 - PR #90 (superseded) / beads fulgur-9ul — history of the viewport pt/px misidentification fix

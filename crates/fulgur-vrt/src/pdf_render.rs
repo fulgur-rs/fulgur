@@ -16,12 +16,7 @@ pub struct RenderSpec<'a> {
 }
 
 fn page_size_from_name(name: &str) -> anyhow::Result<PageSize> {
-    match name.to_ascii_uppercase().as_str() {
-        "A4" => Ok(PageSize::A4),
-        "A3" => Ok(PageSize::A3),
-        "LETTER" => Ok(PageSize::LETTER),
-        other => anyhow::bail!("unsupported page_size: {other}"),
-    }
+    PageSize::from_css_keyword(name).ok_or_else(|| anyhow::anyhow!("unsupported page_size: {name}"))
 }
 
 /// Render `html` through fulgur and return the resulting PDF bytes.
@@ -81,6 +76,16 @@ pub fn pdf_to_rgba(pdf_path: &Path, dpi: u32, work_dir: &Path) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_size_from_name_accepts_newly_added_css_keywords() {
+        // fulgur-5oav: this used to hardcode A4/A3/Letter only, drifting
+        // from the shared `PageSize::from_css_keyword` table used by CSS,
+        // the CLI, and the language bindings.
+        assert!(page_size_from_name("A5").is_ok());
+        assert!(page_size_from_name("jis-b4").is_ok());
+        assert!(page_size_from_name("banana").is_err());
+    }
 
     #[test]
     fn renders_solid_box_html_to_png() {
