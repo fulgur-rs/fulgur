@@ -19,6 +19,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Stacked pull requests: GitHub runs this workflow for every PR in a stack
+# as if it targeted the stack base, so one push in the middle of a stack
+# re-runs every PR above it. Jobs carrying the `stack` condition below run
+# only for PRs outside a stack, for the lowest unmerged PR (the one that
+# targets the stack base directly), and for the top PR (which carries the
+# whole stack's changes). Middle PRs keep the cheap checks. `stack` is null on
+# push/schedule events and for PRs outside a stack, so those always run
+# everything. See
+# https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/optimizing-ci-for-stacked-pull-requests
 jobs:
   markdownlint:
     runs-on: ubuntu-latest
@@ -60,10 +69,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # fulgur-raikiri / fulgur-dev are formatted and linted by raikiri.yml
+      # instead, so a Raikiri-side breakage never blocks Blitz PRs. The fmt
+      # package list comes from cargo metadata so new crates are covered.
+      - name: cargo fmt --check (excluding the Raikiri backend)
+        run: |
+          packages=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[].name | select(. != "fulgur-raikiri" and . != "fulgur-dev") | "-p " + .')
+          cargo fmt --check $packages
+      - run: cargo clippy --workspace --all-targets --exclude fulgur-raikiri --exclude fulgur-dev -- -D warnings
 
   test:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     permissions:
       contents: read
       id-token: write
@@ -120,7 +137,7 @@ jobs:
         with:
           shared-key: ${{ matrix.cache-key }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install poppler-utils (for fulgur-wpt pdftocairo tests)
+      - name: Install poppler-utils (for fulgur-wpt raster tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - name: Configure mold linker
@@ -142,18 +159,23 @@ jobs:
       # Codecov. The WPT coverage surface is exercised by the `wpt` matrix
       # job (in this same workflow) and by nightly; Codecov numbers here
       # only reflect unit-test coverage.
+      #
+      # fulgur-raikiri / fulgur-dev (the unpublished Raikiri backend) are
+      # excluded from every cell, coverage included: they run in raikiri.yml
+      # as a single non-blocking Linux job, so a Raikiri-side failure never
+      # blocks the Blitz pipeline and no cell here pays to compile Raikiri.
       - name: Build tests
         if: ${{ !matrix.coverage }}
-        run: cargo nextest run --workspace --exclude fulgur-vrt --no-run
+        run: cargo nextest run --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --no-run
       - name: Run tests
         if: ${{ !matrix.coverage }}
-        run: cargo nextest run --workspace --exclude fulgur-vrt
+        run: cargo nextest run --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev
       - name: Run tests with coverage
         if: matrix.coverage
         run: |
           cargo llvm-cov clean --workspace
-          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --no-report
-          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --features fulgur/parallel --profile ci --no-report
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --profile ci --no-report
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --exclude fulgur-raikiri --exclude fulgur-dev --features fulgur/parallel --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
@@ -164,7 +186,7 @@ jobs:
           if-no-files-found: error
       - name: Upload coverage to Codecov
         if: matrix.coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
           use_oidc: true
@@ -178,6 +200,7 @@ jobs:
           fail_ci_if_error: false
 
   wasm-check:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: WASM build check
     runs-on: ubuntu-latest
     # Strategic gate: keeps the `fulgur` library buildable on
@@ -200,6 +223,7 @@ jobs:
       - run: cargo check --target wasm32-unknown-unknown -p fulgur -p fulgur-wasm
 
   vrt:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: Visual Regression Tests
     runs-on: ubuntu-latest
     steps:
@@ -248,6 +272,7 @@ jobs:
       - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1
 
   wpt:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: wpt / ${{ matrix.phase }}
     runs-on: ubuntu-latest
     # WPT reftests are a reporting channel, not a blocker on PRs.
@@ -378,6 +403,7 @@ jobs:
         run: rm -rf target/wpt
 
   bindings-check:
+    if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: Bindings type-check
     # `crates/pyfulgur` (extension-module) と `crates/fulgur-ruby` (ruby-api) は
     # `#![cfg(feature = "...")]` で全体 gate されており、workspace 標準の
@@ -399,7 +425,7 @@ jobs:
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v7
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771  # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8  # v1.5.0
         with:
           ruby-version: "3.3"
           rustup-toolchain: stable

@@ -2,8 +2,9 @@
 //!
 //! This crate holds the parts of Fulgur that do not depend on a layout engine:
 //! page/PDF configuration, the asset bundle, unit newtypes, the error type,
-//! image format handling, and PDF inspection. Layout backends (currently
-//! `fulgur-blitz`) build on it, and the `fulgur` facade crate re-exports it.
+//! image format handling, PDF inspection, and the tagged-PDF classification of
+//! HTML elements. Layout backends (currently `fulgur-blitz`) build on it, and
+//! the `fulgur` facade crate re-exports it.
 //!
 //! It must not depend on Blitz, Stylo, Taffy, Parley, or Raikiri.
 
@@ -19,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod image;
 pub mod inspect;
+pub mod tagging;
 pub mod units;
 
 pub use asset::AssetBundle;

@@ -409,8 +409,8 @@ fn walk_semantics(
             // CSS list-style-type を読んで ListNumbering をオーバーライド
             if matches!(tag, crate::tagging::PdfTag::L { .. }) {
                 if let Some(styles) = node.primary_styles() {
+                    use crate::tagging::ListNumbering;
                     use ::style::properties::longhands::list_style_type::computed_value::T as LST;
-                    use krilla::tagging::ListNumbering;
                     let numbering = match styles.clone_list_style_type() {
                         LST::Disc => ListNumbering::Disc,
                         LST::Circle => ListNumbering::Circle,
@@ -467,11 +467,11 @@ fn walk_semantics(
             if matches!(tag, crate::tagging::PdfTag::Th { .. }) {
                 let scope = get_attr(elem, "scope")
                     .and_then(|s| match s {
-                        "row" => Some(krilla::tagging::TableHeaderScope::Row),
-                        "col" | "column" => Some(krilla::tagging::TableHeaderScope::Column),
+                        "row" => Some(crate::tagging::TableHeaderScope::Row),
+                        "col" | "column" => Some(crate::tagging::TableHeaderScope::Column),
                         _ => None,
                     })
-                    .unwrap_or(krilla::tagging::TableHeaderScope::Both);
+                    .unwrap_or(crate::tagging::TableHeaderScope::Both);
                 tag = crate::tagging::PdfTag::Th { scope };
             }
 
@@ -1283,7 +1283,7 @@ mod semantics_tests {
         let lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Disc,
+                numbering: crate::tagging::ListNumbering::Disc,
             },
         );
         assert_eq!(lists.len(), 1, "expected one ul entry");
@@ -1307,7 +1307,7 @@ mod semantics_tests {
         let lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Decimal,
+                numbering: crate::tagging::ListNumbering::Decimal,
             },
         );
         assert_eq!(lists.len(), 1, "one ol in semantics");
@@ -1333,7 +1333,7 @@ mod semantics_tests {
         let ths = entries_by_tag(
             &d,
             &PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Both,
+                scope: crate::tagging::TableHeaderScope::Both,
             },
         );
         assert_eq!(ths.len(), 1);
@@ -1458,7 +1458,7 @@ mod semantics_tests {
         let decimal_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Decimal,
+                numbering: crate::tagging::ListNumbering::Decimal,
             },
         );
         assert_eq!(decimal_lists.len(), 1, "one ol (Decimal)");
@@ -1567,14 +1567,14 @@ mod semantics_tests {
         let row_ths = entries_by_tag(
             &d,
             &PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Row,
+                scope: crate::tagging::TableHeaderScope::Row,
             },
         );
         assert_eq!(row_ths.len(), 1, "one th with scope=row");
         let both_ths = entries_by_tag(
             &d,
             &PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Both,
+                scope: crate::tagging::TableHeaderScope::Both,
             },
         );
         assert_eq!(
@@ -1597,7 +1597,7 @@ mod semantics_tests {
         let col_ths = entries_by_tag(
             &d,
             &PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Column,
+                scope: crate::tagging::TableHeaderScope::Column,
             },
         );
         assert_eq!(col_ths.len(), 2, "two th with scope=col/column");
@@ -1616,7 +1616,7 @@ mod semantics_tests {
         let both_ths = entries_by_tag(
             &d,
             &PdfTag::Th {
-                scope: krilla::tagging::TableHeaderScope::Both,
+                scope: crate::tagging::TableHeaderScope::Both,
             },
         );
         assert_eq!(both_ths.len(), 1, "unrecognised scope falls back to Both");
@@ -1635,14 +1635,14 @@ mod semantics_tests {
         let circle_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Circle,
+                numbering: crate::tagging::ListNumbering::Circle,
             },
         );
         assert_eq!(circle_lists.len(), 1, "one ul with Circle numbering");
         let disc_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Disc,
+                numbering: crate::tagging::ListNumbering::Disc,
             },
         );
         assert_eq!(disc_lists.len(), 0, "no Disc list when circle is set");
@@ -1657,7 +1657,7 @@ mod semantics_tests {
         let square_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::Square,
+                numbering: crate::tagging::ListNumbering::Square,
             },
         );
         assert_eq!(square_lists.len(), 1, "one ul with Square numbering");
@@ -1672,7 +1672,7 @@ mod semantics_tests {
         let alpha_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::LowerAlpha,
+                numbering: crate::tagging::ListNumbering::LowerAlpha,
             },
         );
         assert_eq!(alpha_lists.len(), 1, "one ol with LowerAlpha numbering");
@@ -1687,7 +1687,7 @@ mod semantics_tests {
         let alpha_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::UpperAlpha,
+                numbering: crate::tagging::ListNumbering::UpperAlpha,
             },
         );
         assert_eq!(alpha_lists.len(), 1, "one ol with UpperAlpha numbering");
@@ -1706,7 +1706,7 @@ mod semantics_tests {
         let none_lists = entries_by_tag(
             &d,
             &PdfTag::L {
-                numbering: krilla::tagging::ListNumbering::None,
+                numbering: crate::tagging::ListNumbering::None,
             },
         );
         assert_eq!(

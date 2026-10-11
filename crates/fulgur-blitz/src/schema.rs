@@ -1200,4 +1200,54 @@ mod tests {
             "`author` (absent from data) must not appear in the schema"
         );
     }
+
+    // ── collect_from_call_arg: PosSplat and KwargSplat arms ─────────────────
+
+    /// `{{ func(*list_var) }}` — exercises the `CallArg::PosSplat` branch in
+    /// `collect_from_call_arg`.  The splatted variable must appear in the schema.
+    #[test]
+    fn call_with_pos_splat_arg_collects_splatted_variable() {
+        let schema = extract_schema("{{ func(*list_var) }}", "test.html").unwrap();
+        assert_eq!(
+            schema["properties"]["list_var"]["type"], "string",
+            "list_var from *splat must appear in the schema"
+        );
+    }
+
+    /// `{{ func(**dict_var) }}` — exercises the `CallArg::KwargSplat` branch in
+    /// `collect_from_call_arg`.  The splatted variable must appear in the schema.
+    #[test]
+    fn call_with_kwarg_splat_arg_collects_splatted_variable() {
+        let schema = extract_schema("{{ func(**dict_var) }}", "test.html").unwrap();
+        assert_eq!(
+            schema["properties"]["dict_var"]["type"], "string",
+            "dict_var from **splat must appear in the schema"
+        );
+    }
+
+    /// Both splat forms in one call — `{{ func(*pos_args, **kw_args) }}`.
+    /// Both PosSplat and KwargSplat must be collected as schema properties.
+    #[test]
+    fn call_with_both_splat_forms_collects_both_variables() {
+        let schema = extract_schema("{{ func(*pos_args, **kw_args) }}", "test.html").unwrap();
+        assert_eq!(
+            schema["properties"]["pos_args"]["type"], "string",
+            "pos_args from *splat must appear"
+        );
+        assert_eq!(
+            schema["properties"]["kw_args"]["type"], "string",
+            "kw_args from **splat must appear"
+        );
+    }
+
+    /// Filter with a PosSplat argument — `{{ items | batch(*chunk_size) }}`.
+    /// Splat args inside a filter call must be collected the same way.
+    #[test]
+    fn filter_with_pos_splat_arg_collects_splatted_variable() {
+        let schema = extract_schema("{{ items | batch(*chunk_size) }}", "test.html").unwrap();
+        assert_eq!(
+            schema["properties"]["chunk_size"]["type"], "string",
+            "chunk_size from filter *splat must appear in the schema"
+        );
+    }
 }

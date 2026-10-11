@@ -64,7 +64,7 @@ fn cli_pdf_ua_flag_succeeds() {
     let pdf_path = dir.path().join("doc.pdf");
     std::fs::write(
         &html_path,
-        "<html><head><title>Test Document</title></head><body><h1>Hello</h1><p>Hello PDF/UA</p></body></html>",
+        "<html lang=\"en\"><head><title>Test Document</title></head><body><h1>Hello</h1><p>Hello PDF/UA</p></body></html>",
     )
     .unwrap();
 
