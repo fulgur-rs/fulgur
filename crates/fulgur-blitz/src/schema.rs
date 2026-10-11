@@ -1208,6 +1208,7 @@ mod tests {
     /// with a `Stmt::IfCond`.  Parse a template with `set` in each branch so the
     /// scopes are non-empty and the loop bodies at lines 274-275 / 277-278 execute.
     #[test]
+    #[rustfmt::skip]
     fn collect_from_stmt_ifcond_arm_merges_both_branch_vars() {
         // Each branch sets a *different* variable so both merge loops (lines 274-278)
         // must execute to pass the assertions below.
@@ -1218,10 +1219,8 @@ mod tests {
             WhitespaceConfig::default(),
         )
         .unwrap();
-        let ifcond = match &stmt {
-            ast::Stmt::Template(t) => t.children.first().expect("expected IfCond child"),
-            _ => panic!("expected Template root"),
-        };
+        let ast::Stmt::Template(t) = &stmt else { panic!("expected Template root") };
+        let ifcond = t.children.first().expect("expected IfCond child");
         let mut root = BTreeMap::new();
         let mut scope = BTreeMap::new();
         collect_from_stmt(ifcond, &mut root, &mut scope);
@@ -1347,6 +1346,7 @@ mod tests {
     /// expression, extract the inner `BinOp` expr, and call the private
     /// function directly.
     #[test]
+    #[rustfmt::skip]
     fn extract_var_names_non_var_non_list_returns_empty() {
         let stmt = parse(
             "{{ x * 2 }}",
@@ -1355,13 +1355,8 @@ mod tests {
             WhitespaceConfig::default(),
         )
         .unwrap();
-        let e = match &stmt {
-            ast::Stmt::Template(t) => match t.children.first() {
-                Some(ast::Stmt::EmitExpr(e)) => e,
-                _ => panic!("expected EmitExpr child"),
-            },
-            _ => panic!("expected Template root"),
-        };
+        let ast::Stmt::Template(t) = &stmt else { panic!("expected Template root") };
+        let Some(ast::Stmt::EmitExpr(e)) = t.children.first() else { panic!("expected EmitExpr child") };
         // e.expr is Expr::BinOp — neither Var nor List
         let names = extract_var_names(&e.expr);
         assert!(names.is_empty(), "BinOp target must yield no var names");
