@@ -1209,11 +1209,11 @@ mod tests {
     /// scopes are non-empty and the loop bodies at lines 274-275 / 277-278 execute.
     #[test]
     fn collect_from_stmt_ifcond_arm_merges_both_branch_vars() {
-        // `set` inside each branch makes true_scope / false_scope non-empty,
-        // so the `for (k, v) in true_scope` / `false_scope` loops (lines 274-278)
-        // actually iterate and are covered.
+        // Each branch sets a *different* variable so both merge loops (lines 274-278)
+        // must execute to pass the assertions below.  Using the same key in both
+        // branches would let one loop silently skip without failing the test.
         let stmt = parse(
-            "{% if cond %}{% set x = user %}{% else %}{% set x = admin %}{% endif %}",
+            "{% if cond %}{% set user_var = user %}{% else %}{% set admin_var = admin %}{% endif %}",
             "test.html",
             SyntaxConfig,
             WhitespaceConfig::default(),
@@ -1226,10 +1226,24 @@ mod tests {
                 collect_from_stmt(ifcond, &mut root, &mut scope);
                 // cond is collected from the condition expression
                 assert!(root.contains_key("cond"), "cond not collected");
-                // x must not appear (it's a set variable, tracked in scope, not root)
-                assert!(!root.contains_key("x"), "x must not leak to root");
-                // scope should now have x mapped to user / admin (last-writer wins)
-                assert!(scope.contains_key("x"), "x must be in scope after merge");
+                // set variables must not leak to root
+                assert!(
+                    !root.contains_key("user_var"),
+                    "user_var must not leak to root"
+                );
+                assert!(
+                    !root.contains_key("admin_var"),
+                    "admin_var must not leak to root"
+                );
+                // both variables from both branches must appear in scope after merge
+                assert!(
+                    scope.contains_key("user_var"),
+                    "user_var (true branch) must be in scope"
+                );
+                assert!(
+                    scope.contains_key("admin_var"),
+                    "admin_var (false branch) must be in scope"
+                );
             } else {
                 panic!("expected IfCond child");
             }
