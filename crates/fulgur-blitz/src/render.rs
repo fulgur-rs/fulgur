@@ -7531,5 +7531,22 @@ mod tests {
             .render(&html)
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
+        // Scan the 11-byte /Type /Page prefix and check the following byte to
+        // distinguish individual pages from the /Type /Pages tree node.
+        let prefix = b"/Type /Page";
+        let page_count = pdf
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(i, window)| {
+                *window == prefix
+                    && pdf
+                        .get(*i + prefix.len())
+                        .is_some_and(|next| !next.is_ascii_alphanumeric())
+            })
+            .count();
+        assert!(
+            page_count >= 2,
+            "expected at least 2 pages, got {page_count}"
+        );
     }
 }
