@@ -1201,6 +1201,72 @@ mod tests {
         );
     }
 
+    // ── collect_from_stmt: IfCond arm (lines 272-278) ────────────────────────
+
+    /// `collect_from_stmts` intercepts IfCond before calling `collect_from_stmt`,
+    /// so lines 272-278 are only reachable by calling `collect_from_stmt` directly
+    /// with a `Stmt::IfCond`.  Parse a template with `set` in each branch so the
+    /// scopes are non-empty and the loop bodies at lines 274-275 / 277-278 execute.
+    #[test]
+    #[rustfmt::skip]
+    fn collect_from_stmt_ifcond_arm_merges_both_branch_vars() {
+        // Each branch sets a *different* variable so both merge loops (lines 274-278)
+        // must execute to pass the assertions below.
+        let stmt = parse(
+            "{% if cond %}{% set user_var = user %}{% else %}{% set admin_var = admin %}{% endif %}",
+            "test.html",
+            SyntaxConfig,
+            WhitespaceConfig::default(),
+        )
+        .unwrap();
+        let ast::Stmt::Template(t) = &stmt else { panic!("expected Template root") };
+        let ifcond = t.children.first().expect("expected IfCond child");
+        let mut root = BTreeMap::new();
+        let mut scope = BTreeMap::new();
+        collect_from_stmt(ifcond, &mut root, &mut scope);
+        assert!(root.contains_key("cond"), "cond not collected");
+        assert!(
+            !root.contains_key("user_var"),
+            "user_var must not leak to root"
+        );
+        assert!(
+            !root.contains_key("admin_var"),
+            "admin_var must not leak to root"
+        );
+        assert!(
+            scope.contains_key("user_var"),
+            "user_var (true branch) must be in scope"
+        );
+        assert!(
+            scope.contains_key("admin_var"),
+            "admin_var (false branch) must be in scope"
+        );
+    }
+
+    // ── collect_if_cond_scopes: else branch (line 172) ───────────────────────
+
+    /// The else branch of `collect_if_cond_scopes` fires when the statement is
+    /// NOT an IfCond; it returns two clones of the current scope unchanged and
+    /// leaves root unmodified.
+    #[test]
+    fn collect_if_cond_scopes_non_ifcond_returns_cloned_scope() {
+        // Parse any template; the root Stmt::Template is not IfCond.
+        let stmt = parse(
+            "{{ x }}",
+            "test.html",
+            SyntaxConfig,
+            WhitespaceConfig::default(),
+        )
+        .unwrap();
+        let mut root: BTreeMap<String, InferredType> = BTreeMap::new();
+        let mut scope: Scope = BTreeMap::new();
+        scope.insert("existing".to_string(), vec!["some_path".to_string()]);
+        let (s1, s2) = collect_if_cond_scopes(&stmt, &mut root, &scope);
+        assert_eq!(s1, scope, "s1 must be a clone of the original scope");
+        assert_eq!(s2, scope, "s2 must be a clone of the original scope");
+        assert!(root.is_empty(), "root must remain untouched");
+    }
+
     // ── collect_from_call_arg: PosSplat and KwargSplat arms ─────────────────
 
     /// `{{ func(*list_var) }}` — exercises the `CallArg::PosSplat` branch in
@@ -1249,5 +1315,50 @@ mod tests {
             schema["properties"]["chunk_size"]["type"], "string",
             "chunk_size from filter *splat must appear in the schema"
         );
+    }
+
+    // ── resolve_path: empty-path early-return guard (line 465) ───────────────
+
+    /// `resolve_path` with an empty path slice must be a no-op.
+    /// This defensive guard is never reached through normal callers but is
+    /// exercised here to confirm correct behaviour and lift the coverage line.
+    #[test]
+    fn resolve_path_empty_path_is_noop() {
+        let mut root: BTreeMap<String, InferredType> = BTreeMap::new();
+        resolve_path(&mut root, &[], InferredType::String);
+        assert!(root.is_empty());
+    }
+
+    // ── ensure_array_at_path: empty-path early-return guard (line 508) ───────
+
+    /// Same pattern as `resolve_path` — empty path must leave root unchanged.
+    #[test]
+    fn ensure_array_at_path_empty_path_is_noop() {
+        let mut root: BTreeMap<String, InferredType> = BTreeMap::new();
+        ensure_array_at_path(&mut root, &[]);
+        assert!(root.is_empty());
+    }
+
+    // ── extract_var_names: catch-all `_ => vec![]` (line 139) ────────────────
+
+    /// `extract_var_names` returns an empty vec for any expression that is
+    /// neither a `Var` nor a `List`.  Parse a template containing a binary
+    /// expression, extract the inner `BinOp` expr, and call the private
+    /// function directly.
+    #[test]
+    #[rustfmt::skip]
+    fn extract_var_names_non_var_non_list_returns_empty() {
+        let stmt = parse(
+            "{{ x * 2 }}",
+            "test.html",
+            SyntaxConfig,
+            WhitespaceConfig::default(),
+        )
+        .unwrap();
+        let ast::Stmt::Template(t) = &stmt else { panic!("expected Template root") };
+        let Some(ast::Stmt::EmitExpr(e)) = t.children.first() else { panic!("expected EmitExpr child") };
+        // e.expr is Expr::BinOp — neither Var nor List
+        let names = extract_var_names(&e.expr);
+        assert!(names.is_empty(), "BinOp target must yield no var names");
     }
 }
