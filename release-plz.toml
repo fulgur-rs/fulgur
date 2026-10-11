@@ -69,6 +69,18 @@ name = "fulgur-cli"
 version_group = "core"
 publish = true
 
+# Backend-independent core and the Blitz backend, re-exported by the `fulgur`
+# facade. Published in lockstep with it (fulgur-hgro).
+[[package]]
+name = "fulgur-core"
+version_group = "core"
+publish = true
+
+[[package]]
+name = "fulgur-blitz"
+version_group = "core"
+publish = true
+
 # git_only: without this, release-plz checks crates.io for these publish=false
 # crates, finds nothing, and they silently drop out of the "core" version_group
 # lockstep (only fulgur/fulgur-cli would get bumped). See fulgur-7b3l notes.
@@ -106,5 +118,18 @@ publish = false
 
 [[package]]
 name = "fulgur-wpt"
+release = false
+publish = false
+
+# Unpublished Raikiri backend and development CLI: excluded like the
+# test/fixture crates above, and versioned 0.0.0 with path-only dependencies
+# so core releases never have to touch them.
+[[package]]
+name = "fulgur-raikiri"
+release = false
+publish = false
+
+[[package]]
+name = "fulgur-dev"
 release = false
 publish = false

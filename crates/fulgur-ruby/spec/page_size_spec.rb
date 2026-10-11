@@ -18,6 +18,25 @@ RSpec.describe Fulgur::PageSize do
       expect(described_class::A3.width).to be_within(0.1).of(841.89)
       expect(described_class::A3.height).to be_within(0.1).of(1190.55)
     end
+
+    it "exposes A5 as distinct from A4" do
+      # fulgur-5oav: A5 must not be a silent A4 fallback.
+      expect(described_class::A5.width).to be_within(0.1).of(148.0 * 72.0 / 25.4)
+      expect(described_class::A5.height).to be_within(0.1).of(210.0 * 72.0 / 25.4)
+      expect(described_class::A5.width).not_to eq(described_class::A4.width)
+    end
+
+    it "exposes JIS_B4" do
+      expect(described_class::JIS_B4.width).to be_within(0.1).of(257.0 * 72.0 / 25.4)
+      expect(described_class::JIS_B4.height).to be_within(0.1).of(364.0 * 72.0 / 25.4)
+    end
+
+    it "exposes Legal and Ledger" do
+      expect(described_class::LEGAL.width).to be_within(0.1).of(8.5 * 72.0)
+      expect(described_class::LEGAL.height).to be_within(0.1).of(14.0 * 72.0)
+      expect(described_class::LEDGER.width).to be_within(0.1).of(11.0 * 72.0)
+      expect(described_class::LEDGER.height).to be_within(0.1).of(17.0 * 72.0)
+    end
   end
 
   describe ".custom" do

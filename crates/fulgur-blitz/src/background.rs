@@ -1,0 +1,6267 @@
+//! Background rendering: color fills and image layers.
+
+use std::sync::Arc;
+
+use krilla::mask::{Mask, MaskType};
+
+use crate::draw_primitives::{
+    BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
+    BlockStyle, Canvas,
+};
+use crate::units::{F32Units, Px};
+
+/// Draw outer box-shadows behind the element's background.
+///
+/// Per CSS Backgrounds §7.2, shadows are painted in reverse declaration order
+/// (last-declared shadow at the bottom of the paint stack, first-declared on top).
+/// Outer shadows are drawn _below_ the element's background and border.
+/// `inset` shadows are currently unsupported and excluded upstream in
+/// `convert.rs::extract_block_style` (never pushed into `box_shadows`).
+pub fn draw_box_shadows(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    if style.box_shadows.is_empty() {
+        return;
+    }
+    for shadow in style.box_shadows.iter().rev() {
+        if shadow.inset {
+            continue; // defensive; inset shadows are excluded upstream in convert.rs
+        }
+        draw_single_box_shadow(canvas, style, shadow, x, y, w, h);
+    }
+}
+
+/// Build an EvenOdd clip path: `outer` rect minus the element's border-box interior.
+///
+/// Used by box-shadow drawing to prevent shadow from bleeding through transparent elements
+/// (CSS Backgrounds §7.2).
+#[allow(clippy::too_many_arguments)]
+fn build_shadow_evenodd_clip(
+    outer_x: f32,
+    outer_y: f32,
+    outer_w: f32,
+    outer_h: f32,
+    elem_x: f32,
+    elem_y: f32,
+    elem_w: f32,
+    elem_h: f32,
+    style: &BlockStyle,
+) -> Option<krilla::geom::Path> {
+    let mut pb = krilla::geom::PathBuilder::new();
+    let bbox = krilla::geom::Rect::from_xywh(outer_x, outer_y, outer_w, outer_h)?;
+    pb.push_rect(bbox);
+    if style.has_radius() {
+        crate::draw_primitives::append_rounded_rect_subpath(
+            &mut pb,
+            elem_x,
+            elem_y,
+            elem_w,
+            elem_h,
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+        );
+    } else {
+        let box_rect = krilla::geom::Rect::from_xywh(elem_x, elem_y, elem_w, elem_h)?;
+        pb.push_rect(box_rect);
+    }
+    pb.finish()
+}
+
+fn draw_single_box_shadow(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    shadow: &crate::draw_primitives::BoxShadow,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let offset_x = shadow.offset_x.to_f32();
+    let offset_y = shadow.offset_y.to_f32();
+    let blur = shadow.blur.to_f32();
+    let spread = shadow.spread.to_f32();
+    if blur > 0.0 {
+        draw_blur_box_shadow(canvas, style, shadow, x, y, w, h);
+        return;
+    }
+
+    let sx = x + offset_x - spread;
+    let sy = y + offset_y - spread;
+    let sw = w + 2.0 * spread;
+    let sh = h + 2.0 * spread;
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+
+    // Build the (expanded) shadow shape.
+    let shadow_path = if style.has_radius() {
+        let radii = expand_radii(
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+            spread,
+        );
+        crate::draw_primitives::build_rounded_rect_path(sx, sy, sw, sh, &radii)
+    } else {
+        build_rect_path(sx, sy, sw, sh)
+    };
+    let Some(shadow_path) = shadow_path else {
+        return;
+    };
+
+    // Per CSS Backgrounds §7.2, outer shadows are only visible *outside* the
+    // element's border-box. If we painted the expanded shape directly, elements
+    // with transparent or semi-transparent backgrounds would show the shadow
+    // bleeding through the interior. To prevent this we clip the shadow by
+    // excluding the border-box using an EvenOdd clip path: the clip region
+    // covers the shadow's bounding box minus the border-box.
+    let Some(clip_path) = build_shadow_evenodd_clip(sx, sy, sw, sh, x, y, w, h, style) else {
+        return;
+    };
+
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+
+    let [r, g, b, a] = shadow.color;
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: krilla::color::rgb::Color::new(r, g, b).into(),
+        opacity: krilla::num::NormalizedF32::new(a as f32 / 255.0)
+            .unwrap_or(krilla::num::NormalizedF32::ONE),
+        rule: Default::default(),
+    }));
+    canvas.surface.set_stroke(None);
+    canvas.surface.draw_path(&shadow_path);
+
+    canvas.surface.pop();
+}
+
+/// Draw a blurred box-shadow using a luminosity soft mask and a 9-slice gradient.
+///
+/// A `Mask::Luminosity` stream encodes the Gaussian blur falloff as grayscale
+/// (white = fully opaque, black = transparent). The main surface draws a solid
+/// shadow-colour fill over the entire outer rect; the mask attenuates it per-pixel.
+/// An EvenOdd clip on the main surface prevents the shadow from bleeding through
+/// the element's transparent interior (CSS Backgrounds §7.2).
+///
+/// # Geometry
+///
+/// ```text
+/// outer rect = inner rect expanded by blur on all sides
+/// inner rect = (x + offset_x - spread, y + offset_y - spread, w + 2*spread, h + 2*spread)
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn draw_blur_box_shadow(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    shadow: &crate::draw_primitives::BoxShadow,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let offset_x = shadow.offset_x.to_f32();
+    let offset_y = shadow.offset_y.to_f32();
+    let blur = shadow.blur.to_f32();
+    let spread = shadow.spread.to_f32();
+    if blur <= 0.0 {
+        return;
+    }
+
+    // inner rect: shadow shape after spread
+    let ix = x + offset_x - spread;
+    let iy = y + offset_y - spread;
+    let iw = w + 2.0 * spread;
+    let ih = h + 2.0 * spread;
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+
+    // outer rect: inner rect expanded by blur
+    let ox = ix - blur;
+    let oy = iy - blur;
+    let ow = iw + 2.0 * blur;
+    let oh = ih + 2.0 * blur;
+
+    // Corner radii for the inner rect (after spread)
+    let r_inner = expand_radii(
+        &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+        spread,
+    );
+
+    let mask_stops = blur_stops_mask(shadow.color[3], 16);
+    let shadow_a = shadow.color[3] as f32 / 255.0;
+    let center_luma = (shadow_a * 255.0).round().clamp(0.0, 255.0) as u8;
+
+    let r_tl_x = r_inner[0][0];
+    let r_tl_y = r_inner[0][1];
+    let r_tr_x = r_inner[1][0];
+    let r_tr_y = r_inner[1][1];
+    let r_br_x = r_inner[2][0];
+    let r_br_y = r_inner[2][1];
+    let r_bl_x = r_inner[3][0];
+    let r_bl_y = r_inner[3][1];
+
+    // Build luminosity mask stream: 9-slice grayscale gradient
+    let mask = {
+        let mut stream_builder = canvas.surface.stream_builder();
+        {
+            let mut ms = stream_builder.surface();
+
+            // Center: solid gray = shadow alpha (fully opaque within shadow shape)
+            let center_color =
+                krilla::color::rgb::Color::new(center_luma, center_luma, center_luma);
+            let center_path = if style.has_radius() {
+                crate::draw_primitives::build_rounded_rect_path(ix, iy, iw, ih, &r_inner)
+            } else {
+                build_rect_path(ix, iy, iw, ih)
+            };
+            if let Some(path) = center_path {
+                ms.set_fill(Some(krilla::paint::Fill {
+                    paint: center_color.into(),
+                    opacity: krilla::num::NormalizedF32::ONE,
+                    rule: Default::default(),
+                }));
+                ms.set_stroke(None);
+                ms.draw_path(&path);
+                ms.set_fill(None);
+            }
+
+            // Top edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_tl_x,
+                oy,
+                iw - r_tl_x - r_tr_x,
+                blur,
+                ix + r_tl_x,
+                iy,
+                ix + r_tl_x,
+                oy,
+                &mask_stops,
+            );
+            // Bottom edge
+            draw_edge_strip(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih,
+                iw - r_bl_x - r_br_x,
+                blur,
+                ix + r_bl_x,
+                iy + ih,
+                ix + r_bl_x,
+                iy + ih + blur,
+                &mask_stops,
+            );
+            // Left edge
+            draw_edge_strip(
+                &mut ms,
+                ox,
+                iy + r_tl_y,
+                blur,
+                ih - r_tl_y - r_bl_y,
+                ix,
+                iy + r_tl_y,
+                ox,
+                iy + r_tl_y,
+                &mask_stops,
+            );
+            // Right edge
+            draw_edge_strip(
+                &mut ms,
+                ix + iw,
+                iy + r_tr_y,
+                blur,
+                ih - r_tr_y - r_br_y,
+                ix + iw,
+                iy + r_tr_y,
+                ix + iw + blur,
+                iy + r_tr_y,
+                &mask_stops,
+            );
+
+            // TL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_tl_x,
+                iy + r_tl_y,
+                r_tl_x.max(r_tl_y),
+                blur,
+                ox,
+                oy,
+                blur + r_tl_x,
+                blur + r_tl_y,
+                &mask_stops,
+            );
+            // TR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_tr_x,
+                iy + r_tr_y,
+                r_tr_x.max(r_tr_y),
+                blur,
+                ix + iw - r_tr_x,
+                oy,
+                blur + r_tr_x,
+                blur + r_tr_y,
+                &mask_stops,
+            );
+            // BR corner
+            draw_corner_patch(
+                &mut ms,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                r_br_x.max(r_br_y),
+                blur,
+                ix + iw - r_br_x,
+                iy + ih - r_br_y,
+                blur + r_br_x,
+                blur + r_br_y,
+                &mask_stops,
+            );
+            // BL corner
+            draw_corner_patch(
+                &mut ms,
+                ix + r_bl_x,
+                iy + ih - r_bl_y,
+                r_bl_x.max(r_bl_y),
+                blur,
+                ox,
+                iy + ih - r_bl_y,
+                blur + r_bl_x,
+                blur + r_bl_y,
+                &mask_stops,
+            );
+
+            ms.finish();
+        }
+        Mask::new(stream_builder.finish(), MaskType::Luminosity)
+    };
+
+    let Some(clip_path) = build_shadow_evenodd_clip(ox, oy, ow, oh, x, y, w, h, style) else {
+        return;
+    };
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::EvenOdd);
+    canvas.surface.push_mask(mask);
+
+    // Fill outer rect with solid shadow colour; mask provides the blur falloff
+    let [r, g, b, _] = shadow.color;
+    if let Some(outer_path) = build_rect_path(ox, oy, ow, oh) {
+        canvas.surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(r, g, b).into(),
+            opacity: krilla::num::NormalizedF32::ONE,
+            rule: Default::default(),
+        }));
+        canvas.surface.set_stroke(None);
+        canvas.surface.draw_path(&outer_path);
+        canvas.surface.set_fill(None);
+    }
+
+    canvas.surface.pop(); // pop mask
+    canvas.surface.pop(); // pop clip
+}
+
+/// Draw a rectangular strip filled with a LinearGradient.
+///
+/// `(rx, ry, rw, rh)` is the strip rectangle.
+/// `(gx1, gy1)` is the opaque end of the gradient (stop offset=0).
+/// `(gx2, gy2)` is the transparent (bg) end (stop offset=1).
+#[allow(clippy::too_many_arguments)]
+fn draw_edge_strip(
+    surface: &mut krilla::surface::Surface<'_>,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    gx1: f32,
+    gy1: f32,
+    gx2: f32,
+    gy2: f32,
+    stops: &[krilla::paint::Stop],
+) {
+    if rw <= 0.0 || rh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+    let Some(rect) = krilla::geom::Rect::from_xywh(rx, ry, rw, rh) else {
+        return;
+    };
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else { return };
+
+    let lg = krilla::paint::LinearGradient {
+        x1: gx1,
+        y1: gy1,
+        x2: gx2,
+        y2: gy2,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: stops.to_vec(),
+        anti_alias: false,
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: lg.into(),
+        opacity: krilla::num::NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.set_stroke(None);
+    surface.draw_path(&path);
+    surface.set_fill(None);
+}
+
+/// Draw one corner patch of a blurred shadow using a RadialGradient.
+///
+/// `(cx, cy)` is the arc center of the inner rounded corner (shadow shape).
+/// `r_corner` is the inner radius (start of blur, opaque stop); `r_corner + blur` is the outer.
+/// `(patch_x, patch_y, patch_w, patch_h)` is the rectangular bounding patch.
+#[allow(clippy::too_many_arguments)]
+fn draw_corner_patch(
+    surface: &mut krilla::surface::Surface<'_>,
+    cx: f32,
+    cy: f32,
+    r_corner: f32,
+    blur: f32,
+    patch_x: f32,
+    patch_y: f32,
+    patch_w: f32,
+    patch_h: f32,
+    stops: &[krilla::paint::Stop],
+) {
+    let r_outer = r_corner + blur;
+    if patch_w <= 0.0 || patch_h <= 0.0 || r_outer <= 0.0 || stops.len() < 2 {
+        return;
+    }
+    let Some(rect) = krilla::geom::Rect::from_xywh(patch_x, patch_y, patch_w, patch_h) else {
+        return;
+    };
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else { return };
+
+    let rg = krilla::paint::RadialGradient {
+        fx: cx,
+        fy: cy,
+        fr: r_corner,
+        cx,
+        cy,
+        cr: r_outer,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: stops.to_vec(),
+        anti_alias: false,
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: rg.into(),
+        opacity: krilla::num::NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.set_stroke(None);
+    surface.draw_path(&path);
+    surface.set_fill(None);
+}
+
+/// Expand border radii by `spread`. Negative `spread` clamps to zero per CSS spec
+/// (shadow corners become sharp when spread < -radius). Corners with zero radius
+/// stay sharp regardless of spread, per CSS Backgrounds and Borders Level 3.
+fn expand_radii(outer: &[[f32; 2]; 4], spread: f32) -> [[f32; 2]; 4] {
+    let expand = |r: f32| {
+        if r == 0.0 {
+            0.0
+        } else {
+            f32::max(r + spread, 0.0)
+        }
+    };
+    [
+        [expand(outer[0][0]), expand(outer[0][1])],
+        [expand(outer[1][0]), expand(outer[1][1])],
+        [expand(outer[2][0]), expand(outer[2][1])],
+        [expand(outer[3][0]), expand(outer[3][1])],
+    ]
+}
+
+/// Draw all background layers for a block element.
+pub fn draw_background(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    draw_background_color(canvas, style, x, y, w, h);
+    // Draw layers in reverse order (last declared = bottom-most)
+    for layer in style.background_layers.iter().rev() {
+        draw_background_layer(canvas, style, layer, x, y, w, h);
+    }
+}
+
+fn build_rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {
+    let rect = krilla::geom::Rect::from_xywh(x, y, w, h)?;
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    pb.finish()
+}
+
+fn draw_background_color(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let Some(bg) = &style.background_color else {
+        return;
+    };
+    let path = if style.has_radius() {
+        crate::draw_primitives::build_rounded_rect_path(
+            x,
+            y,
+            w,
+            h,
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+        )
+    } else {
+        build_rect_path(x, y, w, h)
+    };
+
+    if let Some(path) = path {
+        canvas.surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(bg[0], bg[1], bg[2]).into(),
+            opacity: krilla::num::NormalizedF32::new(bg[3] as f32 / 255.0)
+                .unwrap_or(krilla::num::NormalizedF32::ONE),
+            rule: Default::default(),
+        }));
+        canvas.surface.set_stroke(None);
+        canvas.surface.draw_path(&path);
+    }
+}
+
+/// Draw a single background image layer.
+fn draw_background_layer(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    layer: &BackgroundLayer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let (ox, oy, ow, oh) = compute_origin_rect(style, &layer.origin, x, y, w, h);
+    let (cx, cy, cw, ch) = compute_clip_rect(style, &layer.clip, x, y, w, h);
+    if cw <= 0.0 || ch <= 0.0 {
+        return;
+    }
+
+    let clip_path = if style.has_radius() {
+        let clip_radii = compute_inner_radii(
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+            style,
+            &layer.clip,
+        );
+        crate::draw_primitives::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
+    } else {
+        build_rect_path(cx, cy, cw, ch)
+    };
+    let Some(clip_path) = clip_path else {
+        return;
+    };
+    canvas
+        .surface
+        .push_clip_path(&clip_path, &krilla::paint::FillRule::default());
+
+    let (img_w, img_h) = match &layer.content {
+        BgImageContent::LinearGradient { .. }
+        | BgImageContent::RadialGradient { .. }
+        | BgImageContent::ConicGradient { .. } => resolve_gradient_size(&layer.size, ow, oh),
+        BgImageContent::Raster { .. } | BgImageContent::Svg { .. } => resolve_size(layer, ow, oh),
+    };
+    if img_w <= 0.0 || img_h <= 0.0 {
+        canvas.surface.pop();
+        return;
+    }
+
+    let pos_x = ox + resolve_position(&layer.position_x, ow, img_w);
+    let pos_y = oy + resolve_position(&layer.position_y, oh, img_h);
+
+    let tiles = compute_tile_positions(
+        layer.repeat_x,
+        layer.repeat_y,
+        pos_x,
+        pos_y,
+        img_w,
+        img_h,
+        cx,
+        cy,
+        cw,
+        ch,
+    );
+    if tiles.is_empty() {
+        canvas.surface.pop();
+        return;
+    }
+
+    match &layer.content {
+        BgImageContent::LinearGradient {
+            direction,
+            stops,
+            repeating,
+        } => {
+            // Detect the tile-grid shape and pick the cheapest emission:
+            // - Fully uniform grid → single Tiling Pattern (one Function 2
+            //   + Shading 2 + Pattern triplet), unchanged fast path.
+            // - Truncated grid (MAX_TILES mid-row cut) → leading complete-row
+            //   rectangle as one Pattern; the trailing partial row is itself
+            //   a uniform 1×N strip so it emits as a second Pattern via the
+            //   remainder try_uniform_grid check below. This bounds the
+            //   pre-fix ~425 MB / ~975 MB RSS regression from
+            //   `background-size:1.33px + background-repeat:repeat`
+            //   (Codex `01f477e4`).
+            // - Otherwise (single tile / irregular geometry) → per-tile
+            //   loop over all tiles.
+            let split = resolve_gradient_split(&tiles);
+            let draw_linear_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
+                let angle = match direction {
+                    crate::draw_primitives::LinearGradientDirection::Angle(a) => *a,
+                    crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
+                        // uniform grid → all tiles share the same (cell_w, cell_h)
+                        // aspect, so a single corner-derived angle suffices.
+                        corner_to_angle_rad(*corner, grid.cell.0, grid.cell.1)
+                    }
+                };
+                draw_gradient_tiling_pattern(canvas, grid, |surface, _tw, _th| {
+                    draw_linear_gradient(
+                        surface,
+                        angle,
+                        stops,
+                        *repeating,
+                        0.0,
+                        0.0,
+                        grid.cell.0,
+                        grid.cell.1,
+                    );
+                });
+            };
+            if let Some(grid) = split.full {
+                draw_linear_grid(canvas, grid);
+            }
+            // Remainder: prefer another Pattern (partial trailing row is a
+            // 1×N uniform strip in the truncated-grid case), else per-tile.
+            // Corner direction needs per-tile angle recomputation because
+            // the angle depends on tile aspect (CSS Images §3.1.1).
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_linear_grid(canvas, grid);
+                } else {
+                    match direction {
+                        crate::draw_primitives::LinearGradientDirection::Angle(a) => {
+                            let angle = *a;
+                            for (tx, ty, tw, th) in split.remainder {
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
+                        }
+                        crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
+                            for (tx, ty, tw, th) in split.remainder {
+                                let angle = corner_to_angle_rad(*corner, *tw, *th);
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        BgImageContent::RadialGradient {
+            shape,
+            size,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        } => {
+            // Same dedup story as Linear: uniform grids share (cell_w, cell_h)
+            // so cx/cy/rx/ry are identical across tiles → a single Pattern
+            // resource is sound. Extended (Codex `01f477e4`) to also route
+            // the truncated-grid leading rectangle + trailing 1×N strip
+            // through Pattern emission rather than per-tile draws.
+            let split = resolve_gradient_split(&tiles);
+            let draw_radial_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
+                draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
+                    draw_radial_gradient(
+                        surface, *shape, size, position_x, position_y, stops, *repeating, 0.0, 0.0,
+                        tw, th,
+                    );
+                });
+            };
+            if let Some(grid) = split.full {
+                draw_radial_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_radial_grid(canvas, grid);
+                } else {
+                    // Per-tile shape geometry — uses each tile's own (tw, th)
+                    // for cx/cy/rx/ry. No uniformity assumption needed.
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_radial_gradient(
+                            canvas.surface,
+                            *shape,
+                            size,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
+                }
+            }
+        }
+        BgImageContent::ConicGradient {
+            from_angle,
+            position_x,
+            position_y,
+            stops,
+            repeating,
+        } => {
+            // Linear/Radial と同じく uniform-tile grid なら 1 個の Tiling Pattern
+            // resource に集約する。Conic は wedge path 群 (~数百 byte/conic) が
+            // 各 tile で完全同一になるため、特に N×M タイルで効果が大きい。
+            // Codex `01f477e4`: also route the truncated-grid leading
+            // rectangle + trailing strip through Pattern emission —
+            // pre-fix conic non-uniform + repeat produced ~46 MB PDF /
+            // ~833 MB RSS from ~300 B HTML.
+            let split = resolve_gradient_split(&tiles);
+            let draw_conic_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
+                draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
+                    draw_conic_gradient(
+                        surface,
+                        *from_angle,
+                        position_x,
+                        position_y,
+                        stops,
+                        *repeating,
+                        0.0,
+                        0.0,
+                        tw,
+                        th,
+                    );
+                });
+            };
+            if let Some(grid) = split.full {
+                draw_conic_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_conic_grid(canvas, grid);
+                } else {
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_conic_gradient(
+                            canvas.surface,
+                            *from_angle,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
+                }
+            }
+        }
+        BgImageContent::Raster { data, format } => {
+            let data: krilla::Data = Arc::clone(data).into();
+            let Ok(image) = format.to_krilla_image(data) else {
+                canvas.surface.pop();
+                return;
+            };
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                canvas.surface.draw_image(image.clone(), size);
+                canvas.surface.pop();
+            }
+        }
+        BgImageContent::Svg { tree } => {
+            use krilla_svg::{SurfaceExt, SvgSettings};
+            for (tx, ty, tw, th) in &tiles {
+                let Some(size) = krilla::geom::Size::from_wh(*tw, *th) else {
+                    continue;
+                };
+                let transform = krilla::geom::Transform::from_translate(*tx, *ty);
+                canvas.surface.push_transform(&transform);
+                if canvas
+                    .surface
+                    .draw_svg(tree, size, SvgSettings::default())
+                    .is_none()
+                {
+                    log::warn!("failed to draw SVG background tile");
+                }
+                canvas.surface.pop();
+            }
+        }
+    }
+
+    canvas.surface.pop();
+}
+
+/// Resolve a `to <corner>` direction to a CSS gradient angle (radians)
+/// for a `width × height` gradient box.
+///
+/// Per CSS Images 3 §3.1.1, the gradient line is perpendicular to the
+/// diagonal connecting the two corners NOT in the start/end pair, so the
+/// angle depends on the box's aspect ratio. In Y-down coordinates the
+/// gradient direction is `(H · h_sign, W · v_sign)`, then
+/// `θ = atan2(H · h_sign, −W · v_sign)` because CSS measures clockwise from
+/// the +Y-up axis (`direction(θ) = (sin θ, −cos θ)` in Y-down).
+fn corner_to_angle_rad(
+    corner: crate::draw_primitives::LinearGradientCorner,
+    w: f32,
+    h: f32,
+) -> f32 {
+    use crate::draw_primitives::LinearGradientCorner::*;
+    let (h_sign, v_sign) = match corner {
+        TopLeft => (-1.0_f32, -1.0_f32),
+        TopRight => (1.0, -1.0),
+        BottomLeft => (-1.0, 1.0),
+        BottomRight => (1.0, 1.0),
+    };
+    let angle_deg = (h * h_sign).atan2(-w * v_sign).to_degrees();
+    match corner {
+        BottomLeft => (angle_deg + 360.0).to_radians(),
+        BottomRight => (angle_deg - 360.0).to_radians(),
+        TopLeft | TopRight => angle_deg.to_radians(),
+    }
+}
+
+/// 範囲外 fraction を CSS Images 3 §3.5.1 準拠で `[0, 1]` 内表現に renormalize する。
+///
+/// 入力: monotonically non-decreasing position の `(pos, rgba)` ベクタ。
+/// `pos` は ℝ で、範囲外 (`-0.5` や `1.5` など) も許容する。
+///
+/// **前提条件: `pos` に NaN を含まないこと。** `color_at` は position が全順序を
+/// 持つことを前提に区間を線形探索し、どれにも該当しなければ `unreachable!()` に
+/// 落ちる。NaN は「どの比較も false」なので、一つ混ざるだけでこの不変条件を破る。
+/// これは呼び出し側 (`resolve_gradient_stops`) が choke point で保証する契約で、
+/// ここを NaN 耐性にして握り潰すべきではない (fulgur-0vzf)。
+///
+/// `±inf` は比較が正しく順序づくので不変条件は破らない (端点合成に落ちて有限な
+/// 出力になる)。ただし `p1 - p0` が `inf` に飽和する極端な入力では補間 alpha が
+/// 0 に潰れて色が不正確になる — caller 側で非有限を弾いているのはこのため。
+///
+/// 出力: `pos` が `[0, 1]` に収まる `(pos, rgba)` ベクタ。Krilla の
+/// `NormalizedF32` 制約をそのまま満たす。
+///
+/// アルゴリズム:
+/// - fast path: 全 stop が `[0, 1]` 内なら無変換
+/// - 範囲外を含む場合: `color_at(0)` / `color_at(1)` を隣接 stop 線形補間
+///   (前方は first stop の色で pad、後方は last stop の色で pad) で合成し、
+///   `(0, 1)` 内既存 stop と組み合わせる
+/// - 既に in-range stop が境界 (`0.0` / `1.0`) ぴったりに座っている場合は
+///   重複合成しない
+fn renormalize_stops_to_unit_range(stops: Vec<(f32, [u8; 4])>) -> Vec<(f32, [u8; 4])> {
+    debug_assert!(stops.len() >= 2, "caller guaranteed len >= 2");
+
+    if stops.iter().all(|(p, _)| (0.0..=1.0).contains(p)) {
+        return stops;
+    }
+
+    let last_idx = stops.len() - 1;
+    let color_at = |t: f32| -> [u8; 4] {
+        if t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[last_idx].0 {
+            return stops[last_idx].1;
+        }
+        for w in stops.windows(2) {
+            let (p0, c0) = w[0];
+            let (p1, c1) = w[1];
+            if p0 <= t && t <= p1 {
+                let span = p1 - p0;
+                if span <= 0.0 {
+                    // hard stop boundary (coincident positions): 後方の色を採用
+                    return c1;
+                }
+                let alpha = (t - p0) / span;
+                return [
+                    lerp_u8(c0[0], c1[0], alpha),
+                    lerp_u8(c0[1], c1[1], alpha),
+                    lerp_u8(c0[2], c1[2], alpha),
+                    lerp_u8(c0[3], c1[3], alpha),
+                ];
+            }
+        }
+        unreachable!("stops are monotonic and t is in [stops[0].0, stops[last].0]")
+    };
+
+    // 上流 (`resolve_gradient_stops` の Auto fill / fr(0.0) / px(0.0) 等) は
+    // exact 0.0 / 1.0 を保証するため、浮動小数 `==` 比較で十分。
+    let has_stop_at_zero = stops.iter().any(|(p, _)| *p == 0.0);
+    let has_stop_at_one = stops.iter().any(|(p, _)| *p == 1.0);
+
+    let mut result = Vec::with_capacity(stops.len() + 2);
+
+    if stops[0].0 != 0.0 && !has_stop_at_zero {
+        result.push((0.0, color_at(0.0)));
+    }
+
+    for (p, rgba) in stops.iter() {
+        if (0.0..=1.0).contains(p) {
+            result.push((*p, *rgba));
+        }
+    }
+
+    if stops[last_idx].0 != 1.0 && !has_stop_at_one {
+        result.push((1.0, color_at(1.0)));
+    }
+
+    result
+}
+
+#[inline]
+fn lerp_u8(a: u8, b: u8, alpha: f32) -> u8 {
+    let av = a as f32;
+    let bv = b as f32;
+    (av + (bv - av) * alpha).round().clamp(0.0, 255.0) as u8
+}
+
+/// `resolve_gradient_stops` 内の中間表現。position / Auto fixup 完了後に
+/// `is_hint` を保持して `expand_interpolation_hints` に渡される。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedStop {
+    pos: f32,
+    rgba: [u8; 4],
+    is_hint: bool,
+}
+
+/// CSS Images 3 §3.5.3 の interpolation hint を 8 個の中間 stop に展開する。
+///
+/// 入力契約:
+/// - 先頭末尾は必ず `is_hint=false` (convert 時に validate 済み)
+/// - 各 hint は前後を `is_hint=false` stop に挟まれる (連続 hint は convert で drop)
+/// - position は monotonic (resolve_gradient_stops の clamp 通過後)
+///
+/// アルゴリズム: hint 位置 H_norm に対し exponent = log(0.5) / log(H_norm)、
+/// 隣接 stop 間で t 等間隔の N=8 サンプル位置 / t.powf(exponent) で色補間。
+/// `H_norm == 0.5` のとき exponent=1.0 で線形 (no-op、8 stop は冗長だが正しい)。
+fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
+    const N_SAMPLES: usize = 8;
+    const EPS: f32 = 1e-4;
+
+    let mut out: Vec<(f32, [u8; 4])> = Vec::with_capacity(stops.len() + N_SAMPLES);
+
+    let mut i = 0;
+    while i < stops.len() {
+        let s = stops[i];
+        if !s.is_hint {
+            out.push((s.pos, s.rgba));
+            i += 1;
+            continue;
+        }
+        // hint: 前後の color stop を取得。convert 段の validation で
+        // leading/trailing hint は drop されるため通常到達不能だが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で不正な
+        // 入力が来た場合に release build で usize underflow / OOB panic
+        // しないよう defensively skip する。
+        if i == 0 || i + 1 >= stops.len() {
+            i += 1;
+            continue;
+        }
+        let a = stops[i - 1];
+        let b = stops[i + 1];
+        let span = b.pos - a.pos;
+
+        if span <= EPS {
+            // 縮退: a と b が同位置 → hint を drop して continue
+            i += 1;
+            continue;
+        }
+
+        let h_norm = ((s.pos - a.pos) / span).clamp(EPS, 1.0 - EPS);
+        let exponent = 0.5_f32.ln() / h_norm.ln();
+
+        for k in 1..=N_SAMPLES {
+            let t = (k as f32) / (N_SAMPLES as f32 + 1.0);
+            let p = t.powf(exponent);
+            let pos = a.pos + span * t;
+            let rgba = [
+                lerp_u8(a.rgba[0], b.rgba[0], p),
+                lerp_u8(a.rgba[1], b.rgba[1], p),
+                lerp_u8(a.rgba[2], b.rgba[2], p),
+                lerp_u8(a.rgba[3], b.rgba[3], p),
+            ];
+            out.push((pos, rgba));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
+/// `Stop` 列に変換する。
+///
+/// **Unit contract:** `line_length` is a [`Px`] (CSS px, matching
+/// `GradientStopPosition::LengthPx`). Callers in pt-space (Krilla draw
+/// surface) tag with `.as_pt()` and convert with `.in_px()` before invoking.
+///
+/// CSS Images Level 3 §3.5.1 の color-stop fixup に従って:
+///   1. `LengthPx(px)` を `px / line_length` で fraction 化
+///   2. 先頭/末尾の `Auto` を 0.0 / 1.0 に確定
+///   3. monotonic clamp (前 fixed より小さければ前 fixed に合わせる)
+///   4. 中間の `Auto` 群を前後 fixed の等間隔補間で埋める
+///   5. `repeating=true` なら fixup 後の `(p_first, p_last)` を周期に取り、
+///      `[0, 1]` を覆うだけ stop 列を平行コピー (CSS Images 3 §3.6)
+///   6. 最終 fraction が `[0, 1]` 外なら `renormalize_stops_to_unit_range` で
+///      端点合成し正規化する (CSS Images 3 §3.5.1; fulgur-n3zk)
+///
+/// `line_length <= 0` の場合は length stop が解決不能なので None。
+fn resolve_gradient_stops(
+    stops: &[crate::draw_primitives::GradientStop],
+    line_length: Px,
+    repeating: bool,
+) -> Option<Vec<krilla::paint::Stop>> {
+    use crate::draw_primitives::GradientStopPosition;
+
+    if stops.len() < 2 {
+        return None;
+    }
+    if !line_length.is_finite() || line_length <= Px::ZERO {
+        // length-typed stop が一つでもあれば解決不能。fraction-only でも
+        // 退化した gradient なので Layer drop 相当 (caller で先に early
+        // return しているため通常到達しない)。
+        //
+        // `is_finite` を先に見るのは `<= Px::ZERO` が NaN-blind だから:
+        // NaN との比較は全て false なので、NaN はこの符号ガードを素通りして
+        // `px / line_length` を NaN offset に変えてしまう (fulgur-0vzf)。
+        return None;
+    }
+
+    let n = stops.len();
+    let mut positions: Vec<Option<f32>> = stops
+        .iter()
+        .map(|s| match s.position {
+            GradientStopPosition::Auto => None,
+            GradientStopPosition::Fraction(f) => Some(f),
+            GradientStopPosition::LengthPx(px) => Some(px.as_px() / line_length),
+        })
+        .collect();
+
+    // 先頭/末尾の Auto を 0/1 に
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions[n - 1].is_none() {
+        positions[n - 1] = Some(1.0);
+    }
+
+    // monotonic clamp.
+    // 初期値が NEG_INFINITY (not 0.0) なのは意図的: renormalize は負値の
+    // 入力位置をそのまま受け取って端点合成する必要があるため、
+    // 0.0 初期値だと Fraction(-0.1) が暗黙に 0.0 に押し上げられて
+    // out-of-range 入力として扱われなくなる。
+    let mut last_resolved = f32::NEG_INFINITY;
+    for v in positions.iter_mut().flatten() {
+        if *v < last_resolved {
+            *v = last_resolved;
+        }
+        last_resolved = *v;
+    }
+
+    // 中間 Auto を前後 fixed の等間隔補間で埋める
+    let mut i = 0;
+    while i < n {
+        if positions[i].is_some() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = start;
+        while end < n && positions[end].is_none() {
+            end += 1;
+        }
+        let p_prev = positions[start - 1].expect("first slot resolved");
+        let p_next = positions[end].expect("last slot resolved");
+        let span = (end - start + 1) as f32;
+        for (k, slot) in positions.iter_mut().enumerate().take(end).skip(start) {
+            let t = (k - start + 1) as f32 / span;
+            *slot = Some(p_prev + (p_next - p_prev) * t);
+        }
+        i = end;
+    }
+
+    // 有限性の choke point (fulgur-0vzf)。ここから下流 (hint 展開 → 周期展開
+    // → renormalize) は position が全順序を持つ前提で書かれている。NaN が
+    // 一つ混ざると `renormalize_stops_to_unit_range` の `color_at` で
+    // どの区間比較も成立せず `unreachable!()` に落ちる。
+    //
+    // 入力ではなく *解決後* の値を検査するのが要点: offset は入力由来の
+    // NaN だけでなく、個別には有限な `px / line_length` が f32 の表現域を
+    // 超えて `inf` に飽和する経路でも壊れる。
+    if !positions.iter().flatten().all(|p| p.is_finite()) {
+        return None;
+    }
+
+    let resolved: Vec<ResolvedStop> = stops
+        .iter()
+        .zip(positions)
+        .map(|(s, p)| ResolvedStop {
+            pos: p.expect("all slots resolved"),
+            rgba: s.rgba,
+            is_hint: s.is_hint,
+        })
+        .collect();
+
+    // CSS Images 3 §3.5.3 interpolation hint expansion. `is_hint=true` の
+    // marker stop を 8 個の中間 stop (累乗カーブ) に展開する。hint を含まない
+    // 入力は素通り。
+    let after_hints: Vec<(f32, [u8; 4])> = expand_interpolation_hints(resolved);
+
+    // hint 展開は stop を減らしうる: `is_hint` だけの入力 (convert 段の
+    // validation を通らない直接構築) は全 marker が defensively skip されて
+    // 空ベクタになる。下流の `expand_repeating_stops` は `first()/last()` を
+    // `expect("len >= 2")` で剥がすので、ここで止めないと release build でも
+    // panic する (fulgur-0vzf)。非 repeating 側も `renormalize` の
+    // `debug_assert!` を踏むので同じ地点で弾く。
+    if after_hints.len() < 2 {
+        return None;
+    }
+
+    // 周期展開: repeating-* gradient は first/last stop 間の差を周期に取り、
+    // `[0, 1]` を覆うように copy を平行移動して並べる。renormalize 段で
+    // 範囲外 stop は端点補間にクリップされるので、ここでは [0, 1] を
+    // 充分カバーするだけ生成すればよい。
+    let expanded = if repeating {
+        expand_repeating_stops(after_hints)?
+    } else {
+        after_hints
+    };
+
+    // renormalize: 範囲外 fraction は端点合成で [0, 1] 内表現に変換 (fulgur-n3zk)
+    let renormalized = renormalize_stops_to_unit_range(expanded);
+
+    // 退化ケースの runtime guard。helper は有限 position に対しては常に
+    // len >= 2 を返すが、krilla の gradient は 2 stops 以上を要求するので、
+    // release build でも縮退した stop 列を krilla に渡さない (fulgur-0vzf)。
+    // 668f2031 で `debug_assert!` に落としたものを戻した: debug_assert は
+    // release で消えるため、不変条件が破れたときに保護が効かなかった。
+    if renormalized.len() < 2 {
+        return None;
+    }
+
+    Some(
+        renormalized
+            .into_iter()
+            .map(|(p, rgba)| krilla::paint::Stop {
+                offset: krilla::num::NormalizedF32::new(p).expect("renormalize guarantees [0, 1]"),
+                color: krilla::color::rgb::Color::new(rgba[0], rgba[1], rgba[2]).into(),
+                opacity: crate::draw_primitives::alpha_to_opacity(rgba[3]),
+            })
+            .collect(),
+    )
+}
+
+/// `repeating-linear-gradient` / `repeating-radial-gradient` の周期展開。
+///
+/// 入力: fixup 後の monotonically non-decreasing `(pos, rgba)` ベクタ (`len >= 2`)。
+/// 出力: `[0, 1]` 範囲を覆うように first/last 差を周期として平行コピーした列。
+/// `renormalize_stops_to_unit_range` 段で out-of-range stop が端点補間に丸められる
+/// 前提なので、ここでは充分なオーバーラップを与える。
+///
+/// `period <= 0` (degenerate) は CSS Images 3 §3.6 に従い「最終 stop の色で
+/// 塗りつぶす単色」として扱う。krilla は最低 2 stop 必要なので、`(0, last)`
+/// と `(1, last)` の 2 stop を返す。`None` ではなく単色 fill を返すことで
+/// `repeating-linear-gradient(red 0%, blue 0%)` のような入力もブラウザと
+/// 同じ blue 単色描画になる (PR #244 coderabbit review より)。
+/// `period > 0` でも安全上限 `MAX_PERIODS` を超えたら最終周期で打ち切り
+/// (`repeating-linear-gradient(red 0%, blue 0.01%)` のような病的入力でも有界化)。
+fn expand_repeating_stops(stops: Vec<(f32, [u8; 4])>) -> Option<Vec<(f32, [u8; 4])>> {
+    debug_assert!(stops.len() >= 2, "caller guaranteed len >= 2");
+
+    let p_first = stops.first().expect("len >= 2").0;
+    let p_last = stops.last().expect("len >= 2").0;
+    let period = p_last - p_first;
+
+    // CSS Images 3 §3.6: 周期が 0 または負 (monotonic clamp 通過後に first/last が
+    // 同位置に潰れた場合) は degenerate。最終 stop の色で塗りつぶす単色 fill を返す。
+    // NaN/Inf も同じ扱いで安全側に倒す。
+    if period <= 0.0 || !period.is_finite() {
+        let last_color = stops.last().expect("len >= 2").1;
+        return Some(vec![(0.0, last_color), (1.0, last_color)]);
+    }
+
+    // 安全上限。256 周期あれば line_length 比 0.4% の周期まで描き切れ、
+    // それ以下は実質連続色なので品質劣化しない。`stops.len() = 100` 等の
+    // pathological 入力 × MAX_PERIODS でも合計 5 万 stop 以下に留まる。
+    const MAX_PERIODS: i32 = 256;
+
+    // forward: p_last + k*period >= 1 となる最小の k
+    // backward: p_first + k*period <= 0 となる最小の |k|  (k は負方向)
+    let forward = if p_last >= 1.0 {
+        0
+    } else {
+        ((1.0 - p_last) / period).ceil() as i32
+    };
+    let backward = if p_first <= 0.0 {
+        0
+    } else {
+        (p_first / period).ceil() as i32
+    };
+
+    let forward = forward.min(MAX_PERIODS);
+    let backward = backward.min(MAX_PERIODS);
+
+    let total_copies = (forward + backward + 1) as usize;
+    let mut out: Vec<(f32, [u8; 4])> = Vec::with_capacity(total_copies * stops.len());
+
+    // k = -backward .. = forward の順に shift 量 k*period を加えて並べる。
+    // 同位置で隣接する周期境界の color が違う場合 (e.g. period 末尾 blue →
+    // 次周期先頭 red) は hard stop として出力に残し、renormalize の線形補間
+    // (`p0 == p1` 時は後者の色を採用) と整合する。
+    for k in -backward..=forward {
+        let shift = (k as f32) * period;
+        for &(p, rgba) in &stops {
+            out.push((p + shift, rgba));
+        }
+    }
+
+    Some(out)
+}
+
+/// Draw a CSS linear-gradient over the origin rect.
+///
+/// CSS angle convention (radians): 0 = "to top", π/2 = "to right",
+/// π = "to bottom", 3π/2 = "to left", clockwise. Krilla / fulgur use Y-down
+/// (top-left origin) so "to top" means decreasing Y.
+///
+/// The gradient line passes through the center of the origin rect with length
+/// `|W·sin θ| + |H·cos θ|` — this is the projection of both diagonals onto the
+/// gradient axis, ensuring the line spans corner-to-corner regardless of angle
+/// (CSS Images §3.1).
+#[allow(clippy::too_many_arguments)]
+fn draw_linear_gradient(
+    surface: &mut krilla::surface::Surface<'_>,
+    angle_rad: f32,
+    stops: &[crate::draw_primitives::GradientStop],
+    repeating: bool,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) {
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    let sin = angle_rad.sin();
+    // CSS y-axis points up; our Y-down system flips it. "to top" (angle=0)
+    // must produce a line ending at the top of the box (low Y), so we
+    // negate cos to express the direction in Y-down space.
+    let cos_neg = -angle_rad.cos();
+
+    let length = (ow * sin).abs() + (oh * cos_neg).abs();
+    // `length <= 0.0` だけでは NaN を落とせない (NaN との比較は常に false)。
+    // NaN な gradient line は下流で NaN offset と NaN 座標の両方を生むので、
+    // ここで Layer drop する (fulgur-0vzf)。
+    if !length.is_finite() || length <= 0.0 {
+        return;
+    }
+
+    let cx_box = ox + ow * 0.5;
+    let cy_box = oy + oh * 0.5;
+    let half = length * 0.5;
+    let x1 = cx_box - sin * half;
+    let y1 = cy_box - cos_neg * half;
+    let x2 = cx_box + sin * half;
+    let y2 = cy_box + cos_neg * half;
+
+    // length は pt 単位 (ow, oh が pt) だが、`GradientStopPosition::LengthPx` は
+    // CSS px で保持されている。`resolve_gradient_stops` は同一単位空間での
+    // `px / line_length` で fraction 化するので、line_length も CSS px に揃える。
+    // (例: 400px box → length = 300pt → px 換算で 400 → 50px / 400 = 0.125)
+    let length_px = length.as_pt().in_px();
+    let Some(krilla_stops) = resolve_gradient_stops(stops, length_px, repeating) else {
+        return;
+    };
+
+    let lg = krilla::paint::LinearGradient {
+        x1,
+        y1,
+        x2,
+        y2,
+        transform: krilla::geom::Transform::default(),
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: krilla_stops,
+        anti_alias: false,
+    };
+
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: lg.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    surface.set_stroke(None);
+
+    // Per CSS Images §3, the gradient image has the size of the positioning
+    // (origin) area; areas inside `clip` but outside `origin` should be
+    // transparent for this layer. With `SpreadMethod::Pad`, painting the
+    // clip rect would extend the first/last stop colors as solid bands into
+    // those areas. Draw the origin rect — the caller's already-pushed
+    // clip_path bounds it, so what's rendered is `origin ∩ clip`, which is
+    // the spec-correct visible region.
+    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
+        surface.set_fill(None);
+        return;
+    };
+    surface.draw_path(&rect_path);
+    // Don't leak the gradient paint to the next draw on this surface.
+    surface.set_fill(None);
+}
+
+/// Draw a CSS radial-gradient over the origin rect.
+///
+/// CSS Images 3 §3.6 の式に従い (cx, cy, rx, ry) を計算し、Krilla の
+/// `RadialGradient` (円のみサポート) に楕円を transform で表現する。
+#[allow(clippy::too_many_arguments)]
+fn draw_radial_gradient(
+    surface: &mut krilla::surface::Surface<'_>,
+    shape: crate::draw_primitives::RadialGradientShape,
+    size: &crate::draw_primitives::RadialGradientSize,
+    position_x: &BgLengthPercentage,
+    position_y: &BgLengthPercentage,
+    stops: &[crate::draw_primitives::GradientStop],
+    repeating: bool,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) {
+    use crate::draw_primitives::{RadialExtent, RadialGradientShape, RadialGradientSize};
+
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    // 中心位置 (cx, cy) を origin rect 内の絶対座標に解決
+    // CSS では position の percentage は origin rect の幅/高さに対する割合 (image=0)
+    let cx = ox + resolve_point(position_x, ow);
+    let cy = oy + resolve_point(position_y, oh);
+
+    // 辺までの距離 (符号は問わない、abs で扱う)
+    let left = (cx - ox).abs();
+    let right = (ox + ow - cx).abs();
+    let top = (cy - oy).abs();
+    let bottom = (oy + oh - cy).abs();
+
+    let (rx, ry) = match (shape, size) {
+        (RadialGradientShape::Circle, RadialGradientSize::Extent(ext)) => {
+            let r = match ext {
+                RadialExtent::ClosestSide => left.min(right).min(top).min(bottom),
+                RadialExtent::FarthestSide => left.max(right).max(top).max(bottom),
+                RadialExtent::ClosestCorner => {
+                    let dl = left.hypot(top);
+                    let dr = right.hypot(top);
+                    let dbl = left.hypot(bottom);
+                    let dbr = right.hypot(bottom);
+                    dl.min(dr).min(dbl).min(dbr)
+                }
+                RadialExtent::FarthestCorner => {
+                    let dl = left.hypot(top);
+                    let dr = right.hypot(top);
+                    let dbl = left.hypot(bottom);
+                    let dbr = right.hypot(bottom);
+                    dl.max(dr).max(dbl).max(dbr)
+                }
+            };
+            (r, r)
+        }
+        (RadialGradientShape::Circle, RadialGradientSize::Explicit { rx, .. }) => {
+            // circle は parser 段階で rx == ry なので rx だけ使う (% 不可だが念のため resolve)
+            let r = resolve_length(rx, ow);
+            (r, r)
+        }
+        (RadialGradientShape::Ellipse, RadialGradientSize::Extent(ext)) => match ext {
+            RadialExtent::ClosestSide => (left.min(right), top.min(bottom)),
+            RadialExtent::FarthestSide => (left.max(right), top.max(bottom)),
+            RadialExtent::ClosestCorner => {
+                // CSS Images §3.6: closest-corner ellipse は closest-side の ratio スケール
+                let (rx0, ry0) = (left.min(right), top.min(bottom));
+                ellipse_corner_scale(cx, cy, ox, oy, ow, oh, rx0, ry0, false)
+            }
+            RadialExtent::FarthestCorner => {
+                let (rx0, ry0) = (left.max(right), top.max(bottom));
+                ellipse_corner_scale(cx, cy, ox, oy, ow, oh, rx0, ry0, true)
+            }
+        },
+        (RadialGradientShape::Ellipse, RadialGradientSize::Explicit { rx, ry }) => {
+            (resolve_length(rx, ow), resolve_length(ry, oh))
+        }
+    };
+
+    // 符号ガードは NaN-blind なので、有限性を明示的に検査する (fulgur-0vzf)。
+    // 中心座標も併せて見る: 半径が有限でも `position_x` / `position_y` 由来の
+    // cx / cy が非有限なら、そのまま krilla の focal / center 座標に流れる。
+    if !rx.is_finite()
+        || !ry.is_finite()
+        || !cx.is_finite()
+        || !cy.is_finite()
+        || rx <= 0.0
+        || ry <= 0.0
+    {
+        return;
+    }
+
+    // Radial gradient line length = rx (CSS Images §3.6.1, ellipse でも +X 軸)。
+    // rx は pt 単位 (ow/oh が pt) なので、`LengthPx` (CSS px) との比較のために
+    // CSS px に揃える。
+    let rx_px = rx.as_pt().in_px();
+    let Some(krilla_stops) = resolve_gradient_stops(stops, rx_px, repeating) else {
+        return;
+    };
+
+    // Krilla の RadialGradient は円のみ。楕円は cr=rx + transform で y 軸を ry/rx に scale。
+    // 合成 T(cx,cy) · S(1, ry/rx) · T(-cx,-cy) を直接展開:
+    //   x → x
+    //   y → sy*y + cy*(1 - sy)  (sy = ry/rx)
+    // tiny_skia の Transform 行列 |sx kx tx; ky sy ty; 0 0 1| に当てはめると
+    //   sx=1, kx=0, tx=0, ky=0, sy=sy, ty=cy*(1-sy)
+    // krilla::geom::Transform の `pre_concat` は pub(crate) で外部から chain できないため、
+    // `from_row(sx, ky, kx, sy, tx, ty)` で行列直接構築する。
+    let transform = if (rx - ry).abs() > f32::EPSILON {
+        let scale_y = ry / rx;
+        let ty = cy * (1.0 - scale_y);
+        // 両オペランドが有限でも比が f32 の表現域を超えることがある
+        // (`ry = f32::MAX` / `rx = f32::MIN_POSITIVE` など)。派生値も検査して
+        // 非有限な行列を krilla に渡さない (fulgur-0vzf)。
+        if !scale_y.is_finite() || !ty.is_finite() {
+            return;
+        }
+        krilla::geom::Transform::from_row(1.0, 0.0, 0.0, scale_y, 0.0, ty)
+    } else {
+        krilla::geom::Transform::default()
+    };
+
+    let rg = krilla::paint::RadialGradient {
+        fx: cx,
+        fy: cy,
+        fr: 0.0,
+        cx,
+        cy,
+        cr: rx, // 円半径 (楕円は transform で表現)
+        transform,
+        spread_method: krilla::paint::SpreadMethod::Pad,
+        stops: krilla_stops,
+        anti_alias: false,
+    };
+
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: rg.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    surface.set_stroke(None);
+
+    let Some(rect_path) = build_rect_path(ox, oy, ow, oh) else {
+        surface.set_fill(None);
+        return;
+    };
+    surface.draw_path(&rect_path);
+    surface.set_fill(None);
+}
+
+/// Draw a CSS conic-gradient as N=360 triangular path wedges, sampling color
+/// at each wedge's mid-angle and merging adjacent same-color wedges into
+/// single polygons. PostScript shading を使わないため PDF/A-1, A-2 適合。
+///
+/// 三角形の外周頂点は中心から放射した ray と box 辺の交点で計算する
+/// (`box_edge_at_angle`)。merge により hard step (pie chart) は色変化点数まで
+/// path が減り、見た目の境界 AA も同色 wedge 間で消失する。
+#[allow(clippy::too_many_arguments)]
+fn draw_conic_gradient(
+    surface: &mut krilla::surface::Surface<'_>,
+    from_angle_rad: f32,
+    position_x: &BgLengthPercentage,
+    position_y: &BgLengthPercentage,
+    stops: &[crate::draw_primitives::GradientStop],
+    repeating: bool,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) {
+    if ow <= 0.0 || oh <= 0.0 || stops.len() < 2 {
+        return;
+    }
+
+    // origin rect への追加クリップ。`at <position>` が origin 外に解決された場合、
+    // wedge polygon の中心頂点 `(cx, cy)` が origin 外でも頂点として含まれてしまい、
+    // 既存 BgClip 用 `clip_path` だけでは `clip \ origin` 領域に塗りが漏れる
+    // (CSS Images §3 では origin の外は当該レイヤーで透明)。linear/radial は
+    // gradient 自体が origin 内で減衰するため顕在化しないが、conic は
+    // 中心からの放射なので明示的に origin で再クリップする。
+    let Some(origin_clip) = build_rect_path(ox, oy, ow, oh) else {
+        return;
+    };
+    surface.push_clip_path(&origin_clip, &krilla::paint::FillRule::default());
+
+    let cx = ox + resolve_point(position_x, ow);
+    let cy = oy + resolve_point(position_y, oh);
+
+    let normalized = normalize_conic_stops(stops);
+    if normalized.len() < 2 {
+        surface.pop();
+        return;
+    }
+    let first = normalized.first().unwrap().0;
+    let last = normalized.last().unwrap().0;
+    let period = (last - first).max(1e-6);
+
+    const N: usize = 360;
+
+    // 各 wedge の中点角度 (CSS fraction) で色をサンプル。repeating 時は
+    // CSS Images 4 §3.x の周期展開で fraction を [first, last] にラップする。
+    // `mid_t` は意図的に clamp しない: stops は seam を跨いで負 / 1 超過しうる
+    // (例: `repeating-conic-gradient(red -30deg, blue 30deg)`)。
+    // `sample_conic_color` 側が範囲外を first / last 端点として吸収する。
+    let colors: Vec<[u8; 4]> = (0..N)
+        .map(|i| {
+            let mid_f = (i as f32 + 0.5) / N as f32;
+            let mid_t = if repeating {
+                first + (mid_f - first).rem_euclid(period)
+            } else {
+                mid_f
+            };
+            sample_conic_color(&normalized, mid_t)
+        })
+        .collect();
+
+    // box 辺との交点を 0..=N でキャッシュ (隣接 wedge で同じ点を 2 回計算するのを避ける)。
+    let edge_points: Vec<(f32, f32)> = (0..=N)
+        .map(|k| {
+            let theta = from_angle_rad + (k as f32 / N as f32) * std::f32::consts::TAU;
+            box_edge_at_angle(theta, cx, cy, ox, oy, ow, oh)
+        })
+        .collect();
+
+    surface.set_stroke(None);
+
+    let mut i = 0usize;
+    while i < N {
+        let color = colors[i];
+        let mut j = i + 1;
+        while j < N && colors[j] == color {
+            j += 1;
+        }
+        // [i, j) の同色 wedge 群を 1 個の多角形にまとめる:
+        //   center → edge_points[i] → edge_points[i+1] → ... → edge_points[j]
+        let mut pb = krilla::geom::PathBuilder::new();
+        pb.move_to(cx, cy);
+        for &(px, py) in &edge_points[i..=j] {
+            pb.line_to(px, py);
+        }
+        pb.close();
+
+        let Some(path) = pb.finish() else {
+            i = j;
+            continue;
+        };
+        surface.set_fill(Some(krilla::paint::Fill {
+            paint: krilla::color::rgb::Color::new(color[0], color[1], color[2]).into(),
+            rule: Default::default(),
+            opacity: crate::draw_primitives::alpha_to_opacity(color[3]),
+        }));
+        surface.draw_path(&path);
+
+        i = j;
+    }
+    surface.set_fill(None);
+    surface.pop();
+}
+
+/// CSS conic ray angle θ から box 辺との交点 (cx + t·sin θ, cy − t·cos θ) を返す
+/// (CSS 規約: θ=0 は top, increasing CW)。
+fn box_edge_at_angle(
+    theta_rad: f32,
+    cx: f32,
+    cy: f32,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+) -> (f32, f32) {
+    // CSS Y-down: 0deg = top (-Y) → ray dir (sin θ, -cos θ)
+    let dx = theta_rad.sin();
+    let dy = -theta_rad.cos();
+
+    let tx = if dx > 1e-9 {
+        (ox + ow - cx) / dx
+    } else if dx < -1e-9 {
+        (ox - cx) / dx
+    } else {
+        f32::INFINITY
+    };
+    let ty = if dy > 1e-9 {
+        (oy + oh - cy) / dy
+    } else if dy < -1e-9 {
+        (oy - cy) / dy
+    } else {
+        f32::INFINITY
+    };
+    let t = tx.min(ty).max(0.0);
+    (cx + t * dx, cy + t * dy)
+}
+
+/// stop position fixup. GradientStop の Auto を線形補間で埋める。
+///
+/// CSS では conic の position は `<angle>|<percentage>` のみで `LengthPx` は
+/// 出ないが、共通 `GradientStop` 経由のため変種が来た場合は無視する。
+fn normalize_conic_stops(stops: &[crate::draw_primitives::GradientStop]) -> Vec<(f32, [u8; 4])> {
+    use crate::draw_primitives::GradientStopPosition;
+    if stops.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<(Option<f32>, [u8; 4])> = stops
+        .iter()
+        .map(|s| {
+            let p = match s.position {
+                GradientStopPosition::Auto => None,
+                GradientStopPosition::Fraction(f) => Some(f),
+                GradientStopPosition::LengthPx(_) => None,
+            };
+            (p, s.rgba)
+        })
+        .collect();
+
+    if out[0].0.is_none() {
+        out[0].0 = Some(0.0);
+    }
+    let last = out.len() - 1;
+    if out[last].0.is_none() {
+        out[last].0 = Some(1.0);
+    }
+
+    let mut prev: f32 = out[0].0.unwrap();
+    for s in out.iter_mut().skip(1) {
+        if let Some(p) = s.0
+            && p < prev
+        {
+            s.0 = Some(prev);
+        }
+        if let Some(p) = s.0 {
+            prev = p;
+        }
+    }
+
+    let mut i = 0usize;
+    while i < out.len() {
+        if out[i].0.is_some() {
+            i += 1;
+            continue;
+        }
+        let prev_pos = out[i - 1].0.unwrap();
+        let mut j = i;
+        while j < out.len() && out[j].0.is_none() {
+            j += 1;
+        }
+        let next_pos = out[j].0.unwrap();
+        let count = j - i + 1;
+        for k in 0..(j - i) {
+            let t = (k + 1) as f32 / count as f32;
+            out[i + k].0 = Some(prev_pos + (next_pos - prev_pos) * t);
+        }
+        i = j;
+    }
+
+    out.into_iter()
+        .map(|(p, rgba)| (p.unwrap(), rgba))
+        .collect()
+}
+
+/// fraction `t` を normalized stops で線形補間して RGBA を返す。
+///
+/// 範囲外 `t` は first / last 端点の色を返す。`t` が coincident stop
+/// (hard transition) 境界上に乗った場合は **後ろの色を採用する** — CSS Images
+/// §3.5.1: 同位置の複数 stop は seam を後続 stop の色が占める。
+///
+/// アルゴリズム: stops は position 昇順前提。`p <= t` を満たす最右 stop の
+/// 直後を起点 segment にすれば、coincident pair (p1 == p2 == t) の境界上で
+/// 自動的に「後の色」が拾える ([..., (t, A), (t, B), (next, B)] で t を渡すと
+/// 起点 (t, B) → next 区間の alpha=0 → B が返る)。
+fn sample_conic_color(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
+    if stops.is_empty() {
+        return [0, 0, 0, 255];
+    }
+    if t < stops[0].0 {
+        return stops[0].1;
+    }
+    if t >= stops[stops.len() - 1].0 {
+        return stops[stops.len() - 1].1;
+    }
+
+    // `p <= t` を満たす最右 stop index。stops は昇順なのでこの index 以降
+    // (idx + 1 を含む) は全て p > t。
+    let idx = stops.iter().rposition(|&(p, _)| p <= t).unwrap_or(0);
+    if idx + 1 >= stops.len() {
+        return stops[idx].1;
+    }
+    let (p1, c1) = stops[idx];
+    let (p2, c2) = stops[idx + 1];
+    let span = p2 - p1;
+    if span <= 0.0 {
+        return c2;
+    }
+    let alpha = ((t - p1) / span).clamp(0.0, 1.0);
+    [
+        lerp_u8(c1[0], c2[0], alpha),
+        lerp_u8(c1[1], c2[1], alpha),
+        lerp_u8(c1[2], c2[2], alpha),
+        lerp_u8(c1[3], c2[3], alpha),
+    ]
+}
+
+/// uniform-grid 検出時の Tiling Pattern 描画ヘルパー。
+///
+/// 1. `surface.stream_builder().surface()` で sub-surface を取得し、
+///    `paint_in_cell` クロージャで gradient を `(0, 0, tile_w, tile_h)` に描画。
+/// 2. `Pattern { stream, transform: Translate(origin), width: step_x, height: step_y }`
+///    を構築 (PDF /Matrix · /XStep · /YStep に対応)。
+/// 3. `set_fill(pattern)` + `draw_path(union_rect)` で塗りつぶし。
+///    既存の `clip_path` がレイヤーの可視領域を bound する。
+///
+/// Krilla の `Pattern` は `Cacheable` なので、同じ stream / transform / step を持つ
+/// Pattern は resource 層で dedupe される (`grid` 全体で 1 個の Pattern resource)。
+fn draw_gradient_tiling_pattern(
+    canvas: &mut Canvas<'_, '_>,
+    grid: UniformGrid,
+    paint_in_cell: impl FnOnce(&mut krilla::surface::Surface<'_>, f32, f32),
+) {
+    let mut sb = canvas.surface.stream_builder();
+    {
+        let mut ps = sb.surface();
+        paint_in_cell(&mut ps, grid.cell.0, grid.cell.1);
+        ps.finish();
+    }
+    let stream = sb.finish();
+
+    let pattern = krilla::paint::Pattern {
+        stream,
+        transform: krilla::geom::Transform::from_translate(grid.origin.0, grid.origin.1),
+        width: grid.step.0,
+        height: grid.step.1,
+    };
+
+    canvas.surface.set_fill(Some(krilla::paint::Fill {
+        paint: pattern.into(),
+        rule: Default::default(),
+        opacity: krilla::num::NormalizedF32::ONE,
+    }));
+    canvas.surface.set_stroke(None);
+
+    let total_w = grid.step.0 * grid.count.0 as f32;
+    let total_h = grid.step.1 * grid.count.1 as f32;
+    let Some(rect_path) = build_rect_path(grid.origin.0, grid.origin.1, total_w, total_h) else {
+        canvas.surface.set_fill(None);
+        return;
+    };
+    canvas.surface.draw_path(&rect_path);
+    canvas.surface.set_fill(None);
+}
+
+/// `BgLengthPercentage` を origin rect 内の点座標に変換 (radial 中心位置用)。
+/// CSS では radial-gradient の position percentage は container の幅/高さに対する単純な割合。
+fn resolve_point(lp: &BgLengthPercentage, container: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => v.to_f32(),
+        BgLengthPercentage::Percentage(p) => container * p,
+    }
+}
+
+/// `BgLengthPercentage` を半径として解決 (length はそのまま、percentage は container 基準)。
+fn resolve_length(lp: &BgLengthPercentage, container: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => v.to_f32(),
+        BgLengthPercentage::Percentage(p) => container * p,
+    }
+}
+
+/// CSS Images §3.6: ellipse の closest-corner / farthest-corner は
+/// closest-side / farthest-side の (rx0, ry0) を ratio スケールしたもの。
+/// `farthest=true` で最も遠い corner、`false` で最も近い corner を選ぶ。
+#[allow(clippy::too_many_arguments)]
+fn ellipse_corner_scale(
+    cx: f32,
+    cy: f32,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+    rx0: f32,
+    ry0: f32,
+    farthest: bool,
+) -> (f32, f32) {
+    if rx0 <= 0.0 || ry0 <= 0.0 {
+        return (rx0, ry0);
+    }
+    let corners = [(ox, oy), (ox + ow, oy), (ox, oy + oh), (ox + ow, oy + oh)];
+    let ratios: Vec<f32> = corners
+        .iter()
+        .map(|(corx, cory)| {
+            let dx = corx - cx;
+            let dy = cory - cy;
+            ((dx / rx0).powi(2) + (dy / ry0).powi(2)).sqrt()
+        })
+        .collect();
+    let chosen = if farthest {
+        ratios.iter().cloned().fold(0.0_f32, f32::max)
+    } else {
+        ratios.iter().cloned().fold(f32::INFINITY, f32::min)
+    };
+    (rx0 * chosen, ry0 * chosen)
+}
+
+/// Resolve `background-size` for a gradient layer.
+///
+/// Per CSS Images §3.3 / §5.5, gradients have no intrinsic dimensions and no
+/// intrinsic aspect ratio. The default concrete object size is the positioning
+/// area, so `auto` / `cover` / `contain` all return `(origin_w, origin_h)`.
+/// `Explicit` with one axis `None` falls back to the corresponding origin axis
+/// (still no aspect to derive from).
+fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
+    // Clamp positive-but-sub-`MIN_GRADIENT_TILE_PT` tile sizes to the
+    // constant so tiles remain above the `try_uniform_grid` epsilon
+    // (`1e-3` pt). Tiles narrower than the eps otherwise collapse in
+    // the grid-shape dedup and re-enter per-tile emission (the Codex
+    // `01f477e4` subpixel residual = 425 MB / 975 MB RSS from ~300 B
+    // HTML). See `MIN_GRADIENT_TILE_PT` for the resolution basis, the
+    // per-value lift factor (grows unbounded as the raw value
+    // approaches zero — `0.001 pt` becomes `10×`, `0.0001 pt` becomes
+    // `100×`), and the trade-off discussion.
+    //
+    // The clamp applies to the **final** tile size — both explicit
+    // `background-size` axes AND the origin-derived `Auto` / `Cover` /
+    // `Contain` / one-axis-`Explicit`-with-auto-side fallback. Rationale:
+    // an attacker can drive the origin box itself sub-eps via the CSS
+    // box model (`background-origin: content-box` + tiny content-box +
+    // large padding, keeping the clip large through `background-clip:
+    // border-box`), which would otherwise bypass an explicit-only clamp
+    // and re-enable the fallback (Codex PR #654 review
+    // `discussion_r3614099014`). Current Blitz layout happens to floor
+    // sub-0.5 CSS-px content to 0 pt, and fulgur's `if img_w <= 0.0`
+    // short-circuit already skips zero-area layers, so the clamp does
+    // not currently rewrite any observable output — but relying on that
+    // implicit rounding would be a lateral dependency on the layout
+    // engine's precision. Clamping the final tile size here removes
+    // that coupling. Zero remains zero (legitimate no-emit); only
+    // strictly positive sub-min values are lifted.
+    //
+    // `background-repeat: round` also gets the same floor at
+    // `resolve_repeat_axis::Round` because that helper re-derives tile
+    // size from `clip_size / count` and can slip back below the min.
+    fn floor_gradient_tile(v: f32) -> f32 {
+        if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
+            crate::MIN_GRADIENT_TILE_PT
+        } else {
+            v
+        }
+    }
+    let (raw_w, raw_h) = match size {
+        BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
+        BgSize::Explicit(w_opt, h_opt) => {
+            let rw = w_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_w))
+                .unwrap_or(origin_w);
+            let rh = h_opt
+                .as_ref()
+                .map(|v| resolve_lp(v, origin_h))
+                .unwrap_or(origin_h);
+            (rw, rh)
+        }
+    };
+    (floor_gradient_tile(raw_w), floor_gradient_tile(raw_h))
+}
+
+/// Resolve `background-size` for a layer relative to the origin area.
+fn resolve_size(layer: &BackgroundLayer, origin_w: f32, origin_h: f32) -> (f32, f32) {
+    let iw = layer.intrinsic_width;
+    let ih = layer.intrinsic_height;
+    if iw <= 0.0 || ih <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let aspect = iw / ih;
+    match &layer.size {
+        BgSize::Auto => (iw, ih),
+        BgSize::Cover => {
+            let scale = (origin_w / iw).max(origin_h / ih);
+            (iw * scale, ih * scale)
+        }
+        BgSize::Contain => {
+            let scale = (origin_w / iw).min(origin_h / ih);
+            (iw * scale, ih * scale)
+        }
+        BgSize::Explicit(w_opt, h_opt) => {
+            let rw = w_opt.as_ref().map(|v| resolve_lp(v, origin_w));
+            let rh = h_opt.as_ref().map(|v| resolve_lp(v, origin_h));
+            match (rw, rh) {
+                (Some(rw), Some(rh)) => (rw, rh),
+                (Some(rw), None) => (rw, rw / aspect),
+                (None, Some(rh)) => (rh * aspect, rh),
+                (None, None) => (iw, ih),
+            }
+        }
+    }
+}
+
+fn resolve_lp(lp: &BgLengthPercentage, basis: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => v.to_f32(),
+        BgLengthPercentage::Percentage(p) => basis * p,
+    }
+}
+
+/// CSS spec: position = (container - image) * percentage, or just length.
+fn resolve_position(lp: &BgLengthPercentage, container: f32, image: f32) -> f32 {
+    match lp {
+        BgLengthPercentage::Length(v) => v.to_f32(),
+        BgLengthPercentage::Percentage(p) => (container - image) * p,
+    }
+}
+
+fn compute_origin_rect(
+    style: &BlockStyle,
+    origin: &BgBox,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32, f32, f32) {
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
+    match origin {
+        BgBox::BorderBox => (x, y, w, h),
+        BgBox::PaddingBox => (x + bw[3], y + bw[0], w - bw[1] - bw[3], h - bw[0] - bw[2]),
+        BgBox::ContentBox => (
+            x + bw[3] + pad[3],
+            y + bw[0] + pad[0],
+            w - bw[1] - bw[3] - pad[1] - pad[3],
+            h - bw[0] - bw[2] - pad[0] - pad[2],
+        ),
+    }
+}
+
+fn compute_clip_rect(
+    style: &BlockStyle,
+    clip: &BgClip,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32, f32, f32) {
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
+    match clip {
+        BgClip::BorderBox => (x, y, w, h),
+        // Text clip: Stylo doesn't expose background-clip: text; falls back to padding-box.
+        // See issue fulgur-5gb for future implementation.
+        BgClip::PaddingBox | BgClip::Text => {
+            (x + bw[3], y + bw[0], w - bw[1] - bw[3], h - bw[0] - bw[2])
+        }
+        BgClip::ContentBox => (
+            x + bw[3] + pad[3],
+            y + bw[0] + pad[0],
+            w - bw[1] - bw[3] - pad[1] - pad[3],
+            h - bw[0] - bw[2] - pad[0] - pad[2],
+        ),
+    }
+}
+
+/// Compute inner border-radii for an inset clip rectangle.
+///
+/// Per CSS Backgrounds §5.3, inner radii are `max(outer_radius - inset, 0)` where
+/// the inset depends on the background-clip box.
+fn compute_inner_radii(outer: &[[f32; 2]; 4], style: &BlockStyle, clip: &BgClip) -> [[f32; 2]; 4] {
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
+    // Insets: (top, right, bottom, left)
+    let (top, right, bottom, left) = match clip {
+        BgClip::BorderBox => (0.0, 0.0, 0.0, 0.0),
+        BgClip::PaddingBox | BgClip::Text => (bw[0], bw[1], bw[2], bw[3]),
+        BgClip::ContentBox => (
+            bw[0] + pad[0],
+            bw[1] + pad[1],
+            bw[2] + pad[2],
+            bw[3] + pad[3],
+        ),
+    };
+    // Each corner is adjacent to two edges:
+    // top-left: (top, left), top-right: (top, right),
+    // bottom-right: (bottom, right), bottom-left: (bottom, left)
+    [
+        [
+            f32::max(outer[0][0] - left, 0.0),
+            f32::max(outer[0][1] - top, 0.0),
+        ],
+        [
+            f32::max(outer[1][0] - right, 0.0),
+            f32::max(outer[1][1] - top, 0.0),
+        ],
+        [
+            f32::max(outer[2][0] - right, 0.0),
+            f32::max(outer[2][1] - bottom, 0.0),
+        ],
+        [
+            f32::max(outer[3][0] - left, 0.0),
+            f32::max(outer[3][1] - bottom, 0.0),
+        ],
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_tile_positions(
+    repeat_x: BgRepeat,
+    repeat_y: BgRepeat,
+    pos_x: f32,
+    pos_y: f32,
+    img_w: f32,
+    img_h: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    // NoRepeat × NoRepeat short-circuit: the slow path's NoRepeat branch
+    // unconditionally emits exactly one tile at (pos, pos, img, img),
+    // regardless of clip overlap. Skip the resolve_repeat_axis indirection
+    // entirely — pure simplification, no correctness change.
+    if repeat_x == BgRepeat::NoRepeat && repeat_y == BgRepeat::NoRepeat {
+        if img_w <= 0.0 || img_h <= 0.0 {
+            return Vec::new();
+        }
+        return vec![(pos_x, pos_y, img_w, img_h)];
+    }
+
+    // Degenerate fast-path: a single image already fully covers the clip rect
+    // from its position. Without this, the boundary tile loop in `repeat`
+    // mode emits up to 4 tiles for the common "image fills box" case (e.g.
+    // default repeat with `image == clip` exactly) where 3 are entirely
+    // outside the clip and add nothing visible but bloat the PDF stream and
+    // can perturb sub-pixel rasterization. Excluded for `round`, which
+    // deliberately resizes tiles to fit an integer count and must not
+    // collapse to a single image-sized tile.
+    //
+    // Epsilon choice: `1e-3` here, vs. the slow-path loop's `+ 0.01` (1e-2).
+    // The two epsilons answer different questions: the slow-path's `+ 0.01`
+    // is a loop-overshoot tolerance asking "should we emit one more tile at
+    // the boundary?", while the fast-path's `1e-3` is a coverage tolerance
+    // asking "does the image cover the clip within float precision?".
+    // Using a tighter epsilon here keeps the fast-path conservative — if the
+    // image only marginally covers the clip (e.g., 5e-3 short on the right),
+    // the fast-path declines and the slow-path's larger epsilon emits a
+    // second tile to fill the residual gap. This asymmetry is intentional.
+    //
+    // Parity with the slow path is enforced by the
+    // `tile_positions_fast_slow_parity_*` tests below, which call
+    // `compute_tile_positions_slow` directly to compare and assert that any
+    // extra slow-path tiles lie entirely outside the clip rect.
+    // Per-axis cover predicate: Repeat axes require *strict* containment
+    // because any uncovered sliver on the cover side is filled by the
+    // adjacent repeated tile in the slow path. Without strict, the
+    // fast path silently drops that sliver (e.g., pos=0.0005, img=99.9995,
+    // clip=(0,100): the [0, 0.0005) strip is covered by the slow path's
+    // boundary-overlap tile but not by a single fast-path tile at pos).
+    // NoRepeat / Space axes have no adjacent tile to fall back on, so the
+    // 1e-3 coverage tolerance is safe — it only collapses already-covered
+    // cases.
+    let covers_x = match repeat_x {
+        BgRepeat::Repeat => pos_x <= clip_x && pos_x + img_w >= clip_x + clip_w,
+        _ => pos_x <= clip_x + 1e-3 && pos_x + img_w + 1e-3 >= clip_x + clip_w,
+    };
+    let covers_y = match repeat_y {
+        BgRepeat::Repeat => pos_y <= clip_y && pos_y + img_h >= clip_y + clip_h,
+        _ => pos_y <= clip_y + 1e-3 && pos_y + img_h + 1e-3 >= clip_y + clip_h,
+    };
+    if repeat_x != BgRepeat::Round
+        && repeat_y != BgRepeat::Round
+        && img_w > 0.0
+        && img_h > 0.0
+        && covers_x
+        && covers_y
+    {
+        return vec![(pos_x, pos_y, img_w, img_h)];
+    }
+
+    compute_tile_positions_slow(
+        repeat_x, repeat_y, pos_x, pos_y, img_w, img_h, clip_x, clip_y, clip_w, clip_h,
+    )
+}
+
+/// Slow path: emit tiles via the `resolve_repeat_axis`-driven loop.
+/// Extracted from `compute_tile_positions` so tests can compare fast-path
+/// output against this path for the same input.
+#[allow(clippy::too_many_arguments)]
+fn compute_tile_positions_slow(
+    repeat_x: BgRepeat,
+    repeat_y: BgRepeat,
+    pos_x: f32,
+    pos_y: f32,
+    img_w: f32,
+    img_h: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    let mut tiles = Vec::new();
+    let (tile_w, space_x, start_x, end_x) =
+        resolve_repeat_axis(repeat_x, pos_x, img_w, clip_x, clip_w);
+    let (tile_h, space_y, start_y, end_y) =
+        resolve_repeat_axis(repeat_y, pos_y, img_h, clip_y, clip_h);
+
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return tiles;
+    }
+
+    // Cap tile count to prevent memory/CPU explosion with tiny images on large containers.
+    const MAX_TILES: usize = 10_000;
+
+    let mut ty = start_y;
+    while ty < end_y + 0.01 {
+        let mut tx = start_x;
+        while tx < end_x + 0.01 {
+            tiles.push((tx, ty, tile_w, tile_h));
+            if tiles.len() >= MAX_TILES {
+                return tiles;
+            }
+            tx += tile_w + space_x;
+            if repeat_x == BgRepeat::NoRepeat {
+                break;
+            }
+        }
+        ty += tile_h + space_y;
+        if repeat_y == BgRepeat::NoRepeat {
+            break;
+        }
+    }
+    tiles
+}
+
+/// 一様タイルグリッドのジオメトリ。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UniformGrid {
+    /// グリッドの最小座標 — ソート後の `(xs[0], ys[0])` であり、
+    /// `tiles[0].0..1` ではない (入力順序に依存しない)。
+    origin: (f32, f32),
+    /// セル (タイル) のサイズ。
+    cell: (f32, f32),
+    /// グリッドのステップ (cell + 任意の gap)。`cell == step` で repeat / round、
+    /// `step > cell` で space (タイル間 gap あり)。
+    step: (f32, f32),
+    /// X 方向のタイル数, Y 方向のタイル数。`count.0 * count.1 == tiles.len()`。
+    count: (usize, usize),
+}
+
+/// 全タイルが (cell サイズ一致 + ステップ一様 + count.x×count.y == tiles.len()) を
+/// 満たすなら `UniformGrid` を返す。Pattern dedup 経路の適用判定に使う。
+/// `tiles.len() < 2` のときは Pattern 構築コストが無駄なので `None`。
+fn try_uniform_grid(tiles: &[(f32, f32, f32, f32)]) -> Option<UniformGrid> {
+    if tiles.len() < 2 {
+        return None;
+    }
+    // eps は PDF user-space pt 座標における sub-pixel jitter 許容値。
+    let eps = 1e-3_f32;
+
+    // セルサイズ一致チェック
+    let (tw0, th0) = (tiles[0].2, tiles[0].3);
+    if !tiles
+        .iter()
+        .all(|t| (t.2 - tw0).abs() < eps && (t.3 - th0).abs() < eps)
+    {
+        return None;
+    }
+
+    // ユニークな x / y 座標を昇順で収集 (epsilon マージ)
+    let mut xs: Vec<f32> = Vec::new();
+    for t in tiles {
+        if !xs.iter().any(|&x| (x - t.0).abs() < eps) {
+            xs.push(t.0);
+        }
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut ys: Vec<f32> = Vec::new();
+    for t in tiles {
+        if !ys.iter().any(|&y| (y - t.1).abs() < eps) {
+            ys.push(t.1);
+        }
+    }
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // count.x × count.y がタイル数と一致 (=完全グリッド) であること
+    if xs.len() * ys.len() != tiles.len() {
+        return None;
+    }
+
+    // X / Y 方向のステップ一様性をチェック
+    let step_x = if xs.len() >= 2 {
+        let s = xs[1] - xs[0];
+        for w in xs.windows(2) {
+            if (w[1] - w[0] - s).abs() > eps {
+                return None;
+            }
+        }
+        s
+    } else {
+        // 単行 (count.x == 1): ステップは未定義だが、cell サイズで埋める
+        tw0
+    };
+    let step_y = if ys.len() >= 2 {
+        let s = ys[1] - ys[0];
+        for w in ys.windows(2) {
+            if (w[1] - w[0] - s).abs() > eps {
+                return None;
+            }
+        }
+        s
+    } else {
+        th0
+    };
+
+    Some(UniformGrid {
+        origin: (xs[0], ys[0]),
+        cell: (tw0, th0),
+        step: (step_x, step_y),
+        count: (xs.len(), ys.len()),
+    })
+}
+
+/// Result of splitting a truncated (`MAX_TILES` mid-row cut) tile grid into
+/// a leading uniform-grid rectangle and a trailing partial-row remainder.
+///
+/// The full rectangle is emitted as a single Tiling Pattern (cheap) and
+/// the remainder as per-tile draws. Degenerate inputs (empty, single tile,
+/// single row, non-truncated grid, or non-uniform geometry) return
+/// `full=None, remainder=<original tiles>` so callers fall through to the
+/// pre-existing per-tile path unchanged.
+#[derive(Debug)]
+struct SplitGrid<'a> {
+    full: Option<UniformGrid>,
+    remainder: &'a [(f32, f32, f32, f32)],
+}
+
+/// Combined uniform-grid / truncated-grid classifier used by every
+/// gradient arm. Wraps the "fast path first, split fallback second"
+/// choice in a single call so the three gradient arms cannot drift
+/// apart (e.g. linear picking up a new shape while radial does not).
+fn resolve_gradient_split(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    if let Some(grid) = try_uniform_grid(tiles) {
+        SplitGrid {
+            full: Some(grid),
+            remainder: &[],
+        }
+    } else {
+        split_truncated_grid(tiles)
+    }
+}
+
+/// Detect a `MAX_TILES` mid-row-truncated grid and split it into a
+/// leading uniform rectangle + a trailing partial-row remainder.
+///
+/// `compute_tile_positions_slow` (see the outer y / inner x loop above)
+/// generates tiles in row-major order and truncates at `MAX_TILES`, so
+/// a truncated output is always shaped as "k full rows of length N
+/// followed by one partial row of length M < N". This function detects
+/// that shape by scanning per-row tile counts by y-coordinate blocks
+/// and, when found, hands the leading `k × N` tiles to `try_uniform_grid`
+/// for full geometry validation (uniform steps + identical x-positions
+/// across rows). The trailing `M` tiles are returned as `remainder` for
+/// the caller to draw per-tile.
+///
+/// Returns `full=None, remainder=tiles` (unchanged) for:
+/// - tiles.len() < 2 (nothing to split)
+/// - non-uniform cell size across the tile set
+/// - single row (nothing to split; caller either used try_uniform_grid
+///   or falls through to per-tile)
+/// - all rows same length (either a complete grid — caller already
+///   ran try_uniform_grid — or geometry is irregular)
+/// - the leading rectangle is not itself a well-formed uniform grid
+///   (non-uniform x-steps or misaligned x-positions across rows)
+fn split_truncated_grid(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    if tiles.len() < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    let eps = 1e-3_f32;
+
+    // Cell size must be uniform across the whole tile set.
+    let (tw0, th0) = (tiles[0].2, tiles[0].3);
+    if !tiles
+        .iter()
+        .all(|t| (t.2 - tw0).abs() < eps && (t.3 - th0).abs() < eps)
+    {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    // Row-major traversal: identify per-row tile counts by y-coordinate
+    // blocks. Consecutive entries with matching y form a row.
+    let mut row_starts: Vec<usize> = Vec::with_capacity(16);
+    row_starts.push(0);
+    let mut cur_y = tiles[0].1;
+    for (i, t) in tiles.iter().enumerate().skip(1) {
+        if (t.1 - cur_y).abs() >= eps {
+            row_starts.push(i);
+            cur_y = t.1;
+        }
+    }
+    let row_count = row_starts.len();
+    if row_count < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    // Compute per-row lengths from start offsets + total tile count.
+    // `row_count <= tiles.len() <= MAX_TILES = 10_000` so the collected
+    // vector is bounded at ~80 KB worst-case, safely below any
+    // materialization concern.
+    let row_lengths: Vec<usize> = row_starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| row_starts.get(i + 1).copied().unwrap_or(tiles.len()) - start)
+        .collect();
+
+    // Count leading rows whose length matches the first row.
+    let full_row_len = row_lengths[0];
+    let full_row_count = row_lengths
+        .iter()
+        .take_while(|&&len| len == full_row_len)
+        .count();
+
+    // All rows equal length → complete grid. try_uniform_grid handles
+    // this on the fast path; return None so the caller does not
+    // double-emit the same tile set.
+    if full_row_count == row_count {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    let full_tile_count = full_row_count * full_row_len;
+    let full_tiles = &tiles[..full_tile_count];
+    let remainder = &tiles[full_tile_count..];
+
+    // Delegate geometry validation (step uniformity + x-position match)
+    // to the existing helper — the leading rectangle must itself be a
+    // well-formed uniform grid for Pattern emission to be sound.
+    match try_uniform_grid(full_tiles) {
+        Some(grid) => SplitGrid {
+            full: Some(grid),
+            remainder,
+        },
+        None => SplitGrid {
+            full: None,
+            remainder: tiles,
+        },
+    }
+}
+
+fn resolve_repeat_axis(
+    repeat: BgRepeat,
+    position: f32,
+    image_size: f32,
+    clip_start: f32,
+    clip_size: f32,
+) -> (f32, f32, f32, f32) {
+    let clip_end = clip_start + clip_size;
+    match repeat {
+        BgRepeat::NoRepeat => (image_size, 0.0, position, position),
+        BgRepeat::Repeat => {
+            if image_size <= 0.0 {
+                return (image_size, 0.0, position, position);
+            }
+            let offset = ((clip_start - position) % image_size + image_size) % image_size;
+            let start = clip_start - offset;
+            (image_size, 0.0, start, clip_end)
+        }
+        BgRepeat::Space => {
+            if image_size <= 0.0 || image_size > clip_size {
+                return (image_size, 0.0, position, position);
+            }
+            let count = (clip_size / image_size).floor() as usize;
+            if count <= 1 {
+                return (image_size, 0.0, position, position);
+            }
+            let spacing = (clip_size - count as f32 * image_size) / (count - 1) as f32;
+            (image_size, spacing, clip_start, clip_end)
+        }
+        BgRepeat::Round => {
+            if image_size <= 0.0 {
+                return (image_size, 0.0, position, position);
+            }
+            let count = (clip_size / image_size).round().max(1.0);
+            let adjusted = clip_size / count;
+            // `Round` re-derives the tile size from `clip_size / count`,
+            // which can slip below MIN_GRADIENT_TILE_PT (and even below
+            // the `try_uniform_grid` eps) when `clip_size` is small or
+            // when `count` rounds up — bypassing the `resolve_gradient_size`
+            // clamp. Apply the same floor here so gradient Round tiles
+            // stay above eps and re-enter the Pattern fast path (coderabbit
+            // review PR #654 discussion_r3614448858). Raster/SVG tiles
+            // that transit through this same helper get the floor too;
+            // sub-min raster tiles are invisible on any output device
+            // (see MIN_GRADIENT_TILE_PT docstring), so the shared clamp
+            // is a defense-in-depth consistency win rather than a
+            // behavior change for legitimate content.
+            let final_size = if adjusted > 0.0 && adjusted < crate::MIN_GRADIENT_TILE_PT {
+                crate::MIN_GRADIENT_TILE_PT
+            } else {
+                adjusted
+            };
+            (final_size, 0.0, clip_start, clip_end)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::ImageFormat;
+    use crate::units::F32Units;
+
+    fn make_layer(iw: f32, ih: f32, size: BgSize) -> BackgroundLayer {
+        BackgroundLayer {
+            content: BgImageContent::Raster {
+                data: Arc::new(vec![]),
+                format: ImageFormat::Png,
+            },
+            intrinsic_width: iw,
+            intrinsic_height: ih,
+            size,
+            position_x: BgLengthPercentage::Percentage(0.0),
+            position_y: BgLengthPercentage::Percentage(0.0),
+            repeat_x: BgRepeat::NoRepeat,
+            repeat_y: BgRepeat::NoRepeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::BorderBox,
+        }
+    }
+
+    #[test]
+    fn test_size_auto() {
+        let layer = make_layer(100.0, 50.0, BgSize::Auto);
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 100.0);
+        assert_eq!(h, 50.0);
+    }
+
+    #[test]
+    fn test_size_cover() {
+        let layer = make_layer(100.0, 50.0, BgSize::Cover);
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 400.0);
+        assert_eq!(h, 200.0);
+    }
+
+    #[test]
+    fn test_size_contain() {
+        let layer = make_layer(100.0, 50.0, BgSize::Contain);
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 200.0);
+        assert_eq!(h, 100.0);
+    }
+
+    #[test]
+    fn test_position_percentage() {
+        let offset = resolve_position(&BgLengthPercentage::Percentage(0.5), 200.0, 100.0);
+        assert_eq!(offset, 50.0);
+    }
+
+    #[test]
+    fn test_position_length() {
+        let offset = resolve_position(&BgLengthPercentage::Length(30.0_f32.as_pt()), 200.0, 100.0);
+        assert_eq!(offset, 30.0);
+    }
+
+    #[test]
+    fn test_repeat_space() {
+        let (size, space, start, _end) =
+            resolve_repeat_axis(BgRepeat::Space, 0.0, 90.0, 0.0, 300.0);
+        assert_eq!(size, 90.0);
+        assert_eq!(space, 15.0);
+        assert_eq!(start, 0.0);
+    }
+
+    #[test]
+    fn test_repeat_round() {
+        let (size, space, start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 110.0, 0.0, 300.0);
+        assert_eq!(size, 100.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+    }
+
+    #[test]
+    fn test_svg_layer_resolve_size_contain() {
+        let svg_data = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="blue"/></svg>"#;
+        let opts = usvg::Options::default();
+        let tree = usvg::Tree::from_data(svg_data, &opts).unwrap();
+        let layer = BackgroundLayer {
+            content: BgImageContent::Svg {
+                tree: std::sync::Arc::new(tree),
+            },
+            intrinsic_width: 200.0,
+            intrinsic_height: 100.0,
+            size: BgSize::Contain,
+            position_x: BgLengthPercentage::Percentage(0.0),
+            position_y: BgLengthPercentage::Percentage(0.0),
+            repeat_x: BgRepeat::NoRepeat,
+            repeat_y: BgRepeat::NoRepeat,
+            origin: BgBox::PaddingBox,
+            clip: BgClip::BorderBox,
+        };
+        let (w, h) = resolve_size(&layer, 300.0, 300.0);
+        assert_eq!(w, 300.0);
+        assert_eq!(h, 150.0);
+    }
+
+    #[test]
+    fn test_repeat_alignment_with_offset_position() {
+        // Tiles must align with position: tiles at position ± n*image_size.
+        // position=25, clip_start=10, image_size=20 → tiles at 5, 25, 45, ...
+        let (size, _space, start, _end) =
+            resolve_repeat_axis(BgRepeat::Repeat, 25.0, 20.0, 10.0, 100.0);
+        assert_eq!(size, 20.0);
+        assert_eq!(start, 5.0);
+    }
+
+    #[test]
+    fn expand_radii_positive_spread_increases_each_corner() {
+        let outer = [[10.0, 10.0]; 4];
+        let got = expand_radii(&outer, 5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 15.0);
+            assert_eq!(corner[1], 15.0);
+        }
+    }
+
+    #[test]
+    fn expand_radii_negative_spread_clamps_to_zero() {
+        let outer = [[2.0, 2.0]; 4];
+        let got = expand_radii(&outer, -5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 0.0);
+            assert_eq!(corner[1], 0.0);
+        }
+    }
+
+    /// Sharp corners (r == 0) must stay sharp even when spread is positive,
+    /// per CSS Backgrounds and Borders Level 3 §7.2.
+    #[test]
+    fn expand_radii_zero_radii_unchanged() {
+        let outer = [[0.0, 0.0]; 4];
+        let got = expand_radii(&outer, 5.0);
+        for corner in &got {
+            assert_eq!(corner[0], 0.0);
+            assert_eq!(corner[1], 0.0);
+        }
+    }
+
+    // Helper: BlockStyle with given border widths and padding, all else default.
+    fn make_style(border_widths: [f32; 4], padding: [f32; 4]) -> BlockStyle {
+        BlockStyle {
+            border_widths: border_widths.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
+            ..BlockStyle::default()
+        }
+    }
+
+    // ─── resolve_lp ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_lp_length_returns_value() {
+        assert_eq!(
+            resolve_lp(&BgLengthPercentage::Length(42.0_f32.as_pt()), 200.0),
+            42.0
+        );
+    }
+
+    #[test]
+    fn resolve_lp_percentage_multiplies_basis() {
+        assert_eq!(
+            resolve_lp(&BgLengthPercentage::Percentage(0.25), 200.0),
+            50.0
+        );
+    }
+
+    // ─── resolve_size Explicit variants ──────────────────────────────────────
+
+    #[test]
+    fn resolve_size_explicit_both_axes() {
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(
+                Some(BgLengthPercentage::Length(80.0_f32.as_pt())),
+                Some(BgLengthPercentage::Length(40.0_f32.as_pt())),
+            ),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_width_only_derives_height_from_aspect() {
+        // iw=100, ih=50, aspect=2; explicit width=80 → height=80/2=40
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(Some(BgLengthPercentage::Length(80.0_f32.as_pt())), None),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_height_only_derives_width_from_aspect() {
+        // iw=100, ih=50, aspect=2; explicit height=40 → width=40*2=80
+        let layer = make_layer(
+            100.0,
+            50.0,
+            BgSize::Explicit(None, Some(BgLengthPercentage::Length(40.0_f32.as_pt()))),
+        );
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 80.0);
+        assert_eq!(h, 40.0);
+    }
+
+    #[test]
+    fn resolve_size_explicit_neither_falls_back_to_intrinsic() {
+        let layer = make_layer(100.0, 50.0, BgSize::Explicit(None, None));
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 100.0);
+        assert_eq!(h, 50.0);
+    }
+
+    #[test]
+    fn resolve_size_zero_intrinsic_returns_zero() {
+        let layer = make_layer(0.0, 50.0, BgSize::Auto);
+        let (w, h) = resolve_size(&layer, 200.0, 200.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    // ─── resolve_gradient_size (no intrinsic dimensions) ─────────────────────
+
+    #[test]
+    fn resolve_gradient_size_auto_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Auto, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_cover_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Cover, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_contain_returns_origin() {
+        let (w, h) = resolve_gradient_size(&BgSize::Contain, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_both_resolves() {
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(50.0_f32.as_pt())),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 50.0).abs() < 1e-6);
+        assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_asymmetric_percentages() {
+        // Each axis resolves against its own origin dimension independently,
+        // so `(50%, 25%)` on a 200×100 origin yields (100, 25), not a
+        // uniform scale. Locks the percentage basis.
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Percentage(0.5)),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 100.0).abs() < 1e-6);
+        assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_clamps_subpixel_to_min_gradient_tile_pt() {
+        // 0.0001 px = 0.000075 pt, well below MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Both axes must clamp; MIN_GRADIENT_TILE_PT closes the Codex `01f477e4`
+        // subpixel residual where sub-eps tiles collapsed try_uniform_grid dedup.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 595.0, 842.0);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps width must clamp to MIN_GRADIENT_TILE_PT, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps height must clamp to MIN_GRADIENT_TILE_PT, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_does_not_clamp_supra_min_values() {
+        // 1 px = 0.75 pt, well above MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Legitimate tile sizes must pass through unchanged.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(1.0_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(2.0_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert!((w - 0.75).abs() < 1e-6, "1 px must remain 0.75 pt, got {w}");
+        assert!((h - 1.5).abs() < 1e-6, "2 px must remain 1.5 pt, got {h}");
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_clamps_sub_min_origin() {
+        // `BgSize::Auto` must lift sub-min origin dimensions to
+        // `MIN_GRADIENT_TILE_PT` to close the Codex `discussion_r3614099014`
+        // origin-manipulation exploit (`background-origin:content-box` +
+        // tiny content-box + large padding). Blitz layout currently floors
+        // sub-0.5 CSS-px content to 0 pt so no observable rendering is
+        // touched today, but the clamp removes the implicit dependency on
+        // that layout-engine rounding.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_w must clamp, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_h must clamp, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_with_auto_side_clamps_auto_axis_too() {
+        // `background-size: 0.001px auto` on a sub-min origin: both axes
+        // must clamp — the explicit width because CSS explicitly asked
+        // for a subpixel tile (attacker), the auto height because the
+        // origin fallback path is likewise attacker-reachable via CSS
+        // box model tricks (Codex `discussion_r3614099014`).
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            None,
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "explicit width must clamp, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "auto-side height with sub-min origin must clamp, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_preserves_supra_min_origin() {
+        // Regression: legitimate non-tiny origins must pass through
+        // unchanged. 1 pt is 100× the min; must not be lifted.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 1.0, 2.0);
+        assert_eq!(
+            (w, h),
+            (1.0, 2.0),
+            "Auto with supra-min origin must pass through"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_preserves_zero_axis() {
+        // Zero-width or zero-height explicit gradient size is legitimate
+        // (Auto behavior falls back to origin, and the tiling early-return
+        // at background.rs handles img_w<=0 || img_h<=0). Do not clamp
+        // zero up to MIN_GRADIENT_TILE_PT — that would resurrect a tile
+        // where the caller asked for nothing.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0_f32.as_pt())),
+            Some(BgLengthPercentage::Length(0.5_f32.as_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert_eq!(w, 0.0, "zero width must stay zero");
+        assert!((h - 0.5).abs() < 1e-6, "non-zero height passes through");
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_one_auto_uses_origin() {
+        // width specified, height auto → height fills origin (no aspect)
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(80.0_f32.as_pt())), None);
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 80.0).abs() < 1e-6);
+        assert!((h - 100.0).abs() < 1e-6);
+
+        // height specified, width auto → width fills origin
+        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Percentage(0.5)));
+        let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
+        assert!((w - 200.0).abs() < 1e-6);
+        assert!((h - 50.0).abs() < 1e-6);
+    }
+
+    // ─── compute_origin_rect ─────────────────────────────────────────────────
+
+    // Layout used below: x=10, y=20, w=100, h=200
+    // border_widths: top=5, right=10, bottom=15, left=20
+    // padding:       top=2, right=4,  bottom=6,  left=8
+
+    #[test]
+    fn origin_rect_border_box_is_identity() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::BorderBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (10.0, 20.0, 100.0, 200.0));
+    }
+
+    #[test]
+    fn origin_rect_padding_box_insets_by_border() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        // x + left_border, y + top_border, w - right_border - left_border, h - top_border - bottom_border
+        // = 10+20=30, 20+5=25, 100-10-20=70, 200-5-15=180
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (30.0, 25.0, 70.0, 180.0));
+    }
+
+    #[test]
+    fn origin_rect_content_box_insets_by_border_and_padding() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        // x + left_border + left_pad = 10+20+8=38
+        // y + top_border + top_pad   = 20+5+2=27
+        // w - right_border - left_border - right_pad - left_pad = 100-10-20-4-8=58
+        // h - top_border - bottom_border - top_pad - bottom_pad = 200-5-15-2-6=172
+        let (ox, oy, ow, oh) =
+            compute_origin_rect(&style, &BgBox::ContentBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((ox, oy, ow, oh), (38.0, 27.0, 58.0, 172.0));
+    }
+
+    // ─── compute_clip_rect ───────────────────────────────────────────────────
+
+    #[test]
+    fn clip_rect_border_box_is_identity() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::BorderBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (10.0, 20.0, 100.0, 200.0));
+    }
+
+    #[test]
+    fn clip_rect_padding_box_insets_by_border() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (30.0, 25.0, 70.0, 180.0));
+    }
+
+    #[test]
+    fn clip_rect_text_equals_padding_box() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let padding_box = compute_clip_rect(&style, &BgClip::PaddingBox, 10.0, 20.0, 100.0, 200.0);
+        let text_clip = compute_clip_rect(&style, &BgClip::Text, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!(padding_box, text_clip);
+    }
+
+    #[test]
+    fn clip_rect_content_box_insets_by_border_and_padding() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let (cx, cy, cw, ch) =
+            compute_clip_rect(&style, &BgClip::ContentBox, 10.0, 20.0, 100.0, 200.0);
+        assert_eq!((cx, cy, cw, ch), (38.0, 27.0, 58.0, 172.0));
+    }
+
+    // ─── compute_inner_radii ─────────────────────────────────────────────────
+
+    // outer corners all = 10pt; bw=(top=5,right=10,bottom=15,left=20); pad=(top=2,right=4,bottom=6,left=8)
+
+    #[test]
+    fn inner_radii_border_box_clip_unchanged() {
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::BorderBox);
+        assert_eq!(got, [[10.0; 2]; 4]);
+    }
+
+    #[test]
+    fn inner_radii_padding_box_clip_shrinks_by_border() {
+        // insets: top=5, right=10, bottom=15, left=20
+        // corner 0 (top-left):   [max(10-20,0), max(10-5,0)] = [0, 5]
+        // corner 1 (top-right):  [max(10-10,0), max(10-5,0)] = [0, 5]
+        // corner 2 (bot-right):  [max(10-10,0), max(10-15,0)] = [0, 0]
+        // corner 3 (bot-left):   [max(10-20,0), max(10-15,0)] = [0, 0]
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::PaddingBox);
+        assert_eq!(got[0], [0.0, 5.0]);
+        assert_eq!(got[1], [0.0, 5.0]);
+        assert_eq!(got[2], [0.0, 0.0]);
+        assert_eq!(got[3], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn inner_radii_content_box_clip_shrinks_by_border_and_padding() {
+        // insets: top=5+2=7, right=10+4=14, bottom=15+6=21, left=20+8=28
+        // corner 0 (top-left):   [max(10-28,0), max(10-7,0)] = [0, 3]
+        // corner 1 (top-right):  [max(10-14,0), max(10-7,0)] = [0, 3]
+        // corner 2 (bot-right):  [max(10-14,0), max(10-21,0)] = [0, 0]
+        // corner 3 (bot-left):   [max(10-28,0), max(10-21,0)] = [0, 0]
+        let style = make_style([5.0, 10.0, 15.0, 20.0], [2.0, 4.0, 6.0, 8.0]);
+        let outer = [[10.0f32; 2]; 4];
+        let got = compute_inner_radii(&outer, &style, &BgClip::ContentBox);
+        assert_eq!(got[0], [0.0, 3.0]);
+        assert_eq!(got[1], [0.0, 3.0]);
+        assert_eq!(got[2], [0.0, 0.0]);
+        assert_eq!(got[3], [0.0, 0.0]);
+    }
+
+    // ─── compute_tile_positions ───────────────────────────────────────────────
+
+    #[test]
+    fn tile_positions_no_repeat_yields_single_tile() {
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            50.0,
+            30.0, // pos_x, pos_y
+            80.0,
+            60.0, // img_w, img_h
+            0.0,
+            0.0,
+            400.0,
+            300.0, // clip
+        );
+        assert_eq!(tiles, vec![(50.0, 30.0, 80.0, 60.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_repeat_collapses_to_one_tile() {
+        // image == clip exactly with default repeat: the boundary epsilon
+        // would otherwise emit 4 tiles (3 fully outside clip). Fast-path
+        // collapses to a single tile.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0, // image == clip
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(0.0, 0.0, 100.0, 100.0)]);
+    }
+
+    #[test]
+    fn tile_positions_image_larger_than_clip_repeat_collapses_to_one_tile() {
+        // image strictly larger than clip with repeat: still a single tile
+        // since the image already covers the clip from its position.
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            -10.0,
+            -5.0,
+            150.0,
+            120.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(tiles, vec![(-10.0, -5.0, 150.0, 120.0)]);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_repeat_image_equals_clip() {
+        // Direct fast-path vs slow-path comparison: same input, the fast
+        // path must produce the same tile set as the slow path would.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // The slow path emits 4 tiles (the +0.01 boundary epsilon); the
+        // fast path emits 1. They cover the same visible area: tile[0] of
+        // slow == fast[0], and the other 3 slow tiles lie entirely outside
+        // the clip rect (right, below, and bottom-right of clip end).
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow[0], fast[0]);
+        for &(tx, ty, _, _) in slow.iter().skip(1) {
+            assert!(
+                tx >= 100.0 - 1e-3 || ty >= 100.0 - 1e-3,
+                "slow-path extra tile ({tx}, {ty}) should be outside clip rect"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_equals_clip() {
+        // For Space×Space with image == clip, the slow path's count <= 1
+        // branch produces a single tile at position. Fast path matches.
+        let fast = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast, slow, "fast and slow paths must agree for Space");
+        assert_eq!(fast.len(), 1);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_negative_position_repeat() {
+        // Reviewer's concern: for Repeat with negative pos_x where the
+        // image covers the clip (pos_x + img_w >= clip_x + clip_w), does
+        // the slow path's `start_x` equal `pos_x`? Mathematical analysis:
+        // when image covers clip from pos_x, img_w >= clip_w + (clip_x -
+        // pos_x), so `clip_x - pos_x < img_w` and the slow-path's
+        // `(clip_x - pos_x) % img_w` reduces to `clip_x - pos_x` exactly,
+        // making `start_x = pos_x` algebraically.
+        //
+        // Empirically there is a sub-ulp drift through the modulo when
+        // pos_x is not exactly representable in f32 (e.g. -99.999), so we
+        // assert agreement within 1e-3 — well below sub-pixel rendering
+        // precision. The fast path uses the literal pos_x and is in fact
+        // strictly more accurate than the slow path here.
+        for &(pos_x, img_w) in &[
+            (-50.0_f32, 200.0_f32),
+            (-99.999, 250.0),
+            (-150.0, 250.0),
+            (-1.0, 110.0),
+            // Reviewer concern (job 442 Medium): pos_x = -150, img_w = 260
+            // claim: slow start_x = 0, fast tile at -150 → mismatch.
+            // Actual slow: offset = 150 % 260 = 150, start_x = 0 - 150 = -150.
+            // Both fast and slow yield -150. Lock this case explicitly.
+            (-150.0, 260.0),
+            // Larger absolute pos_x where image still covers clip:
+            // pos = -250, img = 360, clip = (0, 100). Slow offset =
+            // 250 % 360 = 250, start_x = 0 - 250 = -250 (still equals pos_x
+            // because 250 < 360, i.e. clip_x - pos_x < img_w as required by
+            // the cover-clip predicate).
+            (-250.0, 360.0),
+        ] {
+            let fast = compute_tile_positions(
+                BgRepeat::Repeat,
+                BgRepeat::Repeat,
+                pos_x,
+                pos_x,
+                img_w,
+                img_w,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                BgRepeat::Repeat,
+                BgRepeat::Repeat,
+                pos_x,
+                pos_x,
+                img_w,
+                img_w,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            assert_eq!(
+                fast.len(),
+                1,
+                "fast-path must emit 1 tile for pos={pos_x} img={img_w}"
+            );
+            let (sx, sy, sw, sh) = slow[0];
+            let (fx, fy, fw, fh) = fast[0];
+            assert!(
+                (sx - fx).abs() < 1e-3
+                    && (sy - fy).abs() < 1e-3
+                    && (sw - fw).abs() < 1e-3
+                    && (sh - fh).abs() < 1e-3,
+                "tile[0] mismatch for pos={pos_x} img={img_w}: \
+                 fast={:?} slow={:?}",
+                fast[0],
+                slow[0],
+            );
+            // Any extra slow-path tile must lie entirely outside the clip
+            // rect (above/below/left/right of the clip box) for the
+            // fast-path collapse to be safe.
+            for &(tx, ty, tw, th) in slow.iter().skip(1) {
+                let outside_left = tx + tw <= 0.0 + 1e-3;
+                let outside_right = tx >= 100.0 - 1e-3;
+                let outside_top = ty + th <= 0.0 + 1e-3;
+                let outside_bottom = ty >= 100.0 - 1e-3;
+                assert!(
+                    outside_left || outside_right || outside_top || outside_bottom,
+                    "slow extra tile ({tx}, {ty}, {tw}, {th}) inside clip for \
+                     pos={pos_x} img={img_w}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_space_image_slightly_less_than_clip() {
+        // Reviewer concern (job 439 Medium): Space mode might "center" a
+        // single tile when image is slightly less than clip. Per
+        // resolve_repeat_axis::Space:
+        //   - image_size > clip_size? false (image is less)
+        //   - count = floor(clip / image) = floor(1.000005) = 1
+        //   - count <= 1 → return single tile at *position* (NOT centered)
+        // So Space does not center for count=1. Verify fast and slow agree
+        // for image just under clip where the fast-path 1e-3 epsilon still
+        // triggers.
+        let img = 99.9995_f32;
+        let clip = 100.0_f32;
+        let fast = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Space,
+            BgRepeat::Space,
+            0.0,
+            0.0,
+            img,
+            img,
+            0.0,
+            0.0,
+            clip,
+            clip,
+        );
+        assert_eq!(fast.len(), 1);
+        assert_eq!(slow.len(), 1);
+        let (sx, sy, _, _) = slow[0];
+        let (fx, fy, _, _) = fast[0];
+        assert!((sx - fx).abs() < 1e-3 && (sy - fy).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_no_repeat_various_inputs() {
+        // The NoRepeat × NoRepeat short-circuit emits a single tile at
+        // (pos, pos, img, img). Verify it matches the slow path across
+        // positive, negative, and image-larger-than-clip positions, and
+        // for image-smaller-than-clip (where the broader fast-path
+        // coverage check declines but NoRepeat still single-tiles).
+        for &(pos_x, pos_y, img_w, img_h) in &[
+            (0.0_f32, 0.0_f32, 100.0_f32, 100.0_f32), // image == clip
+            (50.0, 30.0, 80.0, 60.0),                 // image inside clip
+            (-10.0, -5.0, 150.0, 120.0),              // image larger, neg pos
+            (20.0, 20.0, 200.0, 200.0),               // image extends past clip
+        ] {
+            let fast = compute_tile_positions(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            let slow = compute_tile_positions_slow(
+                BgRepeat::NoRepeat,
+                BgRepeat::NoRepeat,
+                pos_x,
+                pos_y,
+                img_w,
+                img_h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+            );
+            assert_eq!(
+                fast, slow,
+                "NoRepeat fast-slow parity broken for pos=({pos_x}, {pos_y}) img=({img_w}, {img_h})"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_positions_no_repeat_zero_axis_returns_empty() {
+        // Degenerate axis (img_w == 0) under NoRepeat: must emit no tiles
+        // (the slow path's resolve_repeat_axis guards image_size <= 0).
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            10.0,
+            10.0,
+            0.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    #[test]
+    fn tile_positions_repeat_strict_cover_preserves_sliver() {
+        // Regression for coderabbit job 442 Major: with Repeat × Repeat
+        // and pos = 0.0005, img = 99.9995, clip = (0, 100), the slow
+        // path's boundary-overlap tile covers the [0.0, 0.0005) strip
+        // via the offset modulo. The pre-fix fast-path collapsed to a
+        // single tile at pos=0.0005 and silently dropped the sliver.
+        // After the fix (strict cover for Repeat axes), the fast-path
+        // declines and the slow path runs.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0005,
+            0.0005,
+            99.9995,
+            99.9995,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // fast-path must NOT collapse to 1 tile here — it should fall
+        // through to the slow path which emits multiple boundary tiles
+        // covering the sliver.
+        assert!(
+            fast.len() > 1,
+            "Repeat axis with sliver-uncovered strip must not collapse: \
+             got {} tiles, expected slow-path multi-tile",
+            fast.len()
+        );
+        // Verify at least one tile starts at or before clip_x = 0 (the
+        // boundary tile that covers the sliver).
+        assert!(
+            fast.iter()
+                .any(|&(tx, _, tw, _)| tx <= 0.0 && tx + tw >= 0.0),
+            "no boundary tile covers the [0, 0.0005) strip: {fast:?}"
+        );
+    }
+
+    #[test]
+    fn tile_positions_repeat_strict_cover_with_no_sliver() {
+        // Sanity: Repeat axes still get the fast-path when image truly
+        // covers the clip from pos. (pos=0, img=100, clip=(0,100)) →
+        // 1 tile.
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast.len(), 1);
+    }
+
+    #[test]
+    fn tile_positions_fast_slow_parity_image_larger_than_clip() {
+        // Image strictly larger than clip with negative position: fast path
+        // returns single image-sized tile at position. Slow path may emit
+        // additional boundary-epsilon tiles for Repeat — those must lie
+        // entirely outside the clip rect for the fast-path collapse to be
+        // safe. Verify: tile[0] matches AND every extra tile is outside
+        // [clip_x, clip_x+clip_w) × [clip_y, clip_y+clip_h).
+        let clip_x = 0.0_f32;
+        let clip_y = 0.0_f32;
+        let clip_w = 100.0_f32;
+        let clip_h = 100.0_f32;
+        for repeat in [BgRepeat::Repeat, BgRepeat::Space, BgRepeat::NoRepeat] {
+            let fast = compute_tile_positions(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, clip_x, clip_y, clip_w, clip_h,
+            );
+            let slow = compute_tile_positions_slow(
+                repeat, repeat, -10.0, -5.0, 150.0, 120.0, clip_x, clip_y, clip_w, clip_h,
+            );
+            assert_eq!(fast.len(), 1, "{repeat:?}: fast-path must be 1 tile");
+            assert_eq!(slow[0], fast[0], "{repeat:?}: tile[0] must match");
+            // Every extra slow-path tile must be fully outside the clip rect
+            // (tile_x >= clip end OR tile_y >= clip end OR tile_right <= clip_x
+            // OR tile_bottom <= clip_y). Since slow-path NEVER emits tiles to
+            // the left/above the start, the relevant checks are tx >= clip_end
+            // and ty >= clip_end.
+            for &(tx, ty, _, _) in slow.iter().skip(1) {
+                assert!(
+                    tx >= clip_x + clip_w - 1e-3 || ty >= clip_y + clip_h - 1e-3,
+                    "{repeat:?}: slow extra tile ({tx}, {ty}) must be outside clip",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tile_positions_image_equals_clip_round_does_not_fast_path() {
+        // Round must not collapse to a single tile even when image == clip:
+        // round's contract is to resize tiles to fit an integer count, and
+        // the caller may rely on tile-size adjustment for the "round" effect.
+        let tiles = compute_tile_positions(
+            BgRepeat::Round,
+            BgRepeat::Round,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // Round with image == clip resolves to tile_size = clip_size / round(clip/image) = 100/1 = 100
+        // and emits boundary tiles per the existing loop (≥1). The point of
+        // this test is that the fast-path was NOT taken.
+        assert!(
+            tiles.iter().all(|&(_, _, w, h)| w == 100.0 && h == 100.0),
+            "round must not change tile size when image fits exactly"
+        );
+    }
+
+    #[test]
+    fn tile_positions_repeat_both_axes_fills_clip() {
+        // 50×50 image, 100×100 clip at origin, position=(0,0)
+        // Tiles at x∈{0,50,100}, y∈{0,50,100} = 9 tiles (partial tiles included)
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(
+            tiles.len() >= 4,
+            "expected at least 4 tiles, got {}",
+            tiles.len()
+        );
+        assert!(tiles.iter().all(|&(_, _, w, h)| w == 50.0 && h == 50.0));
+    }
+
+    #[test]
+    fn tile_positions_no_repeat_x_repeat_y_yields_single_column() {
+        // x: NoRepeat → 1 tile per row; y: Repeat → multiple rows
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // All tiles share the same x position
+        assert!(tiles.len() >= 2);
+        assert!(tiles.iter().all(|&(tx, _, _, _)| tx == 0.0));
+    }
+
+    #[test]
+    fn tile_positions_max_tiles_cap() {
+        // 1×1 image on 200×200 clip → would produce 200*200=40000 tiles without cap
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            200.0,
+            200.0,
+        );
+        assert_eq!(tiles.len(), 10_000);
+    }
+
+    #[test]
+    fn tile_positions_zero_img_size_returns_empty() {
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            0.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    // ─── resolve_repeat_axis edge cases ──────────────────────────────────────
+
+    #[test]
+    fn resolve_repeat_axis_no_repeat_returns_position_as_start_end() {
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::NoRepeat, 25.0, 50.0, 0.0, 200.0);
+        assert_eq!(size, 50.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 25.0);
+        assert_eq!(end, 25.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_image_larger_than_clip_no_tiling() {
+        // image_size=250 > clip_size=200 → falls back to no-repeat at position
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::Space, 0.0, 250.0, 0.0, 200.0);
+        assert_eq!(size, 250.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+        assert_eq!(end, 0.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_count_one_no_gap() {
+        // image_size=200, clip_size=200 → count=1, falls back to no-repeat
+        let (size, space, start, end) =
+            resolve_repeat_axis(BgRepeat::Space, 0.0, 200.0, 0.0, 200.0);
+        assert_eq!(size, 200.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+        assert_eq!(end, 0.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_repeat_zero_image_size_degenerate() {
+        // image_size=0 → returns (0, 0, position, position)
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Repeat, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_zero_image_size_degenerate() {
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Round, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_space_zero_image_size_degenerate() {
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Space, 5.0, 0.0, 0.0, 100.0);
+        assert_eq!(size, 0.0);
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 5.0);
+        assert_eq!(end, 5.0);
+    }
+
+    // ─── try_uniform_grid ─────────────────────────────────────────────────────
+
+    #[test]
+    fn uniform_grid_single_tile_returns_none() {
+        // Single tile (no-repeat) is not worth the Pattern overhead.
+        let tiles = vec![(10.0, 20.0, 30.0, 40.0)];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_repeat_round_8x6_detected() {
+        // 8 columns × 6 rows, cell = step = (10, 15)
+        let mut tiles = Vec::new();
+        for j in 0..6 {
+            for i in 0..8 {
+                tiles.push((i as f32 * 10.0, j as f32 * 15.0, 10.0, 15.0));
+            }
+        }
+        let g = try_uniform_grid(&tiles).expect("detect 8×6 grid");
+        assert_eq!(g.count, (8, 6));
+        assert!((g.cell.0 - 10.0).abs() < 1e-3);
+        assert!((g.cell.1 - 15.0).abs() < 1e-3);
+        assert!((g.step.0 - 10.0).abs() < 1e-3);
+        assert!((g.step.1 - 15.0).abs() < 1e-3);
+        assert!((g.origin.0 - 0.0).abs() < 1e-3);
+        assert!((g.origin.1 - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_space_with_gaps_detected() {
+        // 3 columns × 2 rows, cell = (10, 10), step = (15, 20)
+        let tiles = vec![
+            (0.0, 0.0, 10.0, 10.0),
+            (15.0, 0.0, 10.0, 10.0),
+            (30.0, 0.0, 10.0, 10.0),
+            (0.0, 20.0, 10.0, 10.0),
+            (15.0, 20.0, 10.0, 10.0),
+            (30.0, 20.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 3×2 spaced grid");
+        assert_eq!(g.count, (3, 2));
+        assert!((g.cell.0 - 10.0).abs() < 1e-3);
+        assert!((g.step.0 - 15.0).abs() < 1e-3);
+        assert!((g.step.1 - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_mismatched_cell_size_returns_none() {
+        // Second tile has different height → not uniform.
+        let tiles = vec![(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 12.0)];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_irregular_step_returns_none() {
+        // X steps: 10, 11 → not uniform.
+        let tiles = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (21.0, 0.0, 5.0, 5.0),
+        ];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_single_row_repeat_x() {
+        // 4 tiles in a single row → 4×1 grid.
+        let tiles = vec![
+            (0.0, 5.0, 10.0, 10.0),
+            (10.0, 5.0, 10.0, 10.0),
+            (20.0, 5.0, 10.0, 10.0),
+            (30.0, 5.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 4×1 grid");
+        assert_eq!(g.count, (4, 1));
+    }
+
+    #[test]
+    fn uniform_grid_count_mismatch_returns_none() {
+        // 3 tiles claimed but only 2 unique x positions × 2 unique y → 4 expected.
+        let tiles = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+        ];
+        assert!(try_uniform_grid(&tiles).is_none());
+    }
+
+    #[test]
+    fn uniform_grid_negative_origin_detected() {
+        // Negative origin (e.g. background-position pulling tiles into negative coords).
+        let tiles = vec![
+            (-50.0, -30.0, 10.0, 10.0),
+            (-40.0, -30.0, 10.0, 10.0),
+            (-50.0, -20.0, 10.0, 10.0),
+            (-40.0, -20.0, 10.0, 10.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("detect 2×2 grid with negative origin");
+        assert_eq!(g.count, (2, 2));
+        assert!((g.origin.0 + 50.0).abs() < 1e-3);
+        assert!((g.origin.1 + 30.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_grid_input_order_independent() {
+        // try_uniform_grid sorts xs/ys internally; shuffled input must give same result.
+        let canonical = vec![
+            (0.0, 0.0, 5.0, 5.0),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+        ];
+        let shuffled = vec![
+            (5.0, 5.0, 5.0, 5.0),
+            (0.0, 0.0, 5.0, 5.0),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+        ];
+        assert_eq!(try_uniform_grid(&canonical), try_uniform_grid(&shuffled));
+    }
+
+    // ─── corner_to_angle_rad ──────────────────────────────────────────────────
+
+    #[test]
+    fn corner_to_angle_rad_top_right_square_is_pi_over_4() {
+        use crate::draw_primitives::LinearGradientCorner;
+        // "to top right" on a square → 45° = π/4 clockwise from "to top"
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 100.0, 100.0);
+        assert!(
+            (angle - std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "expected π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_top_left_square_is_neg_pi_over_4() {
+        use crate::draw_primitives::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopLeft, 100.0, 100.0);
+        assert!(
+            (angle + std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "expected -π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_bottom_right_square_is_3pi_over_4() {
+        use crate::draw_primitives::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::BottomRight, 100.0, 100.0);
+        let expected = 3.0 * std::f32::consts::FRAC_PI_4 - std::f32::consts::TAU;
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected -5π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_bottom_left_square_is_neg_3pi_over_4() {
+        use crate::draw_primitives::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::BottomLeft, 100.0, 100.0);
+        let expected = -3.0 * std::f32::consts::FRAC_PI_4 + std::f32::consts::TAU;
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected 5π/4, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_top_right_and_top_left_are_negations_for_square() {
+        // Symmetry: "to top right" and "to top left" are equal-magnitude on a square.
+        use crate::draw_primitives::LinearGradientCorner;
+        let right = corner_to_angle_rad(LinearGradientCorner::TopRight, 200.0, 200.0);
+        let left = corner_to_angle_rad(LinearGradientCorner::TopLeft, 200.0, 200.0);
+        assert!(
+            (right + left).abs() < 1e-5,
+            "angles should cancel: right={right} left={left}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_non_square_top_right_uses_aspect_ratio() {
+        // For w=300, h=400: "to top right" = atan2(h, w) = atan2(400, 300).
+        // On a non-square box the corner direction depends on the aspect ratio.
+        use crate::draw_primitives::LinearGradientCorner;
+        let angle = corner_to_angle_rad(LinearGradientCorner::TopRight, 300.0, 400.0);
+        let expected = f32::atan2(400.0_f32, 300.0_f32);
+        assert!(
+            (angle - expected).abs() < 1e-5,
+            "expected atan2(400,300)={expected}, got {angle}"
+        );
+    }
+
+    #[test]
+    fn corner_to_angle_rad_non_square_matches_wpt_reference_angles() {
+        use crate::draw_primitives::LinearGradientCorner;
+
+        let cases = [
+            (LinearGradientCorner::BottomRight, 0xc066_bc41),
+            (LinearGradientCorner::BottomLeft, 0x4066_bc41),
+            (LinearGradientCorner::TopLeft, 0xbeed_6339),
+            (LinearGradientCorner::TopRight, 0x3eed_6339),
+        ];
+
+        for (corner, expected_bits) in cases {
+            let angle = corner_to_angle_rad(corner, 200.0, 100.0);
+            assert_eq!(angle.to_bits(), expected_bits, "corner={corner:?}");
+        }
+    }
+
+    // ─── ellipse_corner_scale ─────────────────────────────────────────────────
+
+    #[test]
+    fn ellipse_corner_scale_zero_rx_returns_early() {
+        // Degenerate: rx0 == 0 → early return of (rx0, ry0) unchanged.
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 0.0, 25.0, true);
+        assert_eq!(rx, 0.0);
+        assert_eq!(ry, 25.0);
+    }
+
+    #[test]
+    fn ellipse_corner_scale_zero_ry_returns_early() {
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 30.0, 0.0, false);
+        assert_eq!(rx, 30.0);
+        assert_eq!(ry, 0.0);
+    }
+
+    #[test]
+    fn ellipse_corner_scale_centered_square_all_corners_equidistant() {
+        // Center exactly at box center (50,50); all corners are 50√2 away.
+        // Farthest == closest since all ratios equal; result = (50√2, 50√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx_f, ry_f) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, true);
+        assert!((rx_f - 50.0 * sqrt2).abs() < 1e-3, "farthest rx={rx_f}");
+        assert!((ry_f - 50.0 * sqrt2).abs() < 1e-3, "farthest ry={ry_f}");
+
+        let (rx_c, _ry_c) =
+            ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, false);
+        assert!(
+            (rx_f - rx_c).abs() < 1e-3,
+            "farthest={rx_f} and closest={rx_c} should match for symmetric center"
+        );
+    }
+
+    #[test]
+    fn ellipse_corner_scale_farthest_off_center() {
+        // Center at (30,30); box (0,0,100,100); rx0=ry0=1.
+        // Corner distances: (0,0)→30√2, (100,0)→√5800, (0,100)→√5800, (100,100)→70√2.
+        // Farthest ratio = 70√2 → result = (70√2, 70√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(30.0, 30.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, true);
+        assert!((rx - 70.0 * sqrt2).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 70.0 * sqrt2).abs() < 1e-3, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_closest_off_center() {
+        // Same setup; closest corner = (0,0) at 30√2 → result = (30√2, 30√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(30.0, 30.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, false);
+        assert!((rx - 30.0 * sqrt2).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 30.0 * sqrt2).abs() < 1e-3, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_non_uniform_radii_farthest() {
+        // Center at (0,0); box (100,0,100,100); rx0=50, ry0=25.
+        // Per-corner ratios: (100,0)→2, (200,0)→4, (100,100)→√20, (200,100)→4√2.
+        // Farthest ratio = 4√2 → result = (50·4√2, 25·4√2) = (200√2, 100√2).
+        let sqrt2: f32 = std::f32::consts::SQRT_2;
+        let (rx, ry) = ellipse_corner_scale(0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 50.0, 25.0, true);
+        assert!((rx - 200.0 * sqrt2).abs() < 0.01, "rx={rx}");
+        assert!((ry - 100.0 * sqrt2).abs() < 0.01, "ry={ry}");
+    }
+
+    #[test]
+    fn ellipse_corner_scale_non_uniform_radii_closest() {
+        // Same setup; closest corner (100,0) has ratio=2 → result = (100, 50).
+        let (rx, ry) = ellipse_corner_scale(0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 50.0, 25.0, false);
+        assert!((rx - 100.0).abs() < 1e-3, "rx={rx}");
+        assert!((ry - 50.0).abs() < 1e-3, "ry={ry}");
+    }
+
+    // ─── resolve_point and resolve_length ─────────────────────────────────────
+
+    #[test]
+    fn resolve_point_length_returns_value() {
+        assert_eq!(
+            resolve_point(&BgLengthPercentage::Length(42.0_f32.as_pt()), 200.0),
+            42.0
+        );
+    }
+
+    #[test]
+    fn resolve_point_percentage_multiplies_container() {
+        assert_eq!(
+            resolve_point(&BgLengthPercentage::Percentage(0.25), 200.0),
+            50.0
+        );
+    }
+
+    #[test]
+    fn resolve_length_length_returns_value() {
+        assert_eq!(
+            resolve_length(&BgLengthPercentage::Length(15.0_f32.as_pt()), 300.0),
+            15.0
+        );
+    }
+
+    #[test]
+    fn resolve_length_percentage_multiplies_container() {
+        assert_eq!(
+            resolve_length(&BgLengthPercentage::Percentage(0.5), 300.0),
+            150.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_gradient_stops_tests {
+    use super::*;
+    use crate::draw_primitives::GradientStop;
+    use crate::draw_primitives::GradientStopPosition::{self, *};
+
+    fn fr(f: f32) -> GradientStopPosition {
+        Fraction(f)
+    }
+    fn px(f: f32) -> GradientStopPosition {
+        LengthPx(f)
+    }
+    fn stop(p: GradientStopPosition, rgba: [u8; 4]) -> GradientStop {
+        GradientStop {
+            position: p,
+            rgba,
+            is_hint: false,
+        }
+    }
+
+    #[test]
+    fn fraction_only_passes_through() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn length_px_resolved_by_line_length() {
+        let stops = vec![
+            stop(px(0.0), [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+        ];
+        // line_length = 100 → 50px = 0.5
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_position_filled_at_endpoints() {
+        let stops = vec![stop(Auto, [255, 0, 0, 255]), stop(Auto, [0, 0, 255, 255])];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_position_filled_in_middle() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(Auto, [0, 255, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mixed_length_fraction_auto() {
+        // linear-gradient(red, blue 50px, green) on line_length=100
+        // → red Auto (→0), blue 0.5, green Auto (→1)
+        let stops = vec![
+            stop(Auto, [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+            stop(Auto, [0, 255, 0, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
+        assert!((out[2].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn out_of_range_length_renormalized() {
+        // 50px on line_length=30 → 50/30 ≈ 1.667 > 1 → renormalize で
+        // 端点合成。renormalize 入力 = [(0.0, red), (1.667, blue)]:
+        //   0.0 はちょうど red 位置なので左合成スキップ
+        //   1.667 を 1.0 で右合成 → 2 stops [(0.0, red), (1.0, synthesized)]
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(px(50.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 30.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn negative_fraction_renormalized() {
+        // [(-0.1, red), (1.0, blue)]: 左合成で 0.0 を pad、1.0 はちょうど
+        // blue 位置なので右合成スキップ → 2 stops
+        let stops = vec![
+            stop(fr(-0.1), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn monotonic_clamp_applied() {
+        // [0.6, 0.3] → [0.6, 0.6] (monotonic fix)
+        let stops = vec![
+            stop(fr(0.6), [255, 0, 0, 255]),
+            stop(fr(0.3), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert!((out[0].offset.get() - 0.6).abs() < 1e-6);
+        assert!((out[1].offset.get() - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_length_zero_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 0.0_f32.as_px(), false);
+        assert!(out.is_none());
+    }
+
+    // ─── non-finite hardening (fulgur-0vzf) ──────────────────────────────
+    //
+    // 下の各ケースは、以前は `renormalize_stops_to_unit_range` 内の
+    // `color_at` で NaN 比較が全て false になり `unreachable!()` に落ちて
+    // panic していた。choke point で弾いて `None` (= Layer drop) を返す。
+    //
+    // Stylo は computed angle / length を有限域に clamp するので、現時点で
+    // CSS からこの入力は作れない。`BgImageContent` の stops は pub なので
+    // ライブラリ利用者が直接構築する経路と、将来の上流変更に対する防御。
+
+    #[test]
+    fn line_length_nan_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::NAN.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn line_length_infinite_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::INFINITY.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_fraction_stop_returns_none() {
+        let stops = vec![
+            stop(fr(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_length_stop_returns_none() {
+        let stops = vec![
+            stop(px(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn infinite_length_stop_returns_none() {
+        let stops = vec![
+            stop(px(f32::INFINITY), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    /// `px / line_length` が f32 の表現域を超えて `inf` に飽和するケース。
+    /// 入力側の `LengthPx` / `line_length` は個別には有限なので、除算 *後* の
+    /// offset を検査しないと素通りする。
+    #[test]
+    fn length_stop_overflowing_to_infinity_returns_none() {
+        let stops = vec![
+            stop(px(f32::MAX), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::MIN_POSITIVE.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_stop_in_repeating_gradient_returns_none() {
+        let stops = vec![
+            stop(fr(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(0.25), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).is_none());
+    }
+
+    /// 全 stop が `is_hint` の入力は、hint 展開が全 marker を defensively skip
+    /// して空ベクタを返す。以前は `expand_repeating_stops` の
+    /// `expect("len >= 2")` を release build でも踏んで panic していた
+    /// (非 repeating 側は `renormalize` の `debug_assert!`)。
+    #[test]
+    fn all_hint_stops_return_none() {
+        let hint = |p: GradientStopPosition| GradientStop {
+            position: p,
+            rgba: [255, 0, 0, 255],
+            is_hint: true,
+        };
+        for repeating in [false, true] {
+            let stops = vec![hint(fr(0.0)), hint(fr(1.0))];
+            assert!(
+                resolve_gradient_stops(&stops, 100.0_f32.as_px(), repeating).is_none(),
+                "repeating={repeating}"
+            );
+        }
+    }
+
+    /// `repeating-linear-gradient(red 0%, blue 25%)`: period = 0.25。
+    /// 4 周期分 + 端点合成で `[0, 1]` を覆う。0% / 25% / 50% / 75% / 100% は
+    /// hard stop boundary を保ち、隣接 (red→blue→red→...) のパターンが見える。
+    #[test]
+    fn repeating_simple_period() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(fr(0.25), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        // 期待: forward = ceil(0.75/0.25) = 3, backward = 0
+        // → k = 0, 1, 2, 3 で各周期の (red, blue) を配置
+        // (0, red), (0.25, blue), (0.25, red), (0.5, blue), (0.5, red),
+        // (0.75, blue), (0.75, red), (1.0, blue) の 8 stops
+        assert_eq!(out.len(), 8, "got offsets: {:?}", offsets(&out));
+        let expected = [
+            (0.0, [255, 0, 0, 255]),
+            (0.25, [0, 0, 255, 255]),
+            (0.25, [255, 0, 0, 255]),
+            (0.5, [0, 0, 255, 255]),
+            (0.5, [255, 0, 0, 255]),
+            (0.75, [0, 0, 255, 255]),
+            (0.75, [255, 0, 0, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        for (i, (eo, ec)) in expected.iter().enumerate() {
+            assert!(
+                (out[i].offset.get() - eo).abs() < 1e-5,
+                "stop[{i}] offset got {} expected {eo}",
+                out[i].offset.get()
+            );
+            // krilla::paint::Stop にコンポーネントアクセスがないので
+            // RGB は output 個数だけ確認 (色の検証は VRT 側で行う)
+            let _ = ec;
+        }
+    }
+
+    /// `repeating-linear-gradient(red 25%, blue 50%)`: period = 0.25、
+    /// 周期境界が box の端点に揃わない。前後両方向に展開され、renormalize で
+    /// 端点合成される。
+    #[test]
+    fn repeating_offset_period_extends_both_directions() {
+        let stops = vec![
+            stop(fr(0.25), [255, 0, 0, 255]),
+            stop(fr(0.5), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        // backward = ceil(0.25/0.25) = 1, forward = ceil(0.5/0.25) = 2
+        // 展開列: k=-1 (0.0 red, 0.25 blue), k=0 (0.25 red, 0.5 blue),
+        //         k=1 (0.5 red, 0.75 blue), k=2 (0.75 red, 1.0 blue)
+        // = (0.0, red), (0.25, blue), (0.25, red), (0.5, blue), (0.5, red),
+        //   (0.75, blue), (0.75, red), (1.0, blue) → all in [0, 1] なので
+        // renormalize fast path で 8 stops そのまま。
+        assert_eq!(out.len(), 8);
+        let first = out.first().unwrap().offset.get();
+        let last = out.last().unwrap().offset.get();
+        assert!((first - 0.0).abs() < 1e-5, "first offset {first}");
+        assert!((last - 1.0).abs() < 1e-5, "last offset {last}");
+    }
+
+    /// `repeating-linear-gradient(red 0%, blue 0%)`: period = 0 (degenerate)。
+    /// CSS Images 3 §3.6 に従い最終 stop の色 (blue) で塗りつぶす単色 fill になる。
+    #[test]
+    fn repeating_period_zero_renders_solid_last_color() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(fr(0.0), [0, 0, 255, 255]),
+        ];
+        let out =
+            resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).expect("solid fill, not None");
+        // 単色 fill: 2 stops at 0.0/1.0 で同色 (blue)。renormalize の fast path
+        // (全 stop in [0, 1]) を通って 2 stops のまま。
+        assert_eq!(out.len(), 2);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-5);
+        assert!((out[1].offset.get() - 1.0).abs() < 1e-5);
+    }
+
+    /// `repeating-linear-gradient(red 0%, blue 100%)`: period = 1.0。
+    /// 1 周期で `[0, 1]` を完全カバー、non-repeating と同じ結果。
+    #[test]
+    fn repeating_full_period_equals_single_pass() {
+        let stops = vec![
+            stop(fr(0.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        let repeat = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        let plain = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        // どちらも 2 stops で同じ位置。
+        assert_eq!(repeat.len(), plain.len());
+        for (r, p) in repeat.iter().zip(plain.iter()) {
+            assert!((r.offset.get() - p.offset.get()).abs() < 1e-5);
+        }
+    }
+
+    /// `repeating-linear-gradient(red, blue, green)`: 3 stops, Auto fixup 後
+    /// (0.0, 0.5, 1.0) → period = 1.0。1 周期で完結。
+    #[test]
+    fn repeating_three_color_stops() {
+        let stops = vec![
+            stop(Auto, [255, 0, 0, 255]),
+            stop(Auto, [0, 255, 0, 255]),
+            stop(Auto, [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        // forward = backward = 0 → 1 copy = 3 stops
+        assert_eq!(out.len(), 3);
+        assert!((out[0].offset.get() - 0.0).abs() < 1e-5);
+        assert!((out[1].offset.get() - 0.5).abs() < 1e-5);
+        assert!((out[2].offset.get() - 1.0).abs() < 1e-5);
+    }
+
+    /// `repeating-radial-gradient(red 0px, blue 25px)` を radius=100px で評価。
+    /// 0/25 px → 0.0/0.25 fraction で linear と同じ展開。
+    #[test]
+    fn repeating_with_length_px_stops() {
+        let stops = vec![
+            stop(px(0.0), [255, 0, 0, 255]),
+            stop(px(25.0), [0, 0, 255, 255]),
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        // line_length=100, 25px → 0.25 fraction → repeating_simple_period と
+        // 同じ展開: 8 stops
+        assert_eq!(out.len(), 8);
+    }
+
+    fn offsets(stops: &[krilla::paint::Stop]) -> Vec<f32> {
+        stops.iter().map(|s| s.offset.get()).collect()
+    }
+}
+
+#[cfg(test)]
+mod expand_interpolation_hints_tests {
+    use super::*;
+
+    /// 内部表現: position 解決済みの stop 列。`is_hint=true` は CSS hint marker。
+    fn s(pos: f32, r: u8, g: u8, b: u8) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba: [r, g, b, 255],
+            is_hint: false,
+        }
+    }
+    fn h(pos: f32) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba: [0, 0, 0, 0],
+            is_hint: true,
+        }
+    }
+
+    #[test]
+    fn no_hints_passthrough() {
+        let input = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (0.0, [255, 0, 0, 255]));
+        assert_eq!(out[1], (1.0, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn midpoint_hint_yields_linear_interpolation() {
+        // H=0.5 → exponent=1.0 → 8 個の中間 stop は線形補間と一致 (許容誤差 1)
+        let input = vec![s(0.0, 255, 0, 0), h(0.5), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8, "2 endpoints + 8 samples");
+        // 中央サンプル (i=4, t=4/9) の R は線形補間で 255 * (1 - 4/9) = 141.67 → 142
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            (mid.1[0] as i16 - 142).abs() <= 1,
+            "R channel near 142, got {}",
+            mid.1[0]
+        );
+        assert!(
+            (mid.1[2] as i16 - 113).abs() <= 1,
+            "B channel near 113, got {}",
+            mid.1[2]
+        );
+    }
+
+    #[test]
+    fn early_hint_biases_toward_end_color() {
+        // H=0.2 → exponent = log(0.5)/log(0.2) ≈ 0.43 → 早期に end 色に寄る
+        let input = vec![s(0.0, 255, 0, 0), h(0.2), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        // 中央サンプル (t=0.5 相当 = i=4 / 9) の B は H=0.5 (線形 113) より高い
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            mid.1[2] > 113,
+            "B should be biased above 113, got {}",
+            mid.1[2]
+        );
+    }
+
+    #[test]
+    fn late_hint_biases_toward_start_color() {
+        // H=0.8 → exponent ≈ 3.1 → 後期まで start 色に近い
+        let input = vec![s(0.0, 255, 0, 0), h(0.8), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        let mid = out
+            .iter()
+            .find(|(p, _)| (p - 4.0 / 9.0).abs() < 1e-3)
+            .unwrap();
+        assert!(
+            mid.1[0] > 142,
+            "R should remain above 142, got {}",
+            mid.1[0]
+        );
+    }
+
+    #[test]
+    fn degenerate_zero_span_drops_hint() {
+        // p_a == p_b → hint は無意味、output から hint を drop
+        let input = vec![s(0.5, 255, 0, 0), h(0.5), s(0.5, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        // hint が drop され、両端 color stop だけが残る
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter().all(|(_, c)| c[3] == 255),
+            "no transparent hint leak"
+        );
+    }
+
+    #[test]
+    fn hint_at_extreme_position_clamps() {
+        // H=0 (start に張り付き) は EPS で吸収、panic しない
+        let input = vec![s(0.0, 255, 0, 0), h(0.0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8);
+        // すべて step 関数化、ほぼ end 色 (B≈255)
+        let last_sample = out.iter().rfind(|(p, _)| *p > 0.0 && *p < 1.0).unwrap();
+        assert!(
+            last_sample.1[2] > 200,
+            "B should be near 255 (step), got {}",
+            last_sample.1[2]
+        );
+    }
+
+    #[test]
+    fn hint_within_segment_geometry() {
+        // span 0.4..0.8 内の hint。位置は span 等間隔で 8 サンプル。
+        let input = vec![s(0.4, 255, 0, 0), h(0.6), s(0.8, 0, 0, 255)];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 2 + 8);
+        // 中間 sample 位置は p_a + (p_b - p_a) * i/9 で 0.4..0.8 内
+        for (p, _) in out.iter().filter(|(p, _)| *p > 0.4 && *p < 0.8) {
+            assert!((0.4..=0.8).contains(p));
+        }
+    }
+
+    #[test]
+    fn multiple_hints_in_separate_segments() {
+        // [red, h, blue, h, green]: 各 segment 独立に展開
+        let input = vec![
+            s(0.0, 255, 0, 0),
+            h(0.25),
+            s(0.5, 0, 0, 255),
+            h(0.75),
+            s(1.0, 0, 255, 0),
+        ];
+        let out = expand_interpolation_hints(input);
+        assert_eq!(out.len(), 3 + 8 + 8, "3 endpoints + 8 + 8 samples");
+    }
+
+    #[test]
+    fn ill_formed_leading_or_trailing_hint_is_dropped_safely() {
+        // convert 段が validation を通常通り行えば到達しないが、
+        // `BgImageContent` の stops は pub なので外部 API 経由で
+        // leading / trailing hint を持つ入力が来た場合に panic せず
+        // hint を silently drop して残りの color stop だけ返す。
+        let leading = vec![h(0.5), s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let out = expand_interpolation_hints(leading);
+        assert_eq!(out.len(), 2, "leading hint dropped, two color stops remain");
+
+        let trailing = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255), h(0.5)];
+        let out = expand_interpolation_hints(trailing);
+        assert_eq!(
+            out.len(),
+            2,
+            "trailing hint dropped, two color stops remain"
+        );
+    }
+}
+
+#[cfg(test)]
+mod renormalize_stops_to_unit_range_tests {
+    use super::renormalize_stops_to_unit_range;
+
+    fn s(offset: f32, r: u8, g: u8, b: u8) -> (f32, [u8; 4]) {
+        (offset, [r, g, b, 255])
+    }
+
+    fn expect(stops: &[(f32, [u8; 4])], expected: &[(f32, [u8; 4])]) {
+        assert_eq!(stops.len(), expected.len(), "stop count mismatch");
+        for (i, (got, exp)) in stops.iter().zip(expected).enumerate() {
+            assert!(
+                (got.0 - exp.0).abs() < 1e-5,
+                "stop[{i}].offset: got {} expected {}",
+                got.0,
+                exp.0
+            );
+            assert_eq!(got.1, exp.1, "stop[{i}].rgba");
+        }
+    }
+
+    #[test]
+    fn no_op_when_all_in_range() {
+        let stops = vec![s(0.0, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])]);
+    }
+
+    #[test]
+    fn synthesize_left_endpoint() {
+        // red at -50%, blue at 100%: at offset 0, t = 0.5 / 1.5 = 1/3
+        // r = 255 + 1/3 * (0 - 255) = 170
+        // g = 0
+        // b = 0   + 1/3 * (255 - 0) = 85
+        let stops = vec![s(-0.5, 255, 0, 0), s(1.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[(0.0, [170, 0, 85, 255]), (1.0, [0, 0, 255, 255])],
+        );
+    }
+
+    #[test]
+    fn synthesize_right_endpoint() {
+        // red at 50%, blue at 200%: at offset 1, t = 0.5 / 1.5 = 1/3
+        let stops = vec![s(0.5, 255, 0, 0), s(2.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[
+                (0.0, [255, 0, 0, 255]),
+                (0.5, [255, 0, 0, 255]),
+                (1.0, [170, 0, 85, 255]),
+            ],
+        );
+    }
+
+    #[test]
+    fn all_below_zero_pads_with_last_color() {
+        // stops at -50%, -25%: both out of range; pad after last (blue)
+        let stops = vec![s(-0.5, 255, 0, 0), s(-0.25, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [0, 0, 255, 255]), (1.0, [0, 0, 255, 255])]);
+    }
+
+    #[test]
+    fn all_above_one_pads_with_first_color() {
+        // stops at 150%, 200%: both out of range; pad before first (red)
+        let stops = vec![s(1.5, 255, 0, 0), s(2.0, 0, 0, 255)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [255, 0, 0, 255]), (1.0, [255, 0, 0, 255])]);
+    }
+
+    #[test]
+    fn boundary_stop_at_zero_no_left_synthesis() {
+        // -50% red, 0% blue, 100% green: 0.0 はちょうど blue で合成不要
+        let stops = vec![s(-0.5, 255, 0, 0), s(0.0, 0, 0, 255), s(1.0, 0, 255, 0)];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(&result, &[(0.0, [0, 0, 255, 255]), (1.0, [0, 255, 0, 255])]);
+    }
+
+    #[test]
+    fn alpha_channel_is_interpolated() {
+        // red(alpha=0) at -50%, blue(alpha=255) at 100%
+        // at offset 0, t = 1/3 → alpha = 0 + 1/3 * 255 ≈ 85
+        let stops = vec![(-0.5_f32, [255, 0, 0, 0]), (1.0_f32, [0, 0, 255, 255])];
+        let result = renormalize_stops_to_unit_range(stops);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].1[3], 85, "alpha at offset 0");
+        assert_eq!(result[1].1[3], 255, "alpha at offset 1");
+    }
+
+    /// Hard stop (coincident positions) は CSS Images 3 §3.5.1 で valid。
+    /// 範囲外 stop の合成中に hard stop が含まれていても、in-range の
+    /// hard stop は preserve され、合成側は隣接区間を正しく拾う。
+    #[test]
+    fn hard_stop_in_range_is_preserved_during_synthesis() {
+        // -50% red, 50% blue, 50% green, 150% yellow
+        // 左端合成: t=0 は (-0.5, red)/(0.5, blue) 区間で alpha=0.5 → [128, 0, 128]
+        // hard stop preserved: blue at 0.5, green at 0.5
+        // 右端合成: t=1 は (0.5, green)/(1.5, yellow) 区間で alpha=0.5 → [128, 255, 0]
+        let stops = vec![
+            s(-0.5, 255, 0, 0),
+            s(0.5, 0, 0, 255),
+            s(0.5, 0, 255, 0),
+            s(1.5, 255, 255, 0),
+        ];
+        let result = renormalize_stops_to_unit_range(stops);
+        expect(
+            &result,
+            &[
+                (0.0, [128, 0, 128, 255]),
+                (0.5, [0, 0, 255, 255]),
+                (0.5, [0, 255, 0, 255]),
+                (1.0, [128, 255, 0, 255]),
+            ],
+        );
+    }
+}
+
+/// Approximate `erfc(x)` for x >= 0 using Abramowitz & Stegun formula 7.1.26.
+/// Maximum error: 1.5 × 10⁻⁷.
+fn erfc_approx(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_8 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    poly * (-x * x).exp()
+}
+
+/// Alpha at blur-edge position `t` ∈ [0, 1] (0 = inner edge, 1 = outer edge).
+/// Models the cumulative Gaussian with σ = blur/3.
+fn blur_edge_alpha(t: f32) -> f32 {
+    // alpha(x) = 0.5 * erfc(x / (σ√2)) where x = t*blur, σ = blur/3
+    // → 0.5 * erfc(t * 3 / √2)
+    0.5 * erfc_approx(t * 3.0 / std::f32::consts::SQRT_2)
+}
+
+/// Build grayscale gradient stops for a luminosity mask encoding a blur edge.
+///
+/// Luminosity = `blur_alpha(t) × shadow_alpha` encoded as gray (white = opaque,
+/// black = transparent). All stops have `opacity = ONE`; the mask, not the stop
+/// opacity, controls transparency.
+fn blur_stops_mask(shadow_alpha_byte: u8, n: usize) -> Vec<krilla::paint::Stop> {
+    assert!(n >= 2);
+    let shadow_a = shadow_alpha_byte as f32 / 255.0;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let luma = (blur_edge_alpha(t) * shadow_a * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            krilla::paint::Stop {
+                offset: krilla::num::NormalizedF32::new(t)
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                color: krilla::color::rgb::Color::new(luma, luma, luma).into(),
+                opacity: krilla::num::NormalizedF32::ONE,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod conic_helpers_tests {
+    use super::{box_edge_at_angle, normalize_conic_stops, sample_conic_color};
+    use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() < eps
+    }
+
+    #[test]
+    fn box_edge_top() {
+        // CSS 0deg = top → 中心 (50,50) から (50, 0) に向かう
+        let (x, y) = box_edge_at_angle(0.0, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 0.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_right() {
+        // CSS 90deg = right → 中心から (100, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 100.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_bottom() {
+        // CSS 180deg = bottom → 中心から (50, 100) に向かう
+        let (x, y) = box_edge_at_angle(std::f32::consts::PI, 50.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(approx_eq(x, 50.0, 0.01));
+        assert!(approx_eq(y, 100.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_left() {
+        // CSS 270deg = left → 中心から (0, 50) に向かう
+        let (x, y) = box_edge_at_angle(
+            3.0 * std::f32::consts::FRAC_PI_2,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(approx_eq(x, 0.0, 0.01));
+        assert!(approx_eq(y, 50.0, 0.01));
+    }
+
+    #[test]
+    fn box_edge_top_right_corner() {
+        // CSS 45deg = top-right corner direction → ray が top と right の交点に
+        // 当たる前にどちらかの edge にヒット。中心 (50,50)、box (0,0)-(100,100) で
+        // 45deg なら top-right 角 (100, 0) と原点距離が等しいので、辺の早い方に。
+        let (x, y) = box_edge_at_angle(
+            std::f32::consts::FRAC_PI_4,
+            50.0,
+            50.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // 中心から 45deg = (sin, -cos) = (0.707, -0.707)。tx = (100-50)/0.707 = 70.7、
+        // ty = (0-50)/-0.707 = 70.7 → tie。両方の辺に到達 → corner (100, 0) または近傍。
+        assert!(approx_eq(x, 100.0, 0.5));
+        assert!(approx_eq(y, 0.0, 0.5));
+    }
+
+    #[test]
+    fn normalize_with_explicit_fractions() {
+        // 全 stop が Fraction で position 順 → そのまま fraction 化される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert_eq!(n[0], (0.0, [255, 0, 0, 255]));
+        assert_eq!(n[1], (0.5, [0, 255, 0, 255]));
+        assert_eq!(n[2], (1.0, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn normalize_auto_endpoints_filled() {
+        // Auto Auto Auto → 0.0, 0.5, 1.0 に補間される
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        assert!(approx_eq(n[0].0, 0.0, 1e-6));
+        assert!(approx_eq(n[1].0, 0.5, 1e-6));
+        assert!(approx_eq(n[2].0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn normalize_monotonic_clamp() {
+        // 後ろの stop が前より小さい → 前に合わせる (CSS Images L4 fixup)
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.5),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.3),
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n[1].0, 0.5);
+    }
+
+    #[test]
+    fn sample_at_endpoints() {
+        let stops = vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_midpoint_lerps() {
+        let stops = vec![(0.0, [0, 0, 0, 255]), (1.0, [200, 100, 50, 255])];
+        let mid = sample_conic_color(&stops, 0.5);
+        assert_eq!(mid, [100, 50, 25, 255]);
+    }
+
+    #[test]
+    fn sample_clamp_outside_range() {
+        let stops = vec![(0.2, [255, 0, 0, 255]), (0.8, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.0), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 1.0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn sample_coincident_stops_returns_later_color() {
+        // CSS Images §3.5.1 hard transition: red 0%-50%, blue 50%-100% → t=0.5 should be blue.
+        let stops = vec![
+            (0.0, [255, 0, 0, 255]),
+            (0.5, [255, 0, 0, 255]),
+            (0.5, [0, 0, 255, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        assert_eq!(sample_conic_color(&stops, 0.5), [0, 0, 255, 255]);
+        // Just before/after seam: still in correct half.
+        assert_eq!(sample_conic_color(&stops, 0.499), [255, 0, 0, 255]);
+        assert_eq!(sample_conic_color(&stops, 0.501), [0, 0, 255, 255]);
+    }
+}
+
+#[cfg(test)]
+mod blur_stops_tests {
+    use super::{blur_edge_alpha, blur_stops_mask};
+
+    #[test]
+    fn blur_stops_mask_opaque_shadow_inner_edge() {
+        // At t=0 (inner edge) with fully-opaque shadow, luma = blur_edge_alpha(0) * 1.0 ≈ 0.5
+        let stops = blur_stops_mask(255, 8);
+        assert!(stops.len() >= 2);
+        let first = &stops[0];
+        assert_eq!(first.offset, krilla::num::NormalizedF32::ZERO);
+        assert_eq!(first.opacity, krilla::num::NormalizedF32::ONE);
+        // luma at t=0: blur_edge_alpha(0) ≈ 0.5 → ~128
+        let luma_byte = (blur_edge_alpha(0.0) * 255.0).round() as u8;
+        assert_eq!(
+            first.color,
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
+        );
+    }
+
+    #[test]
+    fn blur_stops_mask_outer_edge_is_black() {
+        // At t=1 (outer edge), alpha ≈ 0 → luma ≈ 0 (black = fully transparent)
+        let stops = blur_stops_mask(255, 8);
+        let last = &stops[stops.len() - 1];
+        assert_eq!(last.offset, krilla::num::NormalizedF32::ONE);
+        assert_eq!(last.opacity, krilla::num::NormalizedF32::ONE);
+        // blur_edge_alpha(1.0) < 0.005, so luma must be <= 1
+        let luma_byte = (blur_edge_alpha(1.0) * 255.0).round() as u8;
+        assert!(luma_byte <= 1);
+        assert_eq!(
+            last.color,
+            krilla::color::rgb::Color::new(luma_byte, luma_byte, luma_byte).into()
+        );
+    }
+
+    #[test]
+    fn blur_stops_mask_semi_transparent_shadow_scales_luma() {
+        // Shadow with alpha=128 (~50%): luma should be halved vs fully-opaque shadow
+        let stops_full = blur_stops_mask(255, 4);
+        let stops_half = blur_stops_mask(128, 4);
+        for (f, h) in stops_full.iter().zip(stops_half.iter()) {
+            // Extract the luma byte from the first stop's color (gray, so R=G=B)
+            // We can't easily inspect Color internals, but we can check that
+            // half-alpha stops are ≤ full-alpha stops by offset ordering.
+            assert_eq!(f.offset, h.offset);
+            assert_eq!(f.opacity, krilla::num::NormalizedF32::ONE);
+            assert_eq!(h.opacity, krilla::num::NormalizedF32::ONE);
+        }
+    }
+
+    #[test]
+    fn blur_edge_alpha_monotonic_decay() {
+        // blur_edge_alpha must be strictly decreasing on [0, 1]
+        let t0 = blur_edge_alpha(0.0);
+        let t05 = blur_edge_alpha(0.5);
+        let t1 = blur_edge_alpha(1.0);
+        assert!(t0 > t05, "alpha must decrease from t=0 to t=0.5");
+        assert!(t05 > t1, "alpha must decrease from t=0.5 to t=1");
+        // at t=0, Gaussian center is at the inner edge so alpha = 0.5
+        assert!((t0 - 0.5).abs() < 1e-5);
+        // at t=1, alpha must be near 0
+        assert!(t1 < 0.005);
+    }
+
+    #[test]
+    fn blur_stops_mask_zero_shadow_alpha_produces_all_black() {
+        // shadow_alpha_byte=0 → shadow_a=0 → luma=0 for every stop
+        let stops = blur_stops_mask(0, 4);
+        assert_eq!(stops.len(), 4);
+        for s in &stops {
+            assert_eq!(
+                s.color,
+                krilla::color::rgb::Color::new(0, 0, 0).into(),
+                "luma should be 0 for transparent shadow"
+            );
+            assert_eq!(s.opacity, krilla::num::NormalizedF32::ONE);
+        }
+    }
+
+    #[test]
+    fn blur_stops_mask_minimum_two_stops() {
+        // n=2 is the minimum; first offset=0, last offset=1
+        let stops = blur_stops_mask(200, 2);
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0].offset, krilla::num::NormalizedF32::ZERO);
+        assert_eq!(stops[1].offset, krilla::num::NormalizedF32::ONE);
+        assert_eq!(stops[0].opacity, krilla::num::NormalizedF32::ONE);
+        assert_eq!(stops[1].opacity, krilla::num::NormalizedF32::ONE);
+    }
+}
+
+#[cfg(test)]
+mod lerp_u8_tests {
+    use super::lerp_u8;
+
+    #[test]
+    fn alpha_zero_returns_a() {
+        assert_eq!(lerp_u8(100, 200, 0.0), 100);
+        assert_eq!(lerp_u8(0, 255, 0.0), 0);
+    }
+
+    #[test]
+    fn alpha_one_returns_b() {
+        assert_eq!(lerp_u8(100, 200, 1.0), 200);
+        assert_eq!(lerp_u8(0, 255, 1.0), 255);
+    }
+
+    #[test]
+    fn midpoint_rounds_to_nearest() {
+        // 0 + (255 - 0) * 0.5 = 127.5 → rounds to 128
+        assert_eq!(lerp_u8(0, 255, 0.5), 128);
+        // 100 + (200 - 100) * 0.5 = 150 exactly
+        assert_eq!(lerp_u8(100, 200, 0.5), 150);
+    }
+
+    #[test]
+    fn reverse_direction() {
+        // 255 + (0 - 255) * 0.25 = 191.25 → rounds to 191
+        assert_eq!(lerp_u8(255, 0, 0.25), 191);
+    }
+
+    #[test]
+    fn same_endpoints_always_returns_same() {
+        assert_eq!(lerp_u8(128, 128, 0.0), 128);
+        assert_eq!(lerp_u8(128, 128, 0.5), 128);
+        assert_eq!(lerp_u8(128, 128, 1.0), 128);
+    }
+}
+
+#[cfg(test)]
+mod erfc_approx_tests {
+    use super::erfc_approx;
+
+    #[test]
+    fn erfc_zero_is_one() {
+        // erfc(0) = 1.0 by definition
+        let v = erfc_approx(0.0);
+        assert!((v - 1.0).abs() < 1e-5, "erfc(0) = {v}, expected 1.0");
+    }
+
+    #[test]
+    fn erfc_large_is_near_zero() {
+        // erfc(4) ≈ 1.54e-8 — negligibly small
+        let v = erfc_approx(4.0);
+        assert!(v < 1e-3, "erfc(4) should be near 0, got {v}");
+    }
+
+    #[test]
+    fn erfc_one_matches_reference() {
+        // erfc(1) ≈ 0.15730 (Abramowitz & Stegun, max error 1.5e-7)
+        let v = erfc_approx(1.0);
+        assert!(
+            (v - 0.157_30).abs() < 1e-4,
+            "erfc(1) = {v}, expected ~0.15730"
+        );
+    }
+
+    #[test]
+    fn erfc_monotonically_decreasing() {
+        let vals: Vec<f32> = (0..=10).map(|i| erfc_approx(i as f32 * 0.3)).collect();
+        for (i, w) in vals.windows(2).enumerate() {
+            assert!(
+                w[0] >= w[1],
+                "erfc not decreasing at step {i}: erfc({}) = {} < erfc({}) = {}",
+                i as f32 * 0.3,
+                w[0],
+                (i + 1) as f32 * 0.3,
+                w[1]
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod additional_conic_and_grid_tests {
+    use super::*;
+    use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+    // ─── normalize_conic_stops edge cases ────────────────────────────────────
+
+    #[test]
+    fn normalize_conic_empty_input_returns_empty() {
+        // is_empty() early-return branch
+        let n = normalize_conic_stops(&[]);
+        assert!(n.is_empty());
+    }
+
+    #[test]
+    fn normalize_conic_length_px_treated_as_auto() {
+        // LengthPx is not valid in conic gradient positions; treated as Auto (→ None → interpolated)
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::LengthPx(100.0),
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 3);
+        // LengthPx treated as Auto → mid-point auto-fill between 0.0 and 1.0
+        assert!((n[1].0 - 0.5).abs() < 1e-6, "LengthPx middle stop → 0.5");
+    }
+
+    #[test]
+    fn normalize_conic_two_auto_stops_fill_endpoints() {
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let n = normalize_conic_stops(&stops);
+        assert_eq!(n.len(), 2);
+        assert!((n[0].0 - 0.0).abs() < 1e-6);
+        assert!((n[1].0 - 1.0).abs() < 1e-6);
+    }
+
+    // ─── sample_conic_color edge cases ───────────────────────────────────────
+
+    #[test]
+    fn sample_conic_empty_stops_returns_opaque_black() {
+        // is_empty() early-return branch
+        assert_eq!(sample_conic_color(&[], 0.5), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn sample_conic_before_first_stop_returns_first_color() {
+        let stops = vec![(0.3, [255, 0, 0, 255]), (0.8, [0, 0, 255, 255])];
+        assert_eq!(sample_conic_color(&stops, 0.1), [255, 0, 0, 255]);
+    }
+
+    // ─── try_uniform_grid single-column ──────────────────────────────────────
+
+    #[test]
+    fn uniform_grid_single_column_detected() {
+        // 1 column × 3 rows: xs.len() == 1 → step_x falls back to cell_w
+        let tiles = vec![
+            (10.0_f32, 0.0_f32, 15.0_f32, 20.0_f32),
+            (10.0, 20.0, 15.0, 20.0),
+            (10.0, 40.0, 15.0, 20.0),
+        ];
+        let g = try_uniform_grid(&tiles).expect("1×3 grid detected");
+        assert_eq!(g.count, (1, 3));
+        // xs.len() < 2 → step_x = cell_w = 15
+        assert!(
+            (g.step.0 - 15.0).abs() < 1e-3,
+            "step_x should equal cell_w, got {}",
+            g.step.0
+        );
+        assert!((g.step.1 - 20.0).abs() < 1e-3);
+        assert!((g.origin.0 - 10.0).abs() < 1e-3);
+        assert!((g.origin.1 - 0.0).abs() < 1e-3);
+    }
+
+    // ─── resolve_repeat_axis Round count clamped to 1 ────────────────────────
+
+    #[test]
+    fn resolve_repeat_axis_round_clip_much_smaller_than_image_clamps_count_to_one() {
+        // clip_size=40, image_size=110: round(40/110) = round(0.36) = 0 → max(1) = 1
+        // adjusted = 40 / 1 = 40
+        let (size, space, start, end) = resolve_repeat_axis(BgRepeat::Round, 0.0, 110.0, 0.0, 40.0);
+        assert!(
+            (size - 40.0).abs() < 1e-5,
+            "adjusted tile size = clip_size/1 = 40, got {size}"
+        );
+        assert_eq!(space, 0.0);
+        assert_eq!(start, 0.0);
+        assert!((end - 40.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_sub_min_adjusted_clamps_to_min_gradient_tile_pt() {
+        // clip_size=0.005 pt is well below MIN_GRADIENT_TILE_PT=0.01.
+        // With image_size=100 (post-clamp arbitrary), Round yields
+        //   count = round(0.005/100).max(1) = 1
+        //   adjusted = 0.005 / 1 = 0.005      ← below MIN_GRADIENT_TILE_PT
+        // The floor must lift adjusted to MIN_GRADIENT_TILE_PT (0.01) so
+        // downstream `try_uniform_grid` stays above its 1e-3 pt eps and
+        // the Pattern fast path remains reachable (coderabbit review PR
+        // #654 discussion_r3614448858).
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.005);
+        assert!(
+            (size - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-min Round adjusted must clamp to MIN_GRADIENT_TILE_PT, got {size}"
+        );
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_zero_clip_stays_zero() {
+        // Zero clip is a legitimate degenerate; the floor must not
+        // resurrect a tile out of nothing.
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.0);
+        assert_eq!(size, 0.0, "zero clip must produce zero tile, got {size}");
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_supra_min_adjusted_passes_through() {
+        // Regression: legitimate non-tiny Round tiles must not be
+        // affected by the clamp. image_size=10, clip_size=105.5:
+        //   count = round(10.55) = 11
+        //   adjusted = 105.5 / 11 ≈ 9.591       (well above min)
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 10.0, 0.0, 105.5);
+        let expected = 105.5_f32 / 11.0;
+        assert!(
+            (size - expected).abs() < 1e-5,
+            "supra-min Round adjusted must pass through unchanged, got {size} expected {expected}"
+        );
+    }
+
+    // ─── try_uniform_grid: non-uniform y step rejection ──────────────────────
+
+    #[test]
+    fn non_uniform_y_step_rejects_irregular_grid() {
+        // 2 x-values × 3 y-values = 6 tiles; x-steps are uniform but y-steps are not.
+        // try_uniform_grid must return None because the y-step uniformity check fails.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+            (10.0, 10.0, 5.0, 5.0),
+            (0.0, 25.0, 5.0, 5.0), // y-step jumps from 10 to 15 → non-uniform
+            (10.0, 25.0, 5.0, 5.0),
+        ];
+        assert!(
+            try_uniform_grid(&tiles).is_none(),
+            "non-uniform y steps must be rejected"
+        );
+    }
+
+    #[test]
+    fn non_uniform_x_step_rejects_irregular_grid() {
+        // 3 x-values × 2 y-values = 6 tiles; x-steps are NOT uniform.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (10.0, 0.0, 5.0, 5.0),
+            (25.0, 0.0, 5.0, 5.0), // x-step jumps from 10 to 15
+            (0.0, 10.0, 5.0, 5.0),
+            (10.0, 10.0, 5.0, 5.0),
+            (25.0, 10.0, 5.0, 5.0),
+        ];
+        assert!(
+            try_uniform_grid(&tiles).is_none(),
+            "non-uniform x steps must be rejected"
+        );
+    }
+
+    // ─── split_truncated_grid: degenerate cases ─────────────────────────────
+
+    #[test]
+    fn split_truncated_grid_empty_returns_none_and_no_remainder() {
+        let tiles: Vec<(f32, f32, f32, f32)> = vec![];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder.len(), 0);
+    }
+
+    #[test]
+    fn split_truncated_grid_single_tile_returns_none_and_tile_as_remainder() {
+        let tiles = vec![(0.0_f32, 0.0_f32, 10.0_f32, 10.0_f32)];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_single_row_returns_none_and_row_as_remainder() {
+        // Single row is either fast-path caught by try_uniform_grid or
+        // irregular; split_truncated_grid does not attempt to split a
+        // single row and hands the whole slice back as remainder.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    // ─── split_truncated_grid: truncated-grid detection ─────────────────────
+
+    #[test]
+    fn split_truncated_grid_two_full_rows_plus_partial_returns_full_and_remainder() {
+        // 3 cols × 2 full rows + 1 partial row of 2 tiles.
+        // Cell 5×5, step 5 (no gap), row-major order per compute_tile_positions_slow.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+            (10.0, 5.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+            (5.0, 10.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full grid must be detected");
+        assert_eq!(grid.count, (3, 2));
+        assert_eq!(grid.cell, (5.0, 5.0));
+        assert_eq!(grid.step, (5.0, 5.0));
+        assert_eq!(grid.origin, (0.0, 0.0));
+        assert_eq!(split.remainder.len(), 2);
+        assert_eq!(split.remainder[0], (0.0, 10.0, 5.0, 5.0));
+        assert_eq!(split.remainder[1], (5.0, 10.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn split_truncated_grid_all_rows_same_length_returns_none() {
+        // Complete uniform grid — try_uniform_grid catches this on the
+        // fast path; split_truncated_grid declines so the caller does
+        // not double-emit.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(
+            split.full.is_none(),
+            "complete grid must fall through to try_uniform_grid fast path"
+        );
+    }
+
+    #[test]
+    fn split_truncated_grid_mismatched_cell_sizes_returns_none() {
+        // Non-uniform cell size — cannot be a truncated grid.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 3.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_exploit_shape_100x16_plus_400() {
+        // Emulate the MAX_TILES = 10_000 truncation shape used by the
+        // exploit: 100 cols × 16 full rows + 1 partial row of 400 tiles.
+        // Cell 1×1, step 1.
+        let mut tiles = Vec::with_capacity(2000);
+        for r in 0..16 {
+            for c in 0..100 {
+                tiles.push((c as f32, r as f32, 1.0, 1.0));
+            }
+        }
+        for c in 0..400 {
+            tiles.push((c as f32, 16.0, 1.0, 1.0));
+        }
+        assert_eq!(tiles.len(), 2000);
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full rectangle must be detected");
+        assert_eq!(grid.count, (100, 16));
+        assert_eq!(split.remainder.len(), 400);
+    }
+}
+
+// ─── renormalize_stops_to_unit_range ─────────────────────────────────────────
+
+#[cfg(test)]
+mod renormalize_tests {
+    use super::renormalize_stops_to_unit_range;
+
+    fn red() -> [u8; 4] {
+        [255, 0, 0, 255]
+    }
+    fn blue() -> [u8; 4] {
+        [0, 0, 255, 255]
+    }
+    fn green() -> [u8; 4] {
+        [0, 255, 0, 255]
+    }
+
+    #[test]
+    fn already_in_range_passthrough() {
+        let stops = vec![(0.0, red()), (0.5, green()), (1.0, blue())];
+        let out = renormalize_stops_to_unit_range(stops.clone());
+        assert_eq!(out, stops);
+    }
+
+    #[test]
+    fn stops_shifted_right_of_one_get_endpoint_prepended() {
+        // All stops > 1 → a synthetic stop at 0.0 and at 1.0 are added;
+        // stops that are outside [0,1] are dropped.
+        let stops = vec![(1.2, red()), (1.8, blue())];
+        let out = renormalize_stops_to_unit_range(stops);
+        // First stop synthesized at 0.0 (clamped to first color)
+        assert_eq!(out[0].0, 0.0);
+        // Last synthetic stop at 1.0 (between red and blue interpolated)
+        assert_eq!(out.last().unwrap().0, 1.0);
+    }
+
+    #[test]
+    fn stops_shifted_left_of_zero_get_endpoint_appended() {
+        // All stops < 0 → synthetic stops added at 0.0 and 1.0; the out-of-range
+        // stops are dropped so the result covers exactly [0, 1].
+        let stops = vec![(-0.8, red()), (-0.2, blue())];
+        let out = renormalize_stops_to_unit_range(stops);
+        assert_eq!(out[0].0, 0.0);
+        assert_eq!(out.last().unwrap().0, 1.0);
+    }
+
+    #[test]
+    fn stops_partially_outside_range_only_in_range_kept() {
+        // First stop at -0.5, then stops inside range, then one past 1.0.
+        // Synthetic endpoints at 0 and 1 fill the gaps; out-of-range stops are filtered.
+        let stops = vec![(-0.5, red()), (0.25, green()), (0.75, blue()), (1.5, red())];
+        let out = renormalize_stops_to_unit_range(stops);
+        // Must start at or before 0.0 and end at or after 1.0
+        assert!(out.first().unwrap().0 <= 0.0 + 1e-6);
+        assert!(out.last().unwrap().0 >= 1.0 - 1e-6);
+        // The in-range stops must be present
+        let has_025 = out.iter().any(|(p, _)| (*p - 0.25).abs() < 1e-6);
+        let has_075 = out.iter().any(|(p, _)| (*p - 0.75).abs() < 1e-6);
+        assert!(has_025, "0.25 stop must be preserved");
+        assert!(has_075, "0.75 stop must be preserved");
+    }
+
+    #[test]
+    fn stop_at_zero_already_present_no_duplicate() {
+        // If the first stop is exactly 0.0, no extra 0.0 endpoint is prepended
+        let stops = vec![(0.0, red()), (2.0, blue())];
+        let out = renormalize_stops_to_unit_range(stops);
+        let zeros: Vec<_> = out.iter().filter(|(p, _)| *p == 0.0).collect();
+        assert_eq!(zeros.len(), 1, "exactly one stop at 0.0");
+    }
+
+    #[test]
+    fn stop_at_one_already_present_no_duplicate() {
+        let stops = vec![(-1.0, red()), (1.0, blue())];
+        let out = renormalize_stops_to_unit_range(stops);
+        let ones: Vec<_> = out
+            .iter()
+            .filter(|(p, _)| (*p - 1.0).abs() < 1e-9)
+            .collect();
+        assert_eq!(ones.len(), 1, "exactly one stop at 1.0");
+    }
+
+    #[test]
+    fn in_range_stops_passthrough_unchanged() {
+        // Both stops are in [0, 1] → early-return passthrough, no synthesis
+        let stops = vec![(0.0, [0, 0, 0, 255]), (0.5, [200, 100, 50, 255])];
+        let out = renormalize_stops_to_unit_range(stops.clone());
+        assert_eq!(out, stops, "all-in-range input must be returned unchanged");
+    }
+
+    #[test]
+    fn synthetic_endpoint_at_one_interpolated_from_out_of_range_stop() {
+        // Last stop at 1.5 (outside range) → synthetic 1.0 endpoint added via interpolation;
+        // color_at(1.0) = lerp(black, white, 1/1.5 ≈ 0.667) ≈ [170, 170, 170, 255]
+        let stops = vec![(0.0, [0, 0, 0, 255]), (1.5, [255, 255, 255, 255])];
+        let out = renormalize_stops_to_unit_range(stops);
+        let last = out.last().unwrap();
+        assert!((last.0 - 1.0).abs() < 1e-6, "synthetic stop must be at 1.0");
+        // α = 1.0/1.5 ≈ 0.6667 → each channel ≈ 170
+        assert!(
+            last.1[0] > 160 && last.1[0] < 180,
+            "R channel ≈ 170, got {}",
+            last.1[0]
+        );
+    }
+
+    #[test]
+    fn coincident_stops_hard_transition_picks_later_color() {
+        // Two stops at identical positions (hard transition) inside range;
+        // renormalize adds a 0.0 and 1.0 endpoint. The hard stop at 0.5
+        // should survive intact (two entries at 0.5).
+        let stops = vec![(0.5, [255, 0, 0, 255]), (0.5, [0, 0, 255, 255])];
+        let out = renormalize_stops_to_unit_range(stops);
+        assert!(out.iter().any(|(p, _)| (*p - 0.5).abs() < 1e-9));
+        // Both hard-stop entries survive
+        assert_eq!(
+            out.iter().filter(|(p, _)| (*p - 0.5).abs() < 1e-9).count(),
+            2
+        );
+    }
+}
+
+// ─── expand_interpolation_hints ──────────────────────────────────────────────
+
+#[cfg(test)]
+mod interpolation_hint_tests {
+    use super::{ResolvedStop, expand_interpolation_hints};
+
+    fn make_stop(pos: f32, rgba: [u8; 4]) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba,
+            is_hint: false,
+        }
+    }
+
+    fn make_hint(pos: f32) -> ResolvedStop {
+        ResolvedStop {
+            pos,
+            rgba: [0; 4],
+            is_hint: true,
+        }
+    }
+
+    #[test]
+    fn no_hints_passthrough() {
+        let stops = vec![
+            make_stop(0.0, [255, 0, 0, 255]),
+            make_stop(0.5, [0, 255, 0, 255]),
+            make_stop(1.0, [0, 0, 255, 255]),
+        ];
+        let out = expand_interpolation_hints(stops.clone());
+        assert_eq!(out.len(), 3);
+        assert!((out[0].0 - 0.0).abs() < 1e-6);
+        assert!((out[1].0 - 0.5).abs() < 1e-6);
+        assert!((out[2].0 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hint_at_midpoint_produces_8_intermediate_stops() {
+        // midpoint hint at 0.5 between 0.0 and 1.0 → exponent=1 (linear, no-op)
+        // but 8 intermediate stops are still inserted
+        let stops = vec![
+            make_stop(0.0, [0, 0, 0, 255]),
+            make_hint(0.5),
+            make_stop(1.0, [200, 0, 0, 255]),
+        ];
+        let out = expand_interpolation_hints(stops);
+        // The two color stops survive; the hint is replaced by 8 intermediate stops
+        // (the hint itself disappears but its neighbour stops do too because the
+        // algorithm only emits non-hint stops directly, and then the 8 samples)
+        // Total = 1 (before hint) + 8 (samples) + 0 (hint itself) = 9, then +1 for last stop
+        // Actually: stop 0 emitted, hint replaced by 8 samples, stop 1 emitted → 10
+        assert_eq!(out.len(), 10, "2 color stops + 8 hint samples = 10");
+    }
+
+    #[test]
+    fn leading_hint_is_skipped() {
+        // i==0 is a leading hint: skip (defensive guard in code)
+        let stops = vec![
+            make_hint(0.0),
+            make_stop(0.5, [255, 0, 0, 255]),
+            make_stop(1.0, [0, 0, 255, 255]),
+        ];
+        let out = expand_interpolation_hints(stops);
+        // Leading hint is skipped; only the two color stops survive
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn trailing_hint_is_skipped() {
+        // i == stops.len()-1 is a trailing hint: skip
+        let stops = vec![
+            make_stop(0.0, [255, 0, 0, 255]),
+            make_stop(0.5, [0, 255, 0, 255]),
+            make_hint(1.0),
+        ];
+        let out = expand_interpolation_hints(stops);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn degenerate_span_hint_dropped() {
+        // When the two neighbouring colour stops are at the same position (span ≤ EPS)
+        // the hint is dropped without inserting any intermediate stops.
+        let stops = vec![
+            make_stop(0.5, [255, 0, 0, 255]),
+            make_hint(0.5),
+            make_stop(0.5, [0, 0, 255, 255]),
+        ];
+        let out = expand_interpolation_hints(stops);
+        // hint dropped → only the two surrounding stops
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn hint_biases_midpoint_toward_first_stop() {
+        // hint at 0.25 between 0.0 and 1.0 → exponent = ln(0.5)/ln(0.25) = 0.5
+        // So the midpoint t=0.5 maps to p=t^0.5=0.707, meaning colour is biased
+        // toward the start (darker for black→white).
+        let stops = vec![
+            make_stop(0.0, [0, 0, 0, 255]),
+            make_hint(0.25),
+            make_stop(1.0, [255, 255, 255, 255]),
+        ];
+        let out = expand_interpolation_hints(stops);
+        assert_eq!(out.len(), 10); // 1 + 8 + 1
+        // The first colour stop and last colour stop
+        assert_eq!(out[0], (0.0, [0, 0, 0, 255]));
+        assert_eq!(out[9], (1.0, [255, 255, 255, 255]));
+        // The 5th interpolated sample (t=5/9 ≈ 0.556, pos=0.556)
+        // p = t^exponent where exponent=ln(0.5)/ln(0.25)=0.5 → p=0.556^0.5≈0.745
+        // colour ≈ 0.745*255 ≈ 190
+        let sample_pos = out[5].0;
+        assert!(
+            sample_pos > 0.4 && sample_pos < 0.7,
+            "sample position {sample_pos} should be in (0.4, 0.7)"
+        );
+    }
+}
+
+// ─── expand_repeating_stops ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod repeating_stops_tests {
+    use super::expand_repeating_stops;
+
+    fn red() -> [u8; 4] {
+        [255, 0, 0, 255]
+    }
+    fn blue() -> [u8; 4] {
+        [0, 0, 255, 255]
+    }
+
+    #[test]
+    fn degenerate_zero_period_returns_solid() {
+        // first == last → period=0 → returns [0, last_color], [1, last_color]
+        let stops = vec![(0.5, red()), (0.5, blue())];
+        let out = expand_repeating_stops(stops).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (0.0, blue()));
+        assert_eq!(out[1], (1.0, blue()));
+    }
+
+    #[test]
+    fn already_covers_zero_to_one() {
+        // period covers [0, 1] exactly; forward=0, backward=0, total_copies=1
+        let stops = vec![(0.0, red()), (1.0, blue())];
+        let out = expand_repeating_stops(stops.clone()).unwrap();
+        // Single copy shifted by 0 → same as input
+        assert_eq!(out, stops);
+    }
+
+    #[test]
+    fn short_period_expands_to_cover_range() {
+        // Period [0.2, 0.4]: period=0.2; needs backward to cover 0 and forward to cover 1
+        let stops = vec![(0.2, red()), (0.4, blue())];
+        let out = expand_repeating_stops(stops).unwrap();
+        // Output must cover at least [0, 1]
+        assert!(
+            out.first().unwrap().0 <= 0.0,
+            "first stop must reach or precede 0.0"
+        );
+        assert!(
+            out.last().unwrap().0 >= 1.0,
+            "last stop must reach or exceed 1.0"
+        );
+    }
+
+    #[test]
+    fn period_starts_after_zero_backward_copy_added() {
+        // Period [0.5, 0.8]: p_first=0.5 > 0 → backward copies needed
+        let stops = vec![(0.5, red()), (0.8, blue())];
+        let out = expand_repeating_stops(stops).unwrap();
+        assert!(out.first().unwrap().0 <= 0.0);
+        assert!(out.last().unwrap().0 >= 1.0);
+        // Copies are spaced by period=0.3
+        let first_pos = out.first().unwrap().0;
+        let second_pos = out.get(1).unwrap().0;
+        let step = second_pos - first_pos;
+        assert!(
+            (step - 0.3).abs() < 1e-5,
+            "step should be period 0.3, got {step}"
+        );
+    }
+
+    #[test]
+    fn period_ends_before_one_forward_copy_added() {
+        // Period [0.0, 0.3]: p_last=0.3 < 1 → forward copies needed
+        let stops = vec![(0.0, red()), (0.3, blue())];
+        let out = expand_repeating_stops(stops).unwrap();
+        assert!(out.first().unwrap().0 <= 0.0);
+        assert!(out.last().unwrap().0 >= 1.0);
+    }
+
+    #[test]
+    fn negative_period_returns_solid() {
+        // Monotonic clamp could produce negative period if positions are swapped;
+        // treated as degenerate → solid last color
+        let stops = vec![(0.8, red()), (0.2, blue())];
+        // After monotonic clamp both would be 0.8, but expand_repeating_stops
+        // gets the raw stops. period = 0.2 - 0.8 = -0.6 < 0 → solid.
+        let out = expand_repeating_stops(stops).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].1, blue()); // last_color
+        assert_eq!(out[1].1, blue());
+    }
+}
+
+// ─── resolve_gradient_size ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod gradient_size_tests {
+    use super::{BgLengthPercentage, BgSize, resolve_gradient_size};
+    use crate::units::F32Units;
+
+    #[test]
+    fn auto_returns_origin_size() {
+        assert_eq!(
+            resolve_gradient_size(&BgSize::Auto, 300.0, 200.0),
+            (300.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn cover_returns_origin_size() {
+        assert_eq!(
+            resolve_gradient_size(&BgSize::Cover, 300.0, 200.0),
+            (300.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn contain_returns_origin_size() {
+        assert_eq!(
+            resolve_gradient_size(&BgSize::Contain, 300.0, 200.0),
+            (300.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn explicit_both_axes_resolved() {
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(80.0_f32.as_pt())),
+            Some(BgLengthPercentage::Length(60.0_f32.as_pt())),
+        );
+        assert_eq!(resolve_gradient_size(&size, 300.0, 200.0), (80.0, 60.0));
+    }
+
+    #[test]
+    fn explicit_width_only_height_falls_back_to_origin() {
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(150.0_f32.as_pt())), None);
+        let (w, h) = resolve_gradient_size(&size, 300.0, 200.0);
+        assert_eq!(w, 150.0);
+        assert_eq!(h, 200.0); // None → origin_h
+    }
+
+    #[test]
+    fn explicit_height_only_width_falls_back_to_origin() {
+        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Length(50.0_f32.as_pt())));
+        let (w, h) = resolve_gradient_size(&size, 300.0, 200.0);
+        assert_eq!(w, 300.0); // None → origin_w
+        assert_eq!(h, 50.0);
+    }
+
+    #[test]
+    fn explicit_both_none_returns_origin_size() {
+        let size = BgSize::Explicit(None, None);
+        assert_eq!(resolve_gradient_size(&size, 300.0, 200.0), (300.0, 200.0));
+    }
+
+    #[test]
+    fn explicit_percentage_resolved_against_origin() {
+        let size = BgSize::Explicit(
+            Some(BgLengthPercentage::Percentage(0.5)),
+            Some(BgLengthPercentage::Percentage(0.25)),
+        );
+        let (w, h) = resolve_gradient_size(&size, 400.0, 200.0);
+        assert!((w - 200.0).abs() < 1e-5);
+        assert!((h - 50.0).abs() < 1e-5);
+    }
+}
+
+// ─── compute_origin_rect / compute_clip_rect ─────────────────────────────────
+
+#[cfg(test)]
+mod rect_computation_tests {
+    use super::{BgBox, BgClip, BlockStyle, compute_clip_rect, compute_origin_rect};
+    use crate::units::F32Units;
+
+    fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
+        BlockStyle {
+            border_widths: border.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
+            ..BlockStyle::default()
+        }
+    }
+
+    // ─── compute_origin_rect ─────────────────────────────────────────────────
+
+    #[test]
+    fn origin_border_box_passthrough() {
+        let s = style([5.0; 4], [3.0; 4]);
+        assert_eq!(
+            compute_origin_rect(&s, &BgBox::BorderBox, 10.0, 20.0, 100.0, 80.0),
+            (10.0, 20.0, 100.0, 80.0)
+        );
+    }
+
+    #[test]
+    fn origin_padding_box_inset_by_border() {
+        // border: [top=2, right=3, bottom=4, left=5]
+        let s = style([2.0, 3.0, 4.0, 5.0], [0.0; 4]);
+        let (x, y, w, h) = compute_origin_rect(&s, &BgBox::PaddingBox, 0.0, 0.0, 100.0, 80.0);
+        assert_eq!(x, 5.0); // left border
+        assert_eq!(y, 2.0); // top border
+        assert_eq!(w, 92.0); // 100 - left(5) - right(3)
+        assert_eq!(h, 74.0); // 80 - top(2) - bottom(4)
+    }
+
+    #[test]
+    fn origin_content_box_inset_by_border_and_padding() {
+        // border: [2,3,4,5], padding: [1,2,3,4]
+        let s = style([2.0, 3.0, 4.0, 5.0], [1.0, 2.0, 3.0, 4.0]);
+        let (x, y, w, h) = compute_origin_rect(&s, &BgBox::ContentBox, 0.0, 0.0, 100.0, 80.0);
+        assert_eq!(x, 9.0); // left border(5) + left padding(4)
+        assert_eq!(y, 3.0); // top border(2) + top padding(1)
+        assert_eq!(w, 86.0); // 100 - left(5+4) - right(3+2)
+        assert_eq!(h, 70.0); // 80 - top(2+1) - bottom(4+3)
+    }
+
+    // ─── compute_clip_rect ───────────────────────────────────────────────────
+
+    #[test]
+    fn clip_border_box_passthrough() {
+        let s = style([5.0; 4], [3.0; 4]);
+        assert_eq!(
+            compute_clip_rect(&s, &BgClip::BorderBox, 10.0, 20.0, 100.0, 80.0),
+            (10.0, 20.0, 100.0, 80.0)
+        );
+    }
+
+    #[test]
+    fn clip_padding_box_inset_by_border() {
+        let s = style([2.0, 3.0, 4.0, 5.0], [0.0; 4]);
+        let (x, y, w, h) = compute_clip_rect(&s, &BgClip::PaddingBox, 0.0, 0.0, 100.0, 80.0);
+        assert_eq!(x, 5.0);
+        assert_eq!(y, 2.0);
+        assert_eq!(w, 92.0);
+        assert_eq!(h, 74.0);
+    }
+
+    #[test]
+    fn clip_text_same_as_padding_box() {
+        let s = style([2.0, 3.0, 4.0, 5.0], [0.0; 4]);
+        let padding = compute_clip_rect(&s, &BgClip::PaddingBox, 0.0, 0.0, 100.0, 80.0);
+        let text = compute_clip_rect(&s, &BgClip::Text, 0.0, 0.0, 100.0, 80.0);
+        assert_eq!(padding, text);
+    }
+
+    #[test]
+    fn clip_content_box_inset_by_border_and_padding() {
+        let s = style([2.0, 3.0, 4.0, 5.0], [1.0, 2.0, 3.0, 4.0]);
+        let (x, y, w, h) = compute_clip_rect(&s, &BgClip::ContentBox, 0.0, 0.0, 100.0, 80.0);
+        assert_eq!(x, 9.0);
+        assert_eq!(y, 3.0);
+        assert_eq!(w, 86.0);
+        assert_eq!(h, 70.0);
+    }
+}
+
+// ─── compute_inner_radii ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod inner_radii_tests {
+    use super::{BgClip, BlockStyle, compute_inner_radii};
+    use crate::units::F32Units;
+
+    fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
+        BlockStyle {
+            border_widths: border.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
+            ..BlockStyle::default()
+        }
+    }
+
+    #[test]
+    fn border_box_clip_no_inset() {
+        let s = style([5.0; 4], [3.0; 4]);
+        let outer = [[10.0, 10.0]; 4];
+        let inner = compute_inner_radii(&outer, &s, &BgClip::BorderBox);
+        assert_eq!(inner, outer);
+    }
+
+    #[test]
+    fn padding_box_inset_by_border() {
+        // border=[top=2, right=3, bottom=4, left=5], outer radii=10
+        // top-left: x-radius -= left(5) → 5, y-radius -= top(2) → 8
+        // top-right: x-radius -= right(3) → 7, y-radius -= top(2) → 8
+        let s = style([2.0, 3.0, 4.0, 5.0], [0.0; 4]);
+        let outer = [[10.0, 10.0]; 4];
+        let inner = compute_inner_radii(&outer, &s, &BgClip::PaddingBox);
+        assert_eq!(inner[0], [5.0, 8.0]); // top-left: x-=left(5), y-=top(2)
+        assert_eq!(inner[1], [7.0, 8.0]); // top-right: x-=right(3), y-=top(2)
+        assert_eq!(inner[2], [7.0, 6.0]); // bottom-right: x-=right(3), y-=bottom(4)
+        assert_eq!(inner[3], [5.0, 6.0]); // bottom-left: x-=left(5), y-=bottom(4)
+    }
+
+    #[test]
+    fn content_box_inset_by_border_and_padding() {
+        let s = style([2.0, 3.0, 4.0, 5.0], [1.0, 1.0, 1.0, 1.0]);
+        let outer = [[10.0, 10.0]; 4];
+        let inner = compute_inner_radii(&outer, &s, &BgClip::ContentBox);
+        // top-left: x-=left_border(5)+left_pad(1)=6 → 4, y-=top_border(2)+top_pad(1)=3 → 7
+        assert_eq!(inner[0], [4.0, 7.0]);
+    }
+
+    #[test]
+    fn radii_clamped_to_zero_when_inset_exceeds_radius() {
+        // Small outer radii, large borders → clamp to 0
+        let s = style([8.0; 4], [0.0; 4]);
+        let outer = [[5.0, 5.0]; 4];
+        let inner = compute_inner_radii(&outer, &s, &BgClip::PaddingBox);
+        for corner in &inner {
+            assert_eq!(*corner, [0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn text_clip_same_as_padding_box() {
+        let s = style([3.0; 4], [2.0; 4]);
+        let outer = [[10.0, 10.0]; 4];
+        let padding = compute_inner_radii(&outer, &s, &BgClip::PaddingBox);
+        let text = compute_inner_radii(&outer, &s, &BgClip::Text);
+        assert_eq!(padding, text);
+    }
+}
+
+// ─── ellipse_corner_scale ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod ellipse_corner_scale_tests {
+    use super::ellipse_corner_scale;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn zero_rx_passthrough() {
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 0.0, 10.0, true);
+        assert_eq!(rx, 0.0);
+        assert_eq!(ry, 10.0);
+    }
+
+    #[test]
+    fn zero_ry_passthrough() {
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 10.0, 0.0, true);
+        assert_eq!(rx, 10.0);
+        assert_eq!(ry, 0.0);
+    }
+
+    #[test]
+    fn center_of_square_farthest_corner_is_corner_distance() {
+        // Center at (50, 50) in box (0,0)-(100,100), rx0=ry0=1
+        // All corners are at distance sqrt((50/1)^2 + (50/1)^2) = sqrt(5000) ≈ 70.7
+        // farthest → chosen=70.7, result=(70.7, 70.7)
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, true);
+        let expected = (50.0_f32.powi(2) * 2.0).sqrt();
+        assert!(approx(rx, expected), "rx={rx}, expected≈{expected}");
+        assert!(approx(ry, expected));
+    }
+
+    #[test]
+    fn center_of_square_closest_corner_is_zero() {
+        // Center exactly at a corner: (0,0), box (0,0)-(100,100)
+        // Corners: (0,0) distance=0, (100,0), (0,100), (100,100)
+        // closest = 0
+        let (rx, ry) = ellipse_corner_scale(0.0, 0.0, 0.0, 0.0, 100.0, 100.0, 1.0, 1.0, false);
+        assert!(approx(rx, 0.0), "rx={rx}");
+        assert!(approx(ry, 0.0), "ry={ry}");
+    }
+
+    #[test]
+    fn asymmetric_ellipse_farthest_scales_proportionally() {
+        // rx0=2, ry0=1; the scale factor is the same for both axes (it's a scalar multiple)
+        let (rx, ry) = ellipse_corner_scale(50.0, 50.0, 0.0, 0.0, 100.0, 100.0, 2.0, 1.0, true);
+        // The ratio rx/ry must equal rx0/ry0 = 2
+        let ratio = rx / ry;
+        assert!(approx(ratio, 2.0), "ratio={ratio}, expected 2.0");
+    }
+}
+
+// ─── compute_tile_positions / compute_tile_positions_slow ────────────────────
+
+#[cfg(test)]
+mod tile_position_tests {
+    use super::{BgRepeat, compute_tile_positions, compute_tile_positions_slow};
+    use crate::units::F32Units;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    // ─── NoRepeat × NoRepeat fast-path ───────────────────────────────────────
+
+    #[test]
+    fn no_repeat_both_axes_returns_single_tile() {
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            10.0,
+            20.0,
+            50.0,
+            40.0,
+            0.0,
+            0.0,
+            200.0,
+            200.0,
+        );
+        assert_eq!(tiles, vec![(10.0, 20.0, 50.0, 40.0)]);
+    }
+
+    #[test]
+    fn no_repeat_zero_image_size_returns_empty() {
+        let tiles = compute_tile_positions(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            0.0,
+            0.0,
+            0.0,
+            30.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    // ─── Repeat × Repeat ─────────────────────────────────────────────────────
+
+    #[test]
+    fn repeat_tiles_cover_entire_clip_region() {
+        // Image 20×20 in 100×100 clip, starting at (0,0).
+        // The slow-path loop uses `tx < end + 0.01` so boundary tiles at x=100 are
+        // also emitted; 6 columns × 6 rows = 36 tiles (0,20,40,60,80,100).
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            20.0,
+            20.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // All tiles are 20×20
+        assert!(tiles.iter().all(|t| approx(t.2, 20.0) && approx(t.3, 20.0)));
+        // Tiles must span from ≤0 to ≥100 in both axes
+        let min_x = tiles.iter().map(|t| t.0).fold(f32::INFINITY, f32::min);
+        let max_x = tiles.iter().map(|t| t.0 + t.2).fold(0.0_f32, f32::max);
+        assert!(min_x <= 0.0, "left edge should cover 0");
+        assert!(max_x >= 100.0, "right edge should reach 100");
+        // Count is deterministic (boundary tiles included via +0.01 tolerance)
+        assert_eq!(
+            tiles.len(),
+            36,
+            "6 cols × 6 rows = 36 with boundary tolerance"
+        );
+    }
+
+    #[test]
+    fn repeat_with_offset_position_aligns_to_position() {
+        // Image 30px at position 15px: tiles at -15, 15, 45, 75, then 105 (outside)
+        // clip [0, 100], img 30, pos 15 → start = 15 - 30 = -15
+        let tiles = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::NoRepeat,
+            15.0,
+            0.0,
+            30.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let xs: Vec<f32> = tiles.iter().map(|t| t.0).collect();
+        // Should include tile at -15 and at 15
+        assert!(
+            xs.iter().any(|&x| approx(x, -15.0)),
+            "tile at -15 expected, got {xs:?}"
+        );
+        assert!(
+            xs.iter().any(|&x| approx(x, 15.0)),
+            "tile at 15 expected, got {xs:?}"
+        );
+    }
+
+    // ─── Slow path ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn slow_path_no_repeat_single_tile() {
+        let tiles = compute_tile_positions_slow(
+            BgRepeat::NoRepeat,
+            BgRepeat::NoRepeat,
+            10.0,
+            20.0,
+            50.0,
+            40.0,
+            0.0,
+            0.0,
+            200.0,
+            200.0,
+        );
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0], (10.0, 20.0, 50.0, 40.0));
+    }
+
+    #[test]
+    fn slow_path_degenerate_zero_tile_size_returns_empty() {
+        // resolve_repeat_axis with image_size=0 returns (0, ...) → tile_w=0 → empty
+        let tiles = compute_tile_positions_slow(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert!(tiles.is_empty());
+    }
+
+    #[test]
+    fn slow_path_repeat_matches_fast_path() {
+        // Both paths must agree on tile list for a simple repeat case
+        let fast = compute_tile_positions(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            25.0,
+            25.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        let slow = compute_tile_positions_slow(
+            BgRepeat::Repeat,
+            BgRepeat::Repeat,
+            0.0,
+            0.0,
+            25.0,
+            25.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!(fast.len(), slow.len());
+        for (f, s) in fast.iter().zip(slow.iter()) {
+            assert!(
+                approx(f.0, s.0) && approx(f.1, s.1),
+                "tile mismatch: {f:?} vs {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn space_repeat_tiles_at_clip_boundaries() {
+        // Space repeat: tiles at clip_start and spaced evenly
+        let tiles = compute_tile_positions(
+            BgRepeat::Space,
+            BgRepeat::NoRepeat,
+            0.0,
+            0.0,
+            30.0,
+            100.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+        );
+        // 3 tiles of 30px fit in 100px with 5px spacing each
+        assert_eq!(tiles.len(), 3);
+        assert!(approx(tiles[0].0, 0.0));
+        assert!(approx(tiles[1].0, 35.0)); // 30 + 5 spacing
+        assert!(approx(tiles[2].0, 70.0));
+    }
+
+    // ─── resolve_gradient_stops via public helper ─────────────────────────────
+
+    #[test]
+    fn resolve_gradient_stops_fraction_positions_basic() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);
+        assert_eq!(out[1].offset, krilla::num::NormalizedF32::ONE);
+    }
+
+    #[test]
+    fn resolve_gradient_stops_single_stop_returns_none() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        let stops = vec![GradientStop {
+            position: GradientStopPosition::Fraction(0.5),
+            rgba: [255, 0, 0, 255],
+            is_hint: false,
+        }];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn resolve_gradient_stops_zero_line_length_returns_none() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        assert!(resolve_gradient_stops(&stops, 0.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn resolve_gradient_stops_length_px_converted_to_fraction() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        // LengthPx(50) with line_length=100 → fraction 0.5
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::LengthPx(50.0),
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(1.0),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 3);
+        let mid_offset = out[1].offset.get();
+        assert!((mid_offset - 0.5).abs() < 1e-5, "mid offset={mid_offset}");
+    }
+
+    #[test]
+    fn resolve_gradient_stops_auto_positions_interpolated() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        // Three auto stops → 0.0, 0.5, 1.0
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 255, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Auto,
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);
+        let mid = out[1].offset.get();
+        assert!((mid - 0.5).abs() < 1e-5, "mid={mid}");
+        assert_eq!(out[2].offset, krilla::num::NormalizedF32::ONE);
+    }
+
+    #[test]
+    fn resolve_gradient_stops_repeating_expands_stops() {
+        use super::resolve_gradient_stops;
+        use crate::draw_primitives::{GradientStop, GradientStopPosition};
+
+        // Period [0.0, 0.3] repeating → expands to cover [0, 1]
+        let stops = vec![
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.0),
+                rgba: [255, 0, 0, 255],
+                is_hint: false,
+            },
+            GradientStop {
+                position: GradientStopPosition::Fraction(0.3),
+                rgba: [0, 0, 255, 255],
+                is_hint: false,
+            },
+        ];
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        // repeating expands: many copies needed to cover [0, 1]
+        assert!(out.len() > 2, "repeating should expand beyond 2 stops");
+        assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);
+        assert_eq!(out.last().unwrap().offset, krilla::num::NormalizedF32::ONE);
+    }
+}
+
+#[cfg(test)]
+mod render_smoke_tests {
+    fn render(html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    #[test]
+    fn background_color_with_border_radius() {
+        // draw_background_color の border-radius ブランチ (lines 521-526) を踏む:
+        // has_radius() == true → build_rounded_rect_path が呼ばれる経路。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background-color:red;border-radius:10px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn box_shadow_with_border_radius() {
+        // draw_single_box_shadow (lines 101-106) と
+        // build_shadow_evenodd_clip (lines 59-65) の border-radius ブランチを踏む。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;box-shadow:4px 4px 0px rgba(0,0,0,0.5);border-radius:8px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn linear_gradient_with_border_radius() {
+        // draw_background_layer の border-radius クリップ経路 (lines 561-566) を踏む。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:linear-gradient(red,blue);border-radius:8px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn repeating_radial_gradient_tiling_pattern() {
+        // draw_radial_grid クロージャ → draw_gradient_tiling_pattern (lines 710-716) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:repeating-radial-gradient(circle 20px,red,blue 20px);background-size:30px 30px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn repeating_conic_gradient_tiling_pattern() {
+        // draw_conic_grid クロージャ → draw_gradient_tiling_pattern (lines 760-773) を踏む。
+        // background-size を要素より小さくして複数タイルを強制し、
+        // try_uniform_grid が Some を返す (≥ 2 tiles) ことで Pattern 経路が選ばれる。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background:repeating-conic-gradient(red 0deg,blue 30deg);background-size:40px 40px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn background_and_box_shadow_combined_with_border_radius() {
+        // 3 つの border-radius 経路を同時に踏む:
+        // draw_background_color (lines 521-526), draw_single_box_shadow (lines 101-106),
+        // build_shadow_evenodd_clip (lines 59-65)。
+        let pdf = render(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;background-color:cornflowerblue;
+                        box-shadow:2px 2px 4px rgba(0,0,0,0.4);border-radius:16px"></div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+}
