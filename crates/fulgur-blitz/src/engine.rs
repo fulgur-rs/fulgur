@@ -2245,14 +2245,15 @@ mod tests {
 
     #[test]
     fn render_pdf_ua_without_title_fails_validation() {
-        // pdf_ua(true) without a document title must always fail, but the
-        // specific validation error is platform-dependent: Linux/Krilla emits
-        // NoDocumentTitle first, while macOS emits a document-language error
-        // first.  Either way the render must return Err — that's what we
-        // assert here.  The <h1> produces a document outline so
-        // MissingDocumentOutline is not a confounding variable.
+        // pdf_ua(true) + lang but no <title> must fail with NoDocumentTitle.
+        // Setting lang("en") isolates the missing-title failure: without it
+        // macOS/Krilla emits a document-language error first, which would
+        // keep the assertion trivially true even if title validation broke.
+        // The <h1> produces a document outline so MissingDocumentOutline is
+        // not a confounding variable.
         let result = Engine::builder()
             .pdf_ua(true)
+            .lang("en")
             .build()
             .render("<!doctype html><html><body><h1>heading</h1></body></html>");
         assert!(
