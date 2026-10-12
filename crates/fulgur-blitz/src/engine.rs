@@ -2248,16 +2248,19 @@ mod tests {
         // pdf_ua(true) without a document title causes Krilla to emit
         // NoDocumentTitle and return Err.  Note: a missing language does NOT
         // cause a hard failure in Krilla 0.7 (see pdf_ua_without_lang_succeeds
-        // in crates/fulgur/tests/render_smoke.rs).  This test exercises the
-        // PDF/UA Krilla validation error path; we verify only that the render
-        // fails so the caller is not silently handed a non-conformant PDF.
+        // in crates/fulgur/tests/render_smoke.rs).
+        //
+        // The <h1> produces a document outline so MissingDocumentOutline is
+        // not a confounding failure; the remaining error should be
+        // NoDocumentTitle specifically.
         let result = Engine::builder()
             .pdf_ua(true)
             .build()
-            .render("<!doctype html><html><body><p>no title</p></body></html>");
+            .render("<!doctype html><html><body><h1>heading</h1></body></html>");
+        let err = result.expect_err("PDF/UA render without a document title must fail");
         assert!(
-            result.is_err(),
-            "PDF/UA render without a document title must fail"
+            err.to_string().contains("NoDocumentTitle"),
+            "expected NoDocumentTitle in error, got: {err}"
         );
     }
 }
