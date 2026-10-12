@@ -2241,22 +2241,23 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    // ── PDF/UA: missing lang causes Krilla validation error ──────────────────
+    // ── PDF/UA: missing title causes Krilla validation error ─────────────────
 
     #[test]
-    fn render_pdf_ua_without_any_lang_fails_validation() {
-        // pdf_ua(true) without any document language causes Krilla's PDF/UA
-        // validator to reject the output and return an Err.  The exact
-        // validation diagnostics are Krilla's domain; we verify only that
-        // the render fails so the caller is not silently handed a
-        // non-conformant PDF.
+    fn render_pdf_ua_without_title_fails_validation() {
+        // pdf_ua(true) without a document title causes Krilla to emit
+        // NoDocumentTitle and return Err.  Note: a missing language does NOT
+        // cause a hard failure in Krilla 0.7 (see pdf_ua_without_lang_succeeds
+        // in crates/fulgur/tests/render_smoke.rs).  This test exercises the
+        // PDF/UA Krilla validation error path; we verify only that the render
+        // fails so the caller is not silently handed a non-conformant PDF.
         let result = Engine::builder()
             .pdf_ua(true)
             .build()
-            .render("<!doctype html><html><body><p>no lang</p></body></html>");
+            .render("<!doctype html><html><body><p>no title</p></body></html>");
         assert!(
             result.is_err(),
-            "PDF/UA render without any language must fail"
+            "PDF/UA render without a document title must fail"
         );
     }
 }
