@@ -9,10 +9,10 @@ GEM
   specs:
     diff-lcs (1.6.2)
     rake (13.4.2)
-    rake-compiler (1.3.1)
+    rake-compiler (1.3.2)
       rake
     rake-compiler-dock (1.12.0)
-    rb_sys (0.9.128)
+    rb_sys (0.9.130)
       rake-compiler-dock (= 1.12.0)
     rspec (3.13.2)
       rspec-core (~> 3.13.0)
@@ -38,7 +38,7 @@ PLATFORMS
 DEPENDENCIES
   fulgur!
   rake (~> 13.0)
-  rake-compiler (~> 1.2)
+  rake-compiler (~> 1.3)
   rspec (~> 3.12)
 
 BUNDLED WITH
