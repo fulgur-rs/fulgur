@@ -26,4 +26,4 @@ flpdf = "0.10"
 tempfile = "3"
 
 [dev-dependencies]
-lopdf = "0.42"
+lopdf = "0.45"

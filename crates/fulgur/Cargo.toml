@@ -25,7 +25,7 @@ fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
 tempfile = "3.27.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 toml = "1.1"
-lopdf = "0.42.0"
+lopdf = "0.45.0"
 krilla = "0.7.0"
 parley = "0.6"
 serde_json = "1"

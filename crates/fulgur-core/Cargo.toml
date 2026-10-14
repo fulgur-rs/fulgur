@@ -19,7 +19,7 @@ woff2-patched = "0.4"
 thiserror = "2"
 minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
 log = "0.4"
-lopdf = "0.42.0"
+lopdf = "0.45.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 

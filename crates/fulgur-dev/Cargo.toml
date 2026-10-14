@@ -23,7 +23,7 @@ fulgur-raikiri = { path = "../fulgur-raikiri" }
 
 [dev-dependencies]
 tempfile = "3"
-lopdf = "0.42"
+lopdf = "0.45"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
