@@ -2220,4 +2220,73 @@ mod tests {
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // ── Deprecated render_html / render_html_to_file aliases ─────────────────
+
+    #[allow(deprecated)]
+    #[test]
+    fn render_html_deprecated_alias_still_produces_pdf() {
+        // `render_html` is a renamed alias for `render` (since 0.19.0).
+        // It must still work so callers built against the pre-0.19 API
+        // continue to compile and function without changes.
+        let pdf = Engine::builder()
+            .build()
+            .render_html("<html><body><p>deprecated</p></body></html>")
+            .expect("deprecated render_html should succeed");
+        assert!(pdf.starts_with(b"%PDF"), "render_html must return a PDF");
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn render_html_to_file_deprecated_alias_writes_pdf() {
+        // `render_html_to_file` is a renamed alias for `render_file` (since 0.19.0).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deprecated.pdf");
+        Engine::builder()
+            .build()
+            .render_html_to_file("<html><body><p>deprecated file</p></body></html>", &path)
+            .expect("deprecated render_html_to_file should succeed");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes.starts_with(b"%PDF"),
+            "render_html_to_file must write a PDF"
+        );
+    }
+
+    // ── HTML lang attribute overrides unset Config::lang ─────────────────────
+
+    #[test]
+    fn render_reads_html_lang_when_config_lang_is_unset() {
+        // When the Engine has no configured lang but the HTML carries
+        // `<html lang="de">`, `lang != self.config.lang` (Some vs None) so
+        // the Cow::Owned branch (engine.rs:797-800) fires; the render must
+        // succeed without a PDF/UA missing-language error.
+        let html = "<!doctype html><html lang=\"de\"><body><p>Hallo</p></body></html>";
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("HTML lang attribute must not cause a render error");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── PDF/UA: missing title causes Krilla validation error ─────────────────
+
+    #[test]
+    fn render_pdf_ua_without_title_fails_validation() {
+        // pdf_ua(true) + lang but no <title> must fail with NoDocumentTitle.
+        // Setting lang("en") isolates the missing-title failure: without it
+        // macOS/Krilla emits a document-language error first, which would
+        // keep the assertion trivially true even if title validation broke.
+        // The <h1> produces a document outline so MissingDocumentOutline is
+        // not a confounding variable.
+        let result = Engine::builder()
+            .pdf_ua(true)
+            .lang("en")
+            .build()
+            .render("<!doctype html><html><body><h1>heading</h1></body></html>");
+        assert!(
+            result.is_err(),
+            "PDF/UA render without a document title must fail"
+        );
+    }
 }
