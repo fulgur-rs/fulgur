@@ -708,4 +708,122 @@ mod tests {
             "page 4 should be :right in RTL"
         );
     }
+
+    #[test]
+    fn selector_matches_unknown_selector_returns_false() {
+        let config = Config::default();
+        let rules = vec![PageSettingsRule {
+            page_selector: Some(":unknown".into()),
+            size: None,
+            margin: PartialMargin::from_uniform(99.0),
+        }];
+        let (_, margin, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (margin.top - config.margin.top).abs() < 0.01,
+            "unknown selector should not match any page"
+        );
+    }
+
+    #[test]
+    fn selector_specific_size_overrides_default_size() {
+        let config = Config::default();
+        let rules = vec![
+            PageSettingsRule {
+                page_selector: None,
+                size: Some(PageSizeDecl::Keyword("A3".into())),
+                margin: PartialMargin::default(),
+            },
+            PageSettingsRule {
+                page_selector: Some(":first".into()),
+                size: Some(PageSizeDecl::Keyword("letter".into())),
+                margin: PartialMargin::default(),
+            },
+        ];
+        let (size_p1, _, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size_p1.width - PageSize::LETTER.width).abs() < 0.01,
+            "first page should use letter size"
+        );
+        let (size_p2, _, _) = resolve_page_settings(&rules, 2, 10, &config, false);
+        assert!(
+            (size_p2.width - PageSize::A3.width).abs() < 0.01,
+            "subsequent pages should use A3 from the CSS default rule"
+        );
+    }
+
+    #[test]
+    fn keyword_with_orientation_auto_uses_config_page_size() {
+        let config = Config {
+            page_size: PageSize::A3,
+            ..Default::default()
+        };
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
+            margin: PartialMargin::default(),
+        }];
+        let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size.width - PageSize::A3.width).abs() < 0.01,
+            "auto keyword should fall back to config page size width (A3)"
+        );
+        assert!(
+            (size.height - PageSize::A3.height).abs() < 0.01,
+            "auto keyword should fall back to config page size height (A3)"
+        );
+        assert!(landscape, "landscape=true from CSS should be respected");
+    }
+
+    #[test]
+    fn landscape_cli_override_wins_over_css_keyword_orientation() {
+        let config = Config::builder().landscape(true).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), false)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            landscape,
+            "CLI landscape override should win over CSS portrait orientation"
+        );
+    }
+
+    #[test]
+    fn landscape_cli_false_override_suppresses_css_landscape() {
+        let config = Config::builder().landscape(false).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), true)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            !landscape,
+            "CLI landscape(false) override should suppress CSS landscape orientation"
+        );
+    }
+
+    #[test]
+    fn landscape_cli_override_wins_over_css_custom_size() {
+        let config = Config::builder().landscape(true).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::Custom(566.929, 850.394)),
+            margin: PartialMargin::default(),
+        }];
+        let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size.width - 566.929).abs() < 0.01,
+            "custom size width should be preserved"
+        );
+        assert!(
+            (size.height - 850.394).abs() < 0.01,
+            "custom size height should be preserved"
+        );
+        assert!(
+            landscape,
+            "CLI landscape override should win over CSS custom size orientation"
+        );
+    }
 }
