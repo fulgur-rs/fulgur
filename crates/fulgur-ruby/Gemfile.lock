@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    fulgur (0.40.0)
+    fulgur (0.41.0)
       rb_sys (~> 0.9)
 
 GEM
