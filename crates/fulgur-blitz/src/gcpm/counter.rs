@@ -2490,4 +2490,61 @@ mod tests {
             "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
         );
     }
+
+    // --- format_counter_chain: cap behaviour (line 589) ---
+
+    #[test]
+    fn format_counter_chain_cap_truncates_at_max_bytes() {
+        // 5000 decimal "1" values with no separator → would be 5000 bytes without the cap.
+        // push_bounded returns false for the value that would exceed 4096, triggering
+        // the `break` on the uncovered line 589.
+        let values = vec![1_i32; 5000];
+        let out = format_counter_chain(&values, "", CounterStyle::Decimal);
+        assert!(
+            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "output len {} exceeds cap {}",
+            out.len(),
+            crate::MAX_COUNTER_CHAIN_BYTES,
+        );
+        assert!(
+            !out.is_empty(),
+            "some output must be produced before truncation"
+        );
+    }
+
+    #[test]
+    fn format_counter_chain_cap_via_large_separator() {
+        // A separator larger than the cap forces push_bounded to return false
+        // immediately after the first value, triggering the separator break.
+        // The value branch break (line 589) is also exercised when a large value
+        // representation would overflow.
+        let sep = "x".repeat(crate::MAX_COUNTER_CHAIN_BYTES + 1);
+        let out = format_counter_chain(&[1, 2, 3], &sep, CounterStyle::Decimal);
+        assert!(
+            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "output len {} exceeds cap {}",
+            out.len(),
+            crate::MAX_COUNTER_CHAIN_BYTES,
+        );
+    }
+
+    // --- CounterState::reset(): non-root parent_id path (line 728) ---
+
+    #[test]
+    fn counter_state_reset_with_scoped_top_pushes_new_root_entry() {
+        // When the stack top was created by reset_in_scope (parent_id != COUNTER_ROOT_PARENT),
+        // reset() must NOT overwrite it; instead it pushes a new implicit-root entry.
+        // This exercises the implicit `else` branch that falls through to the push
+        // on the uncovered line 728.
+        let mut state = CounterState::new();
+        state.reset_in_scope("foo", 5, 42); // parent_id = 42 (not COUNTER_ROOT_PARENT)
+        state.reset("foo", 10); // should push a NEW root entry, not overwrite
+        // The innermost value (get()) is the newly pushed root entry.
+        assert_eq!(state.get("foo"), 10);
+        // The chain exposes both values: scoped (5) at index 0, root (10) at index 1.
+        let chain = state.chain("foo");
+        assert_eq!(chain.len(), 2, "expected 2 entries in chain, got {chain:?}");
+        assert_eq!(chain[0], 5);
+        assert_eq!(chain[1], 10);
+    }
 }
