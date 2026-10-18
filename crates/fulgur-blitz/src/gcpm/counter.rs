@@ -2500,32 +2500,16 @@ mod tests {
         // the `break` on the uncovered line 589.
         let values = vec![1_i32; 5000];
         let out = format_counter_chain(&values, "", CounterStyle::Decimal);
-        assert!(
-            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
-            "output len {} exceeds cap {}",
-            out.len(),
-            crate::MAX_COUNTER_CHAIN_BYTES,
-        );
-        assert!(
-            !out.is_empty(),
-            "some output must be produced before truncation"
-        );
+        assert_eq!(out.len(), crate::MAX_COUNTER_CHAIN_BYTES);
     }
 
     #[test]
     fn format_counter_chain_cap_via_large_separator() {
         // A separator larger than the cap forces push_bounded to return false
         // immediately after the first value, triggering the separator break.
-        // The value branch break (line 589) is also exercised when a large value
-        // representation would overflow.
         let sep = "x".repeat(crate::MAX_COUNTER_CHAIN_BYTES + 1);
         let out = format_counter_chain(&[1, 2, 3], &sep, CounterStyle::Decimal);
-        assert!(
-            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
-            "output len {} exceeds cap {}",
-            out.len(),
-            crate::MAX_COUNTER_CHAIN_BYTES,
-        );
+        assert_eq!(out.len(), crate::MAX_COUNTER_CHAIN_BYTES);
     }
 
     // --- CounterState::reset(): non-root parent_id path (line 728) ---
