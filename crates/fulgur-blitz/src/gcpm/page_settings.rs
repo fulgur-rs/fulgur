@@ -818,11 +818,13 @@ mod tests {
     fn keyword_with_orientation_auto_uses_config_page_size() {
         // Use a non-default page size so the test distinguishes "auto reads
         // config.page_size" from "auto always produces A4".
-        // Direct field assignment keeps overrides.page_size=false so the CSS
-        // path is exercised (builder().page_size() would set overrides.page_size=true
+        // Struct update keeps overrides.page_size=false so the CSS path is
+        // exercised (builder().page_size() would set overrides.page_size=true
         // and bypass the CSS matching entirely).
-        let mut config = Config::default();
-        config.page_size = PageSize::LETTER;
+        let config = Config {
+            page_size: PageSize::LETTER,
+            ..Default::default()
+        };
         let rules = vec![PageSettingsRule {
             page_selector: None,
             // "auto" orientation keyword with landscape flag.
