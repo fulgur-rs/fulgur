@@ -816,7 +816,13 @@ mod tests {
 
     #[test]
     fn keyword_with_orientation_auto_uses_config_page_size() {
-        let config = Config::default(); // A4, no overrides
+        // Use a non-default page size so the test distinguishes "auto reads
+        // config.page_size" from "auto always produces A4".
+        // Direct field assignment keeps overrides.page_size=false so the CSS
+        // path is exercised (builder().page_size() would set overrides.page_size=true
+        // and bypass the CSS matching entirely).
+        let mut config = Config::default();
+        config.page_size = PageSize::LETTER;
         let rules = vec![PageSettingsRule {
             page_selector: None,
             // "auto" orientation keyword with landscape flag.
@@ -824,15 +830,15 @@ mod tests {
             margin: PartialMargin::default(),
         }];
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 1, &config, false);
-        // "auto" defers to config.page_size (A4).
+        // "auto" defers to config.page_size (Letter).
         assert!(
-            (size.width - PageSize::A4.width).abs() < 0.01,
-            "size: auto must use config.page_size (A4); got width {}",
+            (size.width - PageSize::LETTER.width).abs() < 0.01,
+            "size: auto must use config.page_size (Letter); got width {}",
             size.width
         );
         assert!(
-            (size.height - PageSize::A4.height).abs() < 0.01,
-            "size: auto must use config.page_size (A4); got height {}",
+            (size.height - PageSize::LETTER.height).abs() < 0.01,
+            "size: auto must use config.page_size (Letter); got height {}",
             size.height
         );
         // No overrides.landscape, so CSS is_landscape = true flows through.
