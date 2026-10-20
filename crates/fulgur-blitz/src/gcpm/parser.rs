@@ -4479,19 +4479,23 @@ mod tests {
 
     #[test]
     fn parse_string_policy_first_non_except_suffix_falls_back_to_first() {
-        // `first - other`: the `-` triggers the split-token path.
-        // Since the ident after `-` is not `except`, line 932 fires and
-        // `try_parse` rewinds; the policy defaults to StringPolicy::First.
-        let css = r#"@page { @top-center { content: string(title, first - other); } }"#;
-        let ctx = parse_gcpm(css);
-        assert_eq!(ctx.margin_boxes.len(), 1);
+        // `first - other`: the `-` triggers the split-token path in
+        // parse_policy_ident (lines 925-934).  Since the ident after `-` is not
+        // `except`, line 932 fires and `try_parse` rewinds; parse_string_policy
+        // returns StringPolicy::First and leaves `- other` unconsumed.
+        use cssparser::{Parser, ParserInput};
+        let mut pi = ParserInput::new("first - other");
+        let mut input = Parser::new(&mut pi);
         assert_eq!(
-            ctx.margin_boxes[0].content,
-            vec![ContentItem::StringRef {
-                name: "title".to_string(),
-                policy: StringPolicy::First,
-            }],
+            parse_string_policy(&mut input).unwrap(),
+            StringPolicy::First,
             "`first - other` must fall back to StringPolicy::First"
+        );
+        assert!(input.expect_delim('-').is_ok(), "delimiter `-` must remain");
+        assert_eq!(
+            input.expect_ident().unwrap().as_ref(),
+            "other",
+            "ident `other` must remain"
         );
     }
 
