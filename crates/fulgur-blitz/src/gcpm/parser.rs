@@ -4439,4 +4439,129 @@ mod tests {
             "bookmark-level: 0 must not produce a bookmark mapping"
         );
     }
+
+    // ── parse_counter_style: split-token hyphenated ident (lines 965-966) ────
+
+    #[test]
+    fn parse_counter_style_split_token_upper_roman() {
+        // cssparser splits "upper-roman" into three tokens when spaces
+        // surround the hyphen. The `try_parse(expect_delim('-'))` path
+        // (lines 965-966) re-joins them into "upper-roman".
+        let css = r#"h1::after { content: counter(chapter, upper - roman); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.content_counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.content_counter_mappings[0].content,
+            vec![ContentItem::Counter {
+                name: "chapter".to_string(),
+                style: CounterStyle::UpperRoman,
+            }],
+            "space-separated `upper - roman` must resolve to CounterStyle::UpperRoman"
+        );
+    }
+
+    #[test]
+    fn parse_counter_style_split_token_lower_roman() {
+        let css = r#"p::before { content: counter(section, lower - roman); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.content_counter_mappings.len(), 1);
+        assert_eq!(
+            ctx.content_counter_mappings[0].content,
+            vec![ContentItem::Counter {
+                name: "section".to_string(),
+                style: CounterStyle::LowerRoman,
+            }],
+            "space-separated `lower - roman` must resolve to CounterStyle::LowerRoman"
+        );
+    }
+
+    // ── parse_policy_ident: non-"except" suffix after "first" (line 932) ────
+
+    #[test]
+    fn parse_string_policy_first_non_except_suffix_falls_back_to_first() {
+        // `first - other`: the `-` triggers the split-token path in
+        // parse_policy_ident (lines 925-934).  Since the ident after `-` is not
+        // `except`, line 932 fires and `try_parse` rewinds; parse_string_policy
+        // returns StringPolicy::First and leaves `- other` unconsumed.
+        use cssparser::{Parser, ParserInput};
+        let mut pi = ParserInput::new("first - other");
+        let mut input = Parser::new(&mut pi);
+        assert_eq!(
+            parse_string_policy(&mut input).unwrap(),
+            StringPolicy::First,
+            "`first - other` must fall back to StringPolicy::First"
+        );
+        assert!(input.expect_delim('-').is_ok(), "delimiter `-` must remain");
+        assert_eq!(
+            input.expect_ident().unwrap().as_ref(),
+            "other",
+            "ident `other` must remain"
+        );
+    }
+
+    // ── string() in parse_content_value (line 1287) ──────────────────────────
+
+    #[test]
+    fn parse_content_value_string_function_in_margin_box() {
+        // string() without a policy argument exercises the
+        // `fn_name.eq_ignore_ascii_case("string")` branch in
+        // parse_content_value and its closing brace (line 1287).
+        let css = r#"@page { @top-center { content: string(running-title); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "running-title".to_string(),
+                policy: StringPolicy::First,
+            }],
+        );
+    }
+
+    // ── string-set: break on parse error (line 896) ───────────────────────────
+
+    #[test]
+    fn parse_string_set_attr_with_non_ident_arg_breaks_loop() {
+        // `attr(123)` — `expect_ident()` inside `attr()` fails for a numeric
+        // token. The `parse_nested_block` propagates Err, `try_parse` wraps
+        // it as Err, and `result.is_err()` at line 895 triggers the `break`
+        // at line 896. No string-set mapping is produced.
+        let ctx = parse_gcpm("h1 { string-set: title attr(123); }");
+        assert!(
+            ctx.string_set_mappings.is_empty(),
+            "`string-set: title attr(123)` must produce no mapping due to error"
+        );
+    }
+
+    // ── @import: numeric-token prelude hits fallback Err (line 1463) ──────────
+
+    #[test]
+    fn extract_import_hrefs_ignores_import_with_numeric_token() {
+        // `@import 123;` — the numeric token hits the `_ => return Err`
+        // fallback (line 1463) inside the @import prelude parser. The
+        // malformed rule is silently discarded.
+        assert!(
+            extract_top_level_import_hrefs("@import 123;").is_empty(),
+            "@import with a numeric token must be ignored"
+        );
+    }
+
+    // ── @charset as first rule: returns CharsetOrLayerStatement (line 1492) ───
+
+    #[test]
+    fn extract_import_hrefs_double_charset_second_seen_as_first() {
+        // cssparser's StyleSheetParser silently absorbs the very first
+        // `@charset` rule before our ImportHrefScanner::parse_prelude is
+        // called, so our `is_first_rule` flag is still `true` when we
+        // process the SECOND `@charset "UTF-8"`. That second rule satisfies
+        // `was_first_rule=true && well_formed=true`, so line 1492 fires and
+        // returns `CharsetOrLayerStatement`, leaving `seen_non_import` clear.
+        // The subsequent `@import` is then collected normally.
+        let css = r#"@charset "UTF-8"; @charset "UTF-8"; @import "theme.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["theme.css".to_string()],
+            "second @charset seen as first must not block subsequent @import"
+        );
+    }
 }
