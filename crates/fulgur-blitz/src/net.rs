@@ -561,4 +561,109 @@ mod tests {
         assert_eq!(tree.size().width(), 10.0);
         assert_eq!(tree.size().height(), 20.0);
     }
+
+    // ── looks_like_css: uncovered branches ────────────────────────────────
+
+    #[test]
+    fn detects_css_by_content_type_with_charset_param() {
+        // `ct.starts_with("text/css;")` branch — a server that responds
+        // with `text/css; charset=utf-8` must be recognised as CSS.
+        let mut req = make_request("file:///tmp/theme");
+        req.content_type = "text/css; charset=utf-8".to_string();
+        assert!(FulgurNetProvider::looks_like_css(
+            &req,
+            Path::new("/tmp/theme")
+        ));
+    }
+
+    #[test]
+    fn non_css_file_returns_false_from_looks_like_css() {
+        // Neither a CSS content type nor a `.css` extension — must return false.
+        let req = make_request("file:///tmp/image.png");
+        assert!(!FulgurNetProvider::looks_like_css(
+            &req,
+            Path::new("/tmp/image.png")
+        ));
+    }
+
+    #[test]
+    fn detects_css_by_uppercase_extension() {
+        // `eq_ignore_ascii_case("css")` must accept `.CSS` in addition to `.css`.
+        let req = make_request("file:///tmp/style.CSS");
+        assert!(FulgurNetProvider::looks_like_css(
+            &req,
+            Path::new("/tmp/style.CSS")
+        ));
+    }
+
+    // ── fetch: non-CSS file ────────────────────────────────────────────────
+
+    #[test]
+    fn fetch_non_css_file_serves_raw_bytes_without_gcpm() {
+        // A binary file with a non-CSS extension (e.g. a PNG) must be served
+        // raw — the `looks_like_css` false branch in `fetch`.
+        // No GCPM context must be recorded since the file is not CSS.
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("logo.png");
+        let raw_png = crate::svg::TEST_PNG_1X1;
+        fs::write(&png_path, raw_png).unwrap();
+
+        let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let request = Request::get(Url::from_file_path(&png_path).unwrap());
+
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
+
+        let served = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("non-CSS file inside the base must be served");
+        assert_eq!(served, raw_png, "non-CSS file must be forwarded unchanged");
+        assert!(
+            provider.drain_gcpm_contexts().is_empty(),
+            "no GCPM context must be pushed for a non-CSS file"
+        );
+    }
+
+    // ── fetch: binary CSS (invalid UTF-8) ─────────────────────────────────
+
+    #[test]
+    fn fetch_binary_css_serves_raw_bytes_without_gcpm() {
+        // A `.css` file with invalid UTF-8 content falls through to the
+        // raw-bytes path — the `from_utf8` Err branch inside the
+        // `looks_like_css` true arm.  The bytes must still reach the
+        // handler and no GCPM context must be pushed.
+        let dir = tempfile::tempdir().unwrap();
+        let css_path = dir.path().join("broken.css");
+        // 0xFF 0xFE is not valid UTF-8.
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, b'p', b' ', b'{', b'}'];
+        fs::write(&css_path, bad_bytes).unwrap();
+
+        let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
+        let request = Request::get(Url::from_file_path(&css_path).unwrap());
+
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
+
+        let served = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("binary .css file inside the base must still be served");
+        assert_eq!(
+            served, bad_bytes,
+            "raw bytes must be forwarded unchanged when UTF-8 decode fails"
+        );
+        assert!(
+            provider.drain_gcpm_contexts().is_empty(),
+            "no GCPM context must be pushed when the CSS body is not valid UTF-8"
+        );
+    }
 }
