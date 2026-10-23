@@ -2220,4 +2220,77 @@ mod tests {
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // ── 非推奨エイリアス: render_html / render_html_to_file ──────────────────
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_deprecated_delegates_to_render() {
+        // render_html は 0.19.0 で render に改名されたが、既存コードとの互換性のため
+        // エイリアスとして残っている。エイリアスが render に委譲し有効な PDF を返すことを確認。
+        let pdf = Engine::builder()
+            .build()
+            .render_html("<html><body><p>deprecated api test</p></body></html>")
+            .expect("render_html must delegate to render and succeed");
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "render_html must return a valid PDF"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_to_file_deprecated_delegates_to_render_file() {
+        // render_html_to_file は 0.19.0 で render_file に改名された。
+        // render_file に委譲し、ファイルに有効な PDF が書き込まれることを確認。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deprecated.pdf");
+        Engine::builder()
+            .build()
+            .render_html_to_file(
+                "<html><body><p>deprecated file api test</p></body></html>",
+                &path,
+            )
+            .expect("render_html_to_file must delegate to render_file and succeed");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes.starts_with(b"%PDF"),
+            "render_html_to_file must write a valid PDF to disk"
+        );
+    }
+
+    // ── PDF/UA + lang なし → エラー (engine.rs:802-805) ─────────────────────
+
+    #[test]
+    fn render_pdf_ua_without_lang_anywhere_returns_error() {
+        // pdf_ua(true) かつ HTML に <html lang> もなく Config::lang も未設定の場合、
+        // render() は "PDF/UA requires a document language" エラーを返す。
+        let result = Engine::builder()
+            .pdf_ua(true)
+            .build()
+            .render("<html><body><p>no lang at all</p></body></html>");
+        let err = result.expect_err("pdf_ua without any lang must be an error");
+        assert!(
+            err.to_string().contains("PDF/UA requires"),
+            "error message must mention PDF/UA lang requirement: {err}"
+        );
+    }
+
+    // ── html lang 属性 → Config::Owned バリアント (engine.rs:797-801) ─────────
+
+    #[test]
+    fn render_html_lang_attr_activates_owned_config_variant() {
+        // Engine の Config::lang が未設定 (None) で HTML に <html lang="en"> がある場合、
+        // render() 内の `lang != self.config.lang` 分岐が真になり Config::Owned が生成される。
+        // (None ≠ Some("en") のため。)
+        // pdf_ua は無効のままなので lang チェックを通過し、有効な PDF が生成される。
+        let pdf = Engine::builder()
+            .build()
+            .render("<html lang=\"en\"><body><p>html-lang test</p></body></html>")
+            .expect("render with html lang attr must succeed");
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "html lang attr must not prevent a valid PDF from being produced"
+        );
+    }
 }
