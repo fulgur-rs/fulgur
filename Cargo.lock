@@ -2461,6 +2461,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2939,6 +2949,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
 name = "pyfulgur"
 version = "0.40.0"
 dependencies = [
@@ -3039,27 +3055,30 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "raikiri-dom"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
+ "raikiri-layout-geometry",
+ "raikiri-layout-style",
  "raikiri-style",
  "raikiri-traits",
  "rayon",
+ "rustc-hash",
  "shodo",
  "skrifa 0.44.0",
  "smol_str 0.3.6",
  "stacker",
- "taffy 0.14.0",
+ "taffy 0.15.0",
  "url",
  "wuff",
 ]
 
 [[package]]
 name = "raikiri-html"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3070,17 +3089,32 @@ dependencies = [
  "raikiri-style",
  "raikiri-svg",
  "raikiri-traits",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "shodo",
  "smol_str 0.3.6",
- "taffy 0.14.0",
  "url",
 ]
 
 [[package]]
+name = "raikiri-layout-geometry"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+
+[[package]]
+name = "raikiri-layout-style"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+dependencies = [
+ "raikiri-layout-geometry",
+ "raikiri-style",
+ "taffy 0.15.0",
+]
+
+[[package]]
 name = "raikiri-net"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "data-url",
  "image",
@@ -3091,8 +3125,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-style"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3104,8 +3138,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-svg"
-version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3118,11 +3152,12 @@ dependencies = [
 
 [[package]]
 name = "raikiri-traits"
-version = "0.2.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=c18dff6156e0298a17220d07badbdd22daf35a24#c18dff6156e0298a17220d07badbdd22daf35a24"
+version = "0.0.3"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
 dependencies = [
  "bytes",
  "libc",
+ "moxcms",
  "raikiri-style",
  "rustc-hash",
  "rustix",
@@ -3709,9 +3744,9 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shodo"
-version = "0.0.28"
+version = "0.0.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ec6b5f91fd2db5d27654277cd9e321a94787862f9639a1a6fe49c2c77e8e77"
+checksum = "0da71e49256890b608b6dbea90aa5be5e77c55c8faf37f683b96f0d1c28ef336"
 dependencies = [
  "foldhash 0.2.0",
  "fontique 0.11.1",
@@ -4230,11 +4265,10 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "639627c87f43b9181c811f40a6296409e093a17bc761214cba3c15df74f86b99"
+checksum = "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa"
 dependencies = [
- "arrayvec",
  "serde",
  "slotmap",
  "smallvec",

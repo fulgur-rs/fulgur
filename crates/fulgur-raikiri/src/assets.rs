@@ -20,7 +20,16 @@ pub(super) fn fonts(options: &RenderOptions<'_>) -> Result<Option<RenderFonts>> 
     let mut builder = FontCollectionBuilder::new().system_fonts(options.system_fonts);
     for data in &bundle.fonts {
         let bytes: Arc<[u8]> = Arc::from(data.as_slice());
-        for family in family_names(&bytes)? {
+        let file = FileRef::new(&bytes)
+            .map_err(|error| Error::Asset(format!("invalid bundled font: {error}")))?;
+        let families = family_names(&file)?;
+        if matches!(file, FileRef::Collection(_)) {
+            // Every face of a TTC/OTC is registered under the family name it
+            // records, so the faces are selected by family name in CSS.
+            builder = builder.ttc_bytes(bytes);
+            continue;
+        }
+        for family in families {
             builder = builder.font_bytes(family, bytes.clone());
         }
     }
@@ -30,14 +39,7 @@ pub(super) fn fonts(options: &RenderOptions<'_>) -> Result<Option<RenderFonts>> 
         .map_err(|error| Error::Asset(error.to_string()))
 }
 
-fn family_names(bytes: &[u8]) -> Result<Vec<String>> {
-    let file = FileRef::new(bytes)
-        .map_err(|error| Error::Asset(format!("invalid bundled font: {error}")))?;
-    if matches!(file, FileRef::Collection(_)) {
-        return Err(Error::Asset(
-            "font collections are not supported by the current Raikiri font API".into(),
-        ));
-    }
+fn family_names(file: &FileRef<'_>) -> Result<Vec<String>> {
     let mut families = Vec::new();
     for font in file.fonts() {
         let font =

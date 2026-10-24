@@ -15,8 +15,8 @@ use krilla::paint::{
 use raikiri_html::computed::{
     AnglePercentage, AngularColorStop, ComputedGradient, ConicGradient, CssColor, CssPosition,
     CssPositionOffset, GradientColorStop, GradientStopColor, HorizontalSide, Length,
-    LinearGradient, LinearGradientDirection, RadialExtent, RadialGradient, RadialShape, RadialSize,
-    VerticalSide,
+    LengthPercentageOrCalc, LinearGradient, LinearGradientDirection, RadialExtent, RadialGradient,
+    RadialShape, RadialSize, VerticalSide,
 };
 
 /// A Krilla paint for `gradient` drawn in `area` (the gradient box), or
@@ -191,10 +191,10 @@ fn radial_size(
     let circle = matches!(shape, RadialShape::Circle);
     match size {
         RadialSize::Circle(radius) => {
-            let r = resolve_length(radius, 0.0);
+            let r = resolve_length_or_calc(radius, 0.0);
             (r, r)
         }
-        RadialSize::Ellipse(x, y) => (resolve_length(x, w), resolve_length(y, h)),
+        RadialSize::Ellipse(x, y) => (resolve_length_or_calc(x, w), resolve_length_or_calc(y, h)),
         RadialSize::Extent(extent) => match (extent, circle) {
             (RadialExtent::ClosestSide, true) => {
                 let r = near_x.min(near_y);
@@ -292,6 +292,17 @@ fn resolve_length(length: Length, basis: f32) -> f32 {
     }
 }
 
+/// [`resolve_length`] for a value that may be a `calc()` of a percentage and
+/// an absolute length. The cascade has already absolutized any font-relative
+/// or viewport term.
+fn resolve_length_or_calc(length: LengthPercentageOrCalc, basis: f32) -> f32 {
+    match length {
+        LengthPercentageOrCalc::Length(length) => resolve_length(length, basis),
+        LengthPercentageOrCalc::Calc(calc) => calc.px + basis * calc.percent / 100.0,
+        _ => 0.0,
+    }
+}
+
 /// A `<position>` in a box of `w` x `h`, from its top-left corner.
 fn resolve_position(position: CssPosition, w: f32, h: f32) -> (f32, f32) {
     let axis = |offset: CssPositionOffset, size: f32| match offset {
@@ -309,8 +320,8 @@ fn resolve_positions(stops: &[GradientColorStop], length: f32) -> Vec<Option<f32
         .iter()
         .map(|stop| {
             stop.position.map(|position| match position {
-                Length::Percent(percent) => percent / 100.0,
-                other => resolve_length(other, length) / length,
+                LengthPercentageOrCalc::Length(Length::Percent(percent)) => percent / 100.0,
+                other => resolve_length_or_calc(other, length) / length,
             })
         })
         .collect()

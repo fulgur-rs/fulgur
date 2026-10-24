@@ -22,16 +22,15 @@ Bundle CSS is registered as user stylesheets in order. Fonts use core asset
 loading (including WOFF2 decoding), then their family names are extracted
 and registered with Raikiri. Parsing, layout, and painting retain the same
 resources and local-file provider. Disabling system fonts requires a bundled
-font. Invalid fonts and TTC/OTC collections return an asset error. Each bundle
-image is a file at the URL its name resolves to against the base directory
-(`img/logo.png`), or at its name when that is an absolute URL; HTML without a
-base directory is `about:blank`, so only absolute-URL names apply to it.
+font. Invalid fonts return an asset error. Every face of a TTC/OTC collection
+is registered under the family name it records. Each bundle image is a file at
+the URL its name resolves to against the base directory (`img/logo.png`), or at
+its name when that is an absolute URL; HTML without a base directory is
+`about:blank`, so only absolute-URL names apply to it.
 Documents reach bundle images with browser URL resolution: `<img src>`
 against the document base URL, `url()` in a linked or imported stylesheet
 against that stylesheet's URL. Bundle images are served ahead of the files in
-the directory, for any resource kind. The pinned font
-API cannot select a collection face; use
-individual TTF/OTF fonts or WOFF2.
+the directory, for any resource kind.
 Bundle CSS has document URL provenance; linked stylesheet imports retain
 stylesheet URL provenance.
 

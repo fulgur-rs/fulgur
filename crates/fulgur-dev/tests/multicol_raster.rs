@@ -390,10 +390,12 @@ fn empty_paragraph_margin_chains_keep_both_signed_extrema_in_pdf() {
 
 #[test]
 fn a_subpixel_noto_line_box_keeps_each_source_and_following_flow_in_pdf() {
+    // A zero-height first block leaves the second block in the first column,
+    // as in Chromium: B shares the first column with A.
     compare(
         "<div class=mc><p class=zero>A</p><p>B</p></div><p>C</p>",
         ".mc .zero{line-height:0}",
-        "<div style='position:absolute;left:0;top:0;line-height:0'>A</div><div style='position:absolute;left:60px;top:0'>B</div><div style='position:absolute;left:0;top:20px'>C</div>",
+        "<div style='position:absolute;left:0;top:0;line-height:0'>A</div><div style='position:absolute;left:0;top:0'>B</div><div style='position:absolute;left:0;top:20px'>C</div>",
         "ABC",
     );
 }

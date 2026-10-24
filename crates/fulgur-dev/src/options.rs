@@ -16,7 +16,7 @@ pub(super) struct RenderArgs {
     /// Additional user stylesheet, repeatable.
     #[arg(long)]
     css: Vec<PathBuf>,
-    /// Bundled font file, repeatable (TTF/OTF/WOFF2; TTC only with Blitz).
+    /// Bundled font file, repeatable (TTF/OTF/TTC/OTC/WOFF2).
     #[arg(long)]
     font: Vec<PathBuf>,
     /// Bundled image as NAME=PATH, repeatable. NAME is the URL path relative
