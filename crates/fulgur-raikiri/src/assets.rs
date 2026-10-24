@@ -22,14 +22,14 @@ pub(super) fn fonts(options: &RenderOptions<'_>) -> Result<Option<RenderFonts>> 
         let bytes: Arc<[u8]> = Arc::from(data.as_slice());
         let file = FileRef::new(&bytes)
             .map_err(|error| Error::Asset(format!("invalid bundled font: {error}")))?;
-        let families = family_names(&file)?;
         if matches!(file, FileRef::Collection(_)) {
             // Every face of a TTC/OTC is registered under the family name it
-            // records, so the faces are selected by family name in CSS.
+            // records, so the faces are selected by family name in CSS. A face
+            // that records none stays available as a fallback.
             builder = builder.ttc_bytes(bytes);
             continue;
         }
-        for family in families {
+        for family in family_names(&file)? {
             builder = builder.font_bytes(family, bytes.clone());
         }
     }

@@ -457,6 +457,41 @@ fn bundled_font_collection_registers_every_face_by_its_family() {
     );
 }
 
+/// `font` with the record count of its name table zeroed: it records no
+/// family name any more.
+fn without_family_names(font: &[u8]) -> Vec<u8> {
+    let mut out = font.to_vec();
+    let tables = usize::from(u16::from_be_bytes([out[4], out[5]]));
+    let name = (0..tables)
+        .map(|table| 12 + 16 * table)
+        .find(|&record| &out[record..record + 4] == b"name")
+        .map(|record| u32::from_be_bytes(out[record + 8..record + 12].try_into().unwrap()) as usize)
+        .expect("a name table");
+    out[name + 2..name + 4].copy_from_slice(&0u16.to_be_bytes());
+    out
+}
+
+#[test]
+fn bundled_font_collection_keeps_working_with_a_face_that_records_no_family() {
+    let mono = std::fs::read(font_path(false)).unwrap();
+    let mut sans_bundle = AssetBundle::new();
+    sans_bundle.add_font_file(font_path(true)).unwrap();
+    let nameless = without_family_names(sans_bundle.fonts[0].as_slice());
+    let (_dir, path) =
+        input("<p style=\"margin:0;font-family:'Noto Sans Mono'\">Hello mono face</p>");
+    let mut bundle = AssetBundle::new();
+    bundle
+        .fonts
+        .push(std::sync::Arc::new(collection(&[&mono, &nameless])));
+    let options = RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: false,
+    };
+    let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    assert!(pdf.extract_text(&[1]).unwrap().contains("Hello mono face"));
+}
+
 #[test]
 fn bundled_font_collection_without_a_face_is_an_asset_error() {
     let (_dir, path) = input("<p>Hello</p>");
