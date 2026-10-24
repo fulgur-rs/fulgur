@@ -331,6 +331,37 @@ fn navigation_follows_transforms() {
     assert_eq!(dest[3].as_float().unwrap(), 105.0);
 }
 
+// spec: https://www.w3.org/TR/css-transforms-1/#transform-rendering
+// A transform on the root element moves the whole page, so the link areas
+// move with it.
+#[test]
+fn navigation_follows_the_root_transform() {
+    let (_dir, path) = input(&format!(
+        "{NAV_CSS}<style>html {{transform:translate(10px,20px)}}</style>\
+         <a href='https://example.com/'></a>"
+    ));
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 1);
+    let rect = links[0].get(b"Rect").unwrap().as_array().unwrap();
+    let values: [f32; 4] = std::array::from_fn(|i| rect[i].as_float().unwrap());
+    assert_eq!(values, [22.5, 97.5, 52.5, 105.0]);
+}
+
+// A matrix that cannot be inverted renders nothing of the root, so there is
+// nothing to click.
+#[test]
+fn a_singular_root_transform_leaves_no_link_areas() {
+    let (_dir, path) = input(&format!(
+        "{NAV_CSS}<style>html {{transform:scale(0)}}</style>\
+         <a href='https://example.com/'></a>"
+    ));
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    assert!(annotations(&pdf, 1).is_empty());
+}
+
 // A rotation off the page axes gives the link a quadrilateral area.
 #[test]
 fn navigation_rotated_link_uses_quad_points() {

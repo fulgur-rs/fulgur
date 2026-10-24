@@ -1,3 +1,4 @@
+use crate::paint::RootSpace;
 use fulgur_core::{Error, Result, units::PX_TO_PT};
 use krilla::{
     destination::XyzDestination,
@@ -124,6 +125,7 @@ impl OutlineBuilder {
     /// Record the positions of the visible fragments of `page`.
     pub(super) fn add_page(&mut self, page: &Page<'_>) {
         let dom = page.dom();
+        let space = RootSpace::of_page(page);
         for fragment in page.fragments() {
             let node = fragment.node();
             let element = if dom.kind(node) == Some(NodeKind::Text) {
@@ -142,10 +144,10 @@ impl OutlineBuilder {
                 continue;
             }
             // The heading is where the painter draws it, after relative
-            // offsets and transforms.
+            // offsets and transforms, the root element's included.
             let Some(point) = page
                 .paint_transform(node)
-                .map(|transform| transform.apply((rect.x, rect.y)))
+                .and_then(|transform| space.apply(transform.apply((rect.x, rect.y))))
                 .filter(|point| point.0.is_finite() && point.1.is_finite())
             else {
                 continue;

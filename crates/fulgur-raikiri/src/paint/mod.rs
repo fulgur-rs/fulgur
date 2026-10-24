@@ -25,6 +25,7 @@ mod transform;
 
 use crate::orientation::Rotations;
 use crate::tagging::{Tags, Target};
+pub(crate) use canvas::RootSpace;
 use clip::{ClipMap, ClipStack};
 use fulgur_core::units::PX_TO_PT;
 use fulgur_core::{Error, Result};
@@ -38,8 +39,9 @@ use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use navigation::PageLink;
 use raikiri_html::computed::{
-    ComputedBackgroundImage, ComputedDisplay, ComputedLengthPercentageOrCalc, ComputedValues,
-    ComputedVisibility, ComputedVisualBox, CssColor,
+    ComputedBackgroundImage, ComputedBackgroundLayer, ComputedDisplay,
+    ComputedLengthPercentageOrCalc, ComputedValues, ComputedVisibility, ComputedVisualBox,
+    CssColor,
 };
 use raikiri_html::{
     AnchorIndex, DocumentLayout, FontId, FragmentKind, GeneratedImageId,
@@ -234,6 +236,10 @@ impl<'a> Painter<'a> {
         surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
         tags.begin_page(page);
+        // The root's transform moves the page content and the canvas images
+        // but not the margin boxes, which belong to the page.
+        let root = page.root_box();
+        let space = RootSpace::of(root.as_ref());
         // The canvas goes under everything else on the page. A root that
         // fades instead takes the canvas into its group with the page body,
         // so the two fade together, and that group follows the margin boxes
@@ -241,7 +247,8 @@ impl<'a> Painter<'a> {
         let group = canvas::root_opacity(page);
         let mut canvas_owner = None;
         if group.is_none() {
-            canvas_owner = canvas::paint_page(&mut surface, tags, raster, page)?;
+            canvas_owner =
+                canvas::paint_page(&mut surface, tags, raster, page, root.as_ref(), space)?;
         }
         // The margin boxes are drawn before the page body.
         let running = margin::paint(
@@ -255,9 +262,20 @@ impl<'a> Painter<'a> {
         )?;
         if let Some(alpha) = group {
             surface.push_opacity(alpha);
-            canvas_owner = canvas::paint_page(&mut surface, tags, raster, page)?;
+            canvas_owner =
+                canvas::paint_page(&mut surface, tags, raster, page, root.as_ref(), space)?;
         }
-        paint_body(&mut surface, page, fonts, svg, raster, tags, canvas_owner)?;
+        // A singular transform leaves nothing of the root to render.
+        let matrix = match space {
+            RootSpace::Plain => Some(None),
+            RootSpace::Moved(matrix) => Some(Some(matrix)),
+            RootSpace::Collapsed => None,
+        };
+        if let Some(matrix) = matrix {
+            transform::with(&mut surface, matrix, |surface| {
+                paint_body(surface, page, space, fonts, svg, raster, tags, canvas_owner)
+            })?;
+        }
         if group.is_some() {
             surface.pop();
         }
@@ -265,7 +283,7 @@ impl<'a> Painter<'a> {
         surface.pop();
         surface.finish();
         let mut pending = Vec::new();
-        for link in navigation::links(page, navigation::Placement::PAGE, targets) {
+        for link in navigation::links(page, navigation::Placement::PAGE, space, targets) {
             match link.annotation(targets.anchors) {
                 Some(annotation) => tags.annotate(&mut pdf_page, page, link.owner, annotation),
                 None if link.is_pending(targets.anchors) => pending.push(link),
@@ -280,7 +298,7 @@ impl<'a> Painter<'a> {
                 clip: Some(border_box),
             };
             let running_page = running.layout.page();
-            for link in navigation::links(&running_page, placement, targets) {
+            for link in navigation::links(&running_page, placement, RootSpace::Plain, targets) {
                 match link.annotation(targets.anchors) {
                     Some(annotation) => {
                         tags.annotate_artifact(&mut pdf_page, &running_page, link.owner, annotation)
@@ -351,11 +369,14 @@ fn start_page(pdf: &mut krilla::Document, page_box: PaintRect) -> Result<krilla:
 
 /// Draw the boxes, text and replaced content of `page`, without its margin
 /// boxes. A running element laid out for a margin box is drawn the same way.
-/// `canvas_owner` is the element whose background was painted as the canvas
-/// background, which its own box does not paint again.
+/// `space` is the root element's transform, which the caller has already
+/// opened on `surface`. `canvas_owner` is the element whose background was
+/// painted as the canvas background, which its own box does not paint again.
+#[allow(clippy::too_many_arguments)]
 fn paint_body(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
+    space: RootSpace,
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
@@ -364,7 +385,8 @@ fn paint_body(
 ) -> Result<()> {
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
-    let paint = if in_order(page, &events, &runs) {
+    let events = inside_root_transform(&events, space);
+    let paint = if in_order(page, events, &runs) {
         paint_ordered
     } else {
         paint_legacy
@@ -372,7 +394,7 @@ fn paint_body(
     paint(
         surface,
         page,
-        &events,
+        events,
         &runs,
         fonts,
         svg,
@@ -380,6 +402,52 @@ fn paint_body(
         tags,
         canvas_owner,
     )
+}
+
+/// `events` without the transform that encloses all of them, when it is the
+/// root element's `space`.
+///
+/// The text runs, link areas and other positions of a page are placed inside
+/// the root's transform, which the caller opens once around the canvas images
+/// and the body. The paint order wraps the document in that same transform,
+/// which would move the boxes twice and put the text, whose runs are
+/// relative to it, back. A paint order without the wrapper is used as it is.
+fn inside_root_transform<'e, 'a>(
+    events: &'e [PaintEvent<'a>],
+    space: RootSpace,
+) -> &'e [PaintEvent<'a>] {
+    let RootSpace::Moved(matrix) = space else {
+        return events;
+    };
+    let [
+        PaintEvent::PushTransform(first),
+        inner @ ..,
+        PaintEvent::PopTransform,
+    ] = events
+    else {
+        return events;
+    };
+    // The first transform must close at the end, not before it.
+    let mut depth = 0usize;
+    let closes_early = inner.iter().any(|event| match event {
+        PaintEvent::PushTransform(_) => {
+            depth += 1;
+            false
+        }
+        PaintEvent::PopTransform => match depth.checked_sub(1) {
+            Some(open) => {
+                depth = open;
+                false
+            }
+            None => true,
+        },
+        _ => false,
+    });
+    if *first == matrix && !closes_early {
+        inner
+    } else {
+        events
+    }
 }
 
 /// Whether `page` is painted in its paint order rather than by the legacy
@@ -982,7 +1050,16 @@ fn paint_box(
         box_shadow::paint_outer(surface, &border_box, slice, style, &mut raster.box_shadows);
     }
     let padding = padding(style, rect, content);
-    paint_background(surface, raster, &border_box, padding, slice, style, text)?;
+    paint_background(
+        surface,
+        raster,
+        &border_box,
+        padding,
+        slice,
+        style,
+        None,
+        text,
+    )?;
     let padding_box = border_box.inset(slice.edges(border::widths(style)));
     box_shadow::paint_inset(surface, &padding_box, slice, style, &mut raster.box_shadows);
     // CSS Backgrounds 3 §6: `border-image` does not apply to internal table
@@ -1066,6 +1143,10 @@ fn is_table(style: &ComputedValues) -> bool {
 /// layer (§2.2). CSS Backgrounds 4 §2.6 adds two painting areas:
 /// `border-area` (the area under the border) and `text` (the glyphs of the
 /// element's text).
+///
+/// `positioning` gives the positioning area of a layer when it is not the
+/// layer's own `background-origin` box of `border_box`, as for the canvas.
+#[allow(clippy::too_many_arguments)]
 fn paint_background(
     surface: &mut Surface<'_>,
     raster: &mut raster::RasterCache<'_>,
@@ -1073,6 +1154,7 @@ fn paint_background(
     padding: Edges,
     slice: Slice,
     style: &ComputedValues,
+    positioning: Option<&dyn Fn(&ComputedBackgroundLayer) -> RoundedRect>,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     let borders = slice.edges(border::widths(style));
@@ -1123,7 +1205,8 @@ fn paint_background(
         })?;
     }
     for layer in painted.iter().rev() {
-        let positioning_area = visual_box(layer.origin);
+        let positioning_area =
+            positioning.map_or_else(|| visual_box(layer.origin), |position| position(layer));
         match &layer.image {
             // The gradient covers the positioning area and its end colors
             // extend to the rest of the painting area.

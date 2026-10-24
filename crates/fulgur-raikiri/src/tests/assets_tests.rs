@@ -59,7 +59,7 @@ fn no_system_fonts_without_bundle_errors() {
     assert!(matches!(result, Err(Error::Asset(_))));
 }
 
-fn dot_png() -> Vec<u8> {
+pub(super) fn dot_png() -> Vec<u8> {
     std::fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/list-style-image/bullet.png"),
     )

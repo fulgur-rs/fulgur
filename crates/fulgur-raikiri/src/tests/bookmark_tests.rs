@@ -319,6 +319,20 @@ fn bookmark_follows_a_transformed_heading() {
     assert_eq!(dest[3].as_float().unwrap(), 135.0);
 }
 
+// A transform on the root element moves the headings with the rest of the page.
+#[test]
+fn bookmark_follows_the_root_transform() {
+    let (_dir, path) = input(&format!(
+        "{BOOK_CSS}<style>html {{transform:translate(10px,20px)}}</style><h1>A</h1>"
+    ));
+    let bytes = render(&path, &Config::builder().bookmarks(true).build()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let items = outline_children(&pdf, outline_root(&pdf));
+    let dest = outline_destination(&pdf, items[0]);
+    assert_eq!(dest[2].as_float().unwrap(), 7.5);
+    assert_eq!(dest[3].as_float().unwrap(), 135.0);
+}
+
 #[test]
 fn bookmark_open_state_keeps_cross_reference_offsets_valid() {
     let (_dir, path) = input(&format!(
