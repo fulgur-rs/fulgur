@@ -221,7 +221,13 @@ fn painted_bounds(operations: &[lopdf::content::Operation], paints: &[&str]) -> 
                 let inner: [f32; 6] = values.try_into().unwrap();
                 *matrices.last_mut().unwrap() = concat(inner, matrix);
             }
-            "m" | "l" | "c" => points.extend(values.chunks_exact(2).map(|p| place((p[0], p[1])))),
+            "m" | "l" | "c" => points.extend(
+                values
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&p| place((p[0], p[1]))),
+            ),
             "re" => {
                 let (x, y, w, h) = (values[0], values[1], values[2], values[3]);
                 points.extend([(x, y), (x + w, y + h)].map(place));

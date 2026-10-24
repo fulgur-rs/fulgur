@@ -1,4 +1,4 @@
-use super::{LinkTargets, RootSpace};
+use super::{Destinations, LinkTargets, RootSpace};
 use fulgur_core::units::PX_TO_PT;
 use krilla::{
     action::{Action, LinkAction},
@@ -7,7 +7,7 @@ use krilla::{
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{AnchorIndex, NodeId, Page, PaintRect};
+use raikiri_html::{NodeId, Page, PaintRect};
 
 /// Where a link on a page points.
 pub(crate) enum Href {
@@ -45,18 +45,18 @@ pub(crate) struct PageLink {
 
 impl PageLink {
     /// The link annotation, `None` for an internal link whose destination
-    /// `anchors` does not have (or no anchors are known yet).
-    pub(crate) fn annotation(&self, anchors: Option<&AnchorIndex>) -> Option<LinkAnnotation> {
+    /// `destinations` does not have (or no anchors are known yet).
+    pub(crate) fn annotation(
+        &self,
+        destinations: Option<Destinations<'_>>,
+    ) -> Option<LinkAnnotation> {
         let target = match &self.href {
             Href::External(uri) => Target::Action(LinkAction::new(uri.clone()).into()),
             Href::Internal(name) => {
-                let anchor = anchors?.get(name)?;
-                if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
-                    return None;
-                }
+                let (page, point) = destinations?.point(name)?;
                 let destination = XyzDestination::new(
-                    anchor.page_index as usize,
-                    Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
+                    page,
+                    Point::from_xy(point.0 * PX_TO_PT, point.1 * PX_TO_PT),
                 );
                 Target::Action(Action::Goto(destination.into()))
             }
@@ -71,8 +71,8 @@ impl PageLink {
     }
 
     /// Whether the link waits for anchors that are not known yet.
-    pub(crate) fn is_pending(&self, anchors: Option<&AnchorIndex>) -> bool {
-        anchors.is_none() && matches!(self.href, Href::Internal(_))
+    pub(crate) fn is_pending(&self, destinations: Option<Destinations<'_>>) -> bool {
+        destinations.is_none() && matches!(self.href, Href::Internal(_))
     }
 }
 

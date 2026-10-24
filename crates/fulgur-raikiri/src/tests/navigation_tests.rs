@@ -349,6 +349,42 @@ fn navigation_follows_the_root_transform() {
     assert_eq!(values, [22.5, 97.5, 52.5, 105.0]);
 }
 
+// spec: https://www.w3.org/TR/css-transforms-1/#transform-rendering
+// An internal link goes to where the transformed root draws its anchor.
+#[test]
+fn internal_link_destinations_follow_the_root_transform() {
+    let (_dir, path) = input(&format!(
+        "{NAV_CSS}<style>html {{transform:translate(10px,20px)}}</style>\
+         <div id=target></div><a href='#target'></a>"
+    ));
+    let bytes = render(&path, &Config::default()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let links = annotations(&pdf, 1);
+    assert_eq!(links.len(), 1);
+    let dest = destination(&pdf, links[0]);
+    assert_eq!(dest[2].as_float().unwrap(), 22.5);
+    assert_eq!(dest[3].as_float().unwrap(), 105.0);
+}
+
+// The margin boxes belong to the page and still draw their links, but the
+// anchor lies in a root that is not rendered, so it has no place to go to.
+#[test]
+fn links_to_an_unrendered_root_are_dropped() {
+    let links_on_first_page = |root_css: &str| {
+        let (_dir, path) = input(&format!(
+            "<style>@page {{size:300px 200px; margin:40px; @top-center {{content: element(hdr)}}}} \
+             body {{margin:0}} .hdr {{position: running(hdr)}} {root_css} \
+             .hdr a {{display:block; width:20px; height:10px}}</style>\
+             <div class='hdr'><a href='#target'></a></div><p id=target>Body</p>"
+        ));
+        let bytes = render(&path, &Config::default()).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        annotations(&pdf, 1).len()
+    };
+    assert_eq!(links_on_first_page(""), 1);
+    assert_eq!(links_on_first_page("html {transform:scale(0)}"), 0);
+}
+
 // A matrix that cannot be inverted renders nothing of the root, so there is
 // nothing to click.
 #[test]

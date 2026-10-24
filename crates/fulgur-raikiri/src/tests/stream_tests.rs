@@ -157,6 +157,67 @@ fn links_to_later_anchors_resolve_on_early_pages() {
     assert_eq!(destinations(&batch, 1), [batch_pages[&last]]);
 }
 
+/// The destination points (x, y in pt) of the link annotations of page `number`.
+fn destination_points(pdf: &lopdf::Document, number: u32) -> Vec<(f32, f32)> {
+    let page = pdf.get_dictionary(pdf.get_pages()[&number]).unwrap();
+    let Ok(annotations) = page.get(b"Annots") else {
+        return Vec::new();
+    };
+    annotations
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|annotation| {
+            let annotation = pdf
+                .get_dictionary(annotation.as_reference().unwrap())
+                .unwrap();
+            let action = annotation.get(b"A").unwrap().as_dict().unwrap();
+            let destination = pdf
+                .get_object(action.get(b"D").unwrap().as_reference().unwrap())
+                .unwrap()
+                .as_array()
+                .unwrap();
+            (
+                destination[2].as_float().unwrap(),
+                destination[3].as_float().unwrap(),
+            )
+        })
+        .collect()
+}
+
+// spec: https://www.w3.org/TR/css-transforms-1/#transform-rendering
+// A link to an anchor on a page delivered later goes to where the transformed
+// root draws that anchor, like the same link in a batch PDF.
+#[test]
+fn early_links_follow_the_root_transform_of_their_destination_page() {
+    let link_to_end = |index: usize| match index {
+        0 => "<p><a href='#end'>to the end</a></p>".to_owned(),
+        4 => "<p id=end>the end</p>".to_owned(),
+        _ => format!("<p>page {index}</p>"),
+    };
+    let plain = long_input(PAGE_CSS, 4, link_to_end);
+    let moved = long_input(
+        &format!("{PAGE_CSS}<style>html {{ transform: translate(10px, 20px) }}</style>"),
+        4,
+        link_to_end,
+    );
+    let (_, plain) = both(&plain, &Config::default());
+    let (batch, streamed) = both(&moved, &Config::default());
+    let point = |bytes: &[u8]| {
+        let points = destination_points(&lopdf::Document::load_mem(bytes).unwrap(), 1);
+        assert_eq!(points.len(), 1);
+        points[0]
+    };
+    let (plain, batch, streamed) = (point(&plain), point(&batch), point(&streamed));
+    // The layout that resumes after delivered pages can differ in the last bits.
+    assert!(
+        (batch.0 - streamed.0).abs() < 1e-3 && (batch.1 - streamed.1).abs() < 1e-3,
+        "{batch:?} != {streamed:?}"
+    );
+    // 10px right and 20px down, in pt on the y-up PDF page.
+    assert_eq!((batch.0 - plain.0, batch.1 - plain.1), (7.5, -15.0));
+}
+
 #[test]
 fn streamed_bookmarks_match_the_batch_outline() {
     let html = long_input(PAGE_CSS, 4, |index| {

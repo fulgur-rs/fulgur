@@ -81,10 +81,19 @@ pub(crate) fn paint_document(
     if let Some(outline) = outline {
         painter.set_outline(outline);
     }
+    // An internal link may point to a page that is painted later, so the
+    // spaces of all pages are known before the first one is painted.
+    let spaces: Vec<RootSpace> = document
+        .pages()
+        .map(|page| RootSpace::of_page(&page))
+        .collect();
     let targets = LinkTargets {
         base_url: document.base_url(),
         document_url,
-        anchors: Some(document.anchors()),
+        anchors: Some(Destinations {
+            anchors: document.anchors(),
+            spaces: &spaces,
+        }),
     };
     for page in document.pages() {
         painter.page(&page, &margin_boxes(&page), &targets)?;
@@ -149,7 +158,34 @@ pub(crate) struct LinkTargets<'u> {
     /// A target naming this URL with a fragment is an internal link.
     pub(crate) document_url: &'u url::Url,
     /// Destinations of internal links, `None` while they are not known yet.
-    pub(crate) anchors: Option<&'u AnchorIndex>,
+    pub(crate) anchors: Option<Destinations<'u>>,
+}
+
+/// Where the internal links of a document land: its anchors, and the space
+/// each page draws its content in.
+#[derive(Clone, Copy)]
+pub(crate) struct Destinations<'u> {
+    pub(crate) anchors: &'u AnchorIndex,
+    /// The space of each page by page index; a page without an entry is
+    /// drawn as laid out.
+    pub(crate) spaces: &'u [RootSpace],
+}
+
+impl Destinations<'_> {
+    /// The page index and the point on that page, in CSS px, where the
+    /// anchor `name` is drawn. `None` when the document has no such anchor,
+    /// its point is not finite, or its page is not rendered.
+    pub(crate) fn point(&self, name: &str) -> Option<(usize, (f32, f32))> {
+        let anchor = self.anchors.get(name)?;
+        let page = anchor.page_index as usize;
+        // The anchors follow the transforms of the elements but leave out
+        // the root element's, which moves the whole page.
+        let space = self.spaces.get(page).copied().unwrap_or(RootSpace::Plain);
+        let point = space
+            .apply(anchor.point)
+            .filter(|point| point.0.is_finite() && point.1.is_finite())?;
+        Some((page, point))
+    }
 }
 
 /// A PDF being written page by page.
@@ -314,7 +350,7 @@ impl<'a> Painter<'a> {
     }
 
     /// Add an untagged page of `page_box` size that holds only `margin_boxes`
-    /// and the internal `links` that resolve against `anchors`.
+    /// and the internal `links` that resolve against `destinations`.
     ///
     /// The boxes are drawn without running elements, which need the page
     /// they belong to, so a box showing one falls back to its text.
@@ -323,7 +359,7 @@ impl<'a> Painter<'a> {
         page_box: PaintRect,
         margin_boxes: &[MarginBox],
         links: &[PageLink],
-        anchors: &AnchorIndex,
+        destinations: Destinations<'_>,
     ) -> Result<()> {
         let mut pdf_page = start_page(&mut self.pdf, page_box)?;
         let mut surface = pdf_page.surface();
@@ -340,7 +376,7 @@ impl<'a> Painter<'a> {
         surface.pop();
         surface.finish();
         for link in links {
-            if let Some(annotation) = link.annotation(Some(anchors)) {
+            if let Some(annotation) = link.annotation(Some(destinations)) {
                 pdf_page.add_annotation(Annotation::new_link(annotation, None));
             }
         }
