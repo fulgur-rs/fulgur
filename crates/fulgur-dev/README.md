@@ -44,9 +44,8 @@ cargo run -p fulgur-dev -- render input.html --engine raikiri --css print.css --
 
 `--css` and `--font` are repeatable. Core asset loading enforces byte limits
 and decodes WOFF2; the development CLI rejects invalid font files before
-rendering. Font family names come from the font, not the file name. Raikiri rejects
-TTC/OTC collections because its pinned API cannot select a collection face;
-use individual TTF/OTF fonts or WOFF2.
+rendering. Font family names come from the font, not the file name. Raikiri
+registers every face of a TTC/OTC collection under the family name it records.
 `--no-system-fonts` requires a bundled font. Raikiri registers bundle CSS as
 user stylesheets based on the input document URL; a CSS argument's file path
 is not retained as stylesheet provenance. Linked stylesheets resolve imports

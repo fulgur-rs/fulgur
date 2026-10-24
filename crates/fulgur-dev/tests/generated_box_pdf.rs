@@ -66,12 +66,14 @@ fn generated_backgrounds_match_literal_inlines() {
 
 #[test]
 fn block_generated_backgrounds_follow_their_lines() {
+    // A display:block pseudo-element is a block box, so its background fills
+    // the line like a literal block's, as in Chromium.
     let actual = raster(
         "<div>A</div>",
         "div::before{display:block;content:'X';background:red;color:transparent}div::after{display:block;content:'Y';background:blue;color:transparent}",
     );
     let expected = raster(
-        "<div><span style='background:red;color:transparent'>X</span><br>A<br><span style='background:blue;color:transparent'>Y</span></div>",
+        "<div><div style='background:red;color:transparent'>X</div>A<div style='background:blue;color:transparent'>Y</div></div>",
         "",
     );
     assert!(

@@ -387,25 +387,120 @@ fn external_css_import_resolves_from_stylesheet_directory() {
     assert!((geometry.page_box.height * 0.75 - 350.0).abs() < 0.01);
 }
 
+/// A TTC holding `fonts`, whose table offsets are made absolute in the file.
+fn collection(fonts: &[&[u8]]) -> Vec<u8> {
+    let header = 12 + 4 * fonts.len();
+    let mut out = b"ttcf".to_vec();
+    out.extend(0x0001_0000_u32.to_be_bytes());
+    out.extend(u32::try_from(fonts.len()).unwrap().to_be_bytes());
+    let mut offset = header;
+    for font in fonts {
+        out.extend(u32::try_from(offset).unwrap().to_be_bytes());
+        offset += font.len();
+    }
+    let mut start = header;
+    for font in fonts {
+        let mut font = font.to_vec();
+        let tables = u16::from_be_bytes(font[4..6].try_into().unwrap());
+        for table in 0..usize::from(tables) {
+            let at = 12 + table * 16 + 8;
+            let value = u32::from_be_bytes(font[at..at + 4].try_into().unwrap());
+            let shifted = value + u32::try_from(start).unwrap();
+            font[at..at + 4].copy_from_slice(&shifted.to_be_bytes());
+        }
+        start += font.len();
+        out.extend(font);
+    }
+    out
+}
+
 #[test]
-fn bundled_font_collection_is_rejected() {
-    let (_dir, path) = input("<p>Hello</p>");
-    let mut font = std::fs::read(font_path(false)).unwrap();
-    let tables = u16::from_be_bytes(font[4..6].try_into().unwrap());
-    for table in 0..usize::from(tables) {
-        let offset = 12 + table * 16 + 8;
-        let value = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
-        font[offset..offset + 4].copy_from_slice(&(value + 20).to_be_bytes());
-    }
-    let mut collection = b"ttcf".to_vec();
-    for value in [0x0001_0000_u32, 2, 20, 20] {
-        collection.extend(value.to_be_bytes());
-    }
-    collection.extend(font);
-    let file = skrifa::raw::FileRef::new(&collection).unwrap();
+fn bundled_font_collection_registers_every_face_by_its_family() {
+    let mono = std::fs::read(font_path(false)).unwrap();
+    // The bundle decodes WOFF2, so its first font is the TTF behind it.
+    let mut sans_bundle = AssetBundle::new();
+    sans_bundle.add_font_file(font_path(true)).unwrap();
+    let sans = sans_bundle.fonts[0].as_slice();
+    let file_bytes = collection(&[&mono, sans]);
+    let file = skrifa::raw::FileRef::new(&file_bytes).unwrap();
     assert_eq!(file.fonts().filter_map(|face| face.ok()).count(), 2);
+
+    let (_dir, path) = input(
+        "<style>p {margin:0}</style>\
+         <p style=\"font-family:'Noto Sans Mono'\">Hello mono face</p>\
+         <p style=\"font-family:'Noto Sans'\">Hello sans face</p>",
+    );
     let mut bundle = AssetBundle::new();
-    bundle.fonts.push(std::sync::Arc::new(collection));
+    bundle.fonts.push(std::sync::Arc::new(file_bytes));
+    let options = RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: false,
+    };
+    let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("Hello mono face") && text.contains("Hello sans face"));
+    let names: Vec<String> = pdf
+        .objects
+        .values()
+        .filter_map(|obj| obj.as_dict().ok())
+        .filter_map(|dict| dict.get(b"BaseFont").ok())
+        .filter_map(|name| name.as_name().ok())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    assert!(names.iter().any(|name| name.contains("NotoSansMono")));
+    assert!(
+        names
+            .iter()
+            .any(|name| name.contains("NotoSans") && !name.contains("NotoSansMono")),
+        "the second face is drawn with its own font: {names:?}"
+    );
+}
+
+/// `font` with the record count of its name table zeroed: it records no
+/// family name any more.
+fn without_family_names(font: &[u8]) -> Vec<u8> {
+    let mut out = font.to_vec();
+    let tables = usize::from(u16::from_be_bytes([out[4], out[5]]));
+    let name = (0..tables)
+        .map(|table| 12 + 16 * table)
+        .find(|&record| &out[record..record + 4] == b"name")
+        .map(|record| u32::from_be_bytes(out[record + 8..record + 12].try_into().unwrap()) as usize)
+        .expect("a name table");
+    out[name + 2..name + 4].copy_from_slice(&0u16.to_be_bytes());
+    out
+}
+
+#[test]
+fn bundled_font_collection_keeps_working_with_a_face_that_records_no_family() {
+    let mono = std::fs::read(font_path(false)).unwrap();
+    let mut sans_bundle = AssetBundle::new();
+    sans_bundle.add_font_file(font_path(true)).unwrap();
+    let nameless = without_family_names(sans_bundle.fonts[0].as_slice());
+    let (_dir, path) =
+        input("<p style=\"margin:0;font-family:'Noto Sans Mono'\">Hello mono face</p>");
+    let mut bundle = AssetBundle::new();
+    bundle
+        .fonts
+        .push(std::sync::Arc::new(collection(&[&mono, &nameless])));
+    let options = RenderOptions {
+        assets: Some(&bundle),
+        system_fonts: false,
+    };
+    let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    assert!(pdf.extract_text(&[1]).unwrap().contains("Hello mono face"));
+}
+
+#[test]
+fn bundled_font_collection_without_a_face_is_an_asset_error() {
+    let (_dir, path) = input("<p>Hello</p>");
+    let mut empty = b"ttcf".to_vec();
+    for value in [0x0001_0000_u32, 0] {
+        empty.extend(value.to_be_bytes());
+    }
+    let mut bundle = AssetBundle::new();
+    bundle.fonts.push(std::sync::Arc::new(empty));
     let result = render_with_options(
         &path,
         &Config::default(),
@@ -414,7 +509,7 @@ fn bundled_font_collection_is_rejected() {
             system_fonts: false,
         },
     );
-    assert!(matches!(result, Err(Error::Asset(message)) if message.contains("collections")));
+    assert!(matches!(result, Err(Error::Asset(_))));
 }
 
 #[test]

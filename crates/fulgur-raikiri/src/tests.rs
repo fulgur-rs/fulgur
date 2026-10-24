@@ -816,6 +816,11 @@ fn linear_gradient_stop_positions_move_the_shading_ends() {
     let colors = stop_colors(&pdf, shadings(&pdf)[0]);
     assert_eq!(colors.first(), Some(&[255, 0, 0]));
     assert_eq!(colors.last(), Some(&[0, 0, 255]));
+    // A calc() of a percentage and a length: 10% + 20px and 90% - 20px.
+    let (_, _, coords) = gradient_box(
+        "background-image: linear-gradient(to right, red calc(10% + 20px), blue calc(90% - 20px))",
+    );
+    assert_close(&coords.unwrap(), &[66.0, 35.0, 234.0, 35.0]);
 }
 
 #[test]
@@ -912,6 +917,10 @@ fn radial_gradient_explicit_sizes_and_positions() {
     let (coords, scale) = radial("radial-gradient(50% 25%, red, blue)");
     assert_eq!(coords[5], 130.0);
     assert!((scale - 7.5 / 130.0).abs() < 1e-4);
+    // A calc() radius adds its length to the percentage of the box.
+    let (coords, scale) = radial("radial-gradient(calc(10% + 10px) calc(50% + 5px), red, blue)");
+    assert_eq!(coords[5], 36.0);
+    assert!((scale - 20.0 / 36.0).abs() < 1e-4);
     // Offsets from the right and bottom edges.
     let (coords, _) = radial("radial-gradient(at right 10px bottom 5px, red, blue)");
     assert_close(&coords[..2], &[270.0, 45.0]);
@@ -1282,32 +1291,40 @@ fn double_border_fallback_uses_each_side_width() {
 
 #[test]
 fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
-    let html = |root: &str| {
+    let html = |root: &str, height: &str| {
         format!(
             "<style>@page {{ size: 300px 200px; margin: 20px }} html {{ {root} }} \
-             body {{ margin: 0; border: 5px solid black; overflow: hidden }}</style>\
+             body {{ margin: 0; border: 5px solid black; overflow: hidden; {height} }}</style>\
              <p style=\"background-color: blue; height: 100px\"></p>"
         )
     };
     // With a visible root, the body's overflow goes to the page.
-    let (_, propagated) = operations(&html(""));
+    let (_, propagated) = operations(&html("", ""));
     assert_eq!(count(&propagated, "W"), 0);
     // Otherwise the root's goes to the page and the body clips its own
     // content to its padding box: its border box inset by the border.
-    let (_, clipped) = operations(&html("overflow: hidden"));
-    let (_dir, path) = input(&html("overflow: hidden"));
-    let layout = completed(&path);
-    let page = layout.page(0).unwrap();
-    let body = page
-        .fragments()
-        .find(|f| page.dom().local_name(f.node()) == Some("body"))
-        .unwrap()
-        .paint_rect();
+    let body_and_clip = |height: &str| {
+        let (_, clipped) = operations(&html("overflow: hidden", height));
+        let (_dir, path) = input(&html("overflow: hidden", height));
+        let layout = completed(&path);
+        let page = layout.page(0).unwrap();
+        let body = page
+            .fragments()
+            .find(|f| page.dom().local_name(f.node()) == Some("body"))
+            .unwrap()
+            .paint_rect();
+        (body, clip_bounds(&clipped))
+    };
+    // The body is as tall as its 100px content plus its two 5px borders.
+    let (body, clip) = body_and_clip("");
+    assert_eq!(body, raikiri_html::PaintRect::new(20.0, 20.0, 260.0, 110.0));
+    assert_eq!(clip, [[25.0, 25.0, 275.0, 125.0]]);
+    // A body taller than the page area (160px): the page cuts the visible
+    // fragment, while the overflow clip keeps the whole padding box below the
+    // page cut.
+    let (body, clip) = body_and_clip("height: 200px");
     assert_eq!(body, raikiri_html::PaintRect::new(20.0, 20.0, 260.0, 160.0));
-    // The body's content-box minimum is 160px; its two 5px borders make
-    // the whole box 170px tall. The page cuts the visible fragment, while
-    // the overflow clip keeps the whole padding box below the page cut.
-    assert_eq!(clip_bounds(&clipped), [[25.0, 25.0, 275.0, 185.0]]);
+    assert_eq!(clip, [[25.0, 25.0, 275.0, 225.0]]);
 }
 
 /// Decoded operations of one page's content stream.

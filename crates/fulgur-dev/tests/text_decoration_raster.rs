@@ -62,6 +62,11 @@ fn red(p: &image::Rgba<u8>) -> bool {
     p[0] > 240 && p[1] < 180 && p[2] < 180
 }
 
+/// Red with at least half coverage over white.
+fn half_covered(p: &image::Rgba<u8>) -> bool {
+    p[0] > 240 && p[1] < 128 && p[2] < 128
+}
+
 #[test]
 fn all_styles_have_visible_geometry_and_real_glyphs() {
     for style in ["solid", "double", "dotted", "dashed", "wavy"] {
@@ -155,10 +160,14 @@ fn split_runs_keep_dashed_dotted_and_wavy_phase() {
             &css,
         );
         assert!(whole.pixels().any(red), "{style}: missing decoration");
+        // The underline sits at a fractional y, so the rasterizer blends the
+        // seams of the split runs: up to 9 levels on the faint edge row. A
+        // pattern phase that drifted by even one dash step differs by more
+        // than 100 levels.
         let diff = whole
             .pixels()
             .zip(split.pixels())
-            .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 8))
+            .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 16))
             .count();
         assert!(
             diff <= 8,
@@ -261,10 +270,14 @@ fn insets_do_not_open_gaps_at_color_run_boundaries() {
             &css,
         );
         assert!(whole.pixels().any(red));
+        // Only pixels at least half covered count: the underline sits at a
+        // fractional y, and its faint top row (30% coverage) blends to 184
+        // instead of 178 at a seam. A real gap leaves the seam white on the
+        // fully covered rows, which this still tells apart.
         for (x, y, p) in whole.enumerate_pixels() {
             assert_eq!(
-                red(p),
-                red(split.get_pixel(x, y)),
+                half_covered(p),
+                half_covered(split.get_pixel(x, y)),
                 "inset {insets} opens a gap at ({x},{y})"
             );
         }
