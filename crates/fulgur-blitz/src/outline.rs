@@ -197,4 +197,77 @@ mod tests {
         let tree = build_tree(&[]);
         assert!(tree.is_empty());
     }
+
+    // --- walk_mut deep-path coverage (line 70-71) ---
+
+    /// H1 → H2 → H3 forces walk_mut to traverse a path with rest=[0],
+    /// exercising the inner loop body that was previously unreachable.
+    #[test]
+    fn three_level_deep_hierarchy_covers_walk_mut() {
+        let entries = vec![
+            entry(0, 0.0.as_pt(), 1, "Chapter"),
+            entry(0, 20.0.as_pt(), 2, "Section"),
+            entry(0, 40.0.as_pt(), 3, "Subsection"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 1, "one root");
+        assert_eq!(tree[0].label, "Chapter");
+        assert_eq!(tree[0].children.len(), 1, "one section under chapter");
+        assert_eq!(tree[0].children[0].label, "Section");
+        assert_eq!(
+            tree[0].children[0].children.len(),
+            1,
+            "one subsection under section"
+        );
+        assert_eq!(tree[0].children[0].children[0].label, "Subsection");
+    }
+
+    /// After H1 → H2 → H3, adding another H2 must close H3 and H2, then
+    /// nest the new H2 under H1 as a sibling of the first H2.
+    #[test]
+    fn sibling_h2_after_deep_nesting() {
+        let entries = vec![
+            entry(0, 0.0.as_pt(), 1, "Chapter"),
+            entry(0, 10.0.as_pt(), 2, "Section A"),
+            entry(0, 20.0.as_pt(), 3, "Sub A.1"),
+            entry(0, 30.0.as_pt(), 2, "Section B"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 1);
+        let chapter = &tree[0];
+        assert_eq!(chapter.children.len(), 2, "two H2 siblings under Chapter");
+        assert_eq!(chapter.children[0].label, "Section A");
+        assert_eq!(
+            chapter.children[0].children.len(),
+            1,
+            "Sub A.1 under Section A"
+        );
+        assert_eq!(chapter.children[1].label, "Section B");
+        assert!(
+            chapter.children[1].children.is_empty(),
+            "Section B has no children"
+        );
+    }
+
+    /// All entries at the same heading level become independent top-level siblings.
+    #[test]
+    fn homogeneous_levels_all_become_siblings() {
+        let entries = vec![
+            entry(0, 0.0.as_pt(), 2, "Alpha"),
+            entry(1, 0.0.as_pt(), 2, "Beta"),
+            entry(2, 0.0.as_pt(), 2, "Gamma"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 3, "all H2 entries become top-level roots");
+        assert_eq!(tree[0].label, "Alpha");
+        assert_eq!(tree[1].label, "Beta");
+        assert_eq!(tree[2].label, "Gamma");
+        for node in &tree {
+            assert!(
+                node.children.is_empty(),
+                "{} should have no children",
+                node.label
+            );
+        }
+    }
 }
