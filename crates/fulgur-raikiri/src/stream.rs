@@ -10,7 +10,9 @@
 
 use crate::bookmarks::{BookmarkCollector, OutlineBuilder};
 use crate::paint::navigation::PageLink;
-use crate::paint::{LinkTargets, Painter, document_lang, html_title, margin_boxes};
+use crate::paint::{
+    Destinations, LinkTargets, Painter, RootSpace, document_lang, html_title, margin_boxes,
+};
 use crate::tagging::Tags;
 use crate::{RenderOptions, Source, bookmarks, metadata, page_defaults, with_resources};
 use fulgur_core::{Config, Error, Result};
@@ -116,6 +118,9 @@ struct PendingPage {
     /// Whether its margin boxes were left out for showing the page count.
     margin_boxes: bool,
     internal_links: Vec<PageLink>,
+    /// The space the page draws its content in, which moves the destinations
+    /// of links to its anchors.
+    space: RootSpace,
 }
 
 struct PdfSink<'a, 'u> {
@@ -187,6 +192,7 @@ impl<'a> PdfSink<'a, '_> {
             page_box: page.geometry().page_box,
             margin_boxes: deferred,
             internal_links,
+            space: RootSpace::of_page(&page),
         });
         Ok(())
     }
@@ -207,6 +213,11 @@ impl<'a> PdfSink<'a, '_> {
         let mut margin_boxes: BTreeMap<_, _> =
             summary.page_count_margin_boxes.into_iter().collect();
         let mut extra_pages = Vec::new();
+        let spaces: Vec<RootSpace> = self.pages.iter().map(|page| page.space).collect();
+        let destinations = Destinations {
+            anchors: &summary.anchors,
+            spaces: &spaces,
+        };
         for (index, page) in self.pages.iter().enumerate() {
             let boxes = if page.margin_boxes {
                 margin_boxes.remove(&(index as u32)).unwrap_or_default()
@@ -216,16 +227,11 @@ impl<'a> PdfSink<'a, '_> {
             let resolves = page
                 .internal_links
                 .iter()
-                .any(|link| link.annotation(Some(&summary.anchors)).is_some());
+                .any(|link| link.annotation(Some(destinations)).is_some());
             if boxes.is_empty() && !resolves {
                 continue;
             }
-            painter.margin_page(
-                page.page_box,
-                &boxes,
-                &page.internal_links,
-                &summary.anchors,
-            )?;
+            painter.margin_page(page.page_box, &boxes, &page.internal_links, destinations)?;
             extra_pages.push(index as u32);
         }
         let rotations = painter.take_rotations();

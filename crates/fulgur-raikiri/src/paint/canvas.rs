@@ -8,20 +8,65 @@
 //! element that gave its background to the canvas does not paint it again.
 //! An element with `display: none` generates no box, so it leaves the canvas
 //! transparent.
+//!
+//! The canvas runs through every page as one surface, so its images are
+//! positioned in the root element's box, which sits higher on each later
+//! page, and the root's `transform` moves them with the page content
+//! (CSS Transforms 1 §6) while the canvas still covers the page area.
 
-use super::paint_background;
 use super::raster::RasterCache;
 use super::shape::{Edges, RoundedRect, Slice};
+use super::{paint_background, transform};
 use crate::tagging::{Tags, Target};
 use fulgur_core::Result;
 use krilla::num::NormalizedF32;
+use krilla::paint::FillRule;
 use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use raikiri_html::computed::{
-    ComputedBackgroundLayer, ComputedDisplay, ComputedValues, ComputedVisualBox, CssColor,
+    ComputedBackgroundAttachment, ComputedBackgroundLayer, ComputedDisplay, ComputedValues,
+    ComputedVisualBox, CssColor,
 };
-use raikiri_html::{NodeId, NodeKind, Page};
+use raikiri_html::{NodeId, NodeKind, Page, PaintInsets, PaintTransform, RootBox};
 use std::sync::Arc;
+
+/// What the root element's `transform` does to the page (CSS Transforms 1 §6).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RootSpace {
+    /// The root has no transform: the page is drawn as laid out.
+    Plain,
+    /// The page content and the canvas images are drawn through this matrix.
+    Moved(PaintTransform),
+    /// The matrix is singular, so the root and its content are not rendered.
+    Collapsed,
+}
+
+impl RootSpace {
+    /// The space the page content of `page` is drawn in.
+    pub(crate) fn of_page(page: &Page<'_>) -> Self {
+        Self::of(page.root_box().as_ref())
+    }
+
+    /// The space the `root` box of a page draws its content in.
+    pub(super) fn of(root: Option<&RootBox>) -> Self {
+        match root.and_then(|root| root.transform) {
+            None => Self::Plain,
+            Some(matrix) if matrix == PaintTransform::IDENTITY => Self::Plain,
+            Some(matrix) if transform::inverse(matrix).is_some() => Self::Moved(matrix),
+            Some(_) => Self::Collapsed,
+        }
+    }
+
+    /// Where a point of the layout lands on the page, `None` when the root
+    /// is not rendered.
+    pub(crate) fn apply(self, point: (f32, f32)) -> Option<(f32, f32)> {
+        match self {
+            Self::Plain => Some(point),
+            Self::Moved(matrix) => Some(matrix.apply(point)),
+            Self::Collapsed => None,
+        }
+    }
+}
 
 /// The element whose background is the canvas background of `page`, with
 /// its computed style.
@@ -75,11 +120,16 @@ fn has_background(style: &ComputedValues) -> bool {
 
 /// Paint the canvas background of `page`, if any, as an artifact, and return
 /// the element that gave its background to the canvas.
+///
+/// The images are positioned in `root`, the root element's box on this page,
+/// and drawn through its transform `space`.
 pub(super) fn paint_page(
     surface: &mut Surface<'_>,
     tags: &mut Tags,
     raster: &mut RasterCache<'_>,
     page: &Page<'_>,
+    root: Option<&RootBox>,
+    space: RootSpace,
 ) -> Result<Option<NodeId>> {
     let Some((owner, style)) = owner(page) else {
         return Ok(None);
@@ -88,7 +138,7 @@ pub(super) fn paint_page(
         surface,
         page,
         Target::Artifact(ArtifactType::Other),
-        |surface| paint(surface, raster, page, style),
+        |surface| paint(surface, raster, page, style, root, space),
     )
     .map(|()| Some(owner))
 }
@@ -107,13 +157,17 @@ pub(super) fn root_opacity(page: &Page<'_>) -> Option<NormalizedF32> {
 
 /// Paint `style`'s background over the page area of `page`.
 ///
-/// The page area also positions the background image: the painter does not
-/// keep the root element's unbroken box, which the spec uses for that.
+/// The color fills the page area whatever the root's transform does. The
+/// images are positioned in the root element's box `root` (`fixed` ones in
+/// the page area) and move with the root's transform `space`, clipped to the
+/// page area. A singular transform leaves the color only.
 fn paint(
     surface: &mut Surface<'_>,
     raster: &mut RasterCache<'_>,
     page: &Page<'_>,
     style: &ComputedValues,
+    root: Option<&RootBox>,
+    space: RootSpace,
 ) -> Result<()> {
     let geometry = page.geometry();
     let (page_box, margins) = (geometry.page_box, geometry.margins);
@@ -131,12 +185,12 @@ fn paint(
         left: true,
         right: true,
     };
-    let mut style = style.clone();
+    let mut images = style.clone();
     // `background-clip` has no effect on the canvas, which covers the whole
     // page area (CSS Backgrounds 3 §2.11.1). The page area has no border or
     // padding, so the other boxes already coincide with it; `text` and
     // `border-area` would otherwise paint glyphs or an empty ring.
-    style.background_layers = style
+    images.background_layers = images
         .background_layers()
         .iter()
         .map(|layer| {
@@ -150,15 +204,81 @@ fn paint(
             layer
         })
         .collect();
+    let mut color = images.clone();
+    color.background_layers = Arc::from([ComputedBackgroundLayer::initial()]);
     paint_background(
         surface,
         raster,
         &area,
         Edges::default(),
         open,
-        &style,
+        &color,
+        None,
         || None,
-    )
+    )?;
+    images.background_color = CssColor::TRANSPARENT;
+    let positioning = |layer: &ComputedBackgroundLayer| positioning_area(root, &area, layer);
+    let draw = |surface: &mut Surface<'_>, raster: &mut RasterCache<'_>, painting: &RoundedRect| {
+        paint_background(
+            surface,
+            raster,
+            painting,
+            Edges::default(),
+            open,
+            &images,
+            Some(&positioning),
+            || None,
+        )
+    };
+    match space {
+        RootSpace::Collapsed => Ok(()),
+        RootSpace::Plain => draw(surface, raster, &area),
+        RootSpace::Moved(matrix) => {
+            let (Some(inverse), Some(clip)) = (transform::inverse(matrix), area.path()) else {
+                return Ok(());
+            };
+            // The transform moves the layers; the part of the canvas that
+            // lands on the page area is what the inverse maps it from.
+            let from = transform::bounds(inverse, area.bounds());
+            let painting = RoundedRect::rect(from.x, from.y, from.width, from.height);
+            surface.push_clip_path(&clip, &FillRule::NonZero);
+            let painted = transform::with(surface, Some(matrix), |surface| {
+                draw(surface, raster, &painting)
+            });
+            surface.pop();
+            painted
+        }
+    }
+}
+
+/// The positioning area of `layer` on the canvas: the page area for a
+/// `fixed` layer, and otherwise the root element's border box inset to the
+/// layer's `background-origin` (CSS Backgrounds 3 §2.11.2). Without a root
+/// box, the page area.
+fn positioning_area(
+    root: Option<&RootBox>,
+    page_area: &RoundedRect,
+    layer: &ComputedBackgroundLayer,
+) -> RoundedRect {
+    let Some(root) = root.filter(|_| layer.attachment != ComputedBackgroundAttachment::Fixed)
+    else {
+        return *page_area;
+    };
+    let rect = root.border_box;
+    let border_box = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height);
+    let edges = |insets: PaintInsets| Edges {
+        top: insets.top,
+        right: insets.right,
+        bottom: insets.bottom,
+        left: insets.left,
+    };
+    match layer.origin {
+        ComputedVisualBox::PaddingBox => border_box.inset(edges(root.border)),
+        ComputedVisualBox::ContentBox => {
+            border_box.inset(edges(root.border).add(edges(root.padding)))
+        }
+        _ => border_box,
+    }
 }
 
 /// `style` without its background, for the element that gave it to the

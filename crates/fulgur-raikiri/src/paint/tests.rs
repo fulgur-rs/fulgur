@@ -317,3 +317,52 @@ fn a_root_without_a_box_gives_no_canvas() {
     let page = layout.page(0).expect("a page");
     assert!(canvas::owner(&page).is_none());
 }
+
+/// Whether `got` is the same stretch of events as `want`.
+fn same_events(got: &[PaintEvent<'_>], want: &[PaintEvent<'_>]) -> bool {
+    got.len() == want.len() && std::ptr::eq(got.as_ptr(), want.as_ptr())
+}
+
+#[test]
+fn the_root_transform_wrapper_of_a_paint_order_is_left_to_the_caller() {
+    let root = PaintTransform::translate(40.0, 30.0);
+    let own = PaintTransform::translate(5.0, 5.0);
+    let events = [
+        PaintEvent::PushTransform(root),
+        PaintEvent::PushTransform(own),
+        PaintEvent::PopTransform,
+        PaintEvent::PopTransform,
+    ];
+    // The wrapper is dropped, and the transforms nested in it stay.
+    assert!(same_events(
+        inside_root_transform(&events, RootSpace::Moved(root)),
+        &events[1..3]
+    ));
+    // Without a root transform to open, nothing is dropped.
+    assert!(same_events(
+        inside_root_transform(&events, RootSpace::Plain),
+        &events
+    ));
+    // A wrapper that is another transform is an element's own.
+    assert!(same_events(
+        inside_root_transform(&events, RootSpace::Moved(own)),
+        &events
+    ));
+    // The first transform closes before the end: siblings, not a wrapper.
+    let siblings = [
+        PaintEvent::PushTransform(root),
+        PaintEvent::PopTransform,
+        PaintEvent::PushTransform(root),
+        PaintEvent::PopTransform,
+    ];
+    assert!(same_events(
+        inside_root_transform(&siblings, RootSpace::Moved(root)),
+        &siblings
+    ));
+    // A paint order that does not wrap the document is used as it is.
+    let bare = [PaintEvent::PushOpacity(0.5), PaintEvent::PopOpacity];
+    assert!(same_events(
+        inside_root_transform(&bare, RootSpace::Moved(root)),
+        &bare
+    ));
+}

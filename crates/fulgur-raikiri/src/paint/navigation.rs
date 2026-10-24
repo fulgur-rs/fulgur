@@ -1,4 +1,4 @@
-use super::LinkTargets;
+use super::{Destinations, LinkTargets, RootSpace};
 use fulgur_core::units::PX_TO_PT;
 use krilla::{
     action::{Action, LinkAction},
@@ -7,7 +7,7 @@ use krilla::{
     geom::{Point, Quadrilateral, Rect},
 };
 use percent_encoding::percent_decode_str;
-use raikiri_html::{AnchorIndex, NodeId, Page, PaintRect};
+use raikiri_html::{NodeId, Page, PaintRect};
 
 /// Where a link on a page points.
 pub(crate) enum Href {
@@ -45,18 +45,18 @@ pub(crate) struct PageLink {
 
 impl PageLink {
     /// The link annotation, `None` for an internal link whose destination
-    /// `anchors` does not have (or no anchors are known yet).
-    pub(crate) fn annotation(&self, anchors: Option<&AnchorIndex>) -> Option<LinkAnnotation> {
+    /// `destinations` does not have (or no anchors are known yet).
+    pub(crate) fn annotation(
+        &self,
+        destinations: Option<Destinations<'_>>,
+    ) -> Option<LinkAnnotation> {
         let target = match &self.href {
             Href::External(uri) => Target::Action(LinkAction::new(uri.clone()).into()),
             Href::Internal(name) => {
-                let anchor = anchors?.get(name)?;
-                if !anchor.point.0.is_finite() || !anchor.point.1.is_finite() {
-                    return None;
-                }
+                let (page, point) = destinations?.point(name)?;
                 let destination = XyzDestination::new(
-                    anchor.page_index as usize,
-                    Point::from_xy(anchor.point.0 * PX_TO_PT, anchor.point.1 * PX_TO_PT),
+                    page,
+                    Point::from_xy(point.0 * PX_TO_PT, point.1 * PX_TO_PT),
                 );
                 Target::Action(Action::Goto(destination.into()))
             }
@@ -71,8 +71,8 @@ impl PageLink {
     }
 
     /// Whether the link waits for anchors that are not known yet.
-    pub(crate) fn is_pending(&self, anchors: Option<&AnchorIndex>) -> bool {
-        anchors.is_none() && matches!(self.href, Href::Internal(_))
+    pub(crate) fn is_pending(&self, destinations: Option<Destinations<'_>>) -> bool {
+        destinations.is_none() && matches!(self.href, Href::Internal(_))
     }
 }
 
@@ -262,10 +262,25 @@ fn bounding_rect(points: &[(f32, f32)]) -> Option<PaintRect> {
     (x1 > x0 && y1 > y0).then(|| PaintRect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
+/// `corners` moved by the root element's transform `space`, `None` when the
+/// root is not rendered.
+fn through(space: RootSpace, corners: [(f32, f32); 4]) -> Option<[(f32, f32); 4]> {
+    let [c0, c1, c2, c3] = corners;
+    Some([
+        space.apply(c0)?,
+        space.apply(c1)?,
+        space.apply(c2)?,
+        space.apply(c3)?,
+    ])
+}
+
 /// The links of `page` that have a target and a visible area once placed.
+/// `space` is the root element's transform, which moves the areas of a page
+/// that the painter draws through it.
 pub(crate) fn links(
     page: &Page<'_>,
     placement: Placement,
+    space: RootSpace,
     targets: &LinkTargets<'_>,
 ) -> Vec<PageLink> {
     let mut links = Vec::new();
@@ -281,7 +296,7 @@ pub(crate) fn links(
         let areas: Vec<Area> = link
             .paint_quads
             .iter()
-            .filter_map(|corners| placement.place(*corners))
+            .filter_map(|corners| placement.place(through(space, *corners)?))
             .collect();
         if !areas.is_empty() {
             links.push(PageLink {

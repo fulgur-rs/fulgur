@@ -3,7 +3,7 @@
 
 use super::raster::BackgroundLayer;
 use super::shape::{self, Edges, RoundedRect};
-use super::{FontCache, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
+use super::{FontCache, RootSpace, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
 use crate::tagging::{Tags, Target, margin_box_artifact};
 use fulgur_core::{Error, Result};
 use krilla::geom::Transform;
@@ -142,6 +142,7 @@ fn paint_box(
         let painted = paint_body(
             surface,
             &running.layout.page(),
+            RootSpace::Plain,
             fonts,
             svg,
             raster,
