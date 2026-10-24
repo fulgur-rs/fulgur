@@ -627,6 +627,14 @@ mod tests {
     }
 
     #[test]
+    fn a_calc_that_keeps_relative_terms_resolves_to_zero() {
+        // The cascade absolutizes font-relative and viewport terms, so a value
+        // that still holds them has nothing to paint with.
+        let unresolved = LengthPercentageOrCalc::RelativeCalc(Default::default());
+        assert_eq!(resolve_length_or_calc(unresolved, 40.0), 0.0);
+    }
+
+    #[test]
     fn stops_outside_the_line_move_the_shading_ends() {
         let red = CssColor {
             r: 255,
