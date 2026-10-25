@@ -12,25 +12,31 @@ fn render_svg_page_with(
     host_style: &str,
     configure: impl FnOnce(&mut RenderOptions<'_>),
 ) -> lopdf::Document {
+    let html = format!(
+        "<style>@page{{size:200px 100px;margin:0}}body{{margin:0}}svg{{display:block;{host_style}}}</style>{svg}"
+    );
+    let pdf = render_html_with_font(&html, configure).unwrap();
+    lopdf::Document::load_mem(&pdf).unwrap()
+}
+
+/// Render `html` set in the bundled test face alone.
+fn render_html_with_font(
+    html: &str,
+    configure: impl FnOnce(&mut RenderOptions<'_>),
+) -> fulgur_core::Result<Vec<u8>> {
     let mut bundle = fulgur_core::AssetBundle::new();
     bundle
         .add_font_bytes(
             include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
         )
         .unwrap();
-    let html = format!(
-        "<style>@page{{size:200px 100px;margin:0}}body{{margin:0}}svg{{display:block;{host_style}}}</style>{svg}"
-    );
     let mut options = crate::RenderOptions {
         assets: Some(&bundle),
         system_fonts: false,
         ..Default::default()
     };
     configure(&mut options);
-    let pdf =
-        crate::render_html_with_options(&html, None, &fulgur_core::Config::default(), &options)
-            .unwrap();
-    lopdf::Document::load_mem(&pdf).unwrap()
+    crate::render_html_with_options(html, None, &fulgur_core::Config::default(), &options)
 }
 
 fn image_objects(pdf: &lopdf::Document) -> usize {
@@ -294,7 +300,7 @@ fn paint_without_groups(html: &str) -> (lopdf::Document, usize) {
     let mut pdf = krilla::Document::new();
     let mut pdf_page =
         pdf.start_page_with(krilla::page::PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = pdf_page.surface();
+    let mut surface = Surface::new(pdf_page.surface());
     let mut svg = SvgCache::default();
     crate::paint::paint_legacy(
         &mut surface,
@@ -350,4 +356,43 @@ fn inline_svg_with_stroked_glyphs_off_a_similarity_is_drawn_as_pixels() {
         .replace(" stroke='navy'", "");
     let pdf = render_svg_page(&filled, "");
     assert_eq!(image_objects(&pdf), 0);
+}
+
+const FILTERED_SVG: &str = "<svg width='20' height='20'><filter id='f'><feGaussianBlur stdDeviation='1'/></filter>\
+     <rect width='20' height='20' fill='red' filter='url(#f)'/></svg>";
+
+/// Asserts that rendering `html` fails with the error of the SVG that cannot
+/// be drawn, where it used to panic as Krilla dropped a surface with pushes
+/// still open.
+fn assert_rejects_the_filtered_svg(html: &str) {
+    match render_html_with_font(html, |_| {}) {
+        Err(fulgur_core::Error::Layout(message)) => {
+            assert!(message.starts_with("inline SVG: "), "{message}");
+        }
+        other => panic!("expected the SVG error, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_inline_svg_that_cannot_be_drawn_fails_the_render() {
+    assert_rejects_the_filtered_svg(&format!(
+        "<style>@page{{size:200px 100px;margin:0}}</style>{FILTERED_SVG}"
+    ));
+}
+
+#[test]
+fn the_error_of_an_inline_svg_unwinds_the_clips_groups_and_transforms_around_it() {
+    assert_rejects_the_filtered_svg(&format!(
+        "<style>@page{{size:200px 100px;margin:0}}</style>\
+         <div style='overflow:hidden;opacity:.5;transform:translate(5px,5px)'>\
+         <div style='overflow:hidden;opacity:.8'>{FILTERED_SVG}</div></div>"
+    ));
+}
+
+#[test]
+fn the_error_of_an_inline_svg_in_a_running_element_unwinds_its_margin_box() {
+    assert_rejects_the_filtered_svg(&format!(
+        "<style>@page{{size:200px 100px;margin:20px;@top-center{{content:element(head)}}}}\
+         .head{{position:running(head)}}</style><div class=head>{FILTERED_SVG}</div><p>Body</p>"
+    ));
 }

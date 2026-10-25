@@ -1,10 +1,10 @@
 //! Inline SVG content inside the existing page paint stack.
 
+use super::surface::Surface;
 use fulgur_core::{Error, Result};
 use krilla::geom::{Rect, Size, Transform};
 use krilla::num::NormalizedF32;
 use krilla::paint::FillRule;
-use krilla::surface::Surface;
 use raikiri_html::{Fragment, ImageContent, Page};
 
 pub(super) mod scene;

@@ -22,7 +22,7 @@ fn legacy_pages_keep_inline_svg_root_opacity() {
     let page = layout.page(0).unwrap();
     let mut pdf = krilla::Document::new();
     let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = pdf_page.surface();
+    let mut surface = Surface::new(pdf_page.surface());
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::default();
     let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());
@@ -69,7 +69,7 @@ fn legacy_pages_keep_inline_svg_vectors() {
     let page = layout.page(0).unwrap();
     let mut pdf = krilla::Document::new();
     let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = pdf_page.surface();
+    let mut surface = Surface::new(pdf_page.surface());
     let mut fonts = FontCache::default();
     let mut svg = svg::SvgCache::default();
     let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());
@@ -150,7 +150,7 @@ fn producer_fragmentainer_clip_is_applied_before_its_opacity_group() {
     ];
     let mut pdf = krilla::Document::new();
     let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = pdf_page.surface();
+    let mut surface = Surface::new(pdf_page.surface());
     paint_ordered(
         &mut surface,
         &page,
@@ -264,7 +264,7 @@ fn legacy_pages_skip_the_background_given_to_the_canvas() {
     let fill_count = |canvas_owner: Option<NodeId>| {
         let mut pdf = krilla::Document::new();
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
-        let mut surface = pdf_page.surface();
+        let mut surface = Surface::new(pdf_page.surface());
         let mut fonts = FontCache::default();
         let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());

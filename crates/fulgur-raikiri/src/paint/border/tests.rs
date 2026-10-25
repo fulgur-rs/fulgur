@@ -35,7 +35,7 @@ fn rule() -> raikiri_html::ColumnRule {
 fn content(rule: Option<&raikiri_html::ColumnRule>) -> Vec<u8> {
     let mut pdf = krilla::Document::new();
     let mut page = pdf.start_page_with(krilla::page::PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = page.surface();
+    let mut surface = Surface::new(page.surface());
     if let Some(rule) = rule {
         paint_column_rule(&mut surface, rule);
     }

@@ -2,8 +2,8 @@
 //! painter moves from their layout location, and the text runs carry the
 //! same moves.
 
+use super::surface::Surface;
 use krilla::geom::Transform;
-use krilla::surface::Surface;
 use raikiri_html::{PaintRect, PaintTransform};
 
 /// The Krilla transform for `transform`.

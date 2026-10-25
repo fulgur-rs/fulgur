@@ -16,12 +16,12 @@
 
 use super::raster::{RasterCache, SvgChoice};
 use super::shape::{Edges, RoundedRect, Slice};
+use super::surface::Surface;
 use super::{paint_background, transform};
 use crate::tagging::{Tags, Target};
 use fulgur_core::Result;
 use krilla::num::NormalizedF32;
 use krilla::paint::FillRule;
-use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use raikiri_html::computed::{
     ComputedBackgroundAttachment, ComputedBackgroundLayer, ComputedDisplay, ComputedValues,

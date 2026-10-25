@@ -10,10 +10,10 @@
 //! Box shadows (`box_shadow`) draw their blurred shapes with the same raster.
 
 use super::fill;
+use super::surface::Surface;
 use super::text_clip::{PathSink, Pen, append_run};
 use krilla::geom::{PathBuilder, Size, Transform};
 use krilla::image::Image;
-use krilla::surface::Surface;
 use raikiri_html::computed::CssColor;
 use raikiri_html::{PositionedGlyphRun, TextShadow};
 

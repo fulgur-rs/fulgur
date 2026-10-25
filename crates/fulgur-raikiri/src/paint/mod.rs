@@ -19,6 +19,7 @@ mod order;
 mod raster;
 mod shadow;
 mod shape;
+pub(crate) mod surface;
 mod svg;
 mod text_clip;
 mod transform;
@@ -35,7 +36,6 @@ use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
-use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use navigation::PageLink;
 use raikiri_html::computed::{
@@ -50,6 +50,7 @@ use raikiri_html::{
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
+use surface::Surface;
 
 /// Draw every page of `document` and return the PDF bytes, with the pages
 /// to rotate for display.
@@ -266,56 +267,47 @@ impl<'a> Painter<'a> {
         } = self;
         rotations.add(page);
         let mut pdf_page = start_page(pdf, page.geometry().page_box)?;
-        let mut surface = pdf_page.surface();
-        surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
         tags.begin_page(page);
         // The root's transform moves the page content and the canvas images
         // but not the margin boxes, which belong to the page.
         let root = page.root_box();
         let space = RootSpace::of(root.as_ref());
-        // The canvas goes under everything else on the page. A root that
-        // fades instead takes the canvas into its group with the page body,
-        // so the two fade together, and that group follows the margin boxes
-        // like the body does.
-        let group = canvas::root_opacity(page);
-        let mut canvas_owner = None;
-        if group.is_none() {
-            canvas_owner =
-                canvas::paint_page(&mut surface, tags, raster, page, root.as_ref(), space)?;
-        }
-        // The margin boxes are drawn before the page body.
-        let running = margin::paint(
-            &mut surface,
-            Some(page),
-            margin_boxes,
-            fonts,
-            svg,
-            raster,
-            tags,
-        )?;
-        if let Some(alpha) = group {
-            surface.push_opacity(alpha);
-            canvas_owner =
-                canvas::paint_page(&mut surface, tags, raster, page, root.as_ref(), space)?;
-        }
-        // A singular transform leaves nothing of the root to render.
-        let matrix = match space {
-            RootSpace::Plain => Some(None),
-            RootSpace::Moved(matrix) => Some(Some(matrix)),
-            RootSpace::Collapsed => None,
-        };
-        if let Some(matrix) = matrix {
-            transform::with(&mut surface, matrix, |surface| {
-                paint_body(surface, page, space, fonts, svg, raster, tags, canvas_owner)
-            })?;
-        }
-        if group.is_some() {
-            surface.pop();
-        }
-
-        surface.pop();
-        surface.finish();
+        let running = draw_page(Surface::new(pdf_page.surface()), |surface| {
+            // The canvas goes under everything else on the page. A root that
+            // fades instead takes the canvas into its group with the page body,
+            // so the two fade together, and that group follows the margin boxes
+            // like the body does.
+            let group = canvas::root_opacity(page);
+            let mut canvas_owner = None;
+            if group.is_none() {
+                canvas_owner =
+                    canvas::paint_page(surface, tags, raster, page, root.as_ref(), space)?;
+            }
+            // The margin boxes are drawn before the page body.
+            let running =
+                margin::paint(surface, Some(page), margin_boxes, fonts, svg, raster, tags)?;
+            if let Some(alpha) = group {
+                surface.push_opacity(alpha);
+                canvas_owner =
+                    canvas::paint_page(surface, tags, raster, page, root.as_ref(), space)?;
+            }
+            // A singular transform leaves nothing of the root to render.
+            let matrix = match space {
+                RootSpace::Plain => Some(None),
+                RootSpace::Moved(matrix) => Some(Some(matrix)),
+                RootSpace::Collapsed => None,
+            };
+            if let Some(matrix) = matrix {
+                transform::with(surface, matrix, |surface| {
+                    paint_body(surface, page, space, fonts, svg, raster, tags, canvas_owner)
+                })?;
+            }
+            if group.is_some() {
+                surface.pop();
+            }
+            Ok(running)
+        })?;
         let mut pending = Vec::new();
         for link in navigation::links(page, navigation::Placement::PAGE, space, targets) {
             match link.annotation(targets.anchors) {
@@ -360,19 +352,17 @@ impl<'a> Painter<'a> {
         destinations: Destinations<'_>,
     ) -> Result<()> {
         let mut pdf_page = start_page(&mut self.pdf, page_box)?;
-        let mut surface = pdf_page.surface();
-        surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
-        margin::paint(
-            &mut surface,
-            None,
-            margin_boxes,
-            &mut self.fonts,
-            &mut self.svg,
-            &mut self.raster,
-            &mut Tags::disabled(),
-        )?;
-        surface.pop();
-        surface.finish();
+        draw_page(Surface::new(pdf_page.surface()), |surface| {
+            margin::paint(
+                surface,
+                None,
+                margin_boxes,
+                &mut self.fonts,
+                &mut self.svg,
+                &mut self.raster,
+                &mut Tags::disabled(),
+            )
+        })?;
         for link in links {
             if let Some(annotation) = link.annotation(Some(destinations)) {
                 pdf_page.add_annotation(Annotation::new_link(annotation, None));
@@ -392,6 +382,26 @@ impl<'a> Painter<'a> {
             .finish()
             .map_err(|error| Error::PdfGeneration(format!("{error:?}")))
     }
+}
+
+/// Draw a page on `surface` with `draw`, in CSS px, then finish the surface.
+///
+/// When `draw` fails, the pushes it left open are closed first: Krilla panics
+/// when a surface with an open push is dropped, which would turn the error
+/// into a panic.
+fn draw_page<'s, T>(
+    mut surface: Surface<'s>,
+    draw: impl FnOnce(&mut Surface<'s>) -> Result<T>,
+) -> Result<T> {
+    surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+    let drawn = draw(&mut surface);
+    if drawn.is_err() {
+        surface.unwind();
+    } else {
+        surface.pop();
+    }
+    surface.finish();
+    drawn
 }
 
 /// Start a PDF page of `page_box` size, given in CSS px.

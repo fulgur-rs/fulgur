@@ -4,12 +4,12 @@
 use super::canvas::root;
 use super::raster::{BackgroundLayer, SvgChoice};
 use super::shape::{self, Edges, RoundedRect};
+use super::surface::Surface;
 use super::{FontCache, RootSpace, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
 use crate::tagging::{Tags, Target, margin_box_artifact};
 use fulgur_core::{Error, Result};
 use krilla::geom::Transform;
 use krilla::paint::{Fill, FillRule};
-use krilla::surface::Surface;
 use raikiri_html::computed::ComputedVisualBox;
 use raikiri_html::{MarginBox, Page, PaintInsets, PaintRect, PlacedRunningElement};
 

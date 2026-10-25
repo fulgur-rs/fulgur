@@ -12,9 +12,9 @@
 //! cannot tell those descendants apart and clips them like in-flow ones.
 
 use super::shape::RoundedRect;
+use super::surface::Surface;
 use krilla::geom::Path;
 use krilla::paint::FillRule;
-use krilla::surface::Surface;
 use raikiri_html::{NodeId, Page, PaintClip, PaintRect};
 use std::collections::HashMap;
 

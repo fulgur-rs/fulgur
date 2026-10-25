@@ -12,10 +12,10 @@
 //! annotations are added as tagged annotations of their `<a>` element. After
 //! the last page the structure tree is assembled in document order.
 
+use crate::paint::surface::Surface;
 use fulgur_core::tagging::{ListNumbering, PdfTag, TableHeaderScope, classify_element};
 use krilla::annotation::{Annotation, LinkAnnotation};
 use krilla::page::Page as PdfPage;
-use krilla::surface::Surface;
 use krilla::tagging::{
     ArtifactType, ContentTag, Identifier, Node, SpanTag, Tag, TagGroup, TagKind, TagTree,
 };
