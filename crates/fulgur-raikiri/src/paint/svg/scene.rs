@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
+use crate::paint::surface::Surface;
 use fulgur_core::Result;
 use krilla::color::rgb;
 use krilla::geom::{Path, PathBuilder, Point, Size, Transform};
@@ -19,7 +20,6 @@ use krilla::paint::{
     Fill, FillRule, LineCap, LineJoin, LinearGradient, Paint, RadialGradient, SpreadMethod, Stop,
     Stroke, StrokeDash,
 };
-use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph, Tag};
 use raikiri_traits::vector as scene;
 use raikiri_traits::{DecodedImage, PaintColor, PaintTransform};
@@ -363,7 +363,7 @@ fn single_shape(
 fn push_mask(surface: &mut Surface<'_>, clip: &scene::ClipPath) {
     let mut builder = surface.stream_builder();
     {
-        let mut inner = builder.surface();
+        let mut inner = Surface::new(builder.surface());
         let moved = clip.transform != PaintTransform::IDENTITY;
         if moved {
             inner.push_transform(&transform(clip.transform));

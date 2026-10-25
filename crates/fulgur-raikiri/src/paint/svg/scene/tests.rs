@@ -45,7 +45,7 @@ fn scene_of(children: Vec<Node>) -> VectorImage {
 fn pdf_of(scene: &VectorImage, assets: &mut SceneAssets) -> lopdf::Document {
     let mut pdf = krilla::Document::new();
     let mut page = pdf.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
-    let mut surface = page.surface();
+    let mut surface = Surface::new(page.surface());
     paint(&mut surface, scene, assets).unwrap();
     surface.finish();
     page.finish();
@@ -172,7 +172,7 @@ fn paint_order_decides_which_is_drawn_first() {
 fn drawn_after_a_fill_was_left_set(scene: &VectorImage) -> Vec<Operation> {
     let mut pdf = krilla::Document::new();
     let mut page = pdf.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
-    let mut surface = page.surface();
+    let mut surface = Surface::new(page.surface());
     surface.set_fill(Some(Fill {
         paint: rgb::Color::new(255, 0, 0).into(),
         opacity: NormalizedF32::ONE,

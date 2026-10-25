@@ -14,10 +14,10 @@
 use super::fill;
 use super::shadow::{self, Budget, RASTER_SCALE, ShadowParams, SkiaPath};
 use super::shape::{RoundedRect, Slice, ring};
+use super::surface::Surface;
 use super::text_clip::PathSink;
 use krilla::geom::PathBuilder;
 use krilla::paint::{Fill, FillRule};
-use krilla::surface::Surface;
 use raikiri_html::computed::{ComputedBoxShadowItem, ComputedValues, CssColor, TextShadowColor};
 
 /// Paint the outer shadows of the box whose border box is `border_box`.

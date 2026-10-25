@@ -57,7 +57,7 @@ fn paint_pdf(
 ) -> (bool, lopdf::Document) {
     let mut pdf = krilla::Document::new();
     let mut page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
-    let mut surface = page.surface();
+    let mut surface = Surface::new(page.surface());
     let mut raster = raster::RasterCache::for_tests(source);
     let drawn = paint(
         &mut surface,

@@ -1,9 +1,9 @@
 //! Paint used text decoration segments supplied by Raikiri.
 
 use super::fill;
+use super::surface::Surface;
 use krilla::geom::{Path, PathBuilder};
 use krilla::paint::{LineCap, Stroke, StrokeDash};
-use krilla::surface::Surface;
 use raikiri_html::{DecorationKind, DecorationLine, DecorationStyle};
 
 const MAX_WAVES: usize = 4096;

@@ -7,11 +7,11 @@
 
 use super::fill;
 use super::shape::{Edges, RoundedRect, Slice, polygon, ring};
+use super::surface::Surface;
 use krilla::color::rgb;
 use krilla::geom::{Path, PathBuilder};
 use krilla::num::NormalizedF32;
 use krilla::paint::{FillRule, LineCap, Stroke, StrokeDash};
-use krilla::surface::Surface;
 use raikiri_html::computed::{BorderColor, BorderStyle, ComputedValues, CssColor};
 
 /// The used width, style and color of one border side.

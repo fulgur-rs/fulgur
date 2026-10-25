@@ -5,13 +5,13 @@
 //! rectangle of the sized image, clipped to the part's area.
 
 use super::shape::{Edges, RoundedRect, Slice};
+use super::surface::Surface;
 use super::{border, gradient, raster};
 use fulgur_core::Result;
 use krilla::geom::{Size, Transform};
 use krilla::image::Image;
 use krilla::num::NormalizedF32;
 use krilla::paint::{Fill, FillRule, Paint, Pattern};
-use krilla::surface::Surface;
 use raikiri_html::PaintRect;
 use raikiri_html::computed::{ComputedBackgroundImage, ComputedValues, Sides};
 use raikiri_html::image_geometry::{BorderImageGeometry, BorderImagePart, border_image_geometry};
@@ -185,7 +185,7 @@ fn draw_pattern(
     };
     let mut builder = surface.stream_builder();
     {
-        let mut cell = builder.surface();
+        let mut cell = Surface::new(builder.surface());
         draw_tile(&mut cell, part, source, image_size);
         cell.finish();
     }

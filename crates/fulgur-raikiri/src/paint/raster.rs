@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
+use super::surface::Surface;
 use fulgur_core::{Error, Result};
 use krilla::geom::Path;
 use krilla::geom::{Size, Transform};
 use krilla::image::{BitsPerComponent, CustomImage, Image, ImageColorspace};
 use krilla::num::NormalizedF32;
 use krilla::paint::FillRule;
-use krilla::surface::Surface;
 use raikiri_html::computed::{
     ComputedBackgroundRepeat, ComputedBackgroundSize, ComputedCssPosition,
 };
