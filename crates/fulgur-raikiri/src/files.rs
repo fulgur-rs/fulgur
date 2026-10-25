@@ -112,12 +112,10 @@ impl NetworkProvider for BaseDirectoryProvider {
     fn fetch_one_hop(&self, request: Request) -> std::result::Result<FetchOutcome, NetworkError> {
         let path = self.resolve(&request.url)?;
         let bytes = read_capped(&path, self.max_bytes)?;
-        Ok(FetchOutcome::Body(FetchedResource {
-            bytes: bytes.into(),
-            content_type: content_type(&path).map(str::to_string),
-            final_url: request.url,
-            encoding: None,
-        }))
+        Ok(FetchOutcome::Body(
+            FetchedResource::new(bytes.into(), request.url)
+                .content_type(content_type(&path).map(str::to_string)),
+        ))
     }
 }
 

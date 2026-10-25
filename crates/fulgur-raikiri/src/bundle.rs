@@ -86,12 +86,10 @@ fn key(mut url: Url) -> Url {
 impl NetworkProvider for Sandbox {
     fn fetch_one_hop(&self, request: Request) -> std::result::Result<FetchOutcome, NetworkError> {
         if let Some(file) = self.images.get(&key(request.url.clone())) {
-            return Ok(FetchOutcome::Body(FetchedResource {
-                bytes: file.data.as_slice().to_vec().into(),
-                content_type: file.content_type.map(str::to_string),
-                final_url: request.url,
-                encoding: None,
-            }));
+            return Ok(FetchOutcome::Body(
+                FetchedResource::new(file.data.as_slice().to_vec().into(), request.url)
+                    .content_type(file.content_type.map(str::to_string)),
+            ));
         }
         self.files.fetch_one_hop(request)
     }

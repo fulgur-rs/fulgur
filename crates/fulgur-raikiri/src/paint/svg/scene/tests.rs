@@ -598,11 +598,11 @@ fn a_shape_with_a_clip_of_its_own_in_a_clip_is_a_mask() {
 
 fn picture(width: u32, height: u32, alpha: u8) -> Arc<DecodedImage> {
     let pixel = [10, 20, 30, alpha];
-    Arc::new(DecodedImage {
+    Arc::new(DecodedImage::new(
         width,
         height,
-        rgba: pixel.repeat((width * height) as usize),
-    })
+        pixel.repeat((width * height) as usize),
+    ))
 }
 
 fn image_objects(pdf: &lopdf::Document) -> usize {

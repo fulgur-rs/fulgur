@@ -14,14 +14,13 @@ impl<R: ReplacedResolver> ReplacedResolver for OptionalImages<'_, R> {
     ) -> std::result::Result<ResolvedIntrinsic, ResolverError> {
         // The consumer intentionally keeps rendering a document whose local
         // image is unavailable. Raikiri records the explicit fallback warning.
-        Ok(self
-            .0
-            .resolve(request)
-            .unwrap_or_else(|error| ResolvedIntrinsic {
-                intrinsic: IntrinsicBox::new(0.0, 0.0),
-                disposition: ResolveDisposition::Fallback {
+        Ok(self.0.resolve(request).unwrap_or_else(|error| {
+            ResolvedIntrinsic::new(
+                IntrinsicBox::new(0.0, 0.0),
+                ResolveDisposition::Fallback {
                     reason: error.to_string(),
                 },
-            }))
+            )
+        }))
     }
 }

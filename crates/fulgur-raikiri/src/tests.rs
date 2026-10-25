@@ -1522,17 +1522,12 @@ fn local_files_get_a_content_type_from_their_extension() {
 
 fn get(provider: &files::BaseDirectoryProvider, url: &str) -> std::result::Result<(), String> {
     use raikiri_traits::ResourceKind;
-    use raikiri_traits::net::{Body, Method, NetworkProvider, Request};
+    use raikiri_traits::net::{NetworkProvider, Request};
     provider
-        .fetch_one_hop(Request {
-            url: url::Url::parse(url).unwrap(),
-            method: Method::Get,
-            content_type: None,
-            headers: Vec::new(),
-            body: Body::Empty,
-            signal: None,
-            kind: ResourceKind::ExternalStylesheet,
-        })
+        .fetch_one_hop(Request::new(
+            url::Url::parse(url).unwrap(),
+            ResourceKind::ExternalStylesheet,
+        ))
         .map(drop)
         .map_err(|error| error.to_string())
 }

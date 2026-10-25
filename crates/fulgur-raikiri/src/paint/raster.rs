@@ -549,11 +549,11 @@ mod tests {
     #[test]
     fn images_drawn_at_two_sizes_in_turn_are_converted_once_per_size() {
         let image = |side: u32| {
-            std::sync::Arc::new(raikiri_traits::DecodedImage {
-                width: side,
-                height: side,
-                rgba: vec![255; (side * side * 4) as usize],
-            })
+            std::sync::Arc::new(raikiri_traits::DecodedImage::new(
+                side,
+                side,
+                vec![255; (side * side * 4) as usize],
+            ))
         };
         let source = Sizes(vec![image(16), image(24)]);
         let mut cache = RasterCache::for_tests(Some(&source));
