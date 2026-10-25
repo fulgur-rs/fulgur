@@ -549,6 +549,7 @@ fn paint_legacy(
                         Slice::of(&fragment),
                         style,
                         Collapse::of(page, fragment.node(), style),
+                        raster::SvgChoice::of(page, fragment.node()),
                         text,
                     )
                 },
@@ -701,6 +702,7 @@ fn paint_ordered(
                                 Slice::of(fragment),
                                 style,
                                 Collapse::of(page, fragment.node(), style),
+                                raster::SvgChoice::of(page, fragment.node()),
                                 text,
                             )
                         },
@@ -724,6 +726,7 @@ fn paint_ordered(
                             Slice::generated(piece),
                             piece.style,
                             Collapse::Separate,
+                            raster::SvgChoice::of(page, piece.clip_owner),
                             text,
                         )
                     },
@@ -751,6 +754,7 @@ fn paint_ordered(
                                 Slice::line_piece(style, piece.has_start_edge, piece.has_end_edge),
                                 style,
                                 Collapse::Separate,
+                                raster::SvgChoice::of(page, node),
                                 text,
                             )
                         },
@@ -859,7 +863,7 @@ fn paint_content_image(
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     image: GeneratedImageId,
-    placement: &raikiri_html::RasterImage,
+    placement: &raikiri_html::PlacedImage,
     host_group: bool,
 ) -> Result<()> {
     tags.mark(surface, page, Target::GeneratedImage(image), |surface| {
@@ -1069,6 +1073,7 @@ fn paint_box(
     slice: Slice,
     style: &ComputedValues,
     collapse: Collapse,
+    svg: raster::SvgChoice,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
@@ -1094,6 +1099,7 @@ fn paint_box(
         slice,
         style,
         None,
+        svg,
         text,
     )?;
     let padding_box = border_box.inset(slice.edges(border::widths(style)));
@@ -1191,6 +1197,7 @@ fn paint_background(
     slice: Slice,
     style: &ComputedValues,
     positioning: Option<&dyn Fn(&ComputedBackgroundLayer) -> RoundedRect>,
+    svg: raster::SvgChoice,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     let borders = slice.edges(border::widths(style));
@@ -1271,6 +1278,7 @@ fn paint_background(
                     size: &layer.size,
                     position: &layer.position,
                     repeat: &layer.repeat,
+                    svg,
                 };
                 with_area(layer.clip, &mut |area, rule| {
                     raster.paint_background(

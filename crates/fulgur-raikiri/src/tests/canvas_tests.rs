@@ -281,6 +281,7 @@ fn render_with_dot(html: &str) -> lopdf::Document {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: true,
+        ..Default::default()
     };
     let bytes = render_with_options(&path, &Config::default(), &options).expect("PDF bytes");
     lopdf::Document::load_mem(&bytes).expect("a readable PDF")

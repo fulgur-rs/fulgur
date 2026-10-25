@@ -12,6 +12,15 @@ fn render_with_fonts(
     css: &str,
     additional_fonts: &[PathBuf],
 ) -> (Vec<image::RgbaImage>, String, lopdf::Document) {
+    render_with_options(body, css, additional_fonts, &[])
+}
+
+fn render_with_options(
+    body: &str,
+    css: &str,
+    additional_fonts: &[PathBuf],
+    flags: &[&str],
+) -> (Vec<image::RgbaImage>, String, lopdf::Document) {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.html");
     let output = dir.path().join("output.pdf");
@@ -26,6 +35,7 @@ fn render_with_fonts(
     for font in additional_fonts {
         command.arg("--font").arg(font);
     }
+    command.args(flags);
     let result = command.arg(input).arg("-o").arg(&output).output().unwrap();
     assert!(
         result.status.success(),
@@ -489,4 +499,94 @@ fn document_current_color_resolves_through_use_instances() {
         ".template{color:currentColor}.instance{color:blue}",
     );
     rgb(&images[0], 5, 5, [0, 0, 255]);
+}
+
+/// The number of image XObjects in the PDF, counting the soft masks that carry
+/// the alpha of an image.
+fn image_objects(pdf: &lopdf::Document) -> usize {
+    pdf.objects
+        .values()
+        .filter(|value| {
+            value
+                .as_stream()
+                .ok()
+                .and_then(|stream| stream.dict.get(b"Subtype").ok())
+                .and_then(|value| value.as_name().ok())
+                == Some(b"Image".as_slice())
+        })
+        .count()
+}
+
+const RED_SQUARE: &str = "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='40'><rect width='30' height='20' fill='red'/></svg>";
+
+#[test]
+fn the_svg_rendering_flag_draws_pictures_as_pixels_that_look_the_same() {
+    let (images, _, pdf) = render_with_options(RED_SQUARE, "", &[], &["--svg-rendering", "raster"]);
+    rgb(&images[0], 4, 4, [255, 0, 0]);
+    rgb(&images[0], 45, 30, [255, 255, 255]);
+    assert!(image_objects(&pdf) > 0, "the picture is not an image");
+}
+
+#[test]
+fn an_element_can_ask_for_pixels_whatever_the_flag_says() {
+    let (images, _, pdf) = render_with_options(
+        RED_SQUARE,
+        "svg{--raikiri-svg-rendering:raster}",
+        &[],
+        &["--svg-rendering", "vector"],
+    );
+    rgb(&images[0], 4, 4, [255, 0, 0]);
+    assert!(image_objects(&pdf) > 0, "the picture is not an image");
+}
+
+#[test]
+fn the_svg_raster_scale_flag_gives_the_picture_more_pixels() {
+    let (_, _, plain) = render_with_options(RED_SQUARE, "", &[], &["--svg-rendering", "raster"]);
+    let (images, _, scaled) = render_with_options(
+        RED_SQUARE,
+        "",
+        &[],
+        &["--svg-rendering", "raster", "--svg-raster-scale", "3"],
+    );
+    rgb(&images[0], 4, 4, [255, 0, 0]);
+    let width = |pdf: &lopdf::Document| {
+        pdf.objects
+            .values()
+            .filter_map(|value| value.as_stream().ok())
+            .find(|stream| {
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|value| value.as_name().ok())
+                    == Some(b"Image".as_slice())
+            })
+            .and_then(|stream| stream.dict.get(b"Width").ok()?.as_i64().ok())
+            .expect("an image with a width")
+    };
+    assert_eq!(width(&plain), 60);
+    assert_eq!(width(&scaled), 180);
+}
+
+#[test]
+fn the_svg_flags_are_refused_for_the_blitz_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    std::fs::write(&input, "<p>hi</p>").unwrap();
+    for flag in [["--svg-rendering", "raster"], ["--svg-raster-scale", "2"]] {
+        let result = Command::new(env!("CARGO_BIN_EXE_fulgur-dev"))
+            .args(["render", "--engine", "blitz"])
+            .args(flag)
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.path().join("out.pdf"))
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("require --engine raikiri"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }

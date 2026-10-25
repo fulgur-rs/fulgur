@@ -85,7 +85,9 @@ pub fn render_streaming(
                 LayoutConfig::default(),
                 sink,
             )
-            .consumer_properties(&registrations);
+            .consumer_properties(&registrations)
+            .svg_rendering(options.svg_rendering)
+            .svg_raster_scale(options.svg_raster_scale);
             let mut file = std::fs::File::open(input)?;
             let mut buffer = vec![0; READ_CHUNK];
             loop {

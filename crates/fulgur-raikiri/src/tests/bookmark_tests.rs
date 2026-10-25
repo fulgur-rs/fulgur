@@ -293,6 +293,7 @@ fn bookmark_bundle_defaults_yield_to_author_style() {
         &RenderOptions {
             assets: Some(&bundle),
             system_fonts: true,
+            ..Default::default()
         },
     )
     .unwrap();

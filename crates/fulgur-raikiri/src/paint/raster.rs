@@ -14,9 +14,16 @@ use raikiri_html::computed::{
     ComputedBackgroundRepeat, ComputedBackgroundSize, ComputedCssPosition,
 };
 use raikiri_html::image_geometry::{background_image_dimensions, background_tiles};
-use raikiri_html::{Fragment, GeneratedImageId, NodeId, Page, PaintRect, RasterImage};
-use raikiri_traits::{DecodedImage, ImageIntrinsicSize, ImagePixelSource, ImageRasterSize};
+use raikiri_html::{
+    Fragment, GeneratedImageId, ImageContent, NodeId, Page, PaintRect, PlacedImage, SvgRendering,
+};
+use raikiri_traits::vector::VectorImage;
+use raikiri_traits::{
+    DecodedImage, ImageIntrinsicSize, ImagePixelSource, ImageRasterSize, ImageVectorRequest,
+};
 use url::Url;
+
+use super::svg::scene::{self, SceneAssets};
 
 #[derive(Clone, Hash)]
 struct Pixels {
@@ -47,8 +54,73 @@ impl CustomImage for Pixels {
     }
 }
 
+/// The Krilla image of straight RGBA8 `pixels`. The color and alpha
+/// channels are split once for PDF, so repeated placements should share the
+/// returned image. `interpolate` asks viewers to smooth it when scaled.
+pub(super) fn krilla_image(pixels: &DecodedImage, interpolate: bool) -> Result<Image> {
+    // Page validates the RGBA dimensions.
+    let count = pixels.rgba.len() / 4;
+    let mut colors = Vec::with_capacity(count * 3);
+    let has_alpha = pixels
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|pixel| pixel[3] != 255);
+    let mut alpha = has_alpha.then(|| Vec::with_capacity(count));
+    for pixel in pixels.rgba.as_chunks::<4>().0 {
+        colors.extend_from_slice(&pixel[..3]);
+        if let Some(alpha) = &mut alpha {
+            alpha.push(pixel[3]);
+        }
+    }
+    Image::from_custom(
+        Pixels {
+            width: pixels.width,
+            height: pixels.height,
+            colors: Arc::new(colors),
+            alpha: alpha.map(Arc::new),
+        },
+        interpolate,
+    )
+    .map_err(Error::PdfGeneration)
+}
+
 /// The most tiles one background layer draws.
 const MAX_BACKGROUND_TILES: usize = 100_000;
+
+/// The most tiles of one layer drawn as vector content. Each tile repeats the
+/// drawing operations of the scene, where an image is drawn by reference, so
+/// a layer with more tiles than this is drawn as pixels.
+const MAX_VECTOR_TILES: usize = 64;
+
+/// How the SVG images of an element are drawn: the choice of the element that
+/// owns them and the layout's raster scale.
+#[derive(Clone, Copy)]
+pub(super) struct SvgChoice {
+    pub rendering: SvgRendering,
+    /// Device pixels per CSS pixel of an SVG image drawn as pixels.
+    pub scale: f32,
+}
+
+impl Default for SvgChoice {
+    fn default() -> Self {
+        Self {
+            rendering: SvgRendering::default(),
+            scale: 1.0,
+        }
+    }
+}
+
+impl SvgChoice {
+    /// The choice for the images that `owner` owns on `page`.
+    pub(super) fn of(page: &Page<'_>, owner: NodeId) -> Self {
+        Self {
+            rendering: page.svg_rendering(owner),
+            scale: page.svg_raster_scale(),
+        }
+    }
+}
 
 /// One `url()` background image layer as computed for a box.
 pub(super) struct BackgroundLayer<'s> {
@@ -57,6 +129,14 @@ pub(super) struct BackgroundLayer<'s> {
     pub size: &'s ComputedBackgroundSize,
     pub position: &'s ComputedCssPosition,
     pub repeat: &'s ComputedBackgroundRepeat,
+    /// How an SVG image is drawn, by the element that owns the layer.
+    pub svg: SvgChoice,
+}
+
+/// What a tile of a background layer is drawn with.
+enum Tile {
+    Image(Image),
+    Scene(Arc<VectorImage>),
 }
 
 /// Converted images kept per URL, one per raster size drawn, so that an
@@ -83,6 +163,8 @@ pub(super) struct RasterCache<'a> {
     urls: HashMap<Box<str>, Option<Url>>,
     /// Raster pixels left for the document's blurred box shadows.
     pub(super) box_shadows: super::shadow::Budget,
+    /// Fonts and pictures of the scenes of SVG images, converted for Krilla.
+    scene_assets: SceneAssets,
 }
 
 impl<'a> RasterCache<'a> {
@@ -93,6 +175,7 @@ impl<'a> RasterCache<'a> {
             images: HashMap::new(),
             urls: HashMap::new(),
             box_shadows: super::shadow::Budget::default(),
+            scene_assets: SceneAssets::default(),
         }
     }
 
@@ -106,33 +189,7 @@ impl<'a> RasterCache<'a> {
         }) {
             return Ok(converted.image.clone());
         }
-        // Page validates the RGBA dimensions. Split once for PDF channels;
-        // repeated placements share the converted image and source pixels.
-        let count = pixels.rgba.len() / 4;
-        let mut colors = Vec::with_capacity(count * 3);
-        let has_alpha = pixels
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .any(|pixel| pixel[3] != 255);
-        let mut alpha = has_alpha.then(|| Vec::with_capacity(count));
-        for pixel in pixels.rgba.as_chunks::<4>().0 {
-            colors.extend_from_slice(&pixel[..3]);
-            if let Some(alpha) = &mut alpha {
-                alpha.push(pixel[3]);
-            }
-        }
-        let image = Image::from_custom(
-            Pixels {
-                width: pixels.width,
-                height: pixels.height,
-                colors: Arc::new(colors),
-                alpha: alpha.map(Arc::new),
-            },
-            true,
-        )
-        .map_err(Error::PdfGeneration)?;
+        let image = krilla_image(pixels, true)?;
         let images = self.images.entry(url.as_str().into()).or_default();
         // Pixels of the same size that the source no longer returns are stale.
         images.retain(|converted| {
@@ -160,31 +217,53 @@ impl<'a> RasterCache<'a> {
         let Some(source) = self.source else {
             return Ok(());
         };
-        let Some(placement) = page.raster_image(fragment, source) else {
+        let Some(placed) = page.placed_image(fragment, source) else {
             return Ok(());
         };
-        self.paint_placement(surface, page, &placement, host_group)
+        let Some(placed) = self.drawable(placed, || page.raster_image(fragment, source)) else {
+            return Ok(());
+        };
+        self.paint_placement(surface, page, &placed, host_group)
     }
 
-    pub(super) fn marker(&self, page: &Page<'_>, owner: NodeId) -> Option<RasterImage> {
-        page.raster_marker(owner, self.source?)
+    pub(super) fn marker(&self, page: &Page<'_>, owner: NodeId) -> Option<PlacedImage> {
+        let source = self.source?;
+        let placed = page.placed_marker(owner, source)?;
+        self.drawable(placed, || page.raster_marker(owner, source))
     }
 
-    /// The raster pixels and rectangle of an image of `::before` or
-    /// `::after` content, as laid out on `page`.
+    /// The image of `::before` or `::after` content, as laid out on `page`,
+    /// with its rectangle.
     pub(super) fn generated_image(
         &self,
         page: &Page<'_>,
         image: GeneratedImageId,
-    ) -> Option<RasterImage> {
-        page.raster_generated_image(image, self.source?)
+    ) -> Option<PlacedImage> {
+        let source = self.source?;
+        let placed = page.placed_generated_image(image, source)?;
+        self.drawable(placed, || page.raster_generated_image(image, source))
+    }
+
+    /// `placed`, with the pixels `pixels` gives where its scene is one this
+    /// painter cannot draw faithfully.
+    fn drawable(
+        &self,
+        mut placed: PlacedImage,
+        pixels: impl FnOnce() -> Option<raikiri_html::RasterImage>,
+    ) -> Option<PlacedImage> {
+        if let ImageContent::Vector(scene) = &placed.content
+            && !scene::paintable(scene)
+        {
+            placed.content = ImageContent::Raster(pixels()?.pixels);
+        }
+        Some(placed)
     }
 
     pub(super) fn paint_placement(
         &mut self,
         surface: &mut Surface<'_>,
         page: &Page<'_>,
-        placement: &RasterImage,
+        placement: &PlacedImage,
         host_group: bool,
     ) -> Result<()> {
         let Some(path) = super::clip::clip_path(placement.clip, page.geometry().page_box) else {
@@ -193,7 +272,11 @@ impl<'a> RasterCache<'a> {
         let Some(size) = Size::from_wh(placement.rect.width, placement.rect.height) else {
             return Ok(());
         };
-        let image = self.image(&placement.url, &placement.pixels)?;
+        let tile = match &placement.content {
+            ImageContent::Raster(pixels) => Tile::Image(self.image(&placement.url, pixels)?),
+            ImageContent::Vector(scene) => Tile::Scene(Arc::clone(scene)),
+            _ => return Ok(()),
+        };
         let opacity = (!host_group)
             .then(|| page.computed(placement.node))
             .flatten()
@@ -206,13 +289,34 @@ impl<'a> RasterCache<'a> {
             placement.rect.x,
             placement.rect.y,
         ));
-        surface.draw_image(image, size);
+        let result = self.draw_tile(surface, &tile, size);
         surface.pop();
         surface.pop();
         if opacity.is_some() {
             surface.pop();
         }
-        Ok(())
+        result
+    }
+
+    /// Draws `tile` with its top left corner at the origin of `surface`'s
+    /// current space, in a box of `size`.
+    fn draw_tile(&mut self, surface: &mut Surface<'_>, tile: &Tile, size: Size) -> Result<()> {
+        match tile {
+            Tile::Image(image) => {
+                surface.draw_image(image.clone(), size);
+                Ok(())
+            }
+            Tile::Scene(scene) => {
+                // The scene is drawn in its box and does not show outside it.
+                let Some(path) = box_path(size) else {
+                    return Ok(());
+                };
+                surface.push_clip_path(&path, &FillRule::NonZero);
+                let result = scene::paint(surface, scene, &mut self.scene_assets);
+                surface.pop();
+                result
+            }
+        }
     }
 
     /// Draw one `url()` background layer (CSS Backgrounds 3 §3).
@@ -272,21 +376,58 @@ impl<'a> RasterCache<'a> {
         let Some(size) = Size::from_wh(tiles.width as f32, tiles.height as f32) else {
             return Ok(());
         };
-        // `round` rescales the tile, so decode at the size actually drawn.
-        let Some(image) = self.sized_image(&url, tiles.width as f32, tiles.height as f32)? else {
+        // `round` rescales the tile, so draw it at the size actually drawn.
+        let count = tiles.x.len().saturating_mul(tiles.y.len());
+        let Some(tile) = self.tile(&url, size, count, layer.svg)? else {
             return Ok(());
         };
         let (path, rule) = area;
         surface.push_clip_path(path, &rule);
-        for y in &tiles.y {
+        let mut result = Ok(());
+        'tiles: for y in &tiles.y {
             for x in &tiles.x {
                 surface.push_transform(&Transform::from_translate(*x as f32, *y as f32));
-                surface.draw_image(image.clone(), size);
+                let drawn = self.draw_tile(surface, &tile, size);
                 surface.pop();
+                if drawn.is_err() {
+                    result = drawn;
+                    break 'tiles;
+                }
             }
         }
         surface.pop();
-        Ok(())
+        result
+    }
+
+    /// What the `count` tiles of `size` of the image at `url` are drawn with:
+    /// a scene when the image has one, `svg` asks for vector content and the
+    /// tiles are few, otherwise pixels at the raster scale.
+    fn tile(
+        &mut self,
+        url: &Url,
+        size: Size,
+        count: usize,
+        svg: SvgChoice,
+    ) -> Result<Option<Tile>> {
+        let Some(source) = self.source else {
+            return Ok(None);
+        };
+        if svg.rendering == SvgRendering::Vector
+            && count <= MAX_VECTOR_TILES
+            && let Some(scene) = source.get_vector(
+                url,
+                &ImageVectorRequest::new(ImageRasterSize {
+                    width: size.width(),
+                    height: size.height(),
+                }),
+            )
+            && scene::paintable(&scene)
+        {
+            return Ok(Some(Tile::Scene(scene)));
+        }
+        Ok(self
+            .sized_image(url, size.width() * svg.scale, size.height() * svg.scale)?
+            .map(Tile::Image))
     }
 
     /// The resolved URL and natural size of a `url()` image, or `None` when
@@ -343,6 +484,18 @@ impl<'a> RasterCache<'a> {
         url.set_fragment(None);
         Some(url)
     }
+}
+
+/// The rectangle of a box of `size` at the origin.
+fn box_path(size: Size) -> Option<Path> {
+    let mut builder = krilla::geom::PathBuilder::new();
+    builder.push_rect(krilla::geom::Rect::from_xywh(
+        0.0,
+        0.0,
+        size.width(),
+        size.height(),
+    )?);
+    builder.finish()
 }
 
 #[cfg(test)]

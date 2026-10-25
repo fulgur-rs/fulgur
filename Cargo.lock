@@ -1145,6 +1145,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "log",
+ "slotmap",
+ "tinyvec",
+]
+
+[[package]]
 name = "fontique"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1307,6 +1318,7 @@ dependencies = [
  "percent-encoding",
  "raikiri-html",
  "raikiri-net",
+ "raikiri-svg",
  "raikiri-traits",
  "skrifa 0.47.0",
  "tempfile",
@@ -1570,6 +1582,18 @@ dependencies = [
  "bytemuck",
  "core_maths",
  "read-fonts 0.35.0",
+ "smallvec",
+]
+
+[[package]]
+name = "harfrust"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytemuck",
+ "read-fonts 0.41.0",
  "smallvec",
 ]
 
@@ -2137,7 +2161,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64dea7da3bdce360b3501a191a7783b62201a1976b95049f5e77db8fa45cc5a4"
 dependencies = [
  "flate2",
- "fontdb",
+ "fontdb 0.23.0",
  "krilla",
  "resvg 0.45.1",
  "tiny-skia 0.11.4",
@@ -3055,8 +3079,8 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "raikiri-dom"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
@@ -3077,8 +3101,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-html"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3093,18 +3117,19 @@ dependencies = [
  "rustc-hash",
  "shodo",
  "smol_str 0.3.6",
+ "unicode-script",
  "url",
 ]
 
 [[package]]
 name = "raikiri-layout-geometry"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 
 [[package]]
 name = "raikiri-layout-style"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "raikiri-layout-geometry",
  "raikiri-style",
@@ -3113,8 +3138,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-net"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "data-url",
  "image",
@@ -3125,8 +3150,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-style"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3138,22 +3163,23 @@ dependencies = [
 
 [[package]]
 name = "raikiri-svg"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
  "resvg 0.48.1",
  "roxmltree 0.21.1",
  "simplecss",
+ "skrifa 0.44.0",
  "svgtypes 0.16.1",
  "usvg 0.48.1",
 ]
 
 [[package]]
 name = "raikiri-traits"
-version = "0.0.3"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=f32ed25e882d50a5e06f1c215ad2dc503ce1e311#f32ed25e882d50a5e06f1c215ad2dc503ce1e311"
+version = "0.0.4"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
 dependencies = [
  "bytes",
  "libc",
@@ -4755,7 +4781,7 @@ dependencies = [
  "base64 0.22.1",
  "data-url",
  "flate2",
- "fontdb",
+ "fontdb 0.23.0",
  "imagesize 0.13.0",
  "kurbo 0.11.3",
  "log",
@@ -4779,7 +4805,10 @@ version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
+ "base64 0.23.1",
  "data-url",
+ "fontdb 0.24.0",
+ "harfrust 0.12.0",
  "imagesize 0.15.0",
  "kurbo 0.13.1",
  "log",
@@ -4787,9 +4816,14 @@ dependencies = [
  "roxmltree 0.21.1",
  "simplecss",
  "siphasher",
+ "skrifa 0.44.0",
  "strict-num",
  "svgtypes 0.16.1",
  "tiny-skia-path 0.12.0",
+ "unicode-bidi",
+ "unicode-script",
+ "unicode-vo",
+ "xmlwriter",
 ]
 
 [[package]]
