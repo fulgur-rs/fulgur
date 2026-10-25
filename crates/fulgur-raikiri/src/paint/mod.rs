@@ -273,8 +273,7 @@ impl<'a> Painter<'a> {
         // but not the margin boxes, which belong to the page.
         let root = page.root_box();
         let space = RootSpace::of(root.as_ref());
-        let running = draw_and_finish(Surface::new(pdf_page.surface()), |surface| {
-            surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+        let running = draw_page(Surface::new(pdf_page.surface()), |surface| {
             // The canvas goes under everything else on the page. A root that
             // fades instead takes the canvas into its group with the page body,
             // so the two fade together, and that group follows the margin boxes
@@ -307,8 +306,6 @@ impl<'a> Painter<'a> {
             if group.is_some() {
                 surface.pop();
             }
-
-            surface.pop();
             Ok(running)
         })?;
         let mut pending = Vec::new();
@@ -355,8 +352,7 @@ impl<'a> Painter<'a> {
         destinations: Destinations<'_>,
     ) -> Result<()> {
         let mut pdf_page = start_page(&mut self.pdf, page_box)?;
-        draw_and_finish(Surface::new(pdf_page.surface()), |surface| {
-            surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
+        draw_page(Surface::new(pdf_page.surface()), |surface| {
             margin::paint(
                 surface,
                 None,
@@ -365,9 +361,7 @@ impl<'a> Painter<'a> {
                 &mut self.svg,
                 &mut self.raster,
                 &mut Tags::disabled(),
-            )?;
-            surface.pop();
-            Ok(())
+            )
         })?;
         for link in links {
             if let Some(annotation) = link.annotation(Some(destinations)) {
@@ -390,18 +384,21 @@ impl<'a> Painter<'a> {
     }
 }
 
-/// Draw on `surface` with `draw`, then finish it.
+/// Draw a page on `surface` with `draw`, in CSS px, then finish the surface.
 ///
 /// When `draw` fails, the pushes it left open are closed first: Krilla panics
 /// when a surface with an open push is dropped, which would turn the error
 /// into a panic.
-fn draw_and_finish<'s, T>(
+fn draw_page<'s, T>(
     mut surface: Surface<'s>,
     draw: impl FnOnce(&mut Surface<'s>) -> Result<T>,
 ) -> Result<T> {
+    surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
     let drawn = draw(&mut surface);
     if drawn.is_err() {
         surface.unwind();
+    } else {
+        surface.pop();
     }
     surface.finish();
     drawn

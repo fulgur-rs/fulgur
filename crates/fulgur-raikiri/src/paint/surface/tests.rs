@@ -65,3 +65,17 @@ fn unwind_with_nothing_open_does_nothing() {
     page.finish();
     assert!(pdf.finish().is_ok());
 }
+
+#[test]
+fn the_surface_reads_through_to_krilla() {
+    let mut pdf = krilla::Document::new();
+    let mut page = pdf.start_page_with(PageSettings::from_wh(20.0, 20.0).unwrap());
+    let mut surface = Surface::new(page.surface());
+    let before = surface.ctm();
+    surface.push_transform(&Transform::from_scale(2.0, 2.0));
+    assert_ne!(surface.ctm(), before);
+    surface.pop();
+    assert_eq!(surface.ctm(), before);
+    surface.finish();
+    page.finish();
+}
