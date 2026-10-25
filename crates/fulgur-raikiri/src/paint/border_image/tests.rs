@@ -15,11 +15,11 @@ impl ImagePixelSource for RedPixels {
 }
 
 fn red() -> RedPixels {
-    RedPixels(Arc::new(DecodedImage {
-        width: 9,
-        height: 9,
-        rgba: [255, 0, 0, 255].repeat(81),
-    }))
+    RedPixels(Arc::new(DecodedImage::new(
+        9,
+        9,
+        [255, 0, 0, 255].repeat(81),
+    )))
 }
 
 /// The computed style of the `<div>` in a document styled by `css`.
@@ -160,11 +160,11 @@ impl ImagePixelSource for Undecodable {
         None
     }
     fn intrinsic_size(&self, _url: &url::Url) -> Option<raikiri_traits::ImageIntrinsicSize> {
-        Some(raikiri_traits::ImageIntrinsicSize {
-            width: Some(9.0),
-            height: Some(9.0),
-            aspect_ratio: None,
-        })
+        Some(raikiri_traits::ImageIntrinsicSize::new(
+            Some(9.0),
+            Some(9.0),
+            None,
+        ))
     }
 }
 

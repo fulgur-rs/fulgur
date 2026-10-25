@@ -18,20 +18,20 @@ impl ReplacedResolver for RedPixels {
         &self,
         _request: ResolverRequest<'_>,
     ) -> std::result::Result<ResolvedIntrinsic, ResolverError> {
-        Ok(ResolvedIntrinsic {
-            intrinsic: IntrinsicBox::new(4.0, 2.0),
-            disposition: ResolveDisposition::Ok,
-        })
+        Ok(ResolvedIntrinsic::new(
+            IntrinsicBox::new(4.0, 2.0),
+            ResolveDisposition::Ok,
+        ))
     }
 }
 
 #[test]
 fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
-    let pixels = RedPixels(Arc::new(DecodedImage {
-        width: 4,
-        height: 2,
-        rgba: [255, 0, 0, 255].repeat(8),
-    }));
+    let pixels = RedPixels(Arc::new(DecodedImage::new(
+        4,
+        2,
+        [255, 0, 0, 255].repeat(8),
+    )));
     let resources = RenderResources::new()
         .replaced_resolver(&pixels)
         .image_pixel_source(&pixels);
@@ -131,11 +131,11 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
 
 #[test]
 fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
-    let pixels = RedPixels(Arc::new(DecodedImage {
-        width: 4,
-        height: 2,
-        rgba: [255, 0, 0, 255].repeat(8),
-    }));
+    let pixels = RedPixels(Arc::new(DecodedImage::new(
+        4,
+        2,
+        [255, 0, 0, 255].repeat(8),
+    )));
     let resources = RenderResources::new().image_pixel_source(&pixels);
     let document = raikiri_html::parse_html_with_resources(
         &b"<style>@page{size:100px 100px;margin:0}body{margin:0}ul{margin:0;padding:0}li{margin-left:20px;opacity:.5;list-style-image:url(https://images.test/marker.png)}</style><ul><li></li></ul>"[..],
@@ -224,11 +224,11 @@ impl ImagePixelSource for SizedPixels {
     }
 
     fn intrinsic_size(&self, _url: &url::Url) -> Option<raikiri_traits::ImageIntrinsicSize> {
-        Some(raikiri_traits::ImageIntrinsicSize {
-            width: Some(4.0),
-            height: Some(2.0),
-            aspect_ratio: Some(2.0),
-        })
+        Some(raikiri_traits::ImageIntrinsicSize::new(
+            Some(4.0),
+            Some(2.0),
+            Some(2.0),
+        ))
     }
 }
 
@@ -291,19 +291,11 @@ fn background_url_skips_missing_sources_and_unusable_pixels() {
             })
             .count()
     };
-    let red = DecodedImage {
-        width: 4,
-        height: 2,
-        rgba: [255, 0, 0, 255].repeat(8),
-    };
+    let red = DecodedImage::new(4, 2, [255, 0, 0, 255].repeat(8));
     assert_eq!(images(Some(red.clone()), true), 1);
     assert_eq!(images(Some(red), false), 0);
     assert_eq!(images(None, true), 0);
-    let truncated = DecodedImage {
-        width: 4,
-        height: 2,
-        rgba: vec![0; 4],
-    };
+    let truncated = DecodedImage::new(4, 2, vec![0; 4]);
     assert_eq!(images(Some(truncated), true), 0);
 }
 
@@ -351,11 +343,11 @@ fn generated_image_layout(pixels: &RedPixels, css: &str) -> raikiri_html::Docume
 }
 
 fn red_8x4() -> RedPixels {
-    RedPixels(Arc::new(DecodedImage {
-        width: 8,
-        height: 4,
-        rgba: [255, 0, 0, 255].repeat(32),
-    }))
+    RedPixels(Arc::new(DecodedImage::new(
+        8,
+        4,
+        [255, 0, 0, 255].repeat(32),
+    )))
 }
 
 #[test]
@@ -564,11 +556,11 @@ impl ImagePixelSource for SceneOnly {
     }
 
     fn intrinsic_size(&self, _url: &url::Url) -> Option<raikiri_traits::ImageIntrinsicSize> {
-        Some(raikiri_traits::ImageIntrinsicSize {
-            width: Some(20.0),
-            height: Some(20.0),
-            aspect_ratio: Some(1.0),
-        })
+        Some(raikiri_traits::ImageIntrinsicSize::new(
+            Some(20.0),
+            Some(20.0),
+            Some(1.0),
+        ))
     }
 
     fn get_vector(
@@ -601,10 +593,10 @@ impl ReplacedResolver for SceneOnly {
         &self,
         _request: ResolverRequest<'_>,
     ) -> std::result::Result<ResolvedIntrinsic, ResolverError> {
-        Ok(ResolvedIntrinsic {
-            intrinsic: IntrinsicBox::new(20.0, 20.0),
-            disposition: ResolveDisposition::Ok,
-        })
+        Ok(ResolvedIntrinsic::new(
+            IntrinsicBox::new(20.0, 20.0),
+            ResolveDisposition::Ok,
+        ))
     }
 }
 
