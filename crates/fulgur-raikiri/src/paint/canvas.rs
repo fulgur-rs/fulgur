@@ -14,7 +14,7 @@
 //! page, and the root's `transform` moves them with the page content
 //! (CSS Transforms 1 §6) while the canvas still covers the page area.
 
-use super::raster::RasterCache;
+use super::raster::{RasterCache, SvgChoice};
 use super::shape::{Edges, RoundedRect, Slice};
 use super::{paint_background, transform};
 use crate::tagging::{Tags, Target};
@@ -99,7 +99,7 @@ pub(super) fn root_generates_no_box(page: &Page<'_>) -> bool {
 }
 
 /// The root `<html>` element of `page`.
-fn root(page: &Page<'_>) -> Option<NodeId> {
+pub(super) fn root(page: &Page<'_>) -> Option<NodeId> {
     let dom = page.dom();
     dom.children(dom.root())
         .find(|&node| is_element(page, node, "html"))
@@ -138,7 +138,10 @@ pub(super) fn paint_page(
         surface,
         page,
         Target::Artifact(ArtifactType::Other),
-        |surface| paint(surface, raster, page, style, root, space),
+        |surface| {
+            let svg = SvgChoice::of(page, owner);
+            paint(surface, raster, page, style, root, space, svg)
+        },
     )
     .map(|()| Some(owner))
 }
@@ -168,6 +171,7 @@ fn paint(
     style: &ComputedValues,
     root: Option<&RootBox>,
     space: RootSpace,
+    svg: SvgChoice,
 ) -> Result<()> {
     let geometry = page.geometry();
     let (page_box, margins) = (geometry.page_box, geometry.margins);
@@ -214,6 +218,7 @@ fn paint(
         open,
         &color,
         None,
+        svg,
         || None,
     )?;
     images.background_color = CssColor::TRANSPARENT;
@@ -227,6 +232,7 @@ fn paint(
             open,
             &images,
             Some(&positioning),
+            svg,
             || None,
         )
     };

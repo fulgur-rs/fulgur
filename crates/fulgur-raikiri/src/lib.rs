@@ -6,6 +6,7 @@
 
 use fulgur_core::units::F32Units;
 use fulgur_core::{AssetBundle, Config, Error, Result};
+pub use raikiri_html::SvgRendering;
 use raikiri_html::{
     LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources, layout,
     parse_html_with_resources,
@@ -26,6 +27,12 @@ pub struct RenderOptions<'a> {
     pub assets: Option<&'a AssetBundle>,
     /// Whether host-dependent system font fallback is enabled.
     pub system_fonts: bool,
+    /// How an SVG picture is drawn when its element declares no
+    /// `--raikiri-svg-rendering`. Vector, unless set.
+    pub svg_rendering: SvgRendering,
+    /// Device pixels per CSS pixel of an SVG drawn as pixels. One, unless set;
+    /// a value that is not finite and greater than zero is ignored.
+    pub svg_raster_scale: f32,
 }
 
 impl Default for RenderOptions<'_> {
@@ -33,6 +40,8 @@ impl Default for RenderOptions<'_> {
         Self {
             assets: None,
             system_fonts: true,
+            svg_rendering: SvgRendering::default(),
+            svg_raster_scale: 1.0,
         }
     }
 }
@@ -211,7 +220,10 @@ fn with_layout<T>(
             Vec::new()
         };
         let mut collector = bookmarks::BookmarkCollector::default();
-        let mut layout_options = LayoutOptions::new().resources(resources);
+        let mut layout_options = LayoutOptions::new()
+            .resources(resources)
+            .svg_rendering(options.svg_rendering)
+            .svg_raster_scale(options.svg_raster_scale);
         if config.effective_bookmarks() {
             layout_options = layout_options.consumer_properties(&registrations, &mut collector);
         }

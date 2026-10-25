@@ -137,6 +137,7 @@ fn render_raikiri(
     let options = fulgur_raikiri::RenderOptions {
         assets,
         system_fonts: true,
+        ..Default::default()
     };
     fulgur_raikiri::render_html_with_options(html, Some(base), &config, &options)
         .map_err(|e| anyhow::anyhow!("fulgur-raikiri render failed: {e}"))

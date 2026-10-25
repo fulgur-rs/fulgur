@@ -1,7 +1,8 @@
 //! Page-margin boxes (CSS Paged Media 3 §4.2), laid out by Raikiri for each
 //! page: the painter only draws the resolved boxes.
 
-use super::raster::BackgroundLayer;
+use super::canvas::root;
+use super::raster::{BackgroundLayer, SvgChoice};
 use super::shape::{self, Edges, RoundedRect};
 use super::{FontCache, RootSpace, fill, paint_body, paint_glyph_run, paints_glyphs, raster, svg};
 use crate::tagging::{Tags, Target, margin_box_artifact};
@@ -31,9 +32,14 @@ pub(super) fn paint<'a>(
     tags: &mut Tags,
 ) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
     let mut drawn = Vec::new();
+    // A margin box is no element, so the root element decides how the SVG
+    // images in its background are drawn.
+    let choice = page
+        .and_then(|page| root(page).map(|root| SvgChoice::of(page, root)))
+        .unwrap_or_default();
     for margin_box in margin_boxes {
         let Some(page) = page else {
-            paint_box(surface, margin_box, None, fonts, svg, raster)?;
+            paint_box(surface, margin_box, None, fonts, svg, raster, choice)?;
             continue;
         };
         let running = page
@@ -41,7 +47,7 @@ pub(super) fn paint<'a>(
             .map_err(|error| Error::Layout(error.to_string()))?;
         let artifact = Target::Artifact(margin_box_artifact(margin_box.slot));
         tags.mark(surface, page, artifact, |surface| {
-            paint_box(surface, margin_box, running, fonts, svg, raster)
+            paint_box(surface, margin_box, running, fonts, svg, raster, choice)
         })?;
         if let Some(running) = running {
             drawn.push((running, margin_box.rect));
@@ -60,6 +66,7 @@ fn paint_box(
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
+    choice: SvgChoice,
 ) -> Result<()> {
     let rect = margin_box.rect;
     let outer = RoundedRect::rect(rect.x, rect.y, rect.width, rect.height);
@@ -106,6 +113,7 @@ fn paint_box(
                 size: &image.size,
                 position: &image.position,
                 repeat: &image.repeat,
+                svg: choice,
             };
             raster.paint_background(
                 surface,

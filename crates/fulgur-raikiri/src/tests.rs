@@ -331,6 +331,13 @@ fn operations_with(
     let (_dir, path) = input(html);
     let bytes = render_with_options(&path, &Config::default(), options).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let operations = operations_of(&pdf);
+    (pdf, operations)
+}
+
+/// The drawing operations of every content stream of `pdf`: page contents
+/// and Form XObjects.
+pub(crate) fn operations_of(pdf: &lopdf::Document) -> Vec<lopdf::content::Operation> {
     let mut operations = Vec::new();
     for page in pdf.get_pages().values() {
         let content = pdf.get_page_content(*page);
@@ -357,10 +364,10 @@ fn operations_with(
             );
         }
     }
-    (pdf, operations)
+    operations
 }
 
-fn count(operations: &[lopdf::content::Operation], operator: &str) -> usize {
+pub(crate) fn count(operations: &[lopdf::content::Operation], operator: &str) -> usize {
     operations
         .iter()
         .filter(|operation| operation.operator == operator)
@@ -369,7 +376,7 @@ fn count(operations: &[lopdf::content::Operation], operator: &str) -> usize {
 
 /// Whether any dictionary in the document, at any depth, has
 /// `/ShadingType shading_type`.
-fn has_shading(pdf: &lopdf::Document, shading_type: i64) -> bool {
+pub(crate) fn has_shading(pdf: &lopdf::Document, shading_type: i64) -> bool {
     fn in_dict(dict: &lopdf::Dictionary, shading_type: i64) -> bool {
         dict.iter().any(|(key, value)| {
             (key == b"ShadingType" && value.as_i64().is_ok_and(|t| t == shading_type))
@@ -1762,6 +1769,8 @@ mod text_shadow_tests;
 mod box_shadow_tests;
 
 mod canvas_tests;
+
+mod svg_image_tests;
 
 #[test]
 fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {

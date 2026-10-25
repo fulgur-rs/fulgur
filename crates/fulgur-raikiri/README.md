@@ -140,11 +140,18 @@ ownership, ancestor clipping, and item opacity. Missing marker sources retain
 text fallback, and explicit `::marker` content takes priority. Image bundle URLs
 remain unsupported.
 
-Inline SVG is drawn as PDF vector content through Krilla SVG, including paths,
-gradients, and selectable text. Its viewport uses Raikiri's resolved content box,
-including border, padding, fixed repeats, and page cuts. SVG fonts follow the
-same bundled-font and system-font options as the HTML text. Resolved root font
-sizes and complete family candidate lists preserve relative sizing and fallback.
+Inline SVG is drawn as PDF vector content from the scene that Raikiri builds
+for it: paths, strokes with dashes, linear and radial gradients, clip paths,
+opacity groups, and selectable text. A clip of several shapes is drawn through
+a mask. Its viewport uses Raikiri's resolved content box, including border,
+padding, fixed repeats, and page cuts. SVG text is set in the faces the page was
+laid out with, so it follows the same bundled-font and system-font options as
+the HTML text and shares its embedded fonts. Resolved root font sizes and
+complete family candidate lists preserve relative sizing and fallback. An SVG
+that uses what the scene leaves out (masks and patterns), that goes over a
+budget of the scene, or that strokes text under a transform that is not a
+rotation and a uniform scale, is drawn from its parsed tree through Krilla SVG
+instead.
 Parent and SVG-root
 opacity composite once while explicit inherited descendant opacity is retained.
 Source preparation preserves selector matches before rewriting the root viewport

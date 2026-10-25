@@ -34,15 +34,37 @@ enum Commands {
         /// still being read (Raikiri only).
         #[arg(long)]
         stream: bool,
+        /// How SVG pictures whose element declares no
+        /// `--raikiri-svg-rendering` are drawn (Raikiri only).
+        #[arg(long, value_enum)]
+        svg_rendering: Option<SvgRenderingChoice>,
+        /// Device pixels per CSS pixel of SVG drawn as pixels (Raikiri only).
+        #[arg(long)]
+        svg_raster_scale: Option<f32>,
         #[command(flatten)]
         args: options::RenderArgs,
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum EngineChoice {
     Blitz,
     Raikiri,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SvgRenderingChoice {
+    Vector,
+    Raster,
+}
+
+impl From<SvgRenderingChoice> for fulgur_raikiri::SvgRendering {
+    fn from(choice: SvgRenderingChoice) -> Self {
+        match choice {
+            SvgRenderingChoice::Vector => Self::Vector,
+            SvgRenderingChoice::Raster => Self::Raster,
+        }
+    }
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -52,15 +74,34 @@ fn run(cli: Cli) -> Result<()> {
             output,
             engine,
             stream,
+            svg_rendering,
+            svg_raster_scale,
             args,
         } => {
             let config = args.config();
             config.validate()?;
             let assets = args.assets()?;
             let system_fonts = args.system_fonts();
+            if engine == EngineChoice::Blitz
+                && (svg_rendering.is_some() || svg_raster_scale.is_some())
+            {
+                return Err(Error::Other(
+                    "--svg-rendering and --svg-raster-scale require --engine raikiri".into(),
+                ));
+            }
+            if let Some(scale) = svg_raster_scale
+                && !(scale.is_finite() && scale > 0.0)
+            {
+                return Err(Error::Other(
+                    "--svg-raster-scale must be a number greater than zero".into(),
+                ));
+            }
+            let defaults = fulgur_raikiri::RenderOptions::default();
             let options = fulgur_raikiri::RenderOptions {
                 assets: Some(&assets),
                 system_fonts,
+                svg_rendering: svg_rendering.map_or(defaults.svg_rendering, Into::into),
+                svg_raster_scale: svg_raster_scale.unwrap_or(defaults.svg_raster_scale),
             };
             let bytes = match (engine, stream) {
                 (EngineChoice::Blitz, false) => {

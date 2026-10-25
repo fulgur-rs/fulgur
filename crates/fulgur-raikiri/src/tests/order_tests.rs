@@ -120,6 +120,7 @@ fn generated_and_ellipsis_preserve_visible_text() {
             &RenderOptions {
                 assets: Some(&bundle),
                 system_fonts: false,
+                ..Default::default()
             },
         )
         .unwrap();

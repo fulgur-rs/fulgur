@@ -21,6 +21,7 @@ fn bundled_family_is_used_without_system_fonts() {
         let options = RenderOptions {
             assets: Some(&bundle),
             system_fonts: false,
+            ..Default::default()
         };
         let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
         let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -54,6 +55,7 @@ fn no_system_fonts_without_bundle_errors() {
         &RenderOptions {
             assets: None,
             system_fonts: false,
+            ..Default::default()
         },
     );
     assert!(matches!(result, Err(Error::Asset(_))));
@@ -73,6 +75,7 @@ fn drawn_images(html: &str, bundle: &AssetBundle) -> usize {
     let options = RenderOptions {
         assets: Some(bundle),
         system_fonts: true,
+        ..Default::default()
     };
     let (pdf, operations) = operations_with(html, &options);
     let forms = pdf
@@ -146,6 +149,7 @@ fn stylesheet_urls_resolve_against_the_stylesheet_like_a_browser() {
         let options = RenderOptions {
             assets: Some(&bundle),
             system_fonts: true,
+            ..Default::default()
         };
         let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
         let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -183,6 +187,7 @@ fn images_outside_the_input_directory_are_not_read_even_with_a_bundle() {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: true,
+        ..Default::default()
     };
     let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -203,6 +208,7 @@ fn bundled_images_take_precedence_over_local_files() {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: true,
+        ..Default::default()
     };
     let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -339,6 +345,7 @@ fn invalid_bundled_font_errors() {
         &RenderOptions {
             assets: Some(&bundle),
             system_fonts: true,
+            ..Default::default()
         },
     );
     assert!(matches!(result, Err(Error::Asset(_))));
@@ -356,6 +363,7 @@ fn bundle_css_preserves_registration_order() {
         &RenderOptions {
             assets: Some(&bundle),
             system_fonts: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -435,6 +443,7 @@ fn bundled_font_collection_registers_every_face_by_its_family() {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: false,
+        ..Default::default()
     };
     let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -486,6 +495,7 @@ fn bundled_font_collection_keeps_working_with_a_face_that_records_no_family() {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: false,
+        ..Default::default()
     };
     let bytes = render_with_options(&path, &Config::default(), &options).unwrap();
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
@@ -507,6 +517,7 @@ fn bundled_font_collection_without_a_face_is_an_asset_error() {
         &RenderOptions {
             assets: Some(&bundle),
             system_fonts: false,
+            ..Default::default()
         },
     );
     assert!(matches!(result, Err(Error::Asset(_))));
@@ -520,6 +531,7 @@ fn html_string_bundles_resolve_against_the_base_directory_or_absolute_urls() {
     let options = RenderOptions {
         assets: Some(&bundle),
         system_fonts: true,
+        ..Default::default()
     };
     let drawn = |src: &str, base_dir: Option<&Path>| {
         let html = format!("{PAGE}<img src='{src}' style='width:8px;height:8px'>");
@@ -587,7 +599,8 @@ fn round_background_svgs_decode_at_the_rescaled_tile_size() {
     bundle.add_image("square.svg", SQUARE_SVG.to_vec());
     // `round` shrinks the huge tile to the 32px box: one tile, decoded small.
     let html = format!(
-        "{PAGE}<div style='width:32px;height:32px;background-image:url(square.svg);\
+        "{PAGE}<div style='--raikiri-svg-rendering:raster;width:32px;height:32px;\
+         background-image:url(square.svg);\
          background-size:100000px 100000px;background-repeat:round'></div>"
     );
     assert_eq!(drawn_images(&html, &bundle), 1);
@@ -599,8 +612,9 @@ fn bundled_files_are_typed_by_the_decoded_url_path() {
     bundle.add_image("square%2Esvg", SQUARE_SVG.to_vec());
     bundle.add_image("https://images.test/icon%2Esvg", SQUARE_SVG.to_vec());
     let html = format!(
-        "{PAGE}<div style='width:8px;height:8px;background-image:url(square%2Esvg)'></div>\
-         <div style='width:8px;height:8px;\
+        "{PAGE}<div style='--raikiri-svg-rendering:raster;width:8px;height:8px;\
+         background-image:url(square%2Esvg)'></div>\
+         <div style='--raikiri-svg-rendering:raster;width:8px;height:8px;\
          background-image:url(https://images.test/icon%2Esvg)'></div>"
     );
     assert_eq!(drawn_images(&html, &bundle), 2);
