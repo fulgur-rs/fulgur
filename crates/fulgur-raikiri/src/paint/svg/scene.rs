@@ -34,14 +34,6 @@ const MAX_CACHED_SCENE_BYTES: usize = 32 * 1024 * 1024;
 /// The tolerance within which two linear transforms count as the same one.
 const LINEAR_EPSILON: f32 = 1e-4;
 
-/// What is being drawn: the content of a scene, or the shapes of a clip.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Content,
-    /// Only the area of the shapes counts: black, opaque, no strokes.
-    Clip,
-}
-
 /// Fonts and pictures converted for Krilla, shared by the scenes of one cache
 /// so that a face or a picture is converted once there.
 #[derive(Default)]
@@ -147,7 +139,7 @@ pub(in crate::paint) fn paint(
     scene: &scene::VectorImage,
     assets: &mut SceneAssets,
 ) -> Result<()> {
-    group(surface, &scene.root, Mode::Content, assets)
+    group(surface, &scene.root, assets)
 }
 
 /// Whether [`paint`] can draw `scene` without distorting it. Krilla strokes
@@ -180,59 +172,31 @@ fn is_similarity(transform: PaintTransform) -> bool {
     (x - y).abs() <= LINEAR_EPSILON * x.max(y) && (a * c + b * d).abs() <= LINEAR_EPSILON * x
 }
 
-fn group(
-    surface: &mut Surface<'_>,
-    group: &scene::Group,
-    mode: Mode,
-    assets: &mut SceneAssets,
-) -> Result<()> {
-    if mode == Mode::Content && group.opacity <= 0.0 {
+fn group(surface: &mut Surface<'_>, group: &scene::Group, assets: &mut SceneAssets) -> Result<()> {
+    if group.opacity <= 0.0 || group.clip.as_deref().is_some_and(clip_covers_nothing) {
         return Ok(());
     }
-    if group.clip.as_deref().is_some_and(clip_covers_nothing) {
-        return Ok(());
-    }
-    let mut pushed = 0;
-    if group.transform != PaintTransform::IDENTITY {
-        surface.push_transform(&transform(group.transform));
+    let mut pushed = push_frame(surface, group);
+    if group.opacity < 1.0 {
+        surface.push_opacity(unit(group.opacity));
         pushed += 1;
     }
-    let mut result = Ok(());
-    if let Some(clip) = group.clip.as_deref() {
-        match push_clip(surface, clip, assets) {
-            Ok(count) => pushed += count,
-            Err(error) => result = Err(error),
-        }
-    }
-    if result.is_ok() {
-        if mode == Mode::Content && group.opacity < 1.0 {
-            surface.push_opacity(unit(group.opacity));
-            pushed += 1;
-        }
-        for child in &group.children {
-            result = node(surface, child, mode, assets);
-            if result.is_err() {
-                break;
-            }
-        }
-    }
+    let result = group
+        .children
+        .iter()
+        .try_for_each(|child| node(surface, child, assets));
     for _ in 0..pushed {
         surface.pop();
     }
     result
 }
 
-fn node(
-    surface: &mut Surface<'_>,
-    node: &scene::Node,
-    mode: Mode,
-    assets: &mut SceneAssets,
-) -> Result<()> {
+fn node(surface: &mut Surface<'_>, node: &scene::Node, assets: &mut SceneAssets) -> Result<()> {
     match node {
-        scene::Node::Group(inner) => group(surface, inner, mode, assets)?,
-        scene::Node::Path(shape) => path(surface, shape, mode),
-        scene::Node::Text(run) if mode == Mode::Content => text(surface, run, assets),
-        scene::Node::Image(picture) if mode == Mode::Content => {
+        scene::Node::Group(inner) => group(surface, inner, assets)?,
+        scene::Node::Path(shape) => path(surface, shape),
+        scene::Node::Text(run) => text(surface, run, assets),
+        scene::Node::Image(picture) => {
             let image = assets.image(picture)?;
             let (width, height) = (picture.image.width as f32, picture.image.height as f32);
             if let Some(size) = Size::from_wh(width, height) {
@@ -244,20 +208,10 @@ fn node(
     Ok(())
 }
 
-fn path(surface: &mut Surface<'_>, shape: &scene::Path, mode: Mode) {
+fn path(surface: &mut Surface<'_>, shape: &scene::Path) {
     let Some(outline) = outline(&shape.segments, PaintTransform::IDENTITY) else {
         return;
     };
-    if mode == Mode::Clip {
-        surface.set_fill(Some(Fill {
-            paint: rgb::Color::black().into(),
-            opacity: NormalizedF32::ONE,
-            rule: fill_rule(shape.fill.as_ref().map(|fill| fill.rule)),
-        }));
-        surface.draw_path(&outline);
-        surface.set_fill(None);
-        return;
-    }
     let fill = shape
         .fill
         .as_ref()
@@ -284,6 +238,20 @@ fn path(surface: &mut Surface<'_>, shape: &scene::Path, mode: Mode) {
             surface.set_stroke(None);
         }
     }
+}
+
+/// Pushes the transform and the clip of `group` and returns how many pushes
+/// were made.
+fn push_frame(surface: &mut Surface<'_>, group: &scene::Group) -> usize {
+    let mut pushed = 0;
+    if group.transform != PaintTransform::IDENTITY {
+        surface.push_transform(&transform(group.transform));
+        pushed += 1;
+    }
+    if let Some(clip) = group.clip.as_deref() {
+        pushed += push_clip(surface, clip);
+    }
+    pushed
 }
 
 /// A Krilla path along `segments` with `to_space` applied to every point.
@@ -345,11 +313,7 @@ fn has_shape(group: &scene::Group) -> bool {
 /// Intersects the drawing area with every link of `clip`'s chain and returns
 /// how many pushes were made. Each link's area is a union of shapes: a single
 /// shape is a clip path, several are a mask.
-fn push_clip(
-    surface: &mut Surface<'_>,
-    clip: &scene::ClipPath,
-    assets: &mut SceneAssets,
-) -> Result<usize> {
+fn push_clip(surface: &mut Surface<'_>, clip: &scene::ClipPath) -> usize {
     let mut pushed = 0;
     let mut link = Some(clip);
     while let Some(current) = link {
@@ -359,12 +323,12 @@ fn push_clip(
             let rule = fill_rule(shape.fill.as_ref().map(|fill| fill.rule));
             surface.push_clip_path(&area, &rule);
         } else {
-            push_mask(surface, current, assets)?;
+            push_mask(surface, current);
         }
         pushed += 1;
         link = current.clip.as_deref();
     }
-    Ok(pushed)
+    pushed
 }
 
 /// The only shape below `group` and the transform from its space to the
@@ -385,29 +349,55 @@ fn single_shape(
     }
 }
 
-fn push_mask(
-    surface: &mut Surface<'_>,
-    clip: &scene::ClipPath,
-    assets: &mut SceneAssets,
-) -> Result<()> {
+fn push_mask(surface: &mut Surface<'_>, clip: &scene::ClipPath) {
     let mut builder = surface.stream_builder();
-    let result = {
+    {
         let mut inner = builder.surface();
         let moved = clip.transform != PaintTransform::IDENTITY;
         if moved {
             inner.push_transform(&transform(clip.transform));
         }
-        let result = group(&mut inner, &clip.root, Mode::Clip, assets);
+        clip_group(&mut inner, &clip.root);
         if moved {
             inner.pop();
         }
         inner.finish();
-        result
-    };
+    }
     let stream = builder.finish();
-    result?;
     surface.push_mask(Mask::new(stream, MaskType::Alpha));
-    Ok(())
+}
+
+/// Draws the area of the shapes below `group` in black, opaque and without
+/// strokes, into the mask of a clip. Opacity, text and pictures do not
+/// change an area, so they do not count.
+fn clip_group(surface: &mut Surface<'_>, group: &scene::Group) {
+    if group.clip.as_deref().is_some_and(clip_covers_nothing) {
+        return;
+    }
+    let pushed = push_frame(surface, group);
+    for child in &group.children {
+        match child {
+            scene::Node::Group(inner) => clip_group(surface, inner),
+            scene::Node::Path(shape) => clip_path(surface, shape),
+            _ => {}
+        }
+    }
+    for _ in 0..pushed {
+        surface.pop();
+    }
+}
+
+fn clip_path(surface: &mut Surface<'_>, shape: &scene::Path) {
+    let Some(outline) = outline(&shape.segments, PaintTransform::IDENTITY) else {
+        return;
+    };
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::black().into(),
+        opacity: NormalizedF32::ONE,
+        rule: fill_rule(shape.fill.as_ref().map(|fill| fill.rule)),
+    }));
+    surface.draw_path(&outline);
+    surface.set_fill(None);
 }
 
 // Text
@@ -705,20 +695,20 @@ pub(super) struct SceneMemo {
 impl SceneMemo {
     /// The scene of `source` for `key`, built by `build` when it is not kept.
     /// `build` gives `None` for a source that has to be drawn another way.
-    pub(super) fn get_or_build<E>(
+    pub(super) fn get_or_build(
         &mut self,
         source: &str,
         key: Option<u32>,
-        build: impl FnOnce() -> std::result::Result<Option<scene::VectorImage>, E>,
-    ) -> std::result::Result<Option<Arc<scene::VectorImage>>, E> {
+        build: impl FnOnce() -> Option<scene::VectorImage>,
+    ) -> Option<Arc<scene::VectorImage>> {
         if let Some(scene) = self
             .scenes
             .get(source)
             .and_then(|scenes| scenes.iter().find(|(known, _)| *known == key))
         {
-            return Ok(scene.1.clone());
+            return scene.1.clone();
         }
-        let scene = build()?.map(Arc::new);
+        let scene = build().map(Arc::new);
         let repeated = !self.seen.insert(self.hasher.hash_one((source, key)));
         let cost = source.len()
             + scene
@@ -731,7 +721,7 @@ impl SceneMemo {
                 .or_default()
                 .push((key, scene.clone()));
         }
-        Ok(scene)
+        scene
     }
 
     #[cfg(test)]

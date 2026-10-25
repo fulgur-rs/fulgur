@@ -7,7 +7,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, RandomState};
 
-use fulgur_core::{Error, Result};
 use krilla::geom::Size;
 use krilla::image::Image;
 use raikiri_html::{InlineSvg, Page};
@@ -53,7 +52,8 @@ pub(super) struct RasterMemo {
 
 impl RasterMemo {
     /// The raster of the prepared source of `svg` in a box of `size` CSS
-    /// pixels at `scale` device pixels per CSS pixel.
+    /// pixels at `scale` device pixels per CSS pixel, or `None` for a document
+    /// that cannot be rasterized (a filter, a budget of the rasterizer).
     ///
     /// The raster leaves out the host opacity of the root; the caller applies
     /// it around the image.
@@ -63,7 +63,7 @@ impl RasterMemo {
         svg: &InlineSvg,
         size: Size,
         scale: f32,
-    ) -> Result<Raster> {
+    ) -> Option<Raster> {
         let variant: Variant = (
             svg.host_opacity.map(f32::to_bits),
             size.width().to_bits(),
@@ -75,7 +75,7 @@ impl RasterMemo {
             .get(svg.source.as_str())
             .and_then(|rasters| rasters.iter().find(|(known, _)| *known == variant))
         {
-            return Ok(raster.clone());
+            return Some(raster.clone());
         }
         let (raster, bytes) = build(page, svg, size, scale)?;
         let repeated = !self
@@ -88,7 +88,7 @@ impl RasterMemo {
                 .or_default()
                 .push((variant, raster.clone()));
         }
-        Ok(raster)
+        Some(raster)
     }
 
     #[cfg(test)]
@@ -98,7 +98,7 @@ impl RasterMemo {
 }
 
 /// Rasterizes `svg`, with the pixel bytes it holds.
-fn build(page: &Page<'_>, svg: &InlineSvg, size: Size, scale: f32) -> Result<(Raster, usize)> {
+fn build(page: &Page<'_>, svg: &InlineSvg, size: Size, scale: f32) -> Option<(Raster, usize)> {
     let fonts = page.svg_fonts();
     let root_style = SvgRootStyle {
         opacity: svg.host_opacity.unwrap_or(1.0),
@@ -119,13 +119,12 @@ fn build(page: &Page<'_>, svg: &InlineSvg, size: Size, scale: f32) -> Result<(Ra
                 None,
             )
         })
-        .map_err(|error| Error::Layout(format!("inline SVG raster: {error}")))?;
+        .ok()?;
     let bytes = pixels.rgba.len();
-    let drawn = Size::from_wh(pixels.width as f32 / scale, pixels.height as f32 / scale)
-        .ok_or_else(|| Error::PdfGeneration("invalid SVG raster size".into()))?;
-    Ok((
+    let drawn = Size::from_wh(pixels.width as f32 / scale, pixels.height as f32 / scale)?;
+    Some((
         Raster {
-            image: krilla_image(&pixels, true)?,
+            image: krilla_image(&pixels, true).ok()?,
             size: drawn,
         },
         bytes,

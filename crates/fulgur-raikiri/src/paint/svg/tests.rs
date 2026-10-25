@@ -347,6 +347,34 @@ fn inline_svg_the_scene_leaves_to_a_raster_is_drawn_from_the_parsed_tree() {
     );
 }
 
+/// An SVG with a gradient of more stops than a scene holds.
+fn svg_over_the_scene_budget() -> String {
+    let stops: String = (0..1100)
+        .map(|index| {
+            format!(
+                "<stop offset='{}' stop-color='{}'/>",
+                f64::from(index) / 1100.0,
+                if index % 2 == 0 { "red" } else { "blue" }
+            )
+        })
+        .collect();
+    format!(
+        "<svg width='200' height='80' viewBox='0 0 100 40'>\
+           <defs><linearGradient id='g'>{stops}</linearGradient></defs>\
+           <rect width='100' height='40' fill='url(#g)'/>\
+         </svg>"
+    )
+}
+
+#[test]
+fn inline_svg_over_a_budget_of_the_scene_is_drawn_from_the_parsed_tree() {
+    // The scene builder refuses the gradient instead of asking for a raster,
+    // so the image goes through the parsed tree and stays vector.
+    let pdf = render_svg_page(&svg_over_the_scene_budget(), "");
+    assert!(crate::tests::has_shading(&pdf, 2));
+    assert_eq!(image_objects(&pdf), 0);
+}
+
 #[test]
 fn the_opacity_of_an_inline_svg_composites_once_whoever_applies_it() {
     // The ordered painter composites the host opacity around the box; the

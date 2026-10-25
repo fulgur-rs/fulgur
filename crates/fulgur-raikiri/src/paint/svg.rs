@@ -123,43 +123,33 @@ impl<'a> SvgCache<'a> {
         // Keep the original viewport while clipping this page's fragment slice.
         let clip_path = rect_path(area.x, area.y, area.width, area.height, "fragment clip")?;
         // An element that asks for pixels gets the picture of the CSS pixel
-        // grid at the layout's raster scale.
+        // grid at the layout's raster scale. A document that cannot be
+        // rasterized is drawn as vector content instead.
         let raster = match page.svg_rendering(fragment.node()) {
             SvgRendering::Raster => {
-                Some(
-                    self.rasters
-                        .get_or_build(page, &svg, size, page.svg_raster_scale())?,
-                )
+                self.rasters
+                    .get_or_build(page, &svg, size, page.svg_raster_scale())
             }
             _ => None,
         };
-        // The scene holds what Raikiri draws itself; anything it leaves to a
-        // raster, or that Krilla could not stroke faithfully, goes through the
-        // parsed tree like before.
+        // The scene holds what Raikiri draws itself; anything it leaves out,
+        // or that Krilla could not stroke faithfully, goes through the parsed
+        // tree like before.
         let scene = match raster {
             Some(_) => None,
-            None => self.scene(page, &svg.source, size, svg.host_opacity)?,
+            None => self.scene(page, &svg.source, size, svg.host_opacity),
         };
         // The scene is placed in its viewport box and clipped to it, as a
         // `preserveAspectRatio` slice needs; so is the raster, which is
         // rounded up to whole device pixels.
-        let viewport = match (&raster, &scene) {
-            (None, None) => None,
-            _ => Some(rect_path(
-                0.0,
-                0.0,
-                size.width(),
-                size.height(),
-                "viewport",
-            )?),
-        };
+        let viewport = rect_path(0.0, 0.0, size.width(), size.height(), "viewport")?;
         surface.push_clip_path(&clip_path, &FillRule::NonZero);
         surface.push_transform(&Transform::from_translate(svg.viewport.x, svg.viewport.y));
         // Neither a scene nor a raster holds the host's opacity. When the
         // page's paint events do not composite it, the SVG keeps it.
         let own_opacity = svg.host_opacity.filter(|_| !host_group);
-        let result = match (raster, scene, viewport) {
-            (Some(raster), _, Some(viewport)) => {
+        let result = match (raster, scene) {
+            (Some(raster), _) => {
                 surface.push_clip_path(&viewport, &FillRule::NonZero);
                 if let Some(alpha) = own_opacity {
                     surface.push_opacity(NormalizedF32::new(alpha).unwrap_or(NormalizedF32::ONE));
@@ -171,7 +161,7 @@ impl<'a> SvgCache<'a> {
                 surface.pop();
                 Ok(())
             }
-            (None, Some(scene), Some(viewport)) => {
+            (None, Some(scene)) => {
                 surface.push_clip_path(&viewport, &FillRule::NonZero);
                 if let Some(alpha) = own_opacity {
                     surface.push_opacity(NormalizedF32::new(alpha).unwrap_or(NormalizedF32::ONE));
@@ -196,41 +186,37 @@ impl<'a> SvgCache<'a> {
     }
 
     /// The vector scene of `source` placed in `size`, set in the fonts of
-    /// `page`, or `None` when it has to be drawn another way.
+    /// `page`, or `None` when it has to be drawn another way: the document is
+    /// outside the vector subset, over a budget of the scene or rejected by
+    /// its parser, and the parsed tree draws what it can of it.
     fn scene(
         &mut self,
         page: &Page<'_>,
         source: &str,
         size: Size,
         host_opacity: Option<f32>,
-    ) -> Result<Option<Arc<VectorImage>>> {
-        let built = self
+    ) -> Option<Arc<VectorImage>> {
+        let scene = self
             .scenes
             .get_or_build(source, host_opacity.map(f32::to_bits), || {
                 let fonts = page.svg_fonts();
-                let built = SvgDocument::parse(source.as_bytes())?.scene_with_resources(
-                    SvgViewport {
-                        width: size.width(),
-                        height: size.height(),
-                    },
-                    SvgRootStyle {
-                        opacity: host_opacity.unwrap_or(1.0),
-                        ..SvgRootStyle::default()
-                    },
-                    None,
-                    SvgResources::new().with_fonts(&fonts),
-                );
-                match built {
-                    Ok(scene) => Ok(Some(scene)),
-                    Err(error) if error.falls_back_to_raster() => Ok(None),
-                    Err(error) => Err(error),
-                }
-            });
-        match built {
-            Ok(Some(scene)) if scene::paintable(&scene) => Ok(Some(scene)),
-            Ok(_) => Ok(None),
-            Err(error) => Err(Error::Layout(format!("inline SVG vector scene: {error}"))),
-        }
+                SvgDocument::parse(source.as_bytes())
+                    .ok()?
+                    .scene_with_resources(
+                        SvgViewport {
+                            width: size.width(),
+                            height: size.height(),
+                        },
+                        SvgRootStyle {
+                            opacity: host_opacity.unwrap_or(1.0),
+                            ..SvgRootStyle::default()
+                        },
+                        None,
+                        SvgResources::new().with_fonts(&fonts),
+                    )
+                    .ok()
+            })?;
+        scene::paintable(&scene).then_some(scene)
     }
 
     /// The parsed tree of `source`, with the root opacity `neutralized`
@@ -277,7 +263,13 @@ impl<'a> SvgCache<'a> {
     }
 }
 
-fn rect_path(x: f32, y: f32, width: f32, height: f32, what: &str) -> Result<krilla::geom::Path> {
+pub(super) fn rect_path(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    what: &str,
+) -> Result<krilla::geom::Path> {
     let rect = Rect::from_xywh(x, y, width, height)
         .ok_or_else(|| Error::PdfGeneration(format!("invalid SVG {what}")))?;
     let mut builder = krilla::geom::PathBuilder::new();

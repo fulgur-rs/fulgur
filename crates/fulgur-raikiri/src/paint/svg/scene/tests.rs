@@ -141,6 +141,19 @@ fn fills_and_strokes_keep_their_paints_and_stroke_styles() {
 }
 
 #[test]
+fn square_caps_and_round_joins_reach_the_stroke() {
+    let mut shape = ScenePath::new(square(10.0, 10.0, 50.0));
+    let mut stroke = SceneStroke::new(solid(0.0, 0.0, 1.0), 3.0);
+    stroke.cap = SceneCap::Square;
+    stroke.join = SceneJoin::Round;
+    shape.stroke = Some(stroke);
+    let (_, operations) = drawn(&scene_of(vec![Node::Path(shape)]));
+    let number = |operator: &str| numbers(&operations[position(&operations, operator)]);
+    assert_eq!(number("J"), [2.0]);
+    assert_eq!(number("j"), [1.0]);
+}
+
+#[test]
 fn paint_order_decides_which_is_drawn_first() {
     let draw = |order| {
         let mut shape = filled(square(10.0, 10.0, 50.0), solid(1.0, 0.0, 0.0));
@@ -485,6 +498,42 @@ fn a_clip_that_covers_nothing_hides_its_group() {
         assert_eq!(count(&operations, "f"), 0);
         assert_eq!(count(&operations, "rg"), 0);
     }
+}
+
+#[test]
+fn text_and_pictures_leave_no_area_in_a_clip() {
+    let fixture = Fixture::new();
+    let (pdf, operations) = drawn(&clipped(clip_of(vec![
+        Node::Text(fixture.run("A", 20.0, 0.0, 20.0)),
+        Node::Image(RasterImage::new(picture(2, 2, 255))),
+        Node::Path(filled(square(0.0, 0.0, 10.0), solid(0.0, 0.0, 0.0))),
+    ])));
+    // The path is the only area, but beside other nodes it is a mask.
+    assert!(has_soft_mask(&pdf));
+    assert_eq!(image_objects(&pdf), 0);
+    assert_eq!(count(&operations, "Tj") + count(&operations, "TJ"), 0);
+    // A clip with nothing but text and pictures hides its group.
+    let (_, operations) = drawn(&clipped(clip_of(vec![
+        Node::Text(fixture.run("A", 20.0, 0.0, 20.0)),
+        Node::Image(RasterImage::new(picture(2, 2, 255))),
+    ])));
+    assert_eq!(count(&operations, "rg"), 0);
+}
+
+#[test]
+fn a_shape_with_a_clip_of_its_own_in_a_clip_is_a_mask() {
+    let mut clip = clip_of(vec![Node::Path(filled(
+        square(0.0, 0.0, 80.0),
+        solid(0.0, 0.0, 0.0),
+    ))]);
+    clip.root.clip = Some(Box::new(clip_of(vec![Node::Path(filled(
+        square(40.0, 40.0, 80.0),
+        solid(0.0, 0.0, 0.0),
+    ))])));
+    let (pdf, operations) = drawn(&clipped(clip));
+    assert!(has_soft_mask(&pdf));
+    // The inner limit is a clip path inside the mask.
+    assert!(count(&operations, "W") >= 1);
 }
 
 // Pictures
@@ -988,71 +1037,54 @@ fn colors_round_to_bytes_and_clamp() {
 
 // Caching
 
-fn tiny(width: f32) -> std::result::Result<Option<VectorImage>, std::convert::Infallible> {
-    Ok(Some(VectorImage::new((width, 1.0))))
+fn tiny(width: f32) -> Option<VectorImage> {
+    Some(VectorImage::new((width, 1.0)))
 }
 
 #[test]
 fn a_scene_is_kept_when_it_is_asked_for_again() {
     let mut memo = SceneMemo::default();
     // Asked for once: built and not kept.
-    let first = memo.get_or_build("a", None, || tiny(1.0)).unwrap().unwrap();
+    let first = memo.get_or_build("a", None, || tiny(1.0)).unwrap();
     assert_eq!(memo.len(), 0);
     // Asked for twice: kept, then reused without building.
-    let second = memo.get_or_build("a", None, || tiny(2.0)).unwrap().unwrap();
+    let second = memo.get_or_build("a", None, || tiny(2.0)).unwrap();
     assert_eq!(memo.len(), 1);
     let third = memo
-        .get_or_build(
-            "a",
-            None,
-            || -> std::result::Result<_, std::convert::Infallible> {
-                panic!("kept scenes are not built again")
-            },
-        )
-        .unwrap()
+        .get_or_build("a", None, || panic!("kept scenes are not built again"))
         .unwrap();
     assert!(Arc::ptr_eq(&second, &third));
     assert!(!Arc::ptr_eq(&first, &second));
     // The host opacity is part of the key.
-    memo.get_or_build("a", Some(1), || tiny(3.0)).unwrap();
-    memo.get_or_build("a", Some(1), || tiny(3.0)).unwrap();
+    memo.get_or_build("a", Some(1), || tiny(3.0));
+    memo.get_or_build("a", Some(1), || tiny(3.0));
     assert_eq!(memo.len(), 2);
 }
 
 #[test]
 fn a_source_drawn_another_way_is_kept_when_it_is_asked_for_again() {
     let mut memo = SceneMemo::default();
-    let another_way =
-        || -> std::result::Result<Option<VectorImage>, std::convert::Infallible> { Ok(None) };
-    assert!(memo.get_or_build("a", None, another_way).unwrap().is_none());
+    assert!(memo.get_or_build("a", None, || None).is_none());
     assert_eq!(memo.len(), 0);
-    assert!(memo.get_or_build("a", None, another_way).unwrap().is_none());
+    assert!(memo.get_or_build("a", None, || None).is_none());
     assert_eq!(memo.len(), 1);
     // Kept, so it is not built again to fail again.
-    let again = memo.get_or_build(
-        "a",
-        None,
-        || -> std::result::Result<_, std::convert::Infallible> {
-            panic!("a source drawn another way is not built again")
-        },
-    );
-    assert!(again.unwrap().is_none());
+    let again = memo.get_or_build("a", None, || {
+        panic!("a source drawn another way is not built again")
+    });
+    assert!(again.is_none());
     // Only the source and the opacity it was asked for with are remembered.
-    assert!(
-        memo.get_or_build("a", Some(1), || tiny(1.0))
-            .unwrap()
-            .is_some()
-    );
+    assert!(memo.get_or_build("a", Some(1), || tiny(1.0)).is_some());
 }
 
 #[test]
-fn a_failed_build_is_not_kept_and_a_full_memo_keeps_nothing_more() {
-    let mut memo = SceneMemo::default();
-    let failed = memo.get_or_build("a", None, || Err::<Option<VectorImage>, _>("broken"));
-    assert_eq!(failed.unwrap_err(), "broken");
-    memo.kept_bytes = MAX_CACHED_SCENE_BYTES;
+fn a_full_memo_keeps_nothing_more() {
+    let mut memo = SceneMemo {
+        kept_bytes: MAX_CACHED_SCENE_BYTES,
+        ..SceneMemo::default()
+    };
     for _ in 0..3 {
-        memo.get_or_build("a", None, || tiny(1.0)).unwrap();
+        memo.get_or_build("a", None, || tiny(1.0));
     }
     assert_eq!(memo.len(), 0);
 }

@@ -23,6 +23,7 @@ use raikiri_traits::{
 };
 use url::Url;
 
+use super::svg::rect_path;
 use super::svg::scene::{self, SceneAssets};
 
 #[derive(Clone, Hash)]
@@ -308,9 +309,7 @@ impl<'a> RasterCache<'a> {
             }
             Tile::Scene(scene) => {
                 // The scene is drawn in its box and does not show outside it.
-                let Some(path) = box_path(size) else {
-                    return Ok(());
-                };
+                let path = rect_path(0.0, 0.0, size.width(), size.height(), "tile")?;
                 surface.push_clip_path(&path, &FillRule::NonZero);
                 let result = scene::paint(surface, scene, &mut self.scene_assets);
                 surface.pop();
@@ -378,25 +377,33 @@ impl<'a> RasterCache<'a> {
         };
         // `round` rescales the tile, so draw it at the size actually drawn.
         let count = tiles.x.len().saturating_mul(tiles.y.len());
-        let Some(tile) = self.tile(&url, size, count, layer.svg)? else {
+        let Some(tile) = self.tile(source, &url, size, count, layer.svg)? else {
             return Ok(());
         };
         let (path, rule) = area;
         surface.push_clip_path(path, &rule);
-        let mut result = Ok(());
-        'tiles: for y in &tiles.y {
-            for x in &tiles.x {
-                surface.push_transform(&Transform::from_translate(*x as f32, *y as f32));
-                let drawn = self.draw_tile(surface, &tile, size);
-                surface.pop();
-                if drawn.is_err() {
-                    result = drawn;
-                    break 'tiles;
-                }
-            }
-        }
+        let result = self.draw_tiles(surface, (&tiles.x, &tiles.y), &tile, size);
         surface.pop();
         result
+    }
+
+    /// Draws `tile` once at every position of the grid `(xs, ys)`.
+    fn draw_tiles(
+        &mut self,
+        surface: &mut Surface<'_>,
+        (xs, ys): (&[f64], &[f64]),
+        tile: &Tile,
+        size: Size,
+    ) -> Result<()> {
+        for y in ys {
+            for x in xs {
+                surface.push_transform(&Transform::from_translate(*x as f32, *y as f32));
+                let drawn = self.draw_tile(surface, tile, size);
+                surface.pop();
+                drawn?;
+            }
+        }
+        Ok(())
     }
 
     /// What the `count` tiles of `size` of the image at `url` are drawn with:
@@ -404,14 +411,12 @@ impl<'a> RasterCache<'a> {
     /// tiles are few, otherwise pixels at the raster scale.
     fn tile(
         &mut self,
+        source: &dyn ImagePixelSource,
         url: &Url,
         size: Size,
         count: usize,
         svg: SvgChoice,
     ) -> Result<Option<Tile>> {
-        let Some(source) = self.source else {
-            return Ok(None);
-        };
         if svg.rendering == SvgRendering::Vector
             && count <= MAX_VECTOR_TILES
             && let Some(scene) = source.get_vector(
@@ -484,18 +489,6 @@ impl<'a> RasterCache<'a> {
         url.set_fragment(None);
         Some(url)
     }
-}
-
-/// The rectangle of a box of `size` at the origin.
-fn box_path(size: Size) -> Option<Path> {
-    let mut builder = krilla::geom::PathBuilder::new();
-    builder.push_rect(krilla::geom::Rect::from_xywh(
-        0.0,
-        0.0,
-        size.width(),
-        size.height(),
-    )?);
-    builder.finish()
 }
 
 #[cfg(test)]
