@@ -5,8 +5,7 @@
 //! so the output keeps vector paths, shadings, clip paths, opacity groups and
 //! selectable text instead of pixels.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasher, RandomState};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
@@ -27,9 +26,6 @@ use raikiri_traits::{DecodedImage, PaintColor, PaintTransform};
 use skrifa::MetadataProvider;
 
 use crate::paint::raster::krilla_image;
-
-/// Upper bound on the heap bytes of the scenes that stay cached.
-const MAX_CACHED_SCENE_BYTES: usize = 32 * 1024 * 1024;
 
 /// The tolerance within which two linear transforms count as the same one.
 const LINEAR_EPSILON: f32 = 1e-4;
@@ -88,21 +84,33 @@ impl SceneAssets {
     }
 
     fn image(&mut self, picture: &scene::RasterImage) -> Result<Image> {
-        let key = Arc::as_ptr(&picture.image) as usize;
+        self.pixels(&picture.image, picture.smooth)
+    }
+
+    /// The pixels as an image for Krilla, converted once for each way of
+    /// smoothing them.
+    pub(in crate::paint) fn pixels(
+        &mut self,
+        pixels: &Arc<DecodedImage>,
+        smooth: bool,
+    ) -> Result<Image> {
+        let key = Arc::as_ptr(pixels) as usize;
         let converted = self.images.entry(key).or_default();
-        if let Some(known) = converted
-            .iter()
-            .find(|known| known.smooth == picture.smooth)
-        {
+        if let Some(known) = converted.iter().find(|known| known.smooth == smooth) {
             return Ok(known.image.clone());
         }
-        let image = krilla_image(&picture.image, picture.smooth)?;
+        let image = krilla_image(pixels, smooth)?;
         converted.push(ConvertedImage {
-            _pixels: Arc::downgrade(&picture.image),
-            smooth: picture.smooth,
+            _pixels: Arc::downgrade(pixels),
+            smooth,
             image: image.clone(),
         });
         Ok(image)
+    }
+
+    #[cfg(test)]
+    pub(in crate::paint) fn converted_images(&self) -> usize {
+        self.images.values().map(Vec::len).sum()
     }
 }
 
@@ -675,63 +683,6 @@ fn krilla_stroke(
             offset: dash.offset * length_scale,
         }),
     })
-}
-
-// Caching
-
-/// The scenes of one source, by the host opacity removed from the root (its
-/// bits). `None` stands for a source that is drawn another way.
-type Variants = Vec<(Option<u32>, Option<Arc<scene::VectorImage>>)>;
-
-/// Scenes by prepared source, then by the host opacity removed from the root
-/// (its bits). A scene is kept only when its pair is built again, so one-off
-/// SVGs never pile up, and the kept scenes stay under a heap budget. A source
-/// that is drawn another way is kept like a scene, so one repeated on every
-/// page is not built again just to fail again.
-#[derive(Default)]
-pub(super) struct SceneMemo {
-    scenes: HashMap<String, Variants>,
-    seen: HashSet<u64>,
-    hasher: RandomState,
-    kept_bytes: usize,
-}
-
-impl SceneMemo {
-    /// The scene of `source` for `key`, built by `build` when it is not kept.
-    /// `build` gives `None` for a source that has to be drawn another way.
-    pub(super) fn get_or_build(
-        &mut self,
-        source: &str,
-        key: Option<u32>,
-        build: impl FnOnce() -> Option<scene::VectorImage>,
-    ) -> Option<Arc<scene::VectorImage>> {
-        if let Some(scene) = self
-            .scenes
-            .get(source)
-            .and_then(|scenes| scenes.iter().find(|(known, _)| *known == key))
-        {
-            return scene.1.clone();
-        }
-        let scene = build().map(Arc::new);
-        let repeated = !self.seen.insert(self.hasher.hash_one((source, key)));
-        let cost = source.len()
-            + scene
-                .as_ref()
-                .map_or(0, |scene| scene.estimated_heap_bytes());
-        if repeated && self.kept_bytes + cost <= MAX_CACHED_SCENE_BYTES {
-            self.kept_bytes += cost;
-            self.scenes
-                .entry(source.to_owned())
-                .or_default()
-                .push((key, scene.clone()));
-        }
-        scene
-    }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.scenes.values().map(Vec::len).sum()
-    }
 }
 
 #[cfg(test)]

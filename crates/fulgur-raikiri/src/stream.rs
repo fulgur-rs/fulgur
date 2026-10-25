@@ -71,7 +71,6 @@ pub fn render_streaming(
             let sink = PdfSink {
                 resources,
                 config,
-                options,
                 painter: None,
                 lang: None,
                 document_url,
@@ -128,7 +127,6 @@ struct PendingPage {
 struct PdfSink<'a, 'u> {
     resources: &'a RenderResources<'a>,
     config: &'u Config,
-    options: &'u RenderOptions<'a>,
     /// Started with the first page, whose `<head>` gives the metadata and
     /// the base URL of images.
     painter: Option<Painter<'a>>,
@@ -145,13 +143,7 @@ impl<'a> PdfSink<'a, '_> {
     /// images resolving against `base`.
     fn start(&mut self, page: Option<&raikiri_html::Page<'_>>, base: url::Url) -> Result<()> {
         self.lang = document_lang(self.config, page);
-        let mut painter = Painter::new(
-            self.resources,
-            self.config,
-            self.options,
-            base,
-            Tags::disabled(),
-        );
+        let mut painter = Painter::new(self.resources, self.config, base, Tags::disabled());
         painter.set_metadata(metadata::build(
             self.config,
             page.and_then(html_title),

@@ -59,7 +59,6 @@ pub(crate) fn paint_document(
     config: &fulgur_core::Config,
     outline: Option<krilla::outline::Outline>,
     document_url: &url::Url,
-    options: &crate::RenderOptions<'_>,
 ) -> Result<(Vec<u8>, Rotations)> {
     let first_page = document.page(0);
     let lang = document_lang(config, first_page.as_ref());
@@ -72,7 +71,7 @@ pub(crate) fn paint_document(
     // Relative `url()` values resolve against the base Raikiri preloaded them
     // with: the document's `<base href>`, else its own URL.
     let base = document.base_url().unwrap_or(document_url);
-    let mut painter = Painter::new(resources, config, options, base.clone(), tags);
+    let mut painter = Painter::new(resources, config, base.clone(), tags);
     painter.set_metadata(crate::metadata::build(
         config,
         first_page.as_ref().and_then(html_title),
@@ -192,7 +191,7 @@ impl Destinations<'_> {
 pub(crate) struct Painter<'a> {
     pdf: krilla::Document,
     fonts: FontCache,
-    svg: svg::SvgCache<'a>,
+    svg: svg::SvgCache,
     raster: raster::RasterCache<'a>,
     tags: Tags,
     rotations: Rotations,
@@ -204,7 +203,6 @@ impl<'a> Painter<'a> {
     pub(crate) fn new(
         resources: &'a raikiri_html::RenderResources<'_>,
         config: &fulgur_core::Config,
-        options: &crate::RenderOptions<'a>,
         base: url::Url,
         tags: Tags,
     ) -> Self {
@@ -227,7 +225,7 @@ impl<'a> Painter<'a> {
         Self {
             pdf,
             fonts: FontCache::default(),
-            svg: svg::SvgCache::new(*options),
+            svg: svg::SvgCache::default(),
             raster: raster::RasterCache::new(resources.image_pixel_source_ref(), base),
             tags,
             rotations: Rotations::default(),
@@ -414,7 +412,7 @@ fn paint_body(
     page: &Page<'_>,
     space: RootSpace,
     fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     canvas_owner: Option<NodeId>,
@@ -507,7 +505,7 @@ fn paint_legacy(
     events: &[PaintEvent<'_>],
     runs: &[PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     canvas_owner: Option<NodeId>,
@@ -614,7 +612,7 @@ fn paint_ordered(
     events: &[PaintEvent<'_>],
     runs: &[PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     canvas_owner: Option<NodeId>,
@@ -876,7 +874,7 @@ fn paint_replaced(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
     fragment: &raikiri_html::Fragment<'_>,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     host_group: bool,

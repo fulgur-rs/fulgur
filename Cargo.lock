@@ -304,7 +304,7 @@ dependencies = [
  "blitz-dom",
  "blitz-traits",
  "html5ever 0.35.0",
- "xml5ever",
+ "xml5ever 0.35.0",
 ]
 
 [[package]]
@@ -1313,18 +1313,15 @@ dependencies = [
  "flpdf",
  "fulgur-core",
  "krilla",
- "krilla-svg",
  "lopdf",
  "percent-encoding",
  "raikiri-html",
  "raikiri-net",
- "raikiri-svg",
  "raikiri-traits",
  "skrifa 0.47.0",
  "tempfile",
  "tiny-skia 0.12.0",
  "url",
- "usvg 0.45.1",
 ]
 
 [[package]]
@@ -3080,7 +3077,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 [[package]]
 name = "raikiri-dom"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
@@ -3102,7 +3099,7 @@ dependencies = [
 [[package]]
 name = "raikiri-html"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3113,23 +3110,23 @@ dependencies = [
  "raikiri-style",
  "raikiri-svg",
  "raikiri-traits",
- "roxmltree 0.21.1",
  "rustc-hash",
  "shodo",
  "smol_str 0.3.6",
  "unicode-script",
  "url",
+ "xml5ever 0.40.0",
 ]
 
 [[package]]
 name = "raikiri-layout-geometry"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 
 [[package]]
 name = "raikiri-layout-style"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "raikiri-layout-geometry",
  "raikiri-style",
@@ -3139,7 +3136,7 @@ dependencies = [
 [[package]]
 name = "raikiri-net"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "data-url",
  "image",
@@ -3151,7 +3148,7 @@ dependencies = [
 [[package]]
 name = "raikiri-style"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3164,7 +3161,7 @@ dependencies = [
 [[package]]
 name = "raikiri-svg"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3179,7 +3176,7 @@ dependencies = [
 [[package]]
 name = "raikiri-traits"
 version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=bd0d9f54ce7fd5418c87fda159099eaa59e9c952#bd0d9f54ce7fd5418c87fda159099eaa59e9c952"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=87e4a822995c9c88b7c08a3e7e0e897e4983f0ef#87e4a822995c9c88b7c08a3e7e0e897e4983f0ef"
 dependencies = [
  "bytes",
  "libc",
@@ -5433,6 +5430,16 @@ checksum = "ee3f1e41afb31a75aef076563b0ad3ecc24f5bd9d12a72b132222664eb76b494"
 dependencies = [
  "log",
  "markup5ever 0.35.0",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73290529dc9bc6c6155bf77fdd70ce0061f98ad387586aa3104cddab29206961"
+dependencies = [
+ "log",
+ "markup5ever 0.40.0",
 ]
 
 [[package]]
