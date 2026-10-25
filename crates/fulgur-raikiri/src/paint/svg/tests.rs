@@ -418,6 +418,12 @@ fn the_opacity_of_an_inline_svg_composites_once_whoever_applies_it() {
         1,
         "{alphas:?}"
     );
+    // Equal states share one object, so also count where they are applied:
+    // once around the box and not again inside it.
+    assert_eq!(
+        crate::tests::count(&crate::tests::operations_of(&pdf), "gs"),
+        1
+    );
 }
 
 /// The widths of the images of the page.
