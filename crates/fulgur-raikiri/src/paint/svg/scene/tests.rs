@@ -521,6 +521,27 @@ fn text_and_pictures_leave_no_area_in_a_clip() {
 }
 
 #[test]
+fn shapes_that_make_no_path_leave_no_area_in_a_mask() {
+    let black = solid(0.0, 0.0, 0.0);
+    // A group limited by a clip that covers nothing is hidden, in the mask
+    // as it is on the page.
+    let mut hidden = Group::new(PaintTransform::IDENTITY);
+    hidden.clip = Some(Box::new(clip_of(Vec::new())));
+    hidden
+        .children
+        .push(Node::Path(filled(square(30.0, 30.0, 10.0), black.clone())));
+    let (pdf, operations) = drawn(&clipped(clip_of(vec![
+        Node::Path(filled(square(0.0, 0.0, 10.0), black.clone())),
+        Node::Path(filled(vec![PathSegment::MoveTo((1.0, 1.0))], black)),
+        Node::Group(hidden),
+    ])));
+    assert!(has_soft_mask(&pdf));
+    // One fill for the square of the mask and one for the clipped group: the
+    // shape without a path and the hidden group add none.
+    assert_eq!(count(&operations, "f"), 2);
+}
+
+#[test]
 fn a_shape_with_a_clip_of_its_own_in_a_clip_is_a_mask() {
     let mut clip = clip_of(vec![Node::Path(filled(
         square(0.0, 0.0, 80.0),
