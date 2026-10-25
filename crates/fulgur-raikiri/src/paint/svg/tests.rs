@@ -376,6 +376,30 @@ fn inline_svg_over_a_budget_of_the_scene_is_drawn_from_the_parsed_tree() {
 }
 
 #[test]
+fn an_svg_source_drawn_at_another_size_gets_its_own_scene() {
+    // The same markup at 30, 30 and 15 CSS px: the second drawing makes the
+    // memo keep the scene of the first size, and the third must not reuse it.
+    // The scene memo is keyed by the prepared source and the host opacity
+    // only, because Raikiri puts the resolved viewport size into the source
+    // (`InlineSvg::source`); if it ever stops doing that, this fails and the
+    // size has to join the key.
+    let svg = "<svg viewBox='0 0 10 10'><rect width='10' height='10' fill='green'/></svg>";
+    let pdf = render_svg_page_with(
+        &svg.repeat(3),
+        "width:30px;height:30px}svg:last-of-type{width:15px;height:15px",
+        |_| {},
+    );
+    // The scene maps its 10 unit viewBox to the box, then the page maps CSS
+    // pixels to points: 3 * 0.75 for the first two and 1.5 * 0.75 for the last.
+    let scales: Vec<f32> = crate::tests::operations_of(&pdf)
+        .iter()
+        .filter(|operation| operation.operator == "cm")
+        .filter_map(|operation| operation.operands.first()?.as_float().ok())
+        .collect();
+    assert_eq!(scales, [2.25, 2.25, 1.125]);
+}
+
+#[test]
 fn the_opacity_of_an_inline_svg_composites_once_whoever_applies_it() {
     // The ordered painter composites the host opacity around the box; the
     // scene itself stays opaque.
