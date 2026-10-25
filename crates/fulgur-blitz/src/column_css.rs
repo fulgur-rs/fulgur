@@ -77,7 +77,7 @@ pub struct ColumnRuleSpec {
     pub width: crate::units::Pt,
     pub style: ColumnRuleStyle,
     /// RGBA colour, matching the `[u8; 4]` convention used by
-    /// `paragraph::TextRun` and `draw_primitives::BlockStyle::border_color`.
+    /// `paragraph::TextRun` and `draw_primitives::BlockStyle::border_colors`.
     pub color: [u8; 4],
 }
 

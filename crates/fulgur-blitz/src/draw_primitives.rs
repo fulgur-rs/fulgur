@@ -728,8 +728,8 @@ pub struct BlockStyle {
     pub background_color: Option<[u8; 4]>,
     /// Background image layers (first = top-most, rendered in reverse order).
     pub background_layers: Vec<BackgroundLayer>,
-    /// Border color as RGBA
-    pub border_color: [u8; 4],
+    /// Border colors as RGBA: top, right, bottom, left
+    pub border_colors: [[u8; 4]; 4],
     /// Border widths: top, right, bottom, left
     pub border_widths: [crate::units::Pt; 4],
     /// Padding: top, right, bottom, left
@@ -1555,11 +1555,20 @@ pub(crate) fn draw_block_border(
     if !(bt > 0.0 || br > 0.0 || bb > 0.0 || bl > 0.0) {
         return;
     }
-    let bc = &style.border_color;
+    let colors = &style.border_colors;
+    // The fast paths stroke the whole box with one paint, so they need all
+    // four sides to share a color.
+    let uniform_color = colors.iter().all(|c| c == &colors[0]);
+    let bc = &colors[0];
 
     let uniform_width = bt == br && br == bb && bb == bl;
     let uniform_style = st == sr && sr == sb && sb == sl;
-    if style.has_radius() && uniform_width && uniform_style && st != BorderStyleValue::None {
+    if style.has_radius()
+        && uniform_width
+        && uniform_style
+        && uniform_color
+        && st != BorderStyleValue::None
+    {
         let inset = bt / 2.0;
         let inset_radii = style.border_radii.map(|[rx, ry]| {
             [
@@ -1590,6 +1599,7 @@ pub(crate) fn draw_block_border(
     } else if !style.has_radius()
         && uniform_width
         && uniform_style
+        && uniform_color
         && matches!(st, BorderStyleValue::Solid | BorderStyleValue::Double)
     {
         let opacity = alpha_to_opacity(bc[3]);
@@ -1611,7 +1621,7 @@ pub(crate) fn draw_block_border(
         }
         canvas.surface.set_stroke(None);
     } else {
-        let opacity = alpha_to_opacity(bc[3]);
+        let [ct, cr, cb, cl] = colors;
         canvas.surface.set_fill(None);
 
         // top: normal=(0,+half) points down=inward, so outward_sign=-1
@@ -1623,8 +1633,8 @@ pub(crate) fn draw_block_border(
             y + bt / 2.0,
             bt,
             st,
-            bc,
-            opacity,
+            ct,
+            alpha_to_opacity(ct[3]),
             true,
             -1.0,
         );
@@ -1637,8 +1647,8 @@ pub(crate) fn draw_block_border(
             y + h - bb / 2.0,
             bb,
             sb,
-            bc,
-            opacity,
+            cb,
+            alpha_to_opacity(cb[3]),
             false,
             1.0, // bottom: normal=(0,+half) points down=outward
         );
@@ -1651,8 +1661,8 @@ pub(crate) fn draw_block_border(
             y + h,
             bl,
             sl,
-            bc,
-            opacity,
+            cl,
+            alpha_to_opacity(cl[3]),
             true,
             1.0,
         );
@@ -1665,8 +1675,8 @@ pub(crate) fn draw_block_border(
             y + h,
             br,
             sr,
-            bc,
-            opacity,
+            cr,
+            alpha_to_opacity(cr[3]),
             false,
             -1.0, // right: outward_sign=-1
         );
@@ -2869,7 +2879,7 @@ mod dp_unit_tests {
         // has_radius && uniform_width && uniform_style && Solid
         // → rounded-rect stroke path (lines 1441-1458 in draw_block_border).
         let style = BlockStyle {
-            border_color: [0, 0, 0, 255],
+            border_colors: [[0, 0, 0, 255]; 4],
             border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Solid; 4],
             border_radii: [[4.0, 4.0]; 4].map(|p| p.map(|v| v.as_pt())),
@@ -2886,7 +2896,7 @@ mod dp_unit_tests {
         // → two stroke_inset_rect calls (lines 1473-1476), covering
         //   stroke_inset_rect (1307-1308) and colored_stroke (1323-1324).
         let style = BlockStyle {
-            border_color: [0, 0, 100, 255],
+            border_colors: [[0, 0, 100, 255]; 4],
             border_widths: [6.0, 6.0, 6.0, 6.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Double; 4],
             ..Default::default()
@@ -2902,7 +2912,7 @@ mod dp_unit_tests {
         // Each draw_border_line call hits the `_` arm → colored_stroke +
         // apply_border_style(Solid) + stroke_line.
         let style = BlockStyle {
-            border_color: [200, 100, 0, 255],
+            border_colors: [[200, 100, 0, 255]; 4],
             border_widths: [2.0, 4.0, 2.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Solid; 4],
             ..Default::default()
@@ -2918,7 +2928,7 @@ mod dp_unit_tests {
         // to the per-side fallback even with uniform widths.
         // draw_border_line Groove arm (lines 1369-1397).
         let style = BlockStyle {
-            border_color: [128, 128, 128, 255],
+            border_colors: [[128, 128, 128, 255]; 4],
             border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Groove; 4],
             ..Default::default()
@@ -2931,7 +2941,7 @@ mod dp_unit_tests {
     #[test]
     fn draw_block_border_ridge_per_side_smoke() {
         let style = BlockStyle {
-            border_color: [128, 128, 128, 255],
+            border_colors: [[128, 128, 128, 255]; 4],
             border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Ridge; 4],
             ..Default::default()
@@ -2945,7 +2955,7 @@ mod dp_unit_tests {
     fn draw_block_border_inset_per_side_smoke() {
         // draw_border_line Inset arm (lines 1399-1408).
         let style = BlockStyle {
-            border_color: [128, 128, 128, 255],
+            border_colors: [[128, 128, 128, 255]; 4],
             border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Inset; 4],
             ..Default::default()
@@ -2958,7 +2968,7 @@ mod dp_unit_tests {
     #[test]
     fn draw_block_border_outset_per_side_smoke() {
         let style = BlockStyle {
-            border_color: [128, 128, 128, 255],
+            border_colors: [[128, 128, 128, 255]; 4],
             border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Outset; 4],
             ..Default::default()
@@ -2973,7 +2983,7 @@ mod dp_unit_tests {
         // Non-uniform widths force per-side; top uses Double ≥ 3pt →
         // draw_border_line Double arm (lines 1354-1367).
         let style = BlockStyle {
-            border_color: [0, 0, 0, 255],
+            border_colors: [[0, 0, 0, 255]; 4],
             border_widths: [6.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
             border_styles: [
                 BorderStyleValue::Double,
@@ -3110,7 +3120,7 @@ mod dp_unit_tests {
         // A non-uniform border with top width = 0 causes draw_border_line to
         // hit `if width <= 0.0 { return; }`. Must not panic.
         let style = BlockStyle {
-            border_color: [0, 0, 0, 255],
+            border_colors: [[0, 0, 0, 255]; 4],
             // top = 0 makes widths non-uniform and exercises the guard.
             border_widths: [0.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Solid; 4],
@@ -3127,7 +3137,7 @@ mod dp_unit_tests {
         // in draw_border_line checks `if len == 0.0 { return; }`. Non-uniform
         // widths force the per-side path. Must not panic or divide by zero.
         let style = BlockStyle {
-            border_color: [0, 0, 0, 255],
+            border_colors: [[0, 0, 0, 255]; 4],
             border_widths: [6.0, 2.0, 6.0, 2.0].map(|v| v.as_pt()),
             border_styles: [
                 BorderStyleValue::Double,
@@ -3148,7 +3158,7 @@ mod dp_unit_tests {
         // guards `if len == 0.0 { return; }`). Uniform widths + Groove are not in
         // the Solid|Double fast path, so the per-side fallback is always used.
         let style = BlockStyle {
-            border_color: [128, 128, 128, 255],
+            border_colors: [[128, 128, 128, 255]; 4],
             border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Groove; 4],
             ..Default::default()
