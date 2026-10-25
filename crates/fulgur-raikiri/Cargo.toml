@@ -13,7 +13,7 @@ readme = "README.md"
 [dependencies]
 krilla = "0.7.0"
 tiny-skia = "0.12"
-skrifa = "0.47"
+skrifa = "0.48"
 fulgur-core = { path = "../fulgur-core" }
 raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "52de7e9c26de628df5552ac9d364773c353ee680" }
 raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "52de7e9c26de628df5552ac9d364773c353ee680" }
