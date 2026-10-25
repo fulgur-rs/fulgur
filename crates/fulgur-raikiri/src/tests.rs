@@ -103,7 +103,6 @@ fn already_aborted_layout_returns_aborted() {
             &Config::default(),
             bookmarks::BookmarkCollector::default(),
             &url::Url::from_file_path(path.canonicalize().unwrap()).unwrap(),
-            &RenderOptions::default(),
         ),
         Err(Error::Layout(_))
     ));

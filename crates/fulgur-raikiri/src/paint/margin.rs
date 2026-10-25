@@ -27,7 +27,7 @@ pub(super) fn paint<'a>(
     page: Option<&Page<'a>>,
     margin_boxes: &[MarginBox],
     fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
 ) -> Result<Vec<(PlacedRunningElement<'a>, PaintRect)>> {
@@ -64,7 +64,7 @@ fn paint_box(
     margin_box: &MarginBox,
     running: Option<PlacedRunningElement<'_>>,
     fonts: &mut FontCache,
-    svg: &mut svg::SvgCache<'_>,
+    svg: &mut svg::SvgCache,
     raster: &mut raster::RasterCache<'_>,
     choice: SvgChoice,
 ) -> Result<()> {

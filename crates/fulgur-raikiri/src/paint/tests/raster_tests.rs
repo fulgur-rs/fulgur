@@ -54,7 +54,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
-        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
@@ -164,7 +164,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
-        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
@@ -256,7 +256,7 @@ fn background_url_skips_missing_sources_and_unusable_pixels() {
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
-        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| resources.image_pixel_source_ref())
@@ -381,7 +381,7 @@ fn ordered_generated_image_events_draw_the_content_image() {
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
-        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(
             with_source
                 .then(|| source.image_pixel_source_ref())
@@ -437,7 +437,7 @@ fn legacy_pages_draw_generated_images_with_their_owner_opacity() {
     let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
-    let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+    let mut svg = svg::SvgCache::default();
     let mut raster = raster::RasterCache::for_tests(source.image_pixel_source_ref());
     paint_legacy(
         &mut surface,
@@ -481,7 +481,7 @@ fn legacy_pages_draw_generated_images_inside_their_transforms() {
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = pdf_page.surface();
         let mut fonts = FontCache::default();
-        let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+        let mut svg = svg::SvgCache::default();
         let mut raster = raster::RasterCache::for_tests(source.image_pixel_source_ref());
         let runs = page.text_runs();
         paint_legacy(
@@ -528,7 +528,7 @@ fn legacy_pages_draw_generated_images_inside_their_transforms() {
         &page.paint_order_for_text_runs(&runs),
         &runs,
         &mut FontCache::default(),
-        &mut svg::SvgCache::new(crate::RenderOptions::default()),
+        &mut svg::SvgCache::default(),
         &mut raster::RasterCache::for_tests(None),
         &mut crate::tagging::Tags::disabled(),
         None,
@@ -633,7 +633,7 @@ fn an_img_whose_scene_cannot_be_drawn_and_has_no_pixels_draws_nothing() {
     let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
     let mut surface = pdf_page.surface();
     let mut fonts = FontCache::default();
-    let mut svg = svg::SvgCache::new(crate::RenderOptions::default());
+    let mut svg = svg::SvgCache::default();
     let mut raster = raster::RasterCache::for_tests(resources.image_pixel_source_ref());
     paint_legacy(
         &mut surface,

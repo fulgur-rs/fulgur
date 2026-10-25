@@ -113,7 +113,7 @@ fn render_source(
         options,
         LayoutConfig::default(),
         |status, resources, collector, document_url| {
-            draw(status, resources, config, collector, document_url, options)
+            draw(status, resources, config, collector, document_url)
         },
     )
 }
@@ -166,7 +166,6 @@ fn draw(
     config: &Config,
     collector: bookmarks::BookmarkCollector,
     document_url: &url::Url,
-    options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
@@ -183,7 +182,7 @@ fn draw(
     };
     let outline = want_bookmarks.then_some(bookmarks.outline);
     let (pdf, rotations) =
-        paint::paint_document(&document, resources, config, outline, document_url, options)?;
+        paint::paint_document(&document, resources, config, outline, document_url)?;
     rotations.apply(bookmarks::apply_open_state(pdf, &bookmarks.open)?)
 }
 

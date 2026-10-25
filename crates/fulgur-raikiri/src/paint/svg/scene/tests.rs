@@ -1093,60 +1093,6 @@ fn colors_round_to_bytes_and_clamp() {
     assert_eq!(unit(f32::NAN).get(), 1.0);
 }
 
-// Caching
-
-fn tiny(width: f32) -> Option<VectorImage> {
-    Some(VectorImage::new((width, 1.0)))
-}
-
-#[test]
-fn a_scene_is_kept_when_it_is_asked_for_again() {
-    let mut memo = SceneMemo::default();
-    // Asked for once: built and not kept.
-    let first = memo.get_or_build("a", None, || tiny(1.0)).unwrap();
-    assert_eq!(memo.len(), 0);
-    // Asked for twice: kept, then reused without building.
-    let second = memo.get_or_build("a", None, || tiny(2.0)).unwrap();
-    assert_eq!(memo.len(), 1);
-    let third = memo
-        .get_or_build("a", None, || panic!("kept scenes are not built again"))
-        .unwrap();
-    assert!(Arc::ptr_eq(&second, &third));
-    assert!(!Arc::ptr_eq(&first, &second));
-    // The host opacity is part of the key.
-    memo.get_or_build("a", Some(1), || tiny(3.0));
-    memo.get_or_build("a", Some(1), || tiny(3.0));
-    assert_eq!(memo.len(), 2);
-}
-
-#[test]
-fn a_source_drawn_another_way_is_kept_when_it_is_asked_for_again() {
-    let mut memo = SceneMemo::default();
-    assert!(memo.get_or_build("a", None, || None).is_none());
-    assert_eq!(memo.len(), 0);
-    assert!(memo.get_or_build("a", None, || None).is_none());
-    assert_eq!(memo.len(), 1);
-    // Kept, so it is not built again to fail again.
-    let again = memo.get_or_build("a", None, || {
-        panic!("a source drawn another way is not built again")
-    });
-    assert!(again.is_none());
-    // Only the source and the opacity it was asked for with are remembered.
-    assert!(memo.get_or_build("a", Some(1), || tiny(1.0)).is_some());
-}
-
-#[test]
-fn a_full_memo_keeps_nothing_more() {
-    let mut memo = SceneMemo {
-        kept_bytes: MAX_CACHED_SCENE_BYTES,
-        ..SceneMemo::default()
-    };
-    for _ in 0..3 {
-        memo.get_or_build("a", None, || tiny(1.0));
-    }
-    assert_eq!(memo.len(), 0);
-}
-
 #[test]
 fn a_face_krilla_cannot_parse_stays_alive_with_its_entry() {
     // The entry is keyed by the address of the face's bytes, so it must keep

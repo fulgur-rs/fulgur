@@ -1,247 +1,7 @@
 use super::*;
+use crate::RenderOptions;
 use raikiri_html::{LayoutOptions, LayoutStatus, RenderResources};
 use raikiri_traits::{LayoutConfig, PageDefaults};
-
-#[test]
-fn inherited_svg_font_faces_reach_the_vector_parser() {
-    let resources = RenderResources::new();
-    let document = raikiri_html::parse_html_with_resources(
-        &b"<style>body{font-family:'Noto Sans Mono';font-weight:700;font-style:italic}svg{display:block}</style><svg width='100' height='30'><text y='20'>TEST</text></svg>"[..],
-        &resources,
-    ).unwrap();
-    let LayoutStatus::Completed(layout) = raikiri_html::layout(
-        &document,
-        PageDefaults::default(),
-        LayoutConfig::default(),
-        LayoutOptions::new(),
-    )
-    .unwrap() else {
-        panic!("expected completed layout")
-    };
-    let page = layout.page(0).unwrap();
-    let fragment = page
-        .fragments()
-        .find(|fragment| page.dom().local_name(fragment.node()) == Some("svg"))
-        .unwrap();
-    let svg = page.inline_svg(&fragment).unwrap().unwrap();
-    let mut bundle = fulgur_core::AssetBundle::new();
-    bundle
-        .add_font_bytes(
-            include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
-        )
-        .unwrap();
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: Some(&bundle),
-        system_fonts: true,
-        ..Default::default()
-    });
-    let tree = parse(
-        &svg.source,
-        &usvg::Options {
-            fontdb: cache.fonts(),
-            ..usvg::Options::default()
-        },
-    )
-    .unwrap();
-    fn first_text(group: &usvg::Group) -> Option<&usvg::Text> {
-        group.children().iter().find_map(|node| match node {
-            usvg::Node::Text(text) => Some(text.as_ref()),
-            usvg::Node::Group(group) => first_text(group),
-            _ => None,
-        })
-    }
-    let span = &first_text(tree.root()).unwrap().chunks()[0].spans()[0];
-    assert_eq!(span.font().weight(), 700);
-    assert_eq!(span.font().style(), usvg::FontStyle::Italic);
-}
-
-#[test]
-fn bundled_family_backs_every_generic_svg_family() {
-    let mut bundle = fulgur_core::AssetBundle::new();
-    bundle
-        .add_font_bytes(
-            include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
-        )
-        .unwrap();
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: Some(&bundle),
-        system_fonts: true,
-        ..Default::default()
-    });
-    let fonts = cache.fonts();
-    let bundled = fonts.faces().next().unwrap().families[0].0.clone();
-    for (name, family) in [
-        ("serif", usvg::fontdb::Family::Serif),
-        ("sans-serif", usvg::fontdb::Family::SansSerif),
-        ("cursive", usvg::fontdb::Family::Cursive),
-        ("fantasy", usvg::fontdb::Family::Fantasy),
-        ("monospace", usvg::fontdb::Family::Monospace),
-    ] {
-        assert_eq!(fonts.family_name(&family), bundled, "{name}");
-    }
-}
-
-#[test]
-fn root_opacity_neutralization_preserves_viewbox_transforms() {
-    let options = usvg::Options::default();
-    let tree = parse("<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50' viewBox='10 20 200 100' opacity='.5'><rect x='10' y='20' width='200' height='100' fill='red'/></svg>", &options).unwrap();
-    let bounds = tree.root().abs_bounding_box();
-    let tree = neutralize_root_opacity(tree, &options, 0.5).unwrap();
-    assert_eq!(tree.root().abs_bounding_box(), bounds);
-    fn assert_opaque(group: &usvg::Group) {
-        assert_eq!(group.opacity().get(), 1.0);
-        for node in group.children() {
-            if let usvg::Node::Group(group) = node {
-                assert_opaque(group);
-            }
-        }
-    }
-    assert_opaque(tree.root());
-    assert!(!tree.root().children().is_empty());
-}
-
-#[test]
-fn empty_svg_needs_no_opacity_group() {
-    let options = usvg::Options::default();
-    let tree = parse(
-        "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>",
-        &options,
-    )
-    .unwrap();
-    let tree = neutralize_root_opacity(tree, &options, 0.5).unwrap();
-    assert!(tree.root().children().is_empty());
-}
-
-#[test]
-fn a_different_root_multiplier_is_not_removed() {
-    let options = usvg::Options::default();
-    let tree = parse("<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' opacity='.5'><rect width='10' height='10'/></svg>", &options).unwrap();
-    assert!(matches!(
-        neutralize_root_opacity(tree, &options, 0.25),
-        Err(Error::Layout(_))
-    ));
-}
-
-#[test]
-fn descendants_cannot_substitute_for_a_missing_root_multiplier() {
-    let options = usvg::Options::default();
-    for content in [
-        "<rect width='10' height='10'/>",
-        "<g opacity='.25'><rect width='10' height='10'/></g><g opacity='.75'><circle cx='5' cy='5' r='2'/></g>",
-    ] {
-        let tree = parse(&format!("<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 20 20'>{content}</svg>"), &options).unwrap();
-        assert!(matches!(
-            neutralize_root_opacity(tree, &options, 0.5),
-            Err(Error::Layout(_))
-        ));
-    }
-}
-
-#[test]
-fn document_font_rules_keep_relative_sizes_in_use_instances() {
-    let resources = RenderResources::new();
-    let document = raikiri_html::parse_html_with_resources(
-        &b"<style>body{font-family:'Noto Sans Mono';font-size:12px}svg{display:block}.template{font-size:2em;font-weight:700}.instance{font-size:10px;font-weight:200}</style><svg width='100' height='40'><defs><g id='label' class='template'><text y='20'>TEST</text></g></defs><use class='instance' href='#label'/></svg>"[..], &resources,
-    ).unwrap();
-    let LayoutStatus::Completed(layout) = raikiri_html::layout(
-        &document,
-        PageDefaults::default(),
-        LayoutConfig::default(),
-        LayoutOptions::new(),
-    )
-    .unwrap() else {
-        panic!("expected completed layout")
-    };
-    let page = layout.page(0).unwrap();
-    let fragment = page
-        .fragments()
-        .find(|fragment| page.dom().local_name(fragment.node()) == Some("svg"))
-        .unwrap();
-    let svg = page.inline_svg(&fragment).unwrap().unwrap();
-    let mut bundle = fulgur_core::AssetBundle::new();
-    bundle
-        .add_font_bytes(
-            include_bytes!("../../../../fulgur-ruby/spec/fixtures/noto_sans.ttf").to_vec(),
-        )
-        .unwrap();
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: Some(&bundle),
-        system_fonts: true,
-        ..Default::default()
-    });
-    let tree = parse(
-        &svg.source,
-        &usvg::Options {
-            fontdb: cache.fonts(),
-            ..usvg::Options::default()
-        },
-    )
-    .unwrap();
-    fn first_text(group: &usvg::Group) -> Option<&usvg::Text> {
-        group.children().iter().find_map(|node| match node {
-            usvg::Node::Text(text) => Some(text.as_ref()),
-            usvg::Node::Group(group) => first_text(group),
-            _ => None,
-        })
-    }
-    let span = &first_text(tree.root()).unwrap().chunks()[0].spans()[0];
-    assert_eq!(span.font_size().get(), 20.0);
-    assert_eq!(span.font().weight(), 700);
-}
-
-#[test]
-fn repeated_sources_reuse_one_parsed_tree() {
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: None,
-        system_fonts: true,
-        ..Default::default()
-    });
-    let source = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><g opacity='0.5'><rect width='10' height='10'/></g></svg>";
-    // A source drawn once is not kept.
-    cache.tree(source.into(), None).unwrap();
-    assert!(cache.trees.is_empty());
-    let second: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
-    let third: *const usvg::Tree = cache.tree(source.into(), None).unwrap();
-    assert_eq!(second, third);
-    cache.tree(source.into(), Some(0.5)).unwrap();
-    let neutralized: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
-    assert_ne!(second, neutralized);
-    let again: *const usvg::Tree = cache.tree(source.into(), Some(0.5)).unwrap();
-    assert_eq!(neutralized, again);
-    assert_eq!(cache.trees.len(), 1);
-    assert_eq!(cache.trees[source].len(), 2);
-    // No text, so the font database was never built.
-    assert!(cache.fonts.is_none());
-}
-
-#[test]
-fn text_sources_build_the_font_database() {
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: None,
-        system_fonts: false,
-        ..Default::default()
-    });
-    let source =
-        "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><text y='8'>A</text></svg>";
-    cache.tree(source.into(), None).unwrap();
-    assert!(cache.fonts.is_some());
-}
-
-#[test]
-fn a_full_cache_parses_without_keeping_trees() {
-    let mut cache = SvgCache::new(RenderOptions {
-        assets: None,
-        system_fonts: false,
-        ..Default::default()
-    });
-    cache.cached_source_bytes = MAX_CACHED_SOURCE_BYTES;
-    let source = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10'/></svg>";
-    for _ in 0..3 {
-        cache.tree(source.into(), None).unwrap();
-    }
-    assert!(cache.trees.is_empty());
-    assert!(cache.uncached.is_some());
-}
 
 fn render_svg_page(svg: &str, host_style: &str) -> lopdf::Document {
     render_svg_page_with(svg, host_style, |_| {})
@@ -329,9 +89,9 @@ fn inline_svg_paints_stay_vector_operations() {
 }
 
 #[test]
-fn inline_svg_the_scene_leaves_to_a_raster_is_drawn_from_the_parsed_tree() {
-    // Masks are outside the vector subset, so this image is drawn the way it
-    // was before scenes: still vector, through the parsed tree.
+fn inline_svg_with_a_mask_is_drawn_as_pixels() {
+    // Masks are outside the vector subset, so Raikiri hands over the picture
+    // of the whole image instead of mixing the two renderings.
     let pdf = render_svg_page(
         "<svg width='200' height='80' viewBox='0 0 100 40'>\
            <mask id='m'><rect width='50' height='40' fill='white'/></mask>\
@@ -339,12 +99,8 @@ fn inline_svg_the_scene_leaves_to_a_raster_is_drawn_from_the_parsed_tree() {
          </svg>",
         "",
     );
-    let operations = crate::tests::operations_of(&pdf);
-    assert!(
-        operations
-            .iter()
-            .any(|operation| operation.operator == "rg" && operation.operands.len() == 3)
-    );
+    // The pixels and their soft mask, where the mask leaves some transparent.
+    assert!(image_objects(&pdf) >= 1);
 }
 
 /// An SVG with a gradient of more stops than a scene holds.
@@ -367,22 +123,19 @@ fn svg_over_the_scene_budget() -> String {
 }
 
 #[test]
-fn inline_svg_over_a_budget_of_the_scene_is_drawn_from_the_parsed_tree() {
-    // The scene builder refuses the gradient instead of asking for a raster,
-    // so the image goes through the parsed tree and stays vector.
+fn inline_svg_over_a_budget_of_the_scene_is_drawn_as_pixels() {
+    // The scene builder refuses the gradient, and the raster path has no such
+    // limit, so Raikiri hands over pixels.
     let pdf = render_svg_page(&svg_over_the_scene_budget(), "");
-    assert!(crate::tests::has_shading(&pdf, 2));
-    assert_eq!(image_objects(&pdf), 0);
+    assert!(!crate::tests::has_shading(&pdf, 2));
+    assert_eq!(image_objects(&pdf), 1);
 }
 
 #[test]
 fn an_svg_source_drawn_at_another_size_gets_its_own_scene() {
-    // The same markup at 30, 30 and 15 CSS px: the second drawing makes the
-    // memo keep the scene of the first size, and the third must not reuse it.
-    // The scene memo is keyed by the prepared source and the host opacity
-    // only, because Raikiri puts the resolved viewport size into the source
-    // (`InlineSvg::source`); if it ever stops doing that, this fails and the
-    // size has to join the key.
+    // The same markup at 30, 30 and 15 CSS px: the second drawing is served
+    // from the picture that Raikiri kept for the first size, and the third
+    // must not reuse it.
     let svg = "<svg viewBox='0 0 10 10'><rect width='10' height='10' fill='green'/></svg>";
     let pdf = render_svg_page_with(
         &svg.repeat(3),
@@ -524,7 +277,7 @@ fn the_opacity_of_a_raster_inline_svg_composites_once() {
 }
 
 /// Paints the first page of `html` with the painter that gives an SVG its
-/// own opacity, and tells how many rasters the cache kept.
+/// own opacity, and tells how many pictures the cache converted.
 fn paint_without_groups(html: &str) -> (lopdf::Document, usize) {
     let resources = RenderResources::new();
     let document = raikiri_html::parse_html_with_resources(html.as_bytes(), &resources).unwrap();
@@ -542,7 +295,7 @@ fn paint_without_groups(html: &str) -> (lopdf::Document, usize) {
     let mut pdf_page =
         pdf.start_page_with(krilla::page::PageSettings::from_wh(100.0, 100.0).unwrap());
     let mut surface = pdf_page.surface();
-    let mut svg = SvgCache::new(RenderOptions::default());
+    let mut svg = SvgCache::default();
     crate::paint::paint_legacy(
         &mut surface,
         &page,
@@ -557,7 +310,7 @@ fn paint_without_groups(html: &str) -> (lopdf::Document, usize) {
     .unwrap();
     surface.finish();
     pdf_page.finish();
-    let kept = svg.rasters.len();
+    let kept = svg.converted_images();
     (
         lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap(),
         kept,
@@ -578,6 +331,23 @@ fn a_raster_inline_svg_keeps_its_own_opacity_where_nothing_composites_it() {
             .any(|dict| dict.get(b"ca").ok().and_then(|value| value.as_float().ok()) == Some(0.5))
     );
     assert_eq!(image_objects(&pdf), 1);
-    // The picture asked for again is kept, and the third SVG finds it there.
+    // Raikiri hands out one picture for the three SVGs, which is converted
+    // once.
     assert_eq!(kept, 1);
+}
+
+#[test]
+fn inline_svg_with_stroked_glyphs_off_a_similarity_is_drawn_as_pixels() {
+    // Krilla strokes text in glyph space, so Raikiri hands over pixels for
+    // glyphs that `textLength` stretches.
+    let stretched = "<svg width='100' height='40'><text x='5' y='30' font-size='20' fill='none' stroke='navy' \
+        textLength='90' lengthAdjust='spacingAndGlyphs'>Vector</text></svg>";
+    let pdf = render_svg_page(stretched, "");
+    assert!(image_objects(&pdf) >= 1);
+    // The same text, filled and not stroked, stays text.
+    let filled = stretched
+        .replace("fill='none'", "fill='navy'")
+        .replace(" stroke='navy'", "");
+    let pdf = render_svg_page(&filled, "");
+    assert_eq!(image_objects(&pdf), 0);
 }
