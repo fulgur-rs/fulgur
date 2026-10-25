@@ -167,6 +167,43 @@ fn paint_order_decides_which_is_drawn_first() {
     assert!(position(&stroke_first, "S") < position(&stroke_first, "f"));
 }
 
+/// The scene drawn on a page whose surface still has the fill that the
+/// painter of some earlier content left set, as text and backgrounds do.
+fn drawn_after_a_fill_was_left_set(scene: &VectorImage) -> Vec<Operation> {
+    let mut pdf = krilla::Document::new();
+    let mut page = pdf.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(255, 0, 0).into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::NonZero,
+    }));
+    paint(&mut surface, scene, &mut SceneAssets::default()).unwrap();
+    surface.finish();
+    page.finish();
+    operations_of(&lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap())
+}
+
+#[test]
+fn a_stroke_drawn_first_does_not_paint_the_fill_left_by_earlier_content() {
+    let mut shape = filled(square(10.0, 10.0, 50.0), solid(0.0, 1.0, 0.0));
+    shape.stroke = Some(SceneStroke::new(solid(0.0, 0.0, 1.0), 3.0));
+    shape.paint_order = PaintOrder::StrokeThenFill;
+    let fixture = Fixture::new();
+    let mut run = fixture.run("AB", 20.0, 10.0, 90.0);
+    run.stroke = Some(SceneStroke::new(solid(0.0, 0.0, 1.0), 2.0));
+    run.paint_order = PaintOrder::StrokeThenFill;
+    let operations =
+        drawn_after_a_fill_was_left_set(&scene_of(vec![Node::Path(shape), Node::Text(run)]));
+    // The strokes are alone, and the left fill never reaches the page.
+    assert_eq!(count(&operations, "B"), 0);
+    assert!(
+        operations
+            .iter()
+            .all(|operation| !(operation.operator == "rg" && numbers(operation) == [1.0, 0.0, 0.0]))
+    );
+}
+
 #[test]
 fn curves_closes_and_the_even_odd_rule_reach_the_path() {
     let mut shape = filled(

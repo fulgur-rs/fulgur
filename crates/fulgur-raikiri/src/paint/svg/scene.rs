@@ -222,6 +222,9 @@ fn path(surface: &mut Surface<'_>, shape: &scene::Path) {
         .and_then(|stroke| krilla_stroke(stroke, PaintTransform::IDENTITY, 1.0));
     match (fill, stroke) {
         (Some(fill), Some(stroke)) if shape.paint_order == scene::PaintOrder::StrokeThenFill => {
+            // Other painters leave their fill set, which the stroke pass would
+            // paint under the SVG's own fill.
+            surface.set_fill(None);
             surface.set_stroke(Some(stroke));
             surface.draw_path(&outline);
             surface.set_stroke(None);
@@ -506,6 +509,7 @@ fn text_batch(
     match (fill, stroke) {
         (Some(fill), Some(stroke)) if run.paint_order == scene::PaintOrder::StrokeThenFill => {
             // Only the fill is text, so the characters are not there twice.
+            surface.set_fill(None);
             surface.set_stroke(Some(stroke));
             surface.draw_glyphs(start, &positioned, font.clone(), &text, size, true);
             surface.set_stroke(None);
