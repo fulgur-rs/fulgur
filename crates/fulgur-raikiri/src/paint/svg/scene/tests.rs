@@ -988,18 +988,18 @@ fn colors_round_to_bytes_and_clamp() {
 
 // Caching
 
-fn tiny(width: f32) -> std::result::Result<VectorImage, std::convert::Infallible> {
-    Ok(VectorImage::new((width, 1.0)))
+fn tiny(width: f32) -> std::result::Result<Option<VectorImage>, std::convert::Infallible> {
+    Ok(Some(VectorImage::new((width, 1.0))))
 }
 
 #[test]
 fn a_scene_is_kept_when_it_is_asked_for_again() {
     let mut memo = SceneMemo::default();
     // Asked for once: built and not kept.
-    let first = memo.get_or_build("a", None, || tiny(1.0)).unwrap();
+    let first = memo.get_or_build("a", None, || tiny(1.0)).unwrap().unwrap();
     assert_eq!(memo.len(), 0);
     // Asked for twice: kept, then reused without building.
-    let second = memo.get_or_build("a", None, || tiny(2.0)).unwrap();
+    let second = memo.get_or_build("a", None, || tiny(2.0)).unwrap().unwrap();
     assert_eq!(memo.len(), 1);
     let third = memo
         .get_or_build(
@@ -1009,6 +1009,7 @@ fn a_scene_is_kept_when_it_is_asked_for_again() {
                 panic!("kept scenes are not built again")
             },
         )
+        .unwrap()
         .unwrap();
     assert!(Arc::ptr_eq(&second, &third));
     assert!(!Arc::ptr_eq(&first, &second));
@@ -1019,13 +1020,56 @@ fn a_scene_is_kept_when_it_is_asked_for_again() {
 }
 
 #[test]
+fn a_source_drawn_another_way_is_kept_when_it_is_asked_for_again() {
+    let mut memo = SceneMemo::default();
+    let another_way =
+        || -> std::result::Result<Option<VectorImage>, std::convert::Infallible> { Ok(None) };
+    assert!(memo.get_or_build("a", None, another_way).unwrap().is_none());
+    assert_eq!(memo.len(), 0);
+    assert!(memo.get_or_build("a", None, another_way).unwrap().is_none());
+    assert_eq!(memo.len(), 1);
+    // Kept, so it is not built again to fail again.
+    let again = memo.get_or_build(
+        "a",
+        None,
+        || -> std::result::Result<_, std::convert::Infallible> {
+            panic!("a source drawn another way is not built again")
+        },
+    );
+    assert!(again.unwrap().is_none());
+    // Only the source and the opacity it was asked for with are remembered.
+    assert!(
+        memo.get_or_build("a", Some(1), || tiny(1.0))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn a_failed_build_is_not_kept_and_a_full_memo_keeps_nothing_more() {
     let mut memo = SceneMemo::default();
-    let failed = memo.get_or_build("a", None, || Err::<VectorImage, _>("broken"));
+    let failed = memo.get_or_build("a", None, || Err::<Option<VectorImage>, _>("broken"));
     assert_eq!(failed.unwrap_err(), "broken");
     memo.kept_bytes = MAX_CACHED_SCENE_BYTES;
     for _ in 0..3 {
         memo.get_or_build("a", None, || tiny(1.0)).unwrap();
     }
     assert_eq!(memo.len(), 0);
+}
+
+#[test]
+fn a_face_krilla_cannot_parse_stays_alive_with_its_entry() {
+    // The entry is keyed by the address of the face's bytes, so it must keep
+    // them alive even when it holds no font; otherwise another face could
+    // be given the address and meet the entry.
+    let broken: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(vec![0u8; 16]);
+    let mut assets = SceneAssets::default();
+    let face = FontFace::new(broken.clone(), 0);
+    assert!(assets.font(&face, &[]).is_none());
+    drop(face);
+    assert_eq!(assets.fonts.len(), 1);
+    assert_eq!(Arc::strong_count(&broken), 2, "the entry holds the bytes");
+    // Asked for again, it is the same entry.
+    assert!(assets.font(&FontFace::new(broken, 0), &[]).is_none());
+    assert_eq!(assets.fonts.len(), 1);
 }

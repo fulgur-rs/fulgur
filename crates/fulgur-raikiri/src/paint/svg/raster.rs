@@ -36,16 +36,16 @@ impl Raster {
     }
 }
 
-/// What a raster depends on: the prepared source, the host opacity removed
-/// from the root, the viewport and the scale, as bits.
-type Key = (String, Option<u32>, u32, u32, u32);
+/// What a raster of one source depends on besides the source: the host opacity
+/// removed from the root, the viewport and the scale, as bits.
+type Variant = (Option<u32>, u32, u32, u32);
 
-/// Rasters by what they depend on. One is kept only when it is asked for
-/// again, so one-off SVGs never pile up, and the kept ones stay under a pixel
-/// budget.
+/// Rasters by prepared source, then by what else they depend on. One is kept
+/// only when it is asked for again, so one-off SVGs never pile up, and the
+/// kept ones stay under a pixel budget.
 #[derive(Default)]
 pub(super) struct RasterMemo {
-    rasters: HashMap<Key, Raster>,
+    rasters: HashMap<String, Vec<(Variant, Raster)>>,
     seen: HashSet<u64>,
     hasher: RandomState,
     kept_bytes: usize,
@@ -64,28 +64,36 @@ impl RasterMemo {
         size: Size,
         scale: f32,
     ) -> Result<Raster> {
-        let key: Key = (
-            svg.source.clone(),
+        let variant: Variant = (
             svg.host_opacity.map(f32::to_bits),
             size.width().to_bits(),
             size.height().to_bits(),
             scale.to_bits(),
         );
-        if let Some(raster) = self.rasters.get(&key) {
+        if let Some((_, raster)) = self
+            .rasters
+            .get(svg.source.as_str())
+            .and_then(|rasters| rasters.iter().find(|(known, _)| *known == variant))
+        {
             return Ok(raster.clone());
         }
         let (raster, bytes) = build(page, svg, size, scale)?;
-        let repeated = !self.seen.insert(self.hasher.hash_one(&key));
+        let repeated = !self
+            .seen
+            .insert(self.hasher.hash_one((svg.source.as_str(), variant)));
         if repeated && self.kept_bytes + bytes <= MAX_CACHED_RASTER_BYTES {
             self.kept_bytes += bytes;
-            self.rasters.insert(key, raster.clone());
+            self.rasters
+                .entry(svg.source.clone())
+                .or_default()
+                .push((variant, raster.clone()));
         }
         Ok(raster)
     }
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.rasters.len()
+        self.rasters.values().map(Vec::len).sum()
     }
 }
 

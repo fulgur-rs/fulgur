@@ -208,7 +208,7 @@ impl<'a> SvgCache<'a> {
             .scenes
             .get_or_build(source, host_opacity.map(f32::to_bits), || {
                 let fonts = page.svg_fonts();
-                SvgDocument::parse(source.as_bytes())?.scene_with_resources(
+                let built = SvgDocument::parse(source.as_bytes())?.scene_with_resources(
                     SvgViewport {
                         width: size.width(),
                         height: size.height(),
@@ -219,12 +219,16 @@ impl<'a> SvgCache<'a> {
                     },
                     None,
                     SvgResources::new().with_fonts(&fonts),
-                )
+                );
+                match built {
+                    Ok(scene) => Ok(Some(scene)),
+                    Err(error) if error.falls_back_to_raster() => Ok(None),
+                    Err(error) => Err(error),
+                }
             });
         match built {
-            Ok(scene) if scene::paintable(&scene) => Ok(Some(scene)),
+            Ok(Some(scene)) if scene::paintable(&scene) => Ok(Some(scene)),
             Ok(_) => Ok(None),
-            Err(error) if error.falls_back_to_raster() => Ok(None),
             Err(error) => Err(Error::Layout(format!("inline SVG vector scene: {error}"))),
         }
     }

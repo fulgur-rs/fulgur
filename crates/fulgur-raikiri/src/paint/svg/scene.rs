@@ -42,13 +42,14 @@ enum Mode {
     Clip,
 }
 
-/// Fonts and pictures converted for Krilla, shared by every scene of a
-/// document so that a face or a picture is converted and embedded once.
+/// Fonts and pictures converted for Krilla, shared by the scenes of one cache
+/// so that a face or a picture is converted once there.
 #[derive(Default)]
 pub(in crate::paint) struct SceneAssets {
-    /// The face is kept with its font: the key is the address of the face's
-    /// shared bytes, which must stay unique while the entry exists.
-    fonts: HashMap<FontKey, Option<(scene::FontFace, Font)>>,
+    /// The face is kept with its font, or with `None` for a face Krilla cannot
+    /// parse: the key is the address of the face's shared bytes, which must
+    /// stay unique while the entry exists.
+    fonts: HashMap<FontKey, (scene::FontFace, Option<Font>)>,
     /// Converted pictures by the address of their pixels, which the weak
     /// reference keeps unique.
     images: HashMap<usize, Vec<ConvertedImage>>,
@@ -87,11 +88,11 @@ impl SceneAssets {
                 // An instance with no coordinates is the font's default; a
                 // face Krilla cannot parse is skipped rather than failing
                 // the page.
-                Font::new_variable(face.data().clone().into(), face.index(), &coords)
-                    .map(|font| (face.clone(), font))
+                let font = Font::new_variable(face.data().clone().into(), face.index(), &coords);
+                (face.clone(), font)
             })
-            .as_ref()
-            .map(|(_, font)| font.clone())
+            .1
+            .clone()
     }
 
     fn image(&mut self, picture: &scene::RasterImage) -> Result<Image> {
@@ -685,12 +686,14 @@ fn krilla_stroke(
 // Caching
 
 /// The scenes of one source, by the host opacity removed from the root (its
-/// bits).
-type Variants = Vec<(Option<u32>, Arc<scene::VectorImage>)>;
+/// bits). `None` stands for a source that is drawn another way.
+type Variants = Vec<(Option<u32>, Option<Arc<scene::VectorImage>>)>;
 
 /// Scenes by prepared source, then by the host opacity removed from the root
 /// (its bits). A scene is kept only when its pair is built again, so one-off
-/// SVGs never pile up, and the kept scenes stay under a heap budget.
+/// SVGs never pile up, and the kept scenes stay under a heap budget. A source
+/// that is drawn another way is kept like a scene, so one repeated on every
+/// page is not built again just to fail again.
 #[derive(Default)]
 pub(super) struct SceneMemo {
     scenes: HashMap<String, Variants>,
@@ -701,12 +704,13 @@ pub(super) struct SceneMemo {
 
 impl SceneMemo {
     /// The scene of `source` for `key`, built by `build` when it is not kept.
+    /// `build` gives `None` for a source that has to be drawn another way.
     pub(super) fn get_or_build<E>(
         &mut self,
         source: &str,
         key: Option<u32>,
-        build: impl FnOnce() -> std::result::Result<scene::VectorImage, E>,
-    ) -> std::result::Result<Arc<scene::VectorImage>, E> {
+        build: impl FnOnce() -> std::result::Result<Option<scene::VectorImage>, E>,
+    ) -> std::result::Result<Option<Arc<scene::VectorImage>>, E> {
         if let Some(scene) = self
             .scenes
             .get(source)
@@ -714,9 +718,12 @@ impl SceneMemo {
         {
             return Ok(scene.1.clone());
         }
-        let scene = Arc::new(build()?);
+        let scene = build()?.map(Arc::new);
         let repeated = !self.seen.insert(self.hasher.hash_one((source, key)));
-        let cost = source.len() + scene.estimated_heap_bytes();
+        let cost = source.len()
+            + scene
+                .as_ref()
+                .map_or(0, |scene| scene.estimated_heap_bytes());
         if repeated && self.kept_bytes + cost <= MAX_CACHED_SCENE_BYTES {
             self.kept_bytes += cost;
             self.scenes

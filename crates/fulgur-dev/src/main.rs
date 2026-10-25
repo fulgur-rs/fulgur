@@ -89,6 +89,13 @@ fn run(cli: Cli) -> Result<()> {
                     "--svg-rendering and --svg-raster-scale require --engine raikiri".into(),
                 ));
             }
+            if let Some(scale) = svg_raster_scale
+                && !(scale.is_finite() && scale > 0.0)
+            {
+                return Err(Error::Other(
+                    "--svg-raster-scale must be a number greater than zero".into(),
+                ));
+            }
             let defaults = fulgur_raikiri::RenderOptions::default();
             let options = fulgur_raikiri::RenderOptions {
                 assets: Some(&assets),

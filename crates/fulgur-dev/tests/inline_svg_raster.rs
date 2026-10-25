@@ -590,3 +590,26 @@ fn the_svg_flags_are_refused_for_the_blitz_engine() {
         );
     }
 }
+
+#[test]
+fn a_raster_scale_that_is_no_scale_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.html");
+    std::fs::write(&input, "<p>hi</p>").unwrap();
+    for scale in ["0", "-2", "NaN", "inf"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_fulgur-dev"))
+            .args(["render", "--engine", "raikiri"])
+            .arg(format!("--svg-raster-scale={scale}"))
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.path().join("out.pdf"))
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{scale}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("greater than zero"),
+            "{scale}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
