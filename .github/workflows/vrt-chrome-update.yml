@@ -40,6 +40,12 @@ jobs:
           chrome-version: ${{ steps.pin.outputs.version }}
           install-dependencies: true
 
+      - name: Allow Chrome's sandbox
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces with
+        # AppArmor, which Chrome's sandbox needs. Lift the restriction
+        # instead of running Chrome with --no-sandbox.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
