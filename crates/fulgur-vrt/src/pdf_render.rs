@@ -173,6 +173,64 @@ mod tests {
     }
 
     #[test]
+    fn render_config_carries_the_page_setup() {
+        let config = render_config(RenderSpec {
+            page_size: "A5",
+            margin_pt: Some(12.0),
+            dpi: 150,
+            bookmarks: true,
+        })
+        .unwrap();
+        let a5 = PageSize::from_css_keyword("A5").unwrap();
+        assert_eq!(
+            (config.page_size.width, config.page_size.height),
+            (a5.width, a5.height)
+        );
+        assert_eq!(config.margin.top, 12.0);
+        assert!(config.bookmarks);
+        assert!(config.overrides.page_size && config.overrides.margin);
+
+        let css_margin = render_config(RenderSpec {
+            page_size: "A4",
+            margin_pt: None,
+            dpi: 150,
+            bookmarks: false,
+        })
+        .unwrap();
+        assert!(!css_margin.overrides.margin);
+        assert!(
+            render_config(RenderSpec {
+                page_size: "banana",
+                margin_pt: None,
+                dpi: 150,
+                bookmarks: false,
+            })
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "raikiri")]
+    #[test]
+    fn raikiri_renders_and_every_page_is_rasterized() {
+        let html = r#"<!DOCTYPE html><html><body style="margin:0">
+<div style="height:100px;background:#ff0000"></div>
+<div style="break-before:page;height:100px;background:#0000ff"></div>
+</body></html>"#;
+        let spec = RenderSpec {
+            page_size: "A4",
+            margin_pt: Some(0.0),
+            dpi: 50,
+            bookmarks: false,
+        };
+        let pdf = render_html_to_pdf_raikiri(html, spec).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("r.pdf");
+        std::fs::write(&path, pdf).unwrap();
+        let pages = pdf_to_rgba_pages(&path, 50, &tmp.path().join("png")).unwrap();
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[test]
     fn render_html_to_pdf_returns_pdf_bytes() {
         let html = r#"<!DOCTYPE html><html><body style="margin:0">
 <div style="width:100px;height:100px;background:#ff0000"></div>

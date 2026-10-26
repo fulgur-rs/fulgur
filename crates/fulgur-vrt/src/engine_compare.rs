@@ -167,7 +167,7 @@ pub fn compare_with_goldens(
                 continue;
             }
             Err(payload) => {
-                result.error = Some(format!("panic: {}", panic_message(&payload)));
+                result.error = Some(format!("panic: {}", panic_message(payload.as_ref())));
                 results.push(result);
                 continue;
             }
@@ -175,7 +175,16 @@ pub fn compare_with_goldens(
         let actual_path = work_dir.join("actual.pdf");
         std::fs::create_dir_all(&work_dir)?;
         std::fs::write(&actual_path, &actual_pdf)?;
-        let actual_pages = rasterize_file(&actual_path, fx.dpi, &work_dir.join("act"))?;
+        // A PDF the backend wrote but pdftocairo cannot read is the backend's
+        // failure, not the harness's: record it and go on.
+        let actual_pages = match rasterize_file(&actual_path, fx.dpi, &work_dir.join("act")) {
+            Ok(pages) => pages,
+            Err(e) => {
+                result.error = Some(format!("{e:#}"));
+                results.push(result);
+                continue;
+            }
+        };
         result.pages_actual = Some(actual_pages.len());
         (result.pages, result.outcome) = compare_pages(
             &reference_pages,
@@ -490,5 +499,116 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, Outcome::PageCountMismatch);
         assert_eq!(pages.len(), 1, "only shared pages are compared");
+    }
+
+    /// A fixture whose HTML names the case the fake backend should play.
+    fn case_html(case: &str, color: &str) -> String {
+        format!(
+            "<!DOCTYPE html><!-- case:{case} --><html><body style=\"margin:0\">\
+             <div style=\"height:400px;background:{color}\"></div></body></html>"
+        )
+    }
+
+    /// A backend that matches, differs, fails, panics or writes a broken PDF,
+    /// depending on the fixture.
+    fn fake_backend(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Vec<u8>> {
+        if html.contains("case:differs") {
+            pdf_render::render_html_to_pdf(&html.replace("#ff0000", "#0000ff"), spec)
+        } else if html.contains("case:error") {
+            anyhow::bail!("backend refused the input")
+        } else if html.contains("case:panic") {
+            panic!("backend panicked")
+        } else if html.contains("case:broken") {
+            Ok(b"not a pdf".to_vec())
+        } else {
+            pdf_render::render_html_to_pdf(html, spec)
+        }
+    }
+
+    #[test]
+    fn compare_with_goldens_records_every_outcome_and_writes_the_report() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            crate_root: root.path().to_path_buf(),
+            fixtures_dir: root.path().join("fixtures"),
+            goldens_dir: root.path().join("goldens"),
+            diff_out_dir: root.path().join("target").join("vrt-diff"),
+            update_mode: crate::runner::UpdateMode::Off,
+        };
+        let cases = ["broken", "differs", "error", "match", "panic"];
+        let mut manifest = String::from(
+            "[defaults]\ntolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }\n",
+        );
+        for case in cases {
+            let rel = PathBuf::from("c").join(format!("{case}.html"));
+            let html = case_html(case, "#ff0000");
+            std::fs::create_dir_all(ctx.fixtures_dir.join("c")).unwrap();
+            std::fs::write(ctx.fixtures_dir.join(&rel), &html).unwrap();
+            let golden = ctx
+                .goldens_dir
+                .join("fulgur")
+                .join(rel.with_extension("pdf"));
+            std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+            let spec = RenderSpec {
+                page_size: "A4",
+                margin_pt: Some(0.0),
+                dpi: 150,
+                bookmarks: false,
+            };
+            std::fs::write(
+                &golden,
+                pdf_render::render_html_to_pdf(&html, spec).unwrap(),
+            )
+            .unwrap();
+            manifest.push_str(&format!(
+                "[[fixture]]\npath = \"{}\"\nmargin_pt = 0.0\n",
+                rel.display()
+            ));
+        }
+        std::fs::write(root.path().join("manifest.toml"), manifest).unwrap();
+
+        let out = report_dir(&ctx, "fake");
+        assert_eq!(out, root.path().join("target/vrt-report/fake"));
+        let report = compare_with_goldens(&ctx, "fake", &fake_backend, &out).unwrap();
+        write_report(&report, &out).unwrap();
+
+        let outcomes: Vec<_> = report.fixtures.iter().map(|f| f.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::RenderError,
+                Outcome::Differs,
+                Outcome::RenderError,
+                Outcome::Match,
+                Outcome::RenderError,
+            ]
+        );
+        let errors: Vec<_> = report.fixtures.iter().map(|f| f.error.as_deref()).collect();
+        assert!(
+            errors[0].unwrap().contains("failed to rasterize"),
+            "{errors:?}"
+        );
+        assert_eq!(errors[2], Some("backend refused the input"));
+        assert_eq!(errors[4], Some("panic: backend panicked"));
+        let differs = &report.fixtures[1];
+        let diff_png = differs.pages[0].diff_png.as_ref().expect("diff image");
+        assert!(out.join(diff_png).is_file());
+        assert!(out.join("report.json").is_file());
+        let summary = std::fs::read_to_string(out.join("summary.md")).unwrap();
+        assert!(summary.contains("1 match, 1 differ, 0 page count mismatch, 3 render error"));
+    }
+
+    #[test]
+    fn panic_messages_and_long_errors_fit_a_table_row() {
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned message"));
+        assert_eq!(panic_message(owned.as_ref()), "owned message");
+        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_message(other.as_ref()), "non-string panic payload");
+
+        let long = "x".repeat(200);
+        let cell = table_cell(&long);
+        assert_eq!(cell.chars().count(), 121);
+        assert!(cell.ends_with('…'));
+        assert_eq!(Outcome::PageCountMismatch.label(), "page count");
     }
 }
