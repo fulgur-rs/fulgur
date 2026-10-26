@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 /// treated as rounding rather than a different page size. Chrome rounds the
 /// paper to whole device pixels (A4 prints as 595.92 x 841.92 pt instead of
 /// 595.28 x 841.89 pt), which moves the raster size by a pixel at 150 dpi.
-/// Such pages are compared over their common area.
-const SIZE_SLACK_PX: u32 = 2;
+/// Such pages are compared over their common area. Only comparisons against
+/// a Chromium golden allow it; two fulgur renders of a page have the same size.
+const CHROME_SIZE_SLACK_PX: u32 = 2;
 
 /// How one render compared against a reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -231,19 +232,21 @@ pub fn compare_with_goldens(
         };
 
         let actual = render_pages(fx, &html, render, &work_dir)?;
-        let compare = |reference: &[RgbaImage], actual: &[RgbaImage], pair: &str| {
-            compare_pages(
-                reference,
-                actual,
-                fx.tolerance_chrome,
-                &report_dir.join("diff").join(pair),
-                &fx.path,
-            )
-        };
+        let compare =
+            |reference: &[RgbaImage], actual: &[RgbaImage], pair: &str, size_slack: u32| {
+                compare_pages(
+                    reference,
+                    actual,
+                    fx.tolerance_chrome,
+                    size_slack,
+                    &report_dir.join("diff").join(pair),
+                    &fx.path,
+                )
+            };
 
         let (outcome, pages) = match &actual {
             Ok(pages) => {
-                let c = compare(&blitz_pages, pages, &format!("blitz-{engine}"))?;
+                let c = compare(&blitz_pages, pages, &format!("blitz-{engine}"), 0)?;
                 (c.outcome, c.pages)
             }
             Err(_) => (Outcome::RenderError, Vec::new()),
@@ -251,9 +254,19 @@ pub fn compare_with_goldens(
         let chrome = match &chrome_pages {
             Some(chrome_pages) => ChromeStatus::Compared(ChromeComparison {
                 pages: chrome_pages.len(),
-                blitz: compare(chrome_pages, &blitz_pages, "chrome-blitz")?,
+                blitz: compare(
+                    chrome_pages,
+                    &blitz_pages,
+                    "chrome-blitz",
+                    CHROME_SIZE_SLACK_PX,
+                )?,
                 engine: match &actual {
-                    Ok(pages) => Some(compare(chrome_pages, pages, &format!("chrome-{engine}"))?),
+                    Ok(pages) => Some(compare(
+                        chrome_pages,
+                        pages,
+                        &format!("chrome-{engine}"),
+                        CHROME_SIZE_SLACK_PX,
+                    )?),
                     Err(_) => None,
                 },
             }),
@@ -282,7 +295,8 @@ pub fn compare_with_goldens(
 }
 
 /// Render a fixture through `render` and rasterize the result. A backend
-/// error or panic comes back as `Ok(Err(message))`.
+/// error or panic, or a PDF pdftocairo cannot read, comes back as
+/// `Ok(Err(message))`: it is the backend's failure, not the harness's.
 fn render_pages(
     fx: &Fixture,
     html: &str,
@@ -298,29 +312,31 @@ fn render_pages(
     let pdf = match catch_unwind(AssertUnwindSafe(|| render(html, spec))) {
         Ok(Ok(pdf)) => pdf,
         Ok(Err(e)) => return Ok(Err(format!("{e:#}"))),
-        Err(payload) => return Ok(Err(format!("panic: {}", panic_message(&payload)))),
+        Err(payload) => return Ok(Err(format!("panic: {}", panic_message(payload.as_ref())))),
     };
     let path = work_dir.join("actual.pdf");
     std::fs::create_dir_all(work_dir)?;
     std::fs::write(&path, &pdf)?;
-    Ok(Ok(rasterize_file(&path, fx.dpi, &work_dir.join("act"))?))
+    Ok(rasterize_file(&path, fx.dpi, &work_dir.join("act")).map_err(|e| format!("{e:#}")))
 }
 
 /// Compare the pages two renders have in common and classify the result.
-/// Diff images for pages beyond `tol` are written under `diff_dir`, at
+/// Page rasters whose sizes differ by up to `size_slack` pixels per axis are
+/// compared over their common area (see [`CHROME_SIZE_SLACK_PX`]). Diff images for pages beyond `tol` are written under `diff_dir`, at
 /// [`diff_png_name`]; the recorded paths are relative to the report
 /// directory, two levels up.
 fn compare_pages(
     reference_pages: &[RgbaImage],
     actual_pages: &[RgbaImage],
     tol: Tolerance,
+    size_slack: u32,
     diff_dir: &Path,
     fixture: &Path,
 ) -> anyhow::Result<PageComparison> {
     let mut pages = Vec::with_capacity(reference_pages.len().min(actual_pages.len()));
     for (i, (reference, actual)) in reference_pages.iter().zip(actual_pages).enumerate() {
         let page = i + 1;
-        let (reference, actual) = common_area(reference, actual);
+        let (reference, actual) = common_area(reference, actual, size_slack);
         let report = diff::compare(&reference, &actual, tol);
         let diff_png = if report.pass {
             None
@@ -351,11 +367,12 @@ fn compare_pages(
 }
 
 /// Crop two rasters to their common area when their sizes differ by at most
-/// [`SIZE_SLACK_PX`] per axis. Larger differences are left alone, so
+/// `slack` pixels per axis. Larger differences are left alone, so
 /// `diff::compare` reports them as a size mismatch.
 fn common_area<'a>(
     a: &'a RgbaImage,
     b: &'a RgbaImage,
+    slack: u32,
 ) -> (
     std::borrow::Cow<'a, RgbaImage>,
     std::borrow::Cow<'a, RgbaImage>,
@@ -363,7 +380,7 @@ fn common_area<'a>(
     use std::borrow::Cow;
     let (aw, ah) = a.dimensions();
     let (bw, bh) = b.dimensions();
-    if (aw, ah) == (bw, bh) || aw.abs_diff(bw) > SIZE_SLACK_PX || ah.abs_diff(bh) > SIZE_SLACK_PX {
+    if (aw, ah) == (bw, bh) || aw.abs_diff(bw) > slack || ah.abs_diff(bh) > slack {
         return (Cow::Borrowed(a), Cow::Borrowed(b));
     }
     let (w, h) = (aw.min(bw), ah.min(bh));
@@ -597,19 +614,22 @@ mod tests {
             fixture("basic/b.html", Outcome::Differs, vec![page(1, 0.5)]),
             broken,
         ]));
-        assert!(
-            md.contains(
-                "Against blitz: 3 fixtures, 1 match, 1 differ, 0 page count mismatch, 1 render error."
-            ),
-            "{md}"
-        );
+        assert!(md.contains(
+            "Against blitz: 3 fixtures, 1 match, 1 differ, 0 page count mismatch, 1 render error."
+        ));
         assert!(md.contains("Chromium goldens are not generated yet."));
         assert!(
-            md.contains("| `basic/b.html` | differs | 1 / 1 / - | 50.00% (p1) | 200 | n/a | n/a |"),
-            "{md}"
+            md.contains("| `basic/b.html` | differs | 1 / 1 / - | 50.00% (p1) | 200 | n/a | n/a |")
         );
         assert!(md.contains("render error: bad \\| input |"), "{md}");
         assert!(!md.contains("second line"));
+    }
+
+    #[test]
+    fn a_chromium_cell_without_shared_pages_shows_only_the_outcome() {
+        let empty = compared(Outcome::PageCountMismatch, Vec::new());
+        assert_eq!(chrome_cell(Some(&empty)), "page count");
+        assert_eq!(chrome_cell(None), "render error");
     }
 
     #[test]
@@ -635,23 +655,14 @@ mod tests {
 
         assert_eq!(r.chrome_counts(), (2, 1, 0));
         let md = summary_markdown(&r);
-        assert!(
-            md.contains(
-                "Against Chromium (Chrome/155.0.8059.84): 2 fixtures with a reference, \
+        assert!(md.contains(
+            "Against Chromium (Chrome/155.0.8059.84): 2 fixtures with a reference, \
                  blitz matches 1, raikiri matches 0."
-            ),
-            "{md}"
-        );
-        assert!(
-            md.contains(
-                "| 1 / 1 / 1 | 50.00% (p1) | 200 | match 1.00% (p1) | differs 40.00% (p1) |"
-            ),
-            "{md}"
-        );
-        assert!(
-            md.contains("| 1 / - / 2 | - | - | page count 0.00% (p1) | render error |"),
-            "{md}"
-        );
+        ));
+        assert!(md.contains(
+            "| 1 / 1 / 1 | 50.00% (p1) | 200 | match 1.00% (p1) | differs 40.00% (p1) |"
+        ));
+        assert!(md.contains("| 1 / - / 2 | - | - | page count 0.00% (p1) | render error |"));
         assert!(md.contains("| not generated | not generated |"), "{md}");
     }
 
@@ -668,14 +679,8 @@ mod tests {
             engine: None,
         });
         let json = serde_json::to_string(&report(vec![f])).unwrap();
-        assert!(
-            json.contains(r#""outcome":"page-count-mismatch""#),
-            "{json}"
-        );
-        assert!(
-            json.contains(r#""chrome":{"status":"compared","pages":1"#),
-            "{json}"
-        );
+        assert!(json.contains(r#""outcome":"page-count-mismatch""#));
+        assert!(json.contains(r#""chrome":{"status":"compared","pages":1"#));
         let none = serde_json::to_string(&ChromeStatus::NoReference).unwrap();
         assert_eq!(none, r#"{"status":"no-reference"}"#);
     }
@@ -697,6 +702,7 @@ mod tests {
             &[white.clone(), white.clone()],
             &[white.clone(), white],
             TOL,
+            0,
             &out.path().join("diff/blitz-raikiri"),
             Path::new("a/b.html"),
         )
@@ -714,6 +720,7 @@ mod tests {
             &[solid([255, 255, 255, 255]), solid([255, 255, 255, 255])],
             &[solid([255, 255, 255, 255]), solid([0, 0, 0, 255])],
             TOL,
+            0,
             &out.path().join("diff/chrome-raikiri"),
             Path::new("a/b.html"),
         )
@@ -734,6 +741,7 @@ mod tests {
             std::slice::from_ref(&white),
             &[white.clone(), white.clone()],
             TOL,
+            0,
             out.path(),
             Path::new("a.html"),
         )
@@ -743,34 +751,173 @@ mod tests {
     }
 
     #[test]
-    fn a_pixel_of_rounding_in_the_page_size_is_cropped() {
+    fn a_pixel_of_rounding_in_the_page_size_is_cropped_only_with_slack() {
         let out = tempfile::tempdir().unwrap();
-        let reference = RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
-        let rounded = RgbaImage::from_pixel(11, 10, image::Rgba([255, 255, 255, 255]));
-        let c = compare_pages(
-            std::slice::from_ref(&reference),
-            &[rounded],
-            TOL,
-            out.path(),
-            Path::new("a.html"),
-        )
-        .unwrap();
+        let white = image::Rgba([255, 255, 255, 255]);
+        let reference = RgbaImage::from_pixel(10, 10, white);
+        let rounded = RgbaImage::from_pixel(11, 10, white);
+        let compare = |actual: RgbaImage, slack: u32| {
+            compare_pages(
+                std::slice::from_ref(&reference),
+                &[actual],
+                TOL,
+                slack,
+                out.path(),
+                Path::new("a.html"),
+            )
+            .unwrap()
+        };
+
+        let c = compare(rounded.clone(), CHROME_SIZE_SLACK_PX);
         assert_eq!(c.outcome, Outcome::Match);
         assert_eq!(c.pages[0].total_pixels, 100);
-
-        let other_size = RgbaImage::from_pixel(20, 10, image::Rgba([255, 255, 255, 255]));
-        let c = compare_pages(
-            &[reference],
-            &[other_size],
-            TOL,
-            out.path(),
-            Path::new("a.html"),
-        )
-        .unwrap();
+        assert_eq!(compare(rounded, 0).outcome, Outcome::Differs);
+        let other_size = RgbaImage::from_pixel(20, 10, white);
         assert_eq!(
-            c.outcome,
-            Outcome::Differs,
-            "a real size difference stays a difference"
+            compare(other_size, CHROME_SIZE_SLACK_PX).outcome,
+            Outcome::Differs
         );
+    }
+
+    #[test]
+    fn panic_messages_and_long_errors_fit_a_table_row() {
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned message"));
+        assert_eq!(panic_message(owned.as_ref()), "owned message");
+        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_message(other.as_ref()), "non-string panic payload");
+
+        let long = "x".repeat(200);
+        let cell = table_cell(&long);
+        assert_eq!(cell.chars().count(), 121);
+        assert!(cell.ends_with('…'));
+        assert_eq!(Outcome::PageCountMismatch.label(), "page count");
+    }
+
+    fn compared_chrome(f: &FixtureComparison) -> Option<&ChromeComparison> {
+        match &f.chrome {
+            ChromeStatus::Compared(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A fixture whose HTML names the case the fake backend should play.
+    fn case_html(case: &str) -> String {
+        format!(
+            "<!DOCTYPE html><!-- case:{case} --><html><body style=\"margin:0\">\
+             <div style=\"height:400px;background:#ff0000\"></div></body></html>"
+        )
+    }
+
+    /// A backend that matches, differs, fails, panics or writes a broken PDF,
+    /// depending on the fixture.
+    fn fake_backend(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Vec<u8>> {
+        if html.contains("case:differs") {
+            pdf_render::render_html_to_pdf(&html.replace("#ff0000", "#0000ff"), spec)
+        } else if html.contains("case:error") {
+            anyhow::bail!("backend refused the input")
+        } else if html.contains("case:panic") {
+            panic!("backend panicked")
+        } else if html.contains("case:broken") {
+            Ok(b"not a pdf".to_vec())
+        } else {
+            pdf_render::render_html_to_pdf(html, spec)
+        }
+    }
+
+    #[test]
+    fn compare_with_goldens_records_every_outcome_and_writes_the_report() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            crate_root: root.path().to_path_buf(),
+            fixtures_dir: root.path().join("fixtures"),
+            goldens_dir: root.path().join("goldens"),
+            diff_out_dir: root.path().join("target").join("vrt-diff"),
+            update_mode: crate::runner::UpdateMode::Off,
+        };
+        let spec = RenderSpec {
+            page_size: "A4",
+            margin_pt: Some(0.0),
+            dpi: 150,
+            bookmarks: false,
+        };
+        // (case, Chromium golden: Some(true) present, Some(false) missing,
+        // None opted out)
+        let cases = [
+            ("broken", Some(true)),
+            ("differs", Some(true)),
+            ("error", Some(true)),
+            ("match", Some(false)),
+            ("panic", None),
+        ];
+        let mut manifest = String::from(
+            "[defaults]\ntolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }\n",
+        );
+        for (case, chrome) in cases {
+            let rel = PathBuf::from("c").join(format!("{case}.html"));
+            let html = case_html(case);
+            std::fs::create_dir_all(ctx.fixtures_dir.join("c")).unwrap();
+            std::fs::write(ctx.fixtures_dir.join(&rel), &html).unwrap();
+            let pdf = pdf_render::render_html_to_pdf(&html, spec).unwrap();
+            for (dir, write) in [("fulgur", true), ("chrome", chrome == Some(true))] {
+                let golden = ctx.goldens_dir.join(dir).join(rel.with_extension("pdf"));
+                if write {
+                    std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+                    std::fs::write(&golden, &pdf).unwrap();
+                }
+            }
+            manifest.push_str(&format!(
+                "[[fixture]]\npath = \"{}\"\nmargin_pt = 0.0\nchrome_reference = {}\n",
+                rel.display(),
+                chrome.is_some()
+            ));
+        }
+        std::fs::write(root.path().join("manifest.toml"), manifest).unwrap();
+        std::fs::write(ctx.goldens_dir.join("chrome/VERSION"), "Chrome/1.2.3\n").unwrap();
+
+        let out = report_dir(&ctx, "fake");
+        assert_eq!(out, root.path().join("target/vrt-report/fake"));
+        let report = compare_with_goldens(&ctx, "fake", &fake_backend, &out).unwrap();
+        write_report(&report, &out).unwrap();
+
+        let outcomes: Vec<_> = report.fixtures.iter().map(|f| f.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::RenderError,
+                Outcome::Differs,
+                Outcome::RenderError,
+                Outcome::Match,
+                Outcome::RenderError,
+            ]
+        );
+        let errors: Vec<_> = report.fixtures.iter().map(|f| f.error.as_deref()).collect();
+        assert!(errors[0].unwrap().contains("failed to rasterize"));
+        assert_eq!(errors[2], Some("backend refused the input"));
+        assert_eq!(errors[4], Some("panic: backend panicked"));
+
+        let differs = compared_chrome(&report.fixtures[1]).expect("Chromium golden");
+        assert_eq!(differs.blitz.outcome, Outcome::Match);
+        let engine = differs.engine.as_ref().expect("the backend rendered");
+        assert_eq!(engine.outcome, Outcome::Differs);
+        let diff_png = engine.pages[0].diff_png.as_ref().expect("diff image");
+        assert!(diff_png.starts_with("diff/chrome-fake"));
+        assert!(out.join(diff_png).is_file());
+        let broken = compared_chrome(&report.fixtures[0]).expect("Chromium golden");
+        assert!(broken.engine.is_none());
+        assert!(matches!(
+            report.fixtures[3].chrome,
+            ChromeStatus::NotGenerated
+        ));
+        assert!(matches!(
+            report.fixtures[4].chrome,
+            ChromeStatus::NoReference
+        ));
+
+        assert_eq!(report.chrome_version.as_deref(), Some("Chrome/1.2.3"));
+        assert_eq!(report.chrome_counts(), (3, 3, 0));
+        assert!(out.join("report.json").is_file());
+        let summary = std::fs::read_to_string(out.join("summary.md")).unwrap();
+        assert!(summary.contains("1 match, 1 differ, 0 page count mismatch, 3 render error"));
+        assert!(summary.contains("Against Chromium (Chrome/1.2.3): 3 fixtures with a reference"));
     }
 }
