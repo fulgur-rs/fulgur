@@ -4,6 +4,7 @@
 //! `cargo test -p fulgur-vrt`. It is not shipped to crates.io.
 
 pub mod diff;
+pub mod engine_compare;
 pub mod manifest;
 pub mod pdf_render;
 pub mod runner;

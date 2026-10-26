@@ -50,6 +50,29 @@ cargo test -p fulgur-vrt --features chrome-golden -- --ignored
 stable across hosts — required for byte-identical PDF output between
 local dev and CI.
 
+## Comparing the Raikiri backend
+
+With the `raikiri` feature, `tests/raikiri_compare.rs` renders every
+fixture through the unpublished Raikiri backend (`fulgur-raikiri`) and
+compares it, page by page, against the committed Blitz goldens. The
+goldens stand in for Blitz output, since the byte-exact run above keeps
+them equal to it. Both PDFs are rasterized with `pdftocairo` at the
+fixture's DPI, every page included, and compared with the fixture's
+`tolerance_chrome` as a provisional threshold.
+
+```bash
+FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
+    cargo test -p fulgur-vrt --features raikiri --test raikiri_compare -- --nocapture
+```
+
+This is a measurement, not a gate: the test passes whatever the
+differences are, and writes `target/vrt-report/raikiri/report.json`,
+`summary.md` and `diff/<path>.p<N>.diff.png` for pages beyond the
+tolerance. The numbers hold only on a host where the byte-exact run
+passes; elsewhere Blitz itself differs from its goldens. The nightly
+`vrt` job in `.github/workflows/raikiri.yml` runs it and appends the
+summary to the job page.
+
 ## Adding a fixture
 
 1. Create `fixtures/<category>/<name>.html`. Keep it self-contained
@@ -74,7 +97,9 @@ src/
   pdf_render.rs    fulgur PDF generation plus pdftocairo rasterizer (failure-only)
   chrome.rs        chromiumoxide adapter (feature "chrome-golden")
   runner.rs        manifest → byte compare → update orchestration
+  engine_compare.rs  another backend vs the Blitz goldens, page by page
 tests/vrt_test.rs  single entrypoint run by `cargo test`
+tests/raikiri_compare.rs  Raikiri comparison (feature "raikiri")
 ```
 
 ## Cross-environment determinism

@@ -9,9 +9,11 @@ description = "Visual regression testing harness for fulgur (dev-only, not publi
 
 [dependencies]
 fulgur = { path = "../fulgur" }
+fulgur-raikiri = { path = "../fulgur-raikiri", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 toml = "1.1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 anyhow = "1"
 tempfile = "3"
 
@@ -22,6 +24,16 @@ tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros
 futures = { version = "0.3", optional = true }
 dirs = { version = "6", optional = true }
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+# Same pin as fulgur-wpt: Blitz enables dynamic loading in the shared
+# fontconfig-sys dependency, so Raikiri's newer font stack must select the
+# matching API when both backends link.
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"], optional = true }
+
 [features]
 default = []
+## Compare every fixture rendered through the unpublished Raikiri backend
+## against the committed Blitz goldens (`tests/raikiri_compare.rs`). Off by
+## default so the byte-exact VRT job in ci.yml never compiles Raikiri.
+raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
 chrome-golden = ["dep:chromiumoxide", "dep:tokio", "dep:futures", "dep:dirs"]

@@ -9,7 +9,8 @@ name: Raikiri
 # dependencies, or the Raikiri pin (Cargo.lock). The nightly schedule catches
 # breakage that slips in from elsewhere (e.g. a fulgur-blitz API change that
 # fulgur-dev consumes). The nightly schedule (and manual dispatch) also runs
-# the WPT reftests through the Raikiri backend; see the `wpt` job.
+# the WPT reftests through the Raikiri backend (the `wpt` job) and compares
+# the fulgur-vrt fixtures against the Blitz goldens (the `vrt` job).
 
 on:
   push:
@@ -24,6 +25,11 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
+      # Only the files that can break the fulgur-vrt `raikiri` feature build;
+      # Blitz golden and fixture updates do not need this workflow.
+      - "crates/fulgur-vrt/Cargo.toml"
+      - "crates/fulgur-vrt/src/**"
+      - "crates/fulgur-vrt/tests/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
       # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
@@ -41,6 +47,11 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
+      # Only the files that can break the fulgur-vrt `raikiri` feature build;
+      # Blitz golden and fixture updates do not need this workflow.
+      - "crates/fulgur-vrt/Cargo.toml"
+      - "crates/fulgur-vrt/src/**"
+      - "crates/fulgur-vrt/tests/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
       # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
@@ -109,9 +120,9 @@ jobs:
       - name: Test development backend comparison script
         run: python3 -m unittest discover -s scripts -p compare_raikiri_dev_tests.py
       - name: Rustfmt
-        run: cargo fmt --check -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt
+        run: cargo fmt --check -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt
       - name: Clippy
-        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt --features fulgur-wpt/raikiri --all-targets -- -D warnings
+        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt --features fulgur-wpt/raikiri,fulgur-vrt/raikiri --all-targets -- -D warnings
       # Run the tests under coverage so Codecov patch coverage keeps working
       # on Raikiri PRs now that ci.yml excludes these crates. The upload is
       # flagged `raikiri` and carried forward (codecov.yml) on commits where
@@ -120,6 +131,9 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov nextest -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt --features fulgur-wpt/raikiri --profile ci --no-report
+          # fulgur-vrt unit tests only: vrt_test needs the pinned font set,
+          # and ci.yml does not collect coverage for fulgur-vrt.
+          cargo llvm-cov nextest -p fulgur-vrt --features fulgur-vrt/raikiri --lib --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -214,3 +228,55 @@ jobs:
         # must not round-trip through the rust-cache tarball.
         if: always()
         run: rm -rf target/wpt
+
+  # fulgur-vrt fixtures rendered through the Raikiri backend and compared,
+  # page by page, against the committed Blitz goldens (which ci.yml keeps
+  # byte-equal to the Blitz output). Nightly and manual runs only: this is a
+  # measurement channel, so differences are reported in the step summary and
+  # artifacts and never fail the job.
+  vrt:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: vrt raikiri vs blitz
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur-raikiri-vrt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
+      - name: Configure mold linker
+        run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+      - name: Compare fixtures with the Blitz goldens
+        # Same pinned font set as the VRT job in ci.yml, so the Blitz
+        # goldens are what Blitz renders on this host.
+        run: FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" cargo test -p fulgur-vrt --features raikiri --test raikiri_compare -- --nocapture
+      - name: Append step summary
+        if: always()
+        run: |
+          summary="target/vrt-report/raikiri/summary.md"
+          if [ -f "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no VRT comparison summary" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vrt-raikiri
+          path: target/vrt-report/raikiri
+          if-no-files-found: warn
