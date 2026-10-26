@@ -106,7 +106,7 @@ jobs:
       # oxidize-rb/actions/cross-gem@v1 は `gem install rb_sys` を host 上で
       # 直接実行するので、user-writable な gem directory を持つ Ruby が必要。
       # 事前に ruby/setup-ruby で runner owned の Ruby を入れておく。
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8  # v1.331.0
         with:
           ruby-version: "3.3"
           bundler-cache: true
@@ -158,7 +158,7 @@ jobs:
           # のコメント参照)。
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8  # v1.331.0
         with:
           ruby-version: ${{ matrix.ruby }}
       - uses: actions/download-artifact@v8
@@ -278,7 +278,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8  # v1.331.0
         with:
           ruby-version: "3.3"
       - uses: actions/download-artifact@v8
