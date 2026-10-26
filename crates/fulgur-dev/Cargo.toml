@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-skrifa = "0.47"
+skrifa = "0.48"
 fulgur-core = { path = "../fulgur-core" }
 fulgur-blitz = { path = "../fulgur-blitz" }
 fulgur-raikiri = { path = "../fulgur-raikiri" }

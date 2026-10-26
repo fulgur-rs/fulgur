@@ -1251,7 +1251,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "skrifa 0.47.0",
+ "skrifa 0.48.0",
  "stylo",
  "taffy 0.9.2",
  "tempfile",
@@ -1302,7 +1302,7 @@ dependencies = [
  "fulgur-raikiri",
  "image",
  "lopdf",
- "skrifa 0.47.0",
+ "skrifa 0.48.0",
  "tempfile",
 ]
 
@@ -1318,7 +1318,7 @@ dependencies = [
  "raikiri-html",
  "raikiri-net",
  "raikiri-traits",
- "skrifa 0.47.0",
+ "skrifa 0.48.0",
  "tempfile",
  "tiny-skia 0.12.0",
  "url",
@@ -3332,17 +3332,6 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8"
-dependencies = [
- "bytemuck",
- "font-types 0.12.6",
- "once_cell",
-]
-
-[[package]]
-name = "read-fonts"
 version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a5b7bed3d16ab428d8fa533640ab805ff50e7ad8a4d00649de1259e70023282"
@@ -3836,16 +3825,6 @@ checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
 dependencies = [
  "bytemuck",
  "read-fonts 0.41.0",
-]
-
-[[package]]
-name = "skrifa"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "526e654b303ff4ad73a5a40b25de2b3ce3d039c5e3b6da5f89ae6e57004cb40f"
-dependencies = [
- "bytemuck",
- "read-fonts 0.44.0",
 ]
 
 [[package]]
