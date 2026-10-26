@@ -9,9 +9,12 @@
 use crate::manifest::{Fixture, Manifest};
 use crate::runner::RunnerContext;
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
+use chromiumoxide::cdp::browser_protocol::page::{
+    FontFamilies, PrintToPdfParams, SetFontFamiliesParams,
+};
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Pinned Chrome for Testing version. The golden update workflow installs
 /// exactly this build; bump it only in the change that regenerates
@@ -71,6 +74,38 @@ pub fn page_override_css(fx: &Fixture) -> anyhow::Result<String> {
     ))
 }
 
+/// The concrete family fontconfig resolves `generic` to on this host.
+fn fontconfig_family(generic: &str) -> anyhow::Result<String> {
+    let out = Command::new("fc-match")
+        .args(["-f", "%{family[0]}", generic])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to spawn fc-match: {e}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "fc-match {generic} exited with {}",
+        out.status
+    );
+    let family = String::from_utf8(out.stdout)?.trim().to_string();
+    anyhow::ensure!(!family.is_empty(), "fc-match {generic} returned no family");
+    Ok(family)
+}
+
+/// Generic font families for Chrome, resolved through fontconfig as fulgur
+/// resolves them. Chrome on Linux keeps its own defaults instead (Arial for
+/// sans-serif, Times New Roman for the standard font), which would make
+/// every text difference a font difference. The standard font is the
+/// sans-serif one, as fulgur's initial font is.
+pub fn font_families() -> anyhow::Result<FontFamilies> {
+    let sans_serif = fontconfig_family("sans-serif")?;
+    Ok(FontFamilies {
+        standard: Some(sans_serif.clone()),
+        sans_serif: Some(sans_serif),
+        serif: Some(fontconfig_family("serif")?),
+        fixed: Some(fontconfig_family("monospace")?),
+        ..Default::default()
+    })
+}
+
 /// Location of the Chromium golden for `fixture`.
 pub fn golden_path(ctx: &RunnerContext, fixture: &Path) -> PathBuf {
     ctx.goldens_dir
@@ -81,6 +116,7 @@ pub fn golden_path(ctx: &RunnerContext, fixture: &Path) -> PathBuf {
 /// A running browser that prints fixtures to PDF.
 pub struct ChromePrinter {
     browser: Browser,
+    fonts: FontFamilies,
     handler: tokio::task::JoinHandle<()>,
 }
 
@@ -94,7 +130,11 @@ impl ChromePrinter {
         let config = config.build().map_err(|e| anyhow::anyhow!(e))?;
         let (browser, mut handler) = Browser::launch(config).await?;
         let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
-        Ok(Self { browser, handler })
+        Ok(Self {
+            browser,
+            fonts: font_families()?,
+            handler,
+        })
     }
 
     /// Browser product string, e.g. `Chrome/155.0.8059.84`.
@@ -105,7 +145,10 @@ impl ChromePrinter {
     /// Open `html_path` and print it with the fixture's page setup.
     pub async fn print(&self, html_path: &Path, fx: &Fixture) -> anyhow::Result<Vec<u8>> {
         let url = format!("file://{}", html_path.canonicalize()?.display());
-        let page = self.browser.new_page(url.as_str()).await?;
+        let page = self.browser.new_page("about:blank").await?;
+        page.execute(SetFontFamiliesParams::new(self.fonts.clone()))
+            .await?;
+        page.goto(url.as_str()).await?;
         let css = page_override_css(fx)?;
         let script = format!(
             "(() => {{ const s = document.createElement('style'); \
