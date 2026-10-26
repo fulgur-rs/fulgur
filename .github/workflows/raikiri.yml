@@ -25,7 +25,11 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
-      - "crates/fulgur-vrt/**"
+      # Only the files that can break the fulgur-vrt `raikiri` feature build;
+      # Blitz golden and fixture updates do not need this workflow.
+      - "crates/fulgur-vrt/Cargo.toml"
+      - "crates/fulgur-vrt/src/**"
+      - "crates/fulgur-vrt/tests/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
       # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
@@ -43,7 +47,11 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
-      - "crates/fulgur-vrt/**"
+      # Only the files that can break the fulgur-vrt `raikiri` feature build;
+      # Blitz golden and fixture updates do not need this workflow.
+      - "crates/fulgur-vrt/Cargo.toml"
+      - "crates/fulgur-vrt/src/**"
+      - "crates/fulgur-vrt/tests/**"
       - "scripts/compare-raikiri-dev.py"
       - "scripts/compare_raikiri_dev_tests.py"
       # Test inputs fulgur-dev / fulgur-raikiri read from outside their crates.
@@ -123,6 +131,9 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov nextest -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt --features fulgur-wpt/raikiri --profile ci --no-report
+          # fulgur-vrt unit tests only: vrt_test needs the pinned font set,
+          # and ci.yml does not collect coverage for fulgur-vrt.
+          cargo llvm-cov nextest -p fulgur-vrt --lib --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
