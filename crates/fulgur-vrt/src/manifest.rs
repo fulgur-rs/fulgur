@@ -34,6 +34,11 @@ pub struct FixtureRow {
     /// Enable PDF outline generation (`Engine::builder().bookmarks(true)`).
     /// Default `false` to keep existing goldens stable.
     pub bookmarks: Option<bool>,
+    /// Whether a Chromium golden exists for this fixture. Set `false` for
+    /// fixtures built on constructs Chromium does not implement (GCPM
+    /// running elements, `string-set`, `leader()`, `target-counter()`,
+    /// bookmarks), where its rendering is no reference. Default `true`.
+    pub chrome_reference: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +57,7 @@ pub struct Fixture {
     pub tolerance_chrome: Tolerance,
     pub margin_pt: Option<f32>,
     pub bookmarks: bool,
+    pub chrome_reference: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +87,7 @@ impl Manifest {
                     .unwrap_or(raw.defaults.tolerance_chrome),
                 margin_pt: row.margin_pt,
                 bookmarks: row.bookmarks.unwrap_or(false),
+                chrome_reference: row.chrome_reference.unwrap_or(true),
             })
             .collect();
         Ok(Self { fixtures })
@@ -147,5 +154,23 @@ path = "b.html"
         let m = Manifest::from_toml(SAMPLE_WITH_MARGIN).expect("parse");
         assert_eq!(m.fixtures[0].margin_pt, Some(0.0));
         assert_eq!(m.fixtures[1].margin_pt, None);
+    }
+
+    #[test]
+    fn chrome_reference_defaults_to_true() {
+        const SAMPLE_CHROME: &str = r#"
+[defaults]
+tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
+
+[[fixture]]
+path = "a.html"
+
+[[fixture]]
+path = "b.html"
+chrome_reference = false
+"#;
+        let m = Manifest::from_toml(SAMPLE_CHROME).expect("parse");
+        assert!(m.fixtures[0].chrome_reference);
+        assert!(!m.fixtures[1].chrome_reference);
     }
 }

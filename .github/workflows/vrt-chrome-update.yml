@@ -1,20 +1,17 @@
 name: VRT Chrome Golden Update
 
-# Manually-triggered workflow that regenerates Chromium screenshot goldens
-# under crates/fulgur-vrt/goldens/chrome/. This is intentionally separate
-# from the main `vrt` job so:
-#   - Chromium binary fetch / large cache does not slow normal PRs
-#   - The fulgur-vrt `chrome-golden` feature and its heavy deps
-#     (chromiumoxide, tokio, futures, dirs) are only pulled when needed
-#   - Golden updates are an explicit decision, not an accidental PR diff
+# Manually-triggered workflow that regenerates the Chromium goldens under
+# crates/fulgur-vrt/goldens/chrome/: each fixture printed to PDF by a pinned
+# Chrome for Testing build. This is intentionally separate from the main
+# `vrt` job so:
+#   - the Chrome download and the `chrome-golden` feature's dependencies
+#     (chromiumoxide, tokio, futures) never slow normal PRs
+#   - golden updates are an explicit decision, not an accidental PR diff
 #
-# The Chromium revision is pinned in `crates/fulgur-vrt/src/chrome.rs`
-# (`CHROMIUM_REVISION` constant). Bump that constant in the same PR that
-# commits the regenerated PNGs.
-#
-# NOTE: Task 5 (initial scaffolding) left the chrome screenshot function
-# as `todo!()`. This workflow is a skeleton that will start producing real
-# goldens once a follow-up issue finishes the chromiumoxide integration.
+# The Chrome version is pinned in `crates/fulgur-vrt/src/chrome.rs`
+# (`CHROME_VERSION`); the generator refuses any other build. Bump that
+# constant in the same change that commits the regenerated PDFs: download the
+# `chrome-goldens` artifact and copy it over crates/fulgur-vrt/goldens/chrome/.
 
 on:
   workflow_dispatch:
@@ -29,34 +26,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install system dependencies
+      - name: Read the pinned Chrome version
+        id: pin
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            poppler-utils \
-            libnss3 \
-            libatk-bridge2.0-0 \
-            libdrm2 \
-            libxkbcommon0 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2
+          version=$(sed -n 's/^pub const CHROME_VERSION: &str = "\(.*\)";$/\1/p' crates/fulgur-vrt/src/chrome.rs)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Chrome for Testing
+        id: chrome
+        uses: browser-actions/setup-chrome@39ce663831f86d2ea36cbda0a8143709cdfcc410 # v2.2.0
+        with:
+          chrome-version: ${{ steps.pin.outputs.version }}
+          install-dependencies: true
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Cache Chromium download
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/fulgur-vrt/
-          key: chromium-${{ hashFiles('crates/fulgur-vrt/src/chrome.rs') }}
-
       - name: Generate Chrome goldens
-        run: cargo test -p fulgur-vrt --features chrome-golden -- --ignored
+        env:
+          # Same pinned font set as the VRT job, so text in the goldens uses
+          # the bundled fonts rather than the runner's.
+          FONTCONFIG_FILE: ${{ github.workspace }}/examples/.fontconfig/fonts.conf
+          FULGUR_VRT_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          rm -rf crates/fulgur-vrt/goldens/chrome
+          cargo test -p fulgur-vrt --features chrome-golden --test chrome_golden -- --ignored --nocapture
 
       - name: Upload regenerated goldens
         uses: actions/upload-artifact@v7
@@ -64,4 +61,4 @@ jobs:
           name: chrome-goldens
           path: crates/fulgur-vrt/goldens/chrome/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
