@@ -1473,6 +1473,21 @@ mod tests {
     }
 
     #[test]
+    fn add_image_drops_oversized_key_silently() {
+        // `add_image` with a key exceeding MAX_IMAGE_KEY_BYTES (4 KiB) must
+        // silently drop the image without storing it — the name-length check
+        // fires before any data is retained.
+        let mut bundle = AssetBundle::new();
+        let huge_key = "k".repeat(MAX_IMAGE_KEY_BYTES + 1);
+        bundle.add_image(huge_key, vec![1, 2, 3]);
+        assert_eq!(
+            bundle.images.len(),
+            0,
+            "image with oversized key must be silently dropped"
+        );
+    }
+
+    #[test]
     fn add_image_drops_once_aggregate_budget_exceeded() {
         let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
